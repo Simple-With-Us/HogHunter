@@ -16,7 +16,10 @@ Mac menu bar utility.  Finds CPU and memory hogs now, over the past hour, and ov
 
 **Local:** `~/apps/HogHunter`  
 **Installed app:** `/Applications/HogHunter.app`  
-**Do not** App Store or TestFlight unless the owner asks.
+**TestFlight authorization:** The owner requested external testing for the
+iPhone companion on 2026-09-27.  The release lane is tracked in issue #22.
+Do not upload until the matching App Store Connect app record and a signing-safe
+workflow are ready.
 
 Hosting and routing (apexes, hostnames, hosts, deploy paths): see [`Fleet-OPS/docs/DOMAINS-AND-ROUTING.md`](https://github.com/jaywedgeworth22/Fleet-OPS/blob/main/docs/DOMAINS-AND-ROUTING.md). Built from live Cloudflare, Vercel, Coolify, Namecheap/RDAP, and GitHub APIs by CLAUDE on 2026-09-25; refresh via `Fleet-OPS/scripts/domain-inventory/run-all.sh`.
 
@@ -33,7 +36,7 @@ Prefer `scripts/install.sh` over the manual steps above — it builds Release, s
 
 `HogHunterTests` (XCTest, `Tests/HogHunterTests/`) covers pure logic such as `HogFormat` and the iPhone snapshot codec.  Run with `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.  CI (`.github/workflows/ci.yml`) runs the same on every push to `main` and every pull request, then builds the `HogHunterIOS` scheme for the iOS Simulator.
 
-The iPhone app is `ios/Sources`, scheme `HogHunterIOS`.  It is a read-only viewer of the Mac snapshot over Bonjour (`_hoghunter._tcp`).  Share With iPhone is off until the owner turns it on in Mac Settings.  The pairing code is not advertised.  There is no quit route.  Do not TestFlight it unless the owner asks.  Rollout: `docs/rollouts/2026-09-26-ios-companion.md`.
+The iPhone app is `ios/Sources`, scheme `HogHunterIOS`.  It is a read-only viewer of the Mac snapshot over Bonjour (`_hoghunter._tcp`).  Share With iPhone is off until the owner turns it on in Mac Settings.  The pairing code is not advertised.  There is no quit route.  The owner authorized external TestFlight on 2026-09-27; see issue #22 and `docs/rollouts/2026-09-27-ios-testflight-readiness.md`.  Companion design: `docs/rollouts/2026-09-26-ios-companion.md`.
 
 No LaunchAgent.  The running menu bar app is the sampler.  History only covers time it has been open.
 
