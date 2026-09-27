@@ -6,60 +6,114 @@ import SwiftUI
 /// without either side owning the other.
 struct SettingsView: View {
     @EnvironmentObject private var store: HogStore
-    @Environment(\.openWindow) private var openWindow
 
-    @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 3
-    @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
-    @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
     @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.light.rawValue
-    @AppStorage(HogStore.Key.alertsEnabled) private var alertsEnabled = false
-    @AppStorage(HogStore.Key.alertThresholdPercent) private var alertThreshold: Double = 300
-    @AppStorage(HogStore.Key.alertSustainedMinutes) private var alertSustainedMinutes: Int = 5
 
     var body: some View {
-        Form {
-            general
-            appearanceSection
-            AlertsSection(
-                alerts: store.alerts,
-                enabled: $alertsEnabled,
-                threshold: $alertThreshold,
-                sustainedMinutes: $alertSustainedMinutes
-            )
-            loginSection
-            iphoneSection
-            about
+        TabView {
+            GeneralSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("General", systemImage: "gearshape")
+                }
+                .tag("general")
+
+            AlertsSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("Alerts", systemImage: "bell")
+                }
+                .tag("alerts")
+
+            IPhoneSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("iPhone", systemImage: "iphone")
+                }
+                .tag("iphone")
+
+            AboutSettingsTab()
+                .tabItem {
+                    Label("About", systemImage: "info.circle")
+                }
+                .tag("about")
         }
-        .formStyle(.grouped)
-        .frame(width: 440)
-        .fixedSize(horizontal: false, vertical: true)
         .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme ?? .light)
         .background(SettingsWindowActivator())
         .onAppear { SettingsWindowActivator.front() }
     }
 
-    // MARK: - General
+    static var versionString: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "\(version) (\(build))"
+    }
+}
 
-    private var general: some View {
-        Section("General") {
-            Picker("Refresh Every", selection: $refreshInterval) {
-                Text("2 Seconds").tag(2.0)
-                Text("3 Seconds").tag(3.0)
-                Text("5 Seconds").tag(5.0)
+// MARK: - General Tab
+
+private struct GeneralSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+
+    @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 3
+    @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
+    @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
+    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.light.rawValue
+
+    var body: some View {
+        Form {
+            Section("Sampling & Display") {
+                Picker("Refresh Every", selection: $refreshInterval) {
+                    Text("2 Seconds").tag(2.0)
+                    Text("3 Seconds").tag(3.0)
+                    Text("5 Seconds").tag(5.0)
+                }
+
+                Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
+                    ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                }
+
+                Picker("CPU Scale", selection: $cpuScale) {
+                    ForEach(CpuScale.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                }
+                Text(scaleExplanation)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
-                ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }
+            Section("Appearance") {
+                Picker("Theme", selection: $appearance) {
+                    ForEach(AppearanceChoice.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("Light is the default.  System follows the Mac's own setting.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
-            Picker("CPU Scale", selection: $cpuScale) {
-                ForEach(CpuScale.allCases) { Text($0.rawValue).tag($0.rawValue) }
+            Section("Startup") {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    // The same name the panel's footer and the coverage note use.
+                    Toggle("Launch at Login", isOn: Binding(
+                        get: { store.launchesAtLogin },
+                        set: { _ in store.toggleLoginItem() }
+                    ))
+                    if let error = store.loginItemError {
+                        Text(error)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Text("History only covers the time Hog Hunter has been running.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
-            Text(scaleExplanation)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
+        .formStyle(.grouped)
+        .frame(width: 440)
     }
 
     private var scaleExplanation: String {
@@ -70,69 +124,62 @@ struct SettingsView: View {
             return "Share of Machine puts rows on the header's scale: 100% is every core fully busy."
         }
     }
+}
 
-    // MARK: - Appearance
+// MARK: - Alerts Tab
 
-    private var appearanceSection: some View {
-        Section("Appearance") {
-            Picker("Theme", selection: $appearance) {
-                ForEach(AppearanceChoice.allCases) { Text($0.rawValue).tag($0.rawValue) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            Text("Light is the default.  System follows the Mac's own setting.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+private struct AlertsSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+
+    @AppStorage(HogStore.Key.alertsEnabled) private var alertsEnabled = false
+    @AppStorage(HogStore.Key.alertThresholdPercent) private var alertThreshold: Double = 300
+    @AppStorage(HogStore.Key.alertSustainedMinutes) private var alertSustainedMinutes: Int = 5
+
+    var body: some View {
+        Form {
+            AlertsSection(
+                alerts: store.alerts,
+                enabled: $alertsEnabled,
+                threshold: $alertThreshold,
+                sustainedMinutes: $alertSustainedMinutes
+            )
         }
+        .formStyle(.grouped)
+        .frame(width: 440)
     }
+}
 
-    // MARK: - Launch at Login
+// MARK: - iPhone Tab
 
-    private var loginSection: some View {
-        Section("Startup") {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                // The same name the panel's footer and the coverage note use.
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { store.launchesAtLogin },
-                    set: { _ in store.toggleLoginItem() }
-                ))
-                if let error = store.loginItemError {
-                    Text(error)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Text("History only covers the time Hog Hunter has been running.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }
-    }
+private struct IPhoneSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
 
-    // MARK: - iPhone
-
-    private var iphoneSection: some View {
-        Section("iPhone") {
-            Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-            Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  It cannot quit anything.  Turn this off on a network you do not trust.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if store.shareWithIPhone {
-                LabeledContent("Pairing Code") {
-                    Text(spacedCode(store.companionCode))
-                        .font(.system(.title3, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-                Text(store.companionStatus)
+    var body: some View {
+        Form {
+            Section("iPhone") {
+                Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
+                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  It cannot quit anything.  Turn this off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                HStack {
-                    Button("Copy Code") { copyCompanionCode() }
-                    Button("New Code") { store.regenerateCompanionCode() }
+                    .fixedSize(horizontal: false, vertical: true)
+                if store.shareWithIPhone {
+                    LabeledContent("Pairing Code") {
+                        Text(spacedCode(store.companionCode))
+                            .font(.system(.title3, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    Text(store.companionStatus)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Copy Code") { copyCompanionCode() }
+                        Button("New Code") { store.regenerateCompanionCode() }
+                    }
                 }
             }
         }
+        .formStyle(.grouped)
+        .frame(width: 440)
     }
 
     private func spacedCode(_ code: String) -> String {
@@ -145,38 +192,43 @@ struct SettingsView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(store.companionCode, forType: .string)
     }
+}
 
-    // MARK: - About
+// MARK: - About Tab
 
-    private var about: some View {
-        Section("About") {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 56, height: 56)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Hog Hunter")
-                    Text(Self.versionString)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+private struct AboutSettingsTab: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Form {
+            Section("About") {
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 56, height: 56)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Hog Hunter")
+                            .font(.headline)
+                        Text(SettingsView.versionString)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
-            }
-            Button("Open Activity Monitor") { HogActions.openActivityMonitor() }
-                .buttonStyle(.link)
+                .padding(.vertical, 4)
+
+                Button("Open Activity Monitor") { HogActions.openActivityMonitor() }
+                    .buttonStyle(.link)
                 Button("Storage Window…") { openWindow(id: "hoghunter.storage") }
                     .buttonStyle(.link)
                 Button("Network Window…") { openWindow(id: "hoghunter.network") }
                     .buttonStyle(.link)
+            }
         }
-    }
-
-    static var versionString: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "\(version) (\(build))"
+        .formStyle(.grouped)
+        .frame(width: 440)
     }
 }
 
