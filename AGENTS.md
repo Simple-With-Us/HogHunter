@@ -21,7 +21,7 @@ iPhone companion on 2026-09-27.  The release lane is tracked in issue #22.
 Do not upload until the matching App Store Connect app record and a signing-safe
 workflow are ready.
 
-Hosting and routing: consult the private operations inventory outside this public repository.  Public app access is listed at https://simplewithus.com/hoghunter/.
+Hosting and routing (apexes, hostnames, hosts, deploy paths): see [`Fleet-OPS/docs/DOMAINS-AND-ROUTING.md`](https://github.com/jaywedgeworth22/Fleet-OPS/blob/main/docs/DOMAINS-AND-ROUTING.md). Built from live Cloudflare, Vercel, Coolify, Namecheap/RDAP, and GitHub APIs by CLAUDE on 2026-09-25; refresh via `Fleet-OPS/scripts/domain-inventory/run-all.sh`.
 
 ## Build
 
@@ -35,6 +35,8 @@ ditto build/Build/Products/Release/HogHunter.app /Applications/HogHunter.app
 Prefer `scripts/install.sh` over the manual steps above — it builds Release, signs with the "Developer ID Application" identity when it is in the keychain (adhoc otherwise), quits the running copy, installs, and relaunches.  It installs to `/Applications` by default when a copy is already there, otherwise to `~/Applications`; pass `--dest PATH` to choose explicitly.  Use `--dry-run` to check what it would do without touching the running app or the destination, or `--no-launch` to skip the relaunch.
 
 `HogHunterTests` (XCTest, `Tests/HogHunterTests/`) covers pure logic such as `HogFormat` and the iPhone snapshot codec.  Run with `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.  CI (`.github/workflows/ci.yml`) runs the same on every push to `main` and every pull request, then builds the `HogHunterIOS` scheme for the iOS Simulator.
+
+UI changes must be covered by automated visual verification where feasible: Playwright screenshot assertions for web surfaces, `xcrun simctl io booted screenshot` for iOS simulator. The owner never takes manual screenshots and does not run local UI preview sessions. Native Mac app UI is verified through code review and CI.
 
 The iPhone app is `ios/Sources`, scheme `HogHunterIOS`.  It is a read-only viewer of the Mac snapshot over Bonjour (`_hoghunter._tcp`).  Share With iPhone is off until the owner turns it on in Mac Settings.  The pairing code is not advertised.  There is no quit route.  The owner authorized external TestFlight on 2026-09-27; see issue #22 and `docs/rollouts/2026-09-27-ios-testflight-readiness.md`.  Companion design: `docs/rollouts/2026-09-26-ios-companion.md`.
 
