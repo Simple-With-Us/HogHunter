@@ -67,7 +67,7 @@ xcodegen generate
 
 echo "Building Release."
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build \
-  ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO
+  ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO CODE_SIGNING_ALLOWED=NO
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Build did not produce $APP_PATH." >&2
