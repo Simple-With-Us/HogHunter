@@ -70,8 +70,19 @@ apps=("$work_dir/ipa/Payload/"*.app)
 validate_app "${apps[0]}" true
 
 if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
-  xcrun altool --upload-app -f "${ipas[0]}" --api-key "$ASC_KEY_ID" \
-    --api-issuer "$ASC_ISSUER_ID" --p8-file-path "$ASC_KEY_PATH"
+  xcrun altool --upload-app -f "${ipas[0]}" --type ios --output-format json \
+    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" \
+    --p8-file-path "$ASC_KEY_PATH" > "$work_dir/upload-result.json"
+  python3 - "$work_dir/upload-result.json" <<'PYUPLOAD'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as response:
+        result = json.load(response)
+    if not isinstance(result, dict) or result.get('product-errors') or not result.get('success-message'):
+        raise ValueError('altool did not report an unambiguous success')
+except (OSError, ValueError) as error:
+    raise SystemExit(f'error: App Store Connect upload not confirmed: {error}')
+PYUPLOAD
   result='Upload command succeeded.  Confirm Apple processing, the build identity, and beta review separately before sharing an install link.'
 else
   result='Archive and export validated.  Upload was disabled for this manual run.'

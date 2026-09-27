@@ -107,14 +107,20 @@ elif name == 'codesign':
 elif name == 'xcrun':
     assert args[:2] == ['altool', '--upload-app']
     assert option('--p8-file-path') == os.environ['ASC_KEY_PATH']
+    assert option('--type') == 'ios'
+    assert option('--output-format') == 'json'
     (root / 'upload-invoked').write_text('yes')
+    if os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
+        print('{"product-errors": [{"message": "synthetic upload failure"}]}')
+    else:
+        print('{"success-message": "synthetic upload accepted"}')
 else:
     raise SystemExit('unknown synthetic tool')
 '''
 
 
 class ReleaseFlowTests(unittest.TestCase):
-    def run_release(self, *, upload=False, bad_export=False, event="workflow_dispatch"):
+    def run_release(self, *, upload=False, bad_export=False, upload_error=False, event="workflow_dispatch"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tools = root / "bin"
@@ -131,7 +137,8 @@ class ReleaseFlowTests(unittest.TestCase):
                        GITHUB_ACTIONS="true", GITHUB_EVENT_NAME=event, GITHUB_REF="refs/heads/main",
                        ASC_KEY_ID="synthetic-id", ASC_ISSUER_ID="synthetic-issuer", ASC_KEY_PATH=str(key),
                        HH_BUILD_NUMBER="42", HH_TESTFLIGHT_UPLOAD=str(upload).lower(),
-                       HH_TEST_BAD_EXPORT=str(bad_export).lower(), HH_TEST_FIXTURES=str(root),
+                       HH_TEST_BAD_EXPORT=str(bad_export).lower(), HH_TEST_UPLOAD_ERROR=str(upload_error).lower(),
+                       HH_TEST_FIXTURES=str(root),
                        RUNNER_TEMP=str(root), GITHUB_STEP_SUMMARY=str(root / "summary"))
             result = subprocess.run(["/bin/bash", str(ROOT / "scripts/ios-testflight-release.sh")],
                                     env=env, text=True, capture_output=True)
@@ -149,6 +156,13 @@ class ReleaseFlowTests(unittest.TestCase):
         result, uploaded = self.run_release(upload=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(uploaded)
+
+    def test_zero_exit_with_upload_error_is_not_reported_as_success(self):
+        result, uploaded = self.run_release(upload=True, upload_error=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(uploaded)
+        self.assertNotIn("Upload command succeeded", result.stdout)
+        self.assertIn("upload not confirmed", result.stderr)
 
     def test_invalid_export_stops_before_upload(self):
         result, uploaded = self.run_release(upload=True, bad_export=True)
