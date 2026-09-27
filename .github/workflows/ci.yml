@@ -10,6 +10,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check manual release scripts without signing credentials
+        run: |
+          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh
+          bash scripts/test-ios-stage-asc-key.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
+
   test:
     runs-on: macos-15
     timeout-minutes: 30

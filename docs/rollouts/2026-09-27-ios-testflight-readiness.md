@@ -2,7 +2,8 @@
 
 The owner authorized external testing of the iPhone companion.  This document
 records the release identity and the remaining gates.  The App Store Connect
-app now exists; no uploaded build, approved beta, or public invite exists yet.
+app and an external group now exist.  The group has no builds, so its public
+invite is not yet a usable installation path.
 
 ## Confirmed identity and source
 
@@ -23,18 +24,23 @@ app now exists; no uploaded build, approved beta, or public invite exists yet.
   snapshot over the local network; it cannot quit processes.
 - GitHub CI run `36227076281` built the iOS scheme for generic Simulator.
   A signed device archive and TestFlight upload remain unverified.
+- External group `79295c7f-f69f-4614-9ed3-9a16691380ff` has the public invite
+  `https://testflight.apple.com/join/yrHXfqSR`.  No build was assigned when the
+  group was verified on September 27.  Do not present it as an available beta.
 
 ## Remaining gates
 
-1. Install the existing distribution profile on the release runner, and use
-   the credential-file approach approved by the fleet signing remediation.
-   Do not place a multiline ASC private key in GitHub workflow `env` or
-   `$GITHUB_ENV`; the current fleet pattern exposed key text in a run log.
+1. Complete replacement signing credentials and repository secret setup, then
+   enable the [manual iOS workflow](2026-09-27-ios-manual-release.md).
+   It uses Xcode automatic provisioning and validates the resulting profile.
+   Do not use the previous ASC key or place a multiline private key in workflow
+   `env` or `$GITHUB_ENV`.
 2. Archive and upload a `1.0.1` build with a factual What to Test entry.
    Validate the resulting ASC build ID, processing state, bundle ID, export
    compliance, and beta localization before submitting Apple beta review.
-3. Create an external beta group, assign an eligible build, submit for beta
-   review, and enable/share its public link only when Apple accepts the build.
+3. Assign an eligible build to the existing external group, submit for beta
+   review, and verify that the public link offers the approved build before
+   promoting it on the website.
 
 The reviewer will need a Mac running Hog Hunter on the same Wi-Fi, with
 Settings → Share With iPhone enabled and the Mac's pairing code.  There is no
