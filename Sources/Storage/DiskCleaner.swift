@@ -161,6 +161,7 @@ final class DiskCleaner: @unchecked Sendable {
         var overallSelected: UInt64 = 0
 
         for category in CleanCategory.allCases.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            await Task.yield()
             progress?(category.title)
             let items = scanCategory(category, installedApps: installedApps)
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
@@ -577,6 +578,7 @@ final class DiskCleaner: @unchecked Sendable {
         let totalItems = max(1, items.count)
 
         for (index, item) in items.enumerated() {
+            await Task.yield()
             let progressFraction = Double(index) / Double(totalItems)
             progress?(progressFraction, item.title)
 

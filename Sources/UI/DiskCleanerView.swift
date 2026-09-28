@@ -373,6 +373,7 @@ struct DiskCleanerView: View {
             }
             .buttonStyle(.link)
             .font(.system(size: 11))
+            .disabled(isBusy)
 
             Text("•")
                 .foregroundStyle(.tertiary)
@@ -382,6 +383,7 @@ struct DiskCleanerView: View {
             }
             .buttonStyle(.link)
             .font(.system(size: 11))
+            .disabled(isBusy)
 
             Spacer()
 
@@ -392,6 +394,7 @@ struct DiskCleanerView: View {
                     .font(.system(size: 11))
             }
             .controlSize(.small)
+            .disabled(isBusy)
 
             Button {
                 store.showConfirmation = true
