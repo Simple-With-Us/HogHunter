@@ -4,7 +4,7 @@ Mirror of the live fleet board rows for this app.  Reserve a row before starting
 
 | Date (CT) | Seat | Branch | State | Work |
 |---|---|---|---|---|
-| Sun, Sep 27, 2026 | AG | ag/disk-cleaner | In Progress (#29) | CleanMyMac-style hard disk cleaner: core engine, Storage GUI mode selector, orphaned app leftovers detector, large/old files scanner, `scripts/clean.sh`, and unit tests. |
+| Sun, Sep 27, 2026 | AG | ag/disk-cleaner | Landed (#30) | CleanMyMac-style hard disk cleaner: core engine (DiskCleaner.swift), Storage GUI mode selector (DiskCleanerView.swift), orphaned app leftovers detector, large/old files scanner, scripts/clean.sh, and 125 passing unit tests. |
 | Sun, Sep 27, 2026 | AG | ag/settings-tabview-redesign | Landed (#28) | Reorganized SettingsView into native macOS TabView (General, Alerts, iPhone, About) with compact 440pt panes to prevent off-screen clipping.  Updated macOS & iOS app icons from HogHunter-Icon.icns. |
 | Sun, Sep 27, 2026 | AG | ag/install-entitlements-fix | Landed (#27) | Install HogHunter 1.4.0 with Developer ID & new logo.  Fixed scripts/install.sh with CODE_SIGNING_ALLOWED=NO during build. |
 | Sat, Sep 26, 2026 | GROK-BUILD | grok-build/ios-companion | PR #20 | iOS companion did not exist.  Read-only iPhone app (`com.simplewithus.hoghunter.ios`) shows the Mac snapshot over Bonjour on the same Wi-Fi, gated by a pairing code.  Share With iPhone is off until the owner turns it on.  Mac and iOS app icons replaced with the owner lockup, no squircle crop.  Mac version 1.4.0 / build 6.  iOS 1.0.0 / build 1.  Not TestFlight.  Board `72401c7d`.  Issue #19.  Worktree `~/apps/hoghunter-grok-build-ios`. |
