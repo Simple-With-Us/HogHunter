@@ -97,11 +97,39 @@ final class CompanionServer: @unchecked Sendable {
                     self.receive(connection, buffer: buffer)
                     return
                 }
-                let response = CompanionHTTP.response(request: buffer, body: self.payload, token: self.token)
+                let response = CompanionHTTP.response(request: buffer, body: self.payload, token: self.token) { [weak self] _ in
+                    self?.handleRemoteClean() ?? (status: 500, body: Data("{}".utf8))
+                }
                 connection.send(content: response, completion: .contentProcessed { _ in
                     connection.cancel()
                 })
             }
         }
+    }
+
+    private func handleRemoteClean() -> (status: Int, body: Data) {
+        let cleaner = DiskCleaner()
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultData: Data = Data("{}".utf8)
+        Task {
+            let scanReport = await cleaner.scan(tier: .standard)
+            let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
+            let cleanResult = await cleaner.clean(items: itemsToClean, tier: .standard, createSnapshot: true)
+            let responseObj = CompanionCleanResponse(
+                status: "completed",
+                bytesReclaimed: cleanResult.bytesReclaimed,
+                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+                itemsRemoved: cleanResult.itemsRemoved,
+                snapshotCreated: cleanResult.snapshotName != nil,
+                snapshotName: cleanResult.snapshotName,
+                tier: cleanResult.tier.title
+            )
+            if let encoded = try? JSONEncoder().encode(responseObj) {
+                resultData = encoded
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return (status: 200, body: resultData)
     }
 }

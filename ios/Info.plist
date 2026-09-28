@@ -16,5 +16,16 @@
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.simplewithus.hoghunter.ios</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>hoghunter</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

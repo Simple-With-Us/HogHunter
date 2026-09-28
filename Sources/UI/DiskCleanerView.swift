@@ -8,7 +8,11 @@ struct DiskCleanerView: View {
     @StateObject private var store = DiskCleanerStore()
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
+            tierSelector
+            if store.selectedTier == .extreme {
+                extremeDisclaimerBanner
+            }
             heroHeader
             contentBody
             bottomBar
@@ -19,17 +23,74 @@ struct DiskCleanerView: View {
             }
         }
         .confirmationDialog(
-            "Confirm Disk Cleanup",
+            "Confirm \(store.selectedTier.title)",
             isPresented: $store.showConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(HogFormat.memory(store.totalSelectedBytes()))", role: .destructive) {
-                store.cleanSelected()
+            Button("Reclaim \(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
+                store.cleanSelected(createSnapshot: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to clean \(HogFormat.memory(store.totalSelectedBytes())) across \(store.totalSelectedItemsCount()) items?\n\nNon-trash items will be safely moved to your macOS Trash. Trash items will be permanently removed.")
+            Text("Are you sure you want to clean \(HogFormat.memory(store.totalSelectedBytes())) across \(store.totalSelectedItemsCount()) items?\n\n• APFS Local Snapshot: Automatically created before cleaning for instant rollback.\n• Recoverability: Non-trash items will be safely moved to macOS Trash for Put-Back.")
         }
+    }
+
+    // MARK: - Tier Selector & Disclaimer
+
+    private var tierSelector: some View {
+        HStack {
+            Text("Mode:")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            Picker("Tier", selection: Binding(
+                get: { store.selectedTier },
+                set: { store.setTier($0) }
+            )) {
+                ForEach(CleanTier.allCases) { tier in
+                    Text(tier.title).tag(tier)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 240)
+            .disabled(isBusy)
+
+            Spacer()
+
+            Text(store.selectedTier.badge)
+                .font(.system(size: 10, weight: .semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(store.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
+                )
+                .foregroundStyle(store.selectedTier == .extreme ? Color.orange : Color.blue)
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private var extremeDisclaimerBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Extreme Clean Targets AI Agent & Deep Developer Clutter")
+                    .font(.system(size: 11, weight: .bold))
+            }
+            Text("Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini/Grok/Codex, temporary update downloads, and large/old files.\nWhile git repositories and critical directories are strictly protected, local AI tools may need to re-download model caches, re-index workspaces, or re-authenticate ephemeral CLI sessions.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            Toggle(isOn: $store.acknowledgedExtremeDisclaimer) {
+                Text("I understand this targets AI tool caches, orphaned app data, and older transcripts.")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .toggleStyle(.checkbox)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.25), lineWidth: 1))
     }
 
     // MARK: - Hero Header
@@ -351,6 +412,7 @@ struct DiskCleanerView: View {
         case .trash: color = .red
         case .developer: color = .orange
         case .orphanedData: color = .purple
+        case .aiArtifacts: color = .green
         case .largeAndOldFiles: color = .teal
         }
 
@@ -406,7 +468,7 @@ struct DiskCleanerView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
-            .disabled(store.totalSelectedBytes() == 0 || isBusy)
+            .disabled(store.totalSelectedBytes() == 0 || isBusy || (store.selectedTier == .extreme && !store.acknowledgedExtremeDisclaimer))
         }
         .padding(.top, 4)
     }

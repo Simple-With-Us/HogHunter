@@ -31,6 +31,34 @@ enum CompanionConnection {
         }
     }
 
+    static func triggerClean(endpoint: NWEndpoint, token: String) async throws -> CompanionCleanResponse {
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = CleanResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let request = CompanionHTTP.cleanRequest(token: token)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error { reader.fail(error) }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                    default:
+                        break
+                    }
+                }
+                receiveClean(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .utility))
+            }
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
+        }
+    }
+
     private static func receive(_ connection: NWConnection, reader: ResponseReader, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
             var buffer = buffer
@@ -58,6 +86,56 @@ enum CompanionConnection {
             }
             receive(connection, reader: reader, buffer: buffer)
         }
+    }
+
+    private static func receiveClean(_ connection: NWConnection, reader: CleanResponseReader, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let parsed = CompanionHTTP.parseResponse(buffer) {
+                switch parsed.status {
+                case 200:
+                    if let res = try? JSONDecoder().decode(CompanionCleanResponse.self, from: parsed.body) {
+                        reader.succeed(res)
+                    } else {
+                        reader.fail(CompanionClientError.badResponse)
+                    }
+                case 401:
+                    reader.fail(CompanionClientError.unauthorized)
+                default:
+                    reader.fail(CompanionClientError.badResponse)
+                }
+                connection.cancel()
+                return
+            }
+            if isComplete || error != nil {
+                reader.fail(error ?? CompanionClientError.badResponse)
+                connection.cancel()
+                return
+            }
+            receiveClean(connection, reader: reader, buffer: buffer)
+        }
+    }
+}
+
+private final class CleanResponseReader: @unchecked Sendable {
+    var continuation: CheckedContinuation<CompanionCleanResponse, Error>?
+    private let lock = NSLock()
+
+    func succeed(_ response: CompanionCleanResponse) {
+        resume(.success(response))
+    }
+
+    func fail(_ error: Error) {
+        resume(.failure(error))
+    }
+
+    private func resume(_ result: Result<CompanionCleanResponse, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
     }
 }
 

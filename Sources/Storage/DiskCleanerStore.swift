@@ -32,6 +32,8 @@ final class DiskCleanerStore: ObservableObject {
     @Published var expandedCategoryIds: Set<String> = []
     @Published private(set) var report: CleanScanReport?
     @Published var showConfirmation: Bool = false
+    @Published var selectedTier: CleanTier = .standard
+    @Published var acknowledgedExtremeDisclaimer: Bool = false
 
     let cleaner: DiskCleaner
     private let queue = DispatchQueue(label: "hoghunter.cleaner", qos: .utility)
@@ -43,16 +45,24 @@ final class DiskCleanerStore: ObservableObject {
 
     // MARK: - Scan
 
-    /// Initiates a full disk clutter scan.
+    /// Switches the active cleaning tier and initiates a scan for that tier.
+    func setTier(_ tier: CleanTier) {
+        guard tier != selectedTier else { return }
+        selectedTier = tier
+        scan()
+    }
+
+    /// Initiates a full disk clutter scan for the active tier.
     func scan() {
         guard !isScanInFlight else { return }
         isScanInFlight = true
-        state = .scanning(category: "Starting scan…")
+        let currentTier = selectedTier
+        state = .scanning(category: "Starting \(currentTier.title) scan…")
 
         let cleaner = self.cleaner
         queue.async { [weak self] in
             Task {
-                let scanReport = await cleaner.scan { categoryTitle in
+                let scanReport = await cleaner.scan(tier: currentTier) { categoryTitle in
                     Task { @MainActor in
                         self?.state = .scanning(category: categoryTitle)
                     }
@@ -172,18 +182,19 @@ final class DiskCleanerStore: ObservableObject {
 
     // MARK: - Cleaning
 
-    /// Executes cleaning on all selected items.
-    func cleanSelected() {
+    /// Executes cleaning on all selected items with APFS snapshot preservation.
+    func cleanSelected(createSnapshot: Bool = true) {
         guard let report else { return }
         let itemsToClean = report.categories.flatMap { $0.items }.filter { selectedItemIds.contains($0.id) }
         guard !itemsToClean.isEmpty else { return }
 
+        let currentTier = selectedTier
         state = .cleaning(progress: 0, currentItem: "Preparing…")
 
         let cleaner = self.cleaner
         queue.async { [weak self] in
             Task {
-                let result = await cleaner.clean(items: itemsToClean) { progress, currentItem in
+                let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot) { progress, currentItem in
                     Task { @MainActor in
                         self?.state = .cleaning(progress: progress, currentItem: currentItem)
                     }

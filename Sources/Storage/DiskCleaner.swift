@@ -12,6 +12,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case developer
     /// Residual application support and cache directories left behind by uninstalled applications.
     case orphanedData
+    /// AI agent transcripts, model download temp files, and BotFleet update installers.
+    case aiArtifacts
     /// Large files (>100 MB) or old files (>6 months) in user working folders (Downloads, Documents, Desktop).
     case largeAndOldFiles
 
@@ -24,6 +26,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .trash: return "Trash Bins"
         case .developer: return "Developer Junk"
         case .orphanedData: return "Orphaned App Leftovers"
+        case .aiArtifacts: return "AI & Agent Junk"
         case .largeAndOldFiles: return "Large & Old Files"
         }
     }
@@ -40,6 +43,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Xcode DerivedData, Archives, iOS DeviceSupport, and package manager caches."
         case .orphanedData:
             return "Support folders remaining from applications no longer installed."
+        case .aiArtifacts:
+            return "Inactive AI agent session transcripts (>7 days) and temporary update downloads."
         case .largeAndOldFiles:
             return "Files over 100 MB or untouched for over 6 months."
         }
@@ -52,6 +57,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .trash: return "trash"
         case .developer: return "hammer"
         case .orphanedData: return "app.dashed"
+        case .aiArtifacts: return "sparkles"
         case .largeAndOldFiles: return "clock.arrow.circlepath"
         }
     }
@@ -63,7 +69,18 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .trash: return 2
         case .developer: return 3
         case .orphanedData: return 4
-        case .largeAndOldFiles: return 5
+        case .aiArtifacts: return 5
+        case .largeAndOldFiles: return 6
+        }
+    }
+
+    /// Whether this category is restricted to the Extreme Clean tier.
+    var isExtremeOnly: Bool {
+        switch self {
+        case .userCaches, .logsAndDiagnostics, .trash, .developer:
+            return false
+        case .orphanedData, .aiArtifacts, .largeAndOldFiles:
+            return true
         }
     }
 
@@ -72,9 +89,81 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
             return true
-        case .largeAndOldFiles:
-            // Large and old files require explicit user review to prevent accidental deletion
+        case .aiArtifacts, .largeAndOldFiles:
+            // Large/old files and AI agent artifacts require explicit user review to prevent accidental deletion
             return false
+        }
+    }
+}
+
+/// Degrees of disk cleaning supported by Hog Hunter.
+enum CleanTier: String, CaseIterable, Identifiable, Sendable {
+    /// Safe major clutter removal: caches, logs, trash, developer junk, and stale temp files.
+    /// Preserves full recoverability via APFS snapshot & Trash Put-Back.
+    case standard
+    /// Aggressive deep clean: everything in standard PLUS orphaned app leftovers,
+    /// stale AI agent transcripts/models (>7 days), and large/old files.
+    case extreme
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .standard: return "Standard Clean"
+        case .extreme: return "Extreme Clean"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .standard: return "Safe major clutter removal. Protected by APFS snapshot & Trash Put-Back."
+        case .extreme: return "Deep scan of AI agent bloat, leftovers & large files."
+        }
+    }
+
+    var badge: String {
+        switch self {
+        case .standard: return "Safe / Reversible"
+        case .extreme: return "Deep / AI Artifacts"
+        }
+    }
+
+    func isCategoryIncluded(_ category: CleanCategory) -> Bool {
+        switch self {
+        case .standard:
+            return !category.isExtremeOnly
+        case .extreme:
+            return true
+        }
+    }
+}
+
+/// Helper that manages Apple APFS local snapshots for safe rollback before disk cleaning operations.
+enum SnapshotSafety {
+    /// Attempts to create an APFS local snapshot via `tmutil localsnapshot`.
+    /// Returns the snapshot date/identifier on success, or nil if unavailable.
+    static func createLocalSnapshot() -> (success: Bool, snapshotName: String?) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
+        process.arguments = ["localsnapshot"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            if process.terminationStatus == 0 {
+                if let line = output.components(separatedBy: .newlines).first(where: { $0.contains("Created local snapshot with date:") }) {
+                    let parts = line.components(separatedBy: ": ")
+                    return (true, parts.last?.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+                return (true, "APFS Local Snapshot")
+            }
+            return (false, nil)
+        } catch {
+            return (false, nil)
         }
     }
 }
@@ -121,6 +210,15 @@ struct CleanScanReport: Sendable {
     var totalBytes: UInt64
     var totalSelectedBytes: UInt64
     var scannedAt: Date
+    var tier: CleanTier
+
+    init(categories: [CleanCategoryReport], totalBytes: UInt64, totalSelectedBytes: UInt64, scannedAt: Date, tier: CleanTier = .standard) {
+        self.categories = categories
+        self.totalBytes = totalBytes
+        self.totalSelectedBytes = totalSelectedBytes
+        self.scannedAt = scannedAt
+        self.tier = tier
+    }
 
     var formattedTotalSize: String {
         HogFormat.memory(totalBytes)
@@ -137,6 +235,17 @@ struct CleanResult: Sendable {
     var itemsRemoved: Int
     var errors: [String]
     var cleanedAt: Date
+    var snapshotName: String?
+    var tier: CleanTier
+
+    init(bytesReclaimed: UInt64, itemsRemoved: Int, errors: [String], cleanedAt: Date, snapshotName: String? = nil, tier: CleanTier = .standard) {
+        self.bytesReclaimed = bytesReclaimed
+        self.itemsRemoved = itemsRemoved
+        self.errors = errors
+        self.cleanedAt = cleanedAt
+        self.snapshotName = snapshotName
+        self.tier = tier
+    }
 
     var formattedBytesReclaimed: String {
         HogFormat.memory(bytesReclaimed)
@@ -153,14 +262,19 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Full Scan
 
-    /// Performs a full scan across all categories.
+    /// Performs a full scan across all categories matching the given tier.
     func scan(installedApps: [StorageScanner.InstalledApp] = [],
+              tier: CleanTier = .standard,
               progress: ((String) -> Void)? = nil) async -> CleanScanReport {
         var reports: [CleanCategoryReport] = []
         var overallTotal: UInt64 = 0
         var overallSelected: UInt64 = 0
 
-        for category in CleanCategory.allCases.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+        let categoriesToScan = CleanCategory.allCases
+            .filter { tier.isCategoryIncluded($0) }
+            .sorted(by: { $0.sortOrder < $1.sortOrder })
+
+        for category in categoriesToScan {
             await Task.yield()
             progress?(category.title)
             let items = scanCategory(category, installedApps: installedApps)
@@ -182,7 +296,8 @@ final class DiskCleaner: @unchecked Sendable {
             categories: reports,
             totalBytes: overallTotal,
             totalSelectedBytes: overallSelected,
-            scannedAt: Date()
+            scannedAt: Date(),
+            tier: tier
         )
     }
 
@@ -199,6 +314,8 @@ final class DiskCleaner: @unchecked Sendable {
             return scanDeveloper()
         case .orphanedData:
             return scanOrphanedData(installedApps: installedApps)
+        case .aiArtifacts:
+            return scanAIArtifacts()
         case .largeAndOldFiles:
             return scanLargeAndOldFiles()
         }
@@ -490,6 +607,107 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+    /// Scans for stale AI agent transcripts (>7 days) across Gemini/Antigravity, Grok, Codex,
+    /// stale BotFleet update installers, and old AI model temporary caches.
+    func scanAIArtifacts() -> [CleanItem] {
+        var items: [CleanItem] = []
+        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+
+        // 1. Antigravity brain sessions (~/.gemini/antigravity/brain)
+        let brainURL = userHomeURL.appendingPathComponent(".gemini/antigravity/brain", isDirectory: true)
+        if let brainContents = try? fileManager.contentsOfDirectory(at: brainURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for folderURL in brainContents {
+                let name = folderURL.lastPathComponent
+                if name == "tempmediaStorage" { continue }
+                guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
+                      values.isDirectory == true,
+                      let modDate = values.contentModificationDate,
+                      modDate < sevenDaysAgo else { continue }
+
+                let stats = directoryStats(at: folderURL)
+                guard stats.bytes > 0 else { continue }
+                items.append(CleanItem(
+                    category: .aiArtifacts,
+                    title: "Antigravity Session (\(name.prefix(8)))",
+                    subtitle: "~/.gemini/antigravity/brain/\(name)",
+                    url: folderURL,
+                    bytes: stats.bytes,
+                    fileCount: stats.fileCount,
+                    lastModified: modDate,
+                    isSelected: false,
+                    detail: "Agent session older than 7 days"
+                ))
+            }
+        }
+
+        // 2. Grok sessions (~/.grok/sessions)
+        let grokURL = userHomeURL.appendingPathComponent(".grok/sessions", isDirectory: true)
+        if let grokContents = try? fileManager.contentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for folderURL in grokContents {
+                guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                      let modDate = values.contentModificationDate,
+                      modDate < sevenDaysAgo else { continue }
+                let stats = directoryStats(at: folderURL)
+                guard stats.bytes > 0 else { continue }
+                items.append(CleanItem(
+                    category: .aiArtifacts,
+                    title: "Grok Session (\(folderURL.lastPathComponent.prefix(8)))",
+                    subtitle: "~/.grok/sessions/\(folderURL.lastPathComponent)",
+                    url: folderURL,
+                    bytes: stats.bytes,
+                    fileCount: stats.fileCount,
+                    lastModified: modDate,
+                    isSelected: false,
+                    detail: "Grok transcript older than 7 days"
+                ))
+            }
+        }
+
+        // 3. Codex archived sessions (~/.codex/archived_sessions)
+        let codexURL = userHomeURL.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
+        if let codexContents = try? fileManager.contentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+            for fileURL in codexContents {
+                let stats = directoryStats(at: fileURL)
+                guard stats.bytes > 0 else { continue }
+                items.append(CleanItem(
+                    category: .aiArtifacts,
+                    title: "Codex Archived Session (\(fileURL.lastPathComponent.prefix(16)))",
+                    subtitle: "~/.codex/archived_sessions/\(fileURL.lastPathComponent)",
+                    url: fileURL,
+                    bytes: stats.bytes,
+                    fileCount: stats.fileCount,
+                    lastModified: stats.lastModified,
+                    isSelected: false,
+                    detail: "Archived Codex transcript"
+                ))
+            }
+        }
+
+        // 4. Stale BotFleet update installers & temporary downloads (~/.BotFleet.update-*)
+        if let homeContents = try? fileManager.contentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+            for url in homeContents {
+                let name = url.lastPathComponent
+                if name.hasPrefix(".BotFleet.update-") {
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .aiArtifacts,
+                        title: name,
+                        subtitle: "~/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Stale BotFleet update package"
+                    ))
+                }
+            }
+        }
+
+        return items.sorted { $0.bytes > $1.bytes }
+    }
+
     /// Scans user folders (Downloads, Documents, Desktop) for files >100 MB or untouched >6 months.
     func scanLargeAndOldFiles() -> [CleanItem] {
         var items: [CleanItem] = []
@@ -569,11 +787,23 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
+    /// When `createSnapshot` is true, attempts to take an APFS local snapshot beforehand.
     func clean(items: [CleanItem],
+               tier: CleanTier = .standard,
+               createSnapshot: Bool = true,
                progress: ((Double, String) -> Void)? = nil) async -> CleanResult {
         var reclaimed: UInt64 = 0
         var removedCount = 0
         var errors: [String] = []
+        var snapshotCreatedName: String?
+
+        if createSnapshot {
+            progress?(0.0, "Creating APFS safety snapshot…")
+            let (success, name) = SnapshotSafety.createLocalSnapshot()
+            if success {
+                snapshotCreatedName = name
+            }
+        }
 
         let totalItems = max(1, items.count)
 
@@ -609,7 +839,9 @@ final class DiskCleaner: @unchecked Sendable {
             bytesReclaimed: reclaimed,
             itemsRemoved: removedCount,
             errors: errors,
-            cleanedAt: Date()
+            cleanedAt: Date(),
+            snapshotName: snapshotCreatedName,
+            tier: tier
         )
     }
 
@@ -641,8 +873,8 @@ final class DiskCleaner: @unchecked Sendable {
             return false
         }
 
-        // Never touch git repositories
-        if path.contains("/.git/") || path.hasSuffix("/.git") {
+        // Never touch git repositories or secret directories
+        if path.contains("/.git/") || path.hasSuffix("/.git") || path.contains("/.secrets") {
             return false
         }
 
@@ -692,6 +924,20 @@ final class DiskCleaner: @unchecked Sendable {
             guard allowedOrphanPrefixes.contains(where: { path.hasPrefix($0) }) else { return false }
             // Ensure it's not the directory itself
             return !allowedOrphanPrefixes.contains { path == $0 || path == ($0 as NSString).substring(to: $0.count - 1) }
+
+        case .aiArtifacts:
+            let allowedAIPrefixes = [
+                home + "/.gemini/antigravity/brain/",
+                home + "/.grok/sessions/",
+                home + "/.codex/archived_sessions/",
+                home + "/.botfleet/updates/",
+                home + "/Library/Caches/BotFleet/updates/",
+                home + "/.cache/huggingface/",
+                home + "/.ollama/models/blobs/"
+            ]
+            let isStaleUpdate = path.contains("/.BotFleet.update-")
+            let hasAllowedPrefix = allowedAIPrefixes.contains { path.hasPrefix($0) && path != $0 }
+            return hasAllowedPrefix || isStaleUpdate
 
         case .largeAndOldFiles:
             let allowedUserPrefixes = [

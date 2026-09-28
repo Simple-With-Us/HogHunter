@@ -35,7 +35,7 @@ struct CompanionRootView: View {
         switch model.phase {
         case .live:
             if let snapshot = model.snapshot {
-                DashboardView(snapshot: snapshot)
+                DashboardView(snapshot: snapshot, model: model)
             } else {
                 StatusPage(
                     title: "Waiting for a Snapshot",
@@ -152,6 +152,8 @@ private struct CodeEntryView: View {
 
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
+    @Bindable var model: CompanionModel
+    @State private var showCleanConfirm = false
 
     var body: some View {
         List {
@@ -192,6 +194,76 @@ struct DashboardView: View {
                             Pill(text: pressure, severity: snapshot.pulse.pressureSeverity)
                         }
                     }
+                }
+            }
+            Section("Disk & System Clutter") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Safe Mac Clean", systemImage: "sparkles")
+                            .font(.headline)
+                        Spacer()
+                        if model.isCleaning {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                    Text("Remotely trigger a safe Standard Clean on \(snapshot.hostName). Cleans user caches, logs, developer junk, and empties trash with instant APFS snapshot rollback.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let result = model.lastCleanResult {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("Reclaimed \(result.formattedBytesReclaimed) (\(result.itemsRemoved) items) with APFS snapshot.")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.green)
+                        }
+                        .padding(.vertical, 2)
+                    }
+
+                    if let error = model.cleanError {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    Button {
+                        showCleanConfirm = true
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Text(model.isCleaning ? "Cleaning Mac…" : "Clean Mac Clutter (Safe)")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(model.isCleaning)
+                }
+                .padding(.vertical, 4)
+            }
+            .confirmationDialog(
+                "Clean \(snapshot.hostName)?",
+                isPresented: $showCleanConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Run Safe Clean", role: .destructive) {
+                    Task { await model.triggerRemoteClean() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will safely trigger a Standard Clean on \(snapshot.hostName). An APFS local snapshot will be taken first, and deleted items are moved to Trash.")
+            }
+            .onChange(of: model.showCleanDialogRequested) { _, requested in
+                if requested {
+                    showCleanConfirm = true
+                    model.showCleanDialogRequested = false
                 }
             }
             Section(snapshot.grouping == "Processes" ? "Busy Processes" : "Busy Apps") {

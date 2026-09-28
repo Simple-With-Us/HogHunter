@@ -35,6 +35,10 @@ final class CompanionModel {
     var codeDraft = ""
     var codeError: String?
     var isSubmittingCode = false
+    var isCleaning = false
+    var lastCleanResult: CompanionCleanResponse?
+    var cleanError: String?
+    var showCleanDialogRequested = false
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
 
     private var browser: NWBrowser?
@@ -42,6 +46,7 @@ final class CompanionModel {
     private var started = false
     private var didBrowse = false
     private let defaultsKey = "hoghunter.companion.saved"
+    private let appGroupSuite = "group.com.simplewithus.hoghunter"
 
     enum Phase: Equatable {
         case looking
@@ -129,9 +134,14 @@ final class CompanionModel {
         }
         if case .code = phase { return }
         do {
-            snapshot = try await Self.fetch(endpoint: mac.endpoint, token: saved.token)
+            let fetched = try await Self.fetch(endpoint: mac.endpoint, token: saved.token)
+            snapshot = fetched
             phase = .live
             statusLine = mac.name
+            // Persist for iOS WidgetKit extension
+            if let data = try? CompanionJSON.encode(fetched) {
+                UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
+            }
         } catch CompanionClientError.unauthorized {
             codeError = "The code no longer matches.  Enter the code from Hog Hunter Settings on your Mac."
             phase = .code(saved.peerID)
@@ -141,6 +151,28 @@ final class CompanionModel {
                 phase = .offline
                 statusLine = "The Mac did not answer."
             }
+        }
+    }
+
+    /// Triggers a safe Standard Clean on the connected Mac over the local network.
+    func triggerRemoteClean() async {
+        guard let saved, let mac = discovered.first(where: { $0.id == saved.peerID }) else { return }
+        isCleaning = true
+        cleanError = nil
+        let defaults = UserDefaults(suiteName: appGroupSuite)
+        defaults?.set("Cleaning…", forKey: "clean_status")
+        defer { isCleaning = false }
+        do {
+            let res = try await CompanionConnection.triggerClean(endpoint: mac.endpoint, token: saved.token)
+            lastCleanResult = res
+            defaults?.set("Cleaned", forKey: "clean_status")
+            defaults?.set(Date().timeIntervalSince1970, forKey: "last_clean_date")
+            defaults?.set(res.formattedBytesReclaimed, forKey: "last_clean_bytes")
+            // Refresh snapshot to reflect reclaimed memory/disk immediately
+            await refresh()
+        } catch {
+            cleanError = "Could not start safe clean. The Mac may be busy or unreachable."
+            defaults?.set("Clean failed", forKey: "clean_status")
         }
     }
 

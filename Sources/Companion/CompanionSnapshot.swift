@@ -5,7 +5,19 @@ import Foundation
 enum CompanionService {
     static let type = "_hoghunter._tcp"
     static let path = "/v1/snapshot"
+    static let cleanPath = "/v1/clean"
     static let version = 1
+}
+
+/// Response returned when the iOS companion triggers a safe remote clean on the Mac.
+struct CompanionCleanResponse: Codable, Equatable, Sendable {
+    var status: String
+    var bytesReclaimed: UInt64
+    var formattedBytesReclaimed: String
+    var itemsRemoved: Int
+    var snapshotCreated: Bool
+    var snapshotName: String?
+    var tier: String
 }
 
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
