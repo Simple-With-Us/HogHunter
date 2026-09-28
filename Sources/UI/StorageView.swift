@@ -1,14 +1,23 @@
 import SwiftUI
 import AppKit
 
+enum StorageTab: String, CaseIterable, Identifiable {
+    case appStorage = "App Storage"
+    case diskCleaner = "Disk Cleaner"
+
+    var id: String { rawValue }
+}
+
 /// Storage pane.  Shows top apps by disk usage with the bundle-vs-hidden
-/// split and, when a row is expanded, the per-category breakdown.
+/// split and, when a row is expanded, the per-category breakdown, plus
+/// a CleanMyMac-grade disk cleaner mode.
 ///
 /// The view holds its own `StorageStore` so the panel does not pollute the
 /// shared `HogStore`, and so opening it has no incidental effect on the CPU
 /// panel's cadence.
 struct StorageView: View {
     @StateObject private var store: StorageStore
+    @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
     @State private var filter: StorageFilter = .all
     @State private var expandedUsageId: String?
@@ -21,51 +30,68 @@ struct StorageView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
                 .padding(.top, 4)
-            statusRow
-            list
-            footer
+
+            switch selectedTab {
+            case .appStorage:
+                statusRow
+                list
+                footer
+            case .diskCleaner:
+                DiskCleanerView()
+            }
         }
         .padding(16)
-        .frame(width: 520, height: 640)
+        .frame(minWidth: 540, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             if case .idle = store.state { store.refresh() }
             startRefreshTimer()
         }
         .onDisappear { refreshTask?.cancel() }
-        .navigationTitle("Storage")
+        .navigationTitle(selectedTab == .diskCleaner ? "Disk Cleaner" : "Storage")
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Hog Hunter Storage — top apps by disk usage")
+        .accessibilityLabel("Hog Hunter Storage — top apps and disk cleaner")
     }
 
     // MARK: - Header
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "internaldrive")
-                .font(.system(size: 22))
+            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : "internaldrive")
+                .font(.system(size: 20))
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Storage")
-                    .font(.system(size: 18, weight: .semibold))
-                Text(subtitle)
+                Text(selectedTab == .diskCleaner ? "Disk Cleaner" : "Storage")
+                    .font(.system(size: 17, weight: .semibold))
+                Text(selectedTab == .diskCleaner ? "CleanMyMac-grade clutter cleanup" : subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Picker("Filter", selection: $filter) {
-                Text("All installed").tag(StorageFilter.all)
-                Text("Running now").tag(StorageFilter.running)
+
+            Picker("Mode", selection: $selectedTab) {
+                Text("Disk Cleaner").tag(StorageTab.diskCleaner)
+                Text("App Storage").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
-            .frame(width: 220)
-            Picker("Sort", selection: $sortOrder) {
-                Text("Total").tag(StorageSort.total)
-                Text("Hidden").tag(StorageSort.hidden)
-                Text("Bundle").tag(StorageSort.bundle)
+            .frame(width: 200)
+
+            if selectedTab == .appStorage {
+                Picker("Filter", selection: $filter) {
+                    Text("All").tag(StorageFilter.all)
+                    Text("Running").tag(StorageFilter.running)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 120)
+
+                Picker("Sort", selection: $sortOrder) {
+                    Text("Total").tag(StorageSort.total)
+                    Text("Hidden").tag(StorageSort.hidden)
+                    Text("Bundle").tag(StorageSort.bundle)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 85)
             }
-            .pickerStyle(.menu)
-            .frame(width: 100)
         }
     }
 
