@@ -75,6 +75,8 @@ targets:
       - path: Sources/Companion/CompanionSnapshot.swift
       - path: Sources/Companion/CompanionHTTP.swift
       - path: ios/Assets.xcassets
+    dependencies:
+      - target: HogHunterWidgets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios
@@ -91,6 +93,28 @@ targets:
         ENABLE_PREVIEWS: NO
         INFOPLIST_FILE: ios/Info.plist
 
+  HogHunterWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ios/Widgets
+      - path: Sources/Companion/CompanionSnapshot.swift
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios.widgets
+        PRODUCT_NAME: HogHunterWidgets
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
+        INFOPLIST_FILE: ios/Widgets/Info.plist
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ENABLE_PREVIEWS: NO
+
 schemes:
   HogHunter:
     build:
@@ -104,3 +128,4 @@ schemes:
     build:
       targets:
         HogHunterIOS: all
+        HogHunterWidgets: all
