@@ -1,0 +1,83 @@
+name: iOS Screenshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'App version for screenshot naming'
+        required: false
+        default: '1.0.3'
+
+jobs:
+  screenshots:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild -scheme HogHunterIOS \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-ios \
+            build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            -quiet
+
+      - name: Find built app
+        id: find-app
+        run: |
+          APP_PATH=$(find build-ios -name "*.app" -type d | head -1)
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "Found app: $APP_PATH"
+
+      - name: Capture screenshots
+        run: |
+          mkdir -p screenshots
+          # iPhone 16 Pro Max (6.9") - 1320x2868
+          # iPhone 15 Pro Max (6.7") - 1290x2796  
+          # iPhone 11 Pro Max (6.5") - 1242x2688
+          DEVICES=(
+            "iPhone 16 Pro Max"
+            "iPhone 15 Pro Max"
+            "iPhone 11 Pro Max"
+          )
+          APP_PATH="${{ steps.find-app.outputs.app_path }}"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")
+          echo "Bundle ID: $BUNDLE_ID"
+          
+          for DEVICE in "${DEVICES[@]}"; do
+            echo "=== Capturing for $DEVICE ==="
+            # Boot simulator
+            UDID=$(xcrun simctl create "screenshot-$DEVICE" "$DEVICE" "iOS-18-0" 2>/dev/null || \
+                   xcrun simctl list devices available | grep "$DEVICE" | head -1 | grep -oE '[0-9A-F-]{36}')
+            echo "Using simulator: $UDID"
+            xcrun simctl boot "$UDID"
+            sleep 10
+            # Install and launch app
+            xcrun simctl install "$UDID" "$APP_PATH"
+            xcrun simctl launch "$UDID" "$BUNDLE_ID"
+            sleep 5
+            # Take screenshot
+            SAFE_NAME=$(echo "$DEVICE" | tr ' ' '_' | tr -d '()')
+            xcrun simctl io "$UDID" screenshot "screenshots/${SAFE_NAME}.png"
+            echo "Screenshot saved: screenshots/${SAFE_NAME}.png"
+            # Shutdown
+            xcrun simctl shutdown "$UDID"
+            xcrun simctl delete "$UDID" 2>/dev/null || true
+          done
+          ls -lh screenshots/
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoghunter-screenshots-${{ inputs.version }}
+          path: screenshots/
+          retention-days: 30
