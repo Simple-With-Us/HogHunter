@@ -40,39 +40,48 @@ jobs:
 
       - name: Capture screenshots
         run: |
+          set -x
           mkdir -p screenshots
-          # iPhone 16 Pro Max (6.9") - 1320x2868
-          # iPhone 15 Pro Max (6.7") - 1290x2796  
-          # iPhone 11 Pro Max (6.5") - 1242x2688
-          DEVICES=(
-            "iPhone 16 Pro Max"
-            "iPhone 15 Pro Max"
-            "iPhone 11 Pro Max"
-          )
           APP_PATH="${{ steps.find-app.outputs.app_path }}"
           BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")
           echo "Bundle ID: $BUNDLE_ID"
           
-          for DEVICE in "${DEVICES[@]}"; do
-            echo "=== Capturing for $DEVICE ==="
-            # Boot simulator
-            UDID=$(xcrun simctl create "screenshot-$DEVICE" "$DEVICE" "iOS-18-0" 2>/dev/null || \
-                   xcrun simctl list devices available | grep "$DEVICE" | head -1 | grep -oE '[0-9A-F-]{36}')
-            echo "Using simulator: $UDID"
-            xcrun simctl boot "$UDID"
-            sleep 10
-            # Install and launch app
+          # List available runtimes and devices for debugging
+          echo "=== Available runtimes ==="
+          xcrun simctl list runtimes available
+          echo "=== Available device types ==="
+          xcrun simctl list devicetypes | head -30
+          
+          # Use existing simulators instead of creating new ones
+          # Map to actual available devices
+          for DEVICE_PATTERN in "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 11 Pro Max"; do
+            echo "=== Looking for: $DEVICE_PATTERN ==="
+            UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          pattern = '$DEVICE_PATTERN'
+          for runtime, devices in data['devices'].items():
+              for d in devices:
+                  if d['name'] == pattern and d.get('isAvailable', False):
+                      print(d['udid'])
+                      sys.exit(0)
+          ")
+            if [ -z "$UDID" ]; then
+              echo "WARNING: No available simulator found for $DEVICE_PATTERN, skipping"
+              continue
+            fi
+            echo "Using simulator $UDID for $DEVICE_PATTERN"
+            xcrun simctl boot "$UDID" || true
+            sleep 15
             xcrun simctl install "$UDID" "$APP_PATH"
-            xcrun simctl launch "$UDID" "$BUNDLE_ID"
-            sleep 5
-            # Take screenshot
-            SAFE_NAME=$(echo "$DEVICE" | tr ' ' '_' | tr -d '()')
-            xcrun simctl io "$UDID" screenshot "screenshots/${SAFE_NAME}.png"
-            echo "Screenshot saved: screenshots/${SAFE_NAME}.png"
-            # Shutdown
-            xcrun simctl shutdown "$UDID"
-            xcrun simctl delete "$UDID" 2>/dev/null || true
+            xcrun simctl launch "$UDID" "$BUNDLE_ID" || echo "Launch may have failed, continuing"
+            sleep 8
+            SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
+            xcrun simctl io "$UDID" screenshot "screenshots/${SAFE_NAME}.png" || echo "Screenshot failed for $DEVICE_PATTERN"
+            xcrun simctl shutdown "$UDID" || true
           done
+          
+          echo "=== Screenshots captured ==="
           ls -lh screenshots/
 
       - name: Upload screenshots
