@@ -38,8 +38,8 @@ jobs:
       - name: Validate release inputs and tools
         run: |
           set -euo pipefail
-          build_number="${HH_BUILD_NUMBER_INPUT:-$GITHUB_RUN_NUMBER}"
-          [[ "$build_number" =~ ^[1-9][0-9]{0,8}$ ]] || { echo '::error::Build number must be 1-9 digits without leading zero.'; exit 1; }
+          build_number="${HH_BUILD_NUMBER_INPUT:-$(date -u +%Y%m%d%H%M)}"
+          [[ "$build_number" =~ ^[1-9][0-9]{0,17}$ ]] || { echo '::error::Build number must be valid digits without leading zero.'; exit 1; }
           echo "HH_BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           xcodebuild -version
           xcode_major="$(xcodebuild -version | awk 'NR==1 {split($2, parts, "."); print parts[1]}')"
