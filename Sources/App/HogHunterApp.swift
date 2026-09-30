@@ -32,6 +32,9 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
                 .frame(width: 560, height: 480)
             win.contentViewController = NSHostingController(rootView: rootView)
             win.setContentSize(NSSize(width: 560, height: 480))
+            // Headless runners presented this window title-bar-only (440x38) because
+            // the tab content had no ideal height; never let it shrink below the UI.
+            win.contentMinSize = NSSize(width: 560, height: 480)
             win.center()
             // Register with the activation manager via its existing API (the
             // windowOpened() member this called was never defined) so the app
@@ -43,6 +46,14 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             AppActivationManager.shared.updatePolicy()
             self.screenshotWindow = win
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let win = self?.screenshotWindow else { return }
+                if let content = win.contentView, content.frame.height < 300 {
+                    self?.screenshotLog("content laid out too small (\(content.frame.size)); resizing")
+                    win.setContentSize(NSSize(width: 560, height: 480))
+                }
+                self?.screenshotLog("post-layout: frame=\(win.frame) content=\(win.contentView?.frame.size ?? .zero)")
+            }
             self.screenshotLog("Settings NSWindow ordered front: isVisible=\(win.isVisible) frame=\(win.frame)")
         }
     }

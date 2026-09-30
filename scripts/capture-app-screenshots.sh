@@ -201,7 +201,10 @@ try:
         owner = w.get("kCGWindowOwnerName", "")
         if owner in ("Hog Hunter", "HogHunter") and w.get("kCGWindowLayer", -1) == 0:
             b = w.get("kCGWindowBounds", {})
-            if b.get("Width", 0) > 100 and b.get("Height", 0) > 50:
+            # The Settings window is presented at 560x480 content (plus title bar).
+            # A menu-bar-width strip (the 440x38 title-bar-only window from run
+            # 36766658503) must NOT pass: require a window that can hold the UI.
+            if b.get("Width", 0) >= 400 and b.get("Height", 0) >= 300:
                 print(w.get("kCGWindowNumber", ""))
                 break
 except Exception:
@@ -237,7 +240,18 @@ PYDUMP
       sleep 1
       screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
       if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then
-        echo "  ✓ Saved screenshots/macos/HogHunter_macOS.png"
+        # Re-check the captured image itself: a window that shrank between
+        # detection and capture must not ship as a screenshot (@2x pixels are
+        # larger than points, so the point thresholds are a safe floor).
+        shot_w="$(sips -g pixelWidth screenshots/macos/HogHunter_macOS.png 2>/dev/null | awk '/pixelWidth/ {print $2}')"
+        shot_h="$(sips -g pixelHeight screenshots/macos/HogHunter_macOS.png 2>/dev/null | awk '/pixelHeight/ {print $2}')"
+        if [[ "${shot_w:-0}" -lt 400 || "${shot_h:-0}" -lt 300 ]]; then
+          echo "ERROR: macOS capture is only ${shot_w:-?}x${shot_h:-?} px; the Settings UI did not render at a usable size."
+          rm -f screenshots/macos/HogHunter_macOS.png
+          failures=$((failures + 1))
+        else
+          echo "  ✓ Saved screenshots/macos/HogHunter_macOS.png (${shot_w}x${shot_h})"
+        fi
       else
         echo "ERROR: macOS capture produced no image."
         failures=$((failures + 1))
