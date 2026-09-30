@@ -22,9 +22,83 @@ if [[ -n "$ios_app" && -d "$ios_app" ]]; then
   echo "Bundle ID: $bundle_id"
 
   python3 - "$ios_app" "$bundle_id" <<'PYIOS' || failures=$((failures + 1))
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
+
+BOOT_TIMEOUT_S = 180
+# A solid-colour frame compresses to ~0.1% of its raw size; a rendered screen
+# is an order of magnitude above this.
+MIN_COMPRESSED_RATIO = 0.003
+
+
+def boot_simulator(udid):
+    """Boot and WAIT for the simulator, never a blind sleep.  `bootstatus`
+    only blocks until boot completes with -b; without it, it prints the
+    current state and returns at once.
+    Returns None when it is booted, else the reason it is not."""
+    boot = subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True, text=True)
+    if boot.returncode != 0 and "current state: Booted" not in (boot.stderr or ""):
+        return f"boot failed: {(boot.stderr or boot.stdout or '').strip() or f'exit {boot.returncode}'}"
+    try:
+        status = subprocess.run(
+            ["xcrun", "simctl", "bootstatus", udid, "-b"], capture_output=True, text=True, timeout=BOOT_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        return f"not booted after {BOOT_TIMEOUT_S}s"
+    if status.returncode != 0:
+        return f"bootstatus failed: {(status.stderr or status.stdout or '').strip() or f'exit {status.returncode}'}"
+    return None
+
+
+def app_pid_from_launch(output):
+    """`simctl launch` prints `<bundle id>: <pid>`."""
+    match = re.search(r":\s*(\d+)\s*$", (output or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def launch_pid(udid):
+    """Re-run `simctl launch` and return the pid it reports, or None.
+
+    This proves PROCESS CONTINUITY only: the same pid means the app did not
+    exit and relaunch.  It does not prove the app is in front, and it cannot
+    see a system alert or another app over it (launch also activates the app,
+    which can itself change what is on screen).  Frame content is checked
+    separately by screenshot_problem()."""
+    result = subprocess.run(
+        ["xcrun", "simctl", "launch", udid, bundle_id, "-HogHunterSample"], capture_output=True, text=True
+    )
+    return app_pid_from_launch(result.stdout) if result.returncode == 0 else None
+
+
+def screenshot_problem(path):
+    """Sanity-check the captured PNG itself.  Returns None when it looks like
+    real UI, else why not.  Stdlib only: the PNG header must be valid and the
+    device-sized, and the compressed image data must not be nearly empty (a
+    blank, black or single-colour frame compresses to a tiny fraction of a
+    rendered screen).  This catches a blank or black frame, not a dialog drawn
+    over an otherwise normal screen; that still needs a person looking at the
+    uploaded artifact."""
+    import struct, zlib
+    try:
+        data = open(path, "rb").read()
+    except OSError as e:
+        return f"unreadable: {e}"
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return "not a PNG"
+    pos, width, height, idat = 8, 0, 0, 0
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        if kind == b"IHDR":
+            width, height = struct.unpack(">II", data[pos + 8:pos + 16])
+        elif kind == b"IDAT":
+            idat += length
+        pos += 12 + length
+    if width < 300 or height < 300:
+        return f"unexpected size {width}x{height}"
+    if idat / (width * height * 4) < MIN_COMPRESSED_RATIO:
+        return f"looks blank ({idat} compressed bytes for {width}x{height})"
+    return None
 
 # Format definitions: key -> (output_name, list_of_preferred_devices, fallback_devicetype_pattern)
 FORMATS = {
@@ -126,8 +200,11 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
 
     print(f"[{fmt_key}] Using '{chosen_device}' ({udid})...")
     try:
-        subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True)
-        time.sleep(8)
+        boot_problem = boot_simulator(udid)
+        if boot_problem:
+            print(f"[{fmt_key}] ERROR: simulator {boot_problem}")
+            failures += 1
+            continue
         inst = subprocess.run(["xcrun", "simctl", "install", udid, app_path], capture_output=True, text=True)
         if inst.returncode != 0:
             print(f"[{fmt_key}] ERROR: install failed: {inst.stderr.strip()}")
@@ -140,9 +217,32 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
             print(f"[{fmt_key}] ERROR: launch failed: {launch.stderr.strip()}")
             failures += 1
             continue
+        launched_pid = app_pid_from_launch(launch.stdout)
         time.sleep(5)
+        # The delay is only a settle time.  The pid check below proves the app
+        # was not restarted (a crash on launch would relaunch it with a new
+        # pid); it does NOT prove the app is in front.  That is what the
+        # screenshot_problem() check on the captured file is for, within its
+        # stated limits.
+        if launched_pid is None or launch_pid(udid) != launched_pid:
+            print(f"[{fmt_key}] ERROR: {bundle_id} exited or restarted after launch (pid changed).")
+            failures += 1
+            continue
+        time.sleep(1)
         res = subprocess.run(["xcrun", "simctl", "io", udid, "screenshot", out_file], capture_output=True, text=True)
+        if launch_pid(udid) != launched_pid:
+            print(f"[{fmt_key}] ERROR: {bundle_id} exited or restarted during the capture (pid changed); discarding {out_file}.")
+            if os.path.isfile(out_file):
+                os.remove(out_file)
+            failures += 1
+            continue
         if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 0:
+            problem = screenshot_problem(out_file)
+            if problem:
+                print(f"[{fmt_key}] ERROR: captured frame rejected: {problem}; discarding {out_file}.")
+                os.remove(out_file)
+                failures += 1
+                continue
             print(f"  ✓ Saved {out_file}")
         else:
             print(f"[{fmt_key}] ERROR: screenshot failed: {res.stderr.strip() or 'no file written'}")
