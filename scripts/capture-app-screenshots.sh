@@ -169,6 +169,10 @@ if [[ -n "$mac_app" && -d "$mac_app" ]]; then
   echo "Found macOS app: $mac_app"
   mac_bin="$mac_app/Contents/MacOS/HogHunter"
   if [[ -x "$mac_bin" ]]; then
+    if ! python3 -c "import Quartz" 2>/dev/null; then
+      echo "Installing pyobjc-framework-Quartz for macOS window detection..."
+      python3 -m pip install --quiet --break-system-packages pyobjc-framework-Quartz 2>/dev/null || python3 -m pip install --quiet pyobjc-framework-Quartz 2>/dev/null || true
+    fi
     echo "Capturing macOS screenshot..."
     # -HogHunterScreenshot makes the accessory app activate, open its Settings
     # window, and order it front (see HogHunterAppDelegate; it retries for
