@@ -72,8 +72,11 @@ try:
     rproc = subprocess.run(["xcrun", "simctl", "list", "-j", "runtimes"], capture_output=True, text=True)
     rdata = json.loads(rproc.stdout).get("runtimes", [])
     for r in rdata:
-        if r.get("platform") == "iOS" and r.get("isAvailable", True):
-            ios_runtimes.append((version_key(r.get("version", "")), r.get("identifier"), r.get("version", "")))
+        ident = r.get("identifier", "")
+        name = r.get("name", "")
+        is_ios = ident.startswith("com.apple.CoreSimulator.SimRuntime.iOS") or name.startswith("iOS")
+        if is_ios and r.get("isAvailable", True):
+            ios_runtimes.append((version_key(r.get("version", "")), ident, r.get("version", "")))
 except Exception:
     pass
 ios_runtimes.sort(key=lambda t: t[0])
