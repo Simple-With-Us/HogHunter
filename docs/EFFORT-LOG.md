@@ -4,7 +4,7 @@ Mirror of the live fleet board rows for this app.  Reserve a row before starting
 
 | Date (CT) | Seat | Branch | State | Work |
 |---|---|---|---|---|
-| Wed, Sep 30, 2026 | AG | ag/align-versioning-and-ci-screenshots | In Progress | Align macOS and iOS versions to 1.0.4 with UTC timestamp build numbers, add standard CI screenshot capture across all device formats, and decommission MiniMax Remote on ASC/TestFlight. |
+| Wed, Sep 30, 2026 | AG | ag/align-versioning-and-ci-screenshots | Landed (#40) | Align macOS and iOS versions to 1.0.4 with UTC timestamp build numbers, add standard CI screenshot capture across all device formats (5 iOS + 1 macOS), and decommission MiniMax Remote on ASC/TestFlight. |
 | Wed, Sep 30, 2026 | AG | ag/testflight-direct-secrets | Landed (#38) | Enable direct GitHub Actions secrets for iOS TestFlight release workflow with Infisical fallback, add test coverage, configure HogHunter repo secrets/variables, submit pending iOS build 1.0.3 to Apple Beta Review. |
 | Wed, Sep 30, 2026 | AG | ag/storage-header-icon-fix | Landed (#37) | Fix Storage view header text squishing / vertical wrapping bug, add prominent Storage button in HogHunterPanel, ensure reliable window activation and fronting with dynamic Dock icon, replace macOS/iOS app icon with HogHunter-RedIcon.icns, remove CleanMyMac terminology. Board a869a997. Issue #36. |
 | Mon, Sep 28, 2026 | AG | ag/disk-cleaner-tiers-and-ios-widgets | Landed (#33) | Two-tier disk cleaner (Clean vs Extreme), APFS local snapshots + Trash put-back safety, iOS remote clean trigger, multi-size WidgetKit companion widgets for macOS stats, App Store compatibility review. Board a52b7c69. |
