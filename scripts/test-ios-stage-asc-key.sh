@@ -140,4 +140,49 @@ if grep -Fq 'SYNTHETIC-P12-' "$tmp_dir/multiline-env" "$tmp_dir/multiline-stdout
 fi
 grep -q 'must be single-line' "$tmp_dir/multiline-stderr"
 
+# Test direct repository secrets loading path (without Infisical).
+: > "$tmp_dir/repo-env"
+rm -f "$tmp_dir/repo-imported"
+env -u ASC_KEY_P8 PATH="/usr/bin:/bin:$tmp_dir/bin" \
+  GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/repo-env" \
+  SECRET_ASC_KEY_ID=synthetic-repo-key-id \
+  SECRET_ASC_ISSUER_ID=synthetic-repo-issuer-id \
+  SECRET_IOS_DIST_P12_BASE64=synthetic-repo-p12 \
+  SECRET_IOS_DIST_P12_PASSWORD=synthetic-repo-pass \
+  SECRET_ASC_KEY_P8="$(cat "$tmp_dir/fixture")" \
+  ASC_TEST_IMPORT_MARKER="$tmp_dir/repo-imported" \
+  bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/repo-stdout" 2> "$tmp_dir/repo-stderr"
+if grep -Fq -f "$tmp_dir/fixture" "$tmp_dir/repo-env" "$tmp_dir/repo-stdout" "$tmp_dir/repo-stderr"; then
+  echo 'workflow leaked direct key material' >&2
+  exit 1
+fi
+[[ "$(grep -c '^ASC_KEY_PATH=' "$tmp_dir/repo-env")" == 1 ]]
+[[ "$(grep -c '^ASC_KEY_ID=synthetic-repo-key-id' "$tmp_dir/repo-env")" == 1 ]]
+[[ "$(grep -c '^ASC_ISSUER_ID=synthetic-repo-issuer-id' "$tmp_dir/repo-env")" == 1 ]]
+repo_workflow_key="$(sed -n 's/^ASC_KEY_PATH=//p' "$tmp_dir/repo-env")"
+cmp "$tmp_dir/fixture" "$repo_workflow_key"
+[[ "$(file_mode "$repo_workflow_key")" == 600 ]]
+[[ ! -s "$tmp_dir/repo-stderr" ]]
+[[ -f "$tmp_dir/repo-imported" ]]
+if grep -q '^IOS_DIST_P12_' "$tmp_dir/repo-env"; then
+  echo 'direct certificate credentials escaped the import step' >&2
+  exit 1
+fi
+
+# Multiline in direct secrets must also be rejected.
+: > "$tmp_dir/repo-bad-env"
+if env -u ASC_KEY_P8 PATH="/usr/bin:/bin:$tmp_dir/bin" \
+  GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/repo-bad-env" \
+  SECRET_ASC_KEY_ID=synthetic-repo-key-id \
+  SECRET_ASC_ISSUER_ID=synthetic-repo-issuer-id \
+  SECRET_IOS_DIST_P12_BASE64=$'SYNTHETIC-LINE1\nSYNTHETIC-LINE2' \
+  SECRET_IOS_DIST_P12_PASSWORD=synthetic-repo-pass \
+  SECRET_ASC_KEY_P8="$(cat "$tmp_dir/fixture")" \
+  bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/repo-bad-stdout" 2> "$tmp_dir/repo-bad-stderr"; then
+  echo 'multiline direct credential was accepted' >&2
+  exit 1
+fi
+grep -q 'must be single-line' "$tmp_dir/repo-bad-stderr"
+
 echo 'synthetic ASC key-file and workflow handoff passed'
+
