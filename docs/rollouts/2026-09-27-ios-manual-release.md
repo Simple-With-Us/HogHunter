@@ -58,8 +58,8 @@ repository variable and run **Hog Hunter iOS TestFlight (manual)** from `main`.
 Use stable Xcode 26 or later on the hosted runner.  The workflow also rejects a
 beta macOS host.  A push, PR, or schedule cannot trigger this release job.
 
-1. Choose an unused positive numeric build number, up to nine digits.  Leaving
-   it blank uses the workflow run number; check ASC for collisions first.
+1. Choose an unused positive numeric build number, up to 18 digits.  Leaving
+   it blank uses the current UTC timestamp (`YYYYMMDDHHMM`), matching fleet standard build numbers.
 2. Leave **upload** unchecked for the first archive/export validation run.
 3. Inspect the run's non-secret identity summary and validation result.  A
    successful run validates the signed archive and exported IPA for the iPhone

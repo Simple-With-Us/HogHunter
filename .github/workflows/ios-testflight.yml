@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       build_number:
-        description: 'Unique numeric build number (blank uses this workflow run number)'
+        description: 'Unique numeric build number (blank uses UTC timestamp YYYYMMDDHHMM)'
         required: false
         type: string
       upload:

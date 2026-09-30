@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.4 — Wed, Sep 30, 2026
+
+- Fleet-wide version alignment: aligned macOS and iOS companion marketing versions to `1.0.4` with UTC timestamp build numbers (`YYYYMMDDHHMM`), conforming to fleet-wide release numbering standards across all platforms and retiring legacy `1.4.0 (6)`.
+- CI visual verification: added multi-format screenshot capture (iPhone 6.9"/6.7", 6.3"/6.1", 5.5"/4.7", iPad 13", iPad 11", and macOS window) as a blocking gate and CI artifact in GitHub Actions.
+- MiniMax Remote decommissioning: expired all builds and revoked public TestFlight links in App Store Connect.
+
 ## 1.4.0 — Sat, Sep 26, 2026
 
 iPhone:
