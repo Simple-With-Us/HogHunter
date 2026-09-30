@@ -19,7 +19,7 @@ jobs:
 
       - name: Check manual release scripts without signing credentials
         run: |
-          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh
+          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh
           bash scripts/test-ios-stage-asc-key.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
 
@@ -30,8 +30,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install xcodegen
-        run: brew install xcodegen
+      - name: Install dependencies
+        run: |
+          brew install xcodegen
+          python3 -m pip install --break-system-packages pyobjc-framework-Quartz || python3 -m pip install pyobjc-framework-Quartz
 
       - name: Generate project
         run: xcodegen generate
@@ -51,3 +53,16 @@ jobs:
         run: |
           xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
+
+      - name: Capture app screenshots
+        if: always()
+        run: bash scripts/capture-app-screenshots.sh
+
+      - name: Upload screenshots artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-screenshots
+          path: screenshots/
+          if-no-files-found: error
+          retention-days: 14

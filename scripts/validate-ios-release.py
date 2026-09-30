@@ -9,7 +9,7 @@ from pathlib import Path
 
 BUNDLE_ID = "com.simplewithus.hoghunter.ios"
 TEAM_ID = "CC8UTF7ATG"
-MARKETING_VERSION = "1.0.1"
+MARKETING_VERSION = "1.0.4"
 
 
 def validate(info, profile, entitlements, build_number, distribution=False):

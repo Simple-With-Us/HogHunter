@@ -26,7 +26,7 @@ def fixtures():
     }
     return [
         {"CFBundleIdentifier": validator.BUNDLE_ID, "CFBundleVersion": "42",
-         "CFBundleShortVersionString": "1.0.1", "CFBundleSupportedPlatforms": ["iPhoneOS"],
+         "CFBundleShortVersionString": "1.0.4", "CFBundleSupportedPlatforms": ["iPhoneOS"],
          "CFBundlePackageType": "APPL"},
         {"TeamIdentifier": [validator.TEAM_ID], "Platform": ["iOS"],
          "ExpirationDate": datetime.datetime.now() + datetime.timedelta(days=30),

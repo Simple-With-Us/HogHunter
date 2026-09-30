@@ -25,13 +25,15 @@ final class AppActivationManager {
             object: window,
             queue: .main
         ) { [weak self, weak window] _ in
-            guard let self else { return }
-            if let window {
-                self.activeWindowTokens.remove(ObjectIdentifier(window))
-            }
-            // Delay slightly so window.isVisible is updated by AppKit before rechecking
-            DispatchQueue.main.async {
-                self.updatePolicy()
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let window {
+                    self.activeWindowTokens.remove(ObjectIdentifier(window))
+                }
+                // Delay slightly so window.isVisible is updated by AppKit before rechecking
+                DispatchQueue.main.async {
+                    self.updatePolicy()
+                }
             }
         }
     }

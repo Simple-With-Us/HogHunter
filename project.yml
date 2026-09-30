@@ -19,8 +19,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
-    MARKETING_VERSION: "1.4.0"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "1.0.4"
+    CURRENT_PROJECT_VERSION: "202609300325"
     CODE_SIGN_STYLE: Automatic
     GENERATE_INFOPLIST_FILE: YES
 
@@ -83,8 +83,8 @@ targets:
         PRODUCT_NAME: HogHunter
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0.1"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.0.4"
+        CURRENT_PROJECT_VERSION: "202609300325"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -108,8 +108,8 @@ targets:
         PRODUCT_NAME: HogHunterWidgets
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0.1"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.0.4"
+        CURRENT_PROJECT_VERSION: "202609300325"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_FILE: ios/Widgets/Info.plist
         SWIFT_EMIT_LOC_STRINGS: YES

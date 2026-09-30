@@ -13,7 +13,7 @@ umask 077
 : "${ASC_KEY_PATH:?ASC_KEY_PATH required}"
 : "${HH_BUILD_NUMBER:?HH_BUILD_NUMBER required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP required}"
-[[ "$HH_BUILD_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo 'error: invalid build number' >&2; exit 1; }
+[[ "$HH_BUILD_NUMBER" =~ ^[1-9][0-9]{0,17}$ ]] || { echo 'error: invalid build number' >&2; exit 1; }
 [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true || "${HH_TESTFLIGHT_UPLOAD:-false}" == false ]] || {
   echo 'error: upload must be true or false' >&2
   exit 1
@@ -91,7 +91,7 @@ printf '%s\n' "$result"
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
     printf '## Hog Hunter iOS\n\n'
-    printf 'App Store Connect app: 6816633156  \nBundle: com.simplewithus.hoghunter.ios  \nVersion: 1.0.1  \nBuild: %s\n\n' "$HH_BUILD_NUMBER"
+    printf 'App Store Connect app: 6816633156  \nBundle: com.simplewithus.hoghunter.ios  \nVersion: 1.0.4  \nBuild: %s\n\n' "$HH_BUILD_NUMBER"
     printf '%s\n' "$result"
   } >> "$GITHUB_STEP_SUMMARY"
 fi

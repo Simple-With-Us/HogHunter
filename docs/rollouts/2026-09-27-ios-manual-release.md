@@ -7,7 +7,7 @@ No signing or upload was performed while preparing it.
 ## Current state and remaining blockers
 
 App Store Connect app `6816633156` uses `com.simplewithus.hoghunter.ios` and
-version `1.0.1`.  External group `79295c7f-f69f-4614-9ed3-9a16691380ff` exists
+version `1.0.4`.  External group `79295c7f-f69f-4614-9ed3-9a16691380ff` exists
 with public link `https://testflight.apple.com/join/yrHXfqSR`, but had zero builds
 when verified.  The [readiness record](2026-09-27-ios-testflight-readiness.md)
 contains the saved Apple identity and reviewer setup.
@@ -58,8 +58,8 @@ repository variable and run **Hog Hunter iOS TestFlight (manual)** from `main`.
 Use stable Xcode 26 or later on the hosted runner.  The workflow also rejects a
 beta macOS host.  A push, PR, or schedule cannot trigger this release job.
 
-1. Choose an unused positive numeric build number, up to nine digits.  Leaving
-   it blank uses the workflow run number; check ASC for collisions first.
+1. Choose an unused positive numeric build number, up to 18 digits.  Leaving
+   it blank uses the current UTC timestamp (`YYYYMMDDHHMM`), matching fleet standard build numbers.
 2. Leave **upload** unchecked for the first archive/export validation run.
 3. Inspect the run's non-secret identity summary and validation result.  A
    successful run validates the signed archive and exported IPA for the iPhone
