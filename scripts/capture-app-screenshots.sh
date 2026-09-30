@@ -22,9 +22,44 @@ if [[ -n "$ios_app" && -d "$ios_app" ]]; then
   echo "Bundle ID: $bundle_id"
 
   python3 - "$ios_app" "$bundle_id" <<'PYIOS' || failures=$((failures + 1))
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
+
+BOOT_TIMEOUT_S = 180
+
+
+def boot_simulator(udid):
+    """Boot and WAIT for the simulator (bootstatus), never a blind sleep.
+    Returns None when it is booted, else the reason it is not."""
+    boot = subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True, text=True)
+    if boot.returncode != 0 and "current state: Booted" not in (boot.stderr or ""):
+        return f"boot failed: {(boot.stderr or boot.stdout or '').strip() or f'exit {boot.returncode}'}"
+    try:
+        status = subprocess.run(
+            ["xcrun", "simctl", "bootstatus", udid], capture_output=True, text=True, timeout=BOOT_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        return f"not booted after {BOOT_TIMEOUT_S}s"
+    if status.returncode != 0:
+        return f"bootstatus failed: {(status.stderr or status.stdout or '').strip() or f'exit {status.returncode}'}"
+    return None
+
+
+def app_pid_from_launch(output):
+    """`simctl launch` prints `<bundle id>: <pid>`."""
+    match = re.search(r":\s*(\d+)\s*$", (output or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def bring_to_foreground(udid):
+    """Launching a running app activates it and reports the SAME pid; a new
+    pid means it exited and was relaunched.  Returns the pid, or None when the
+    app could not be brought up."""
+    result = subprocess.run(
+        ["xcrun", "simctl", "launch", udid, bundle_id, "-HogHunterSample"], capture_output=True, text=True
+    )
+    return app_pid_from_launch(result.stdout) if result.returncode == 0 else None
 
 # Format definitions: key -> (output_name, list_of_preferred_devices, fallback_devicetype_pattern)
 FORMATS = {
@@ -126,8 +161,11 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
 
     print(f"[{fmt_key}] Using '{chosen_device}' ({udid})...")
     try:
-        subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True)
-        time.sleep(8)
+        boot_problem = boot_simulator(udid)
+        if boot_problem:
+            print(f"[{fmt_key}] ERROR: simulator {boot_problem}")
+            failures += 1
+            continue
         inst = subprocess.run(["xcrun", "simctl", "install", udid, app_path], capture_output=True, text=True)
         if inst.returncode != 0:
             print(f"[{fmt_key}] ERROR: install failed: {inst.stderr.strip()}")
@@ -140,8 +178,23 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
             print(f"[{fmt_key}] ERROR: launch failed: {launch.stderr.strip()}")
             failures += 1
             continue
+        launched_pid = app_pid_from_launch(launch.stdout)
         time.sleep(5)
+        # The delay is only a settle time.  Before accepting a capture the app
+        # must still be the same process and in front: a crash on launch or a
+        # system alert over it would otherwise ship as the "screenshot".
+        if launched_pid is None or bring_to_foreground(udid) != launched_pid:
+            print(f"[{fmt_key}] ERROR: {bundle_id} is not running in the foreground (exited or restarted after launch).")
+            failures += 1
+            continue
+        time.sleep(1)
         res = subprocess.run(["xcrun", "simctl", "io", udid, "screenshot", out_file], capture_output=True, text=True)
+        if bring_to_foreground(udid) != launched_pid:
+            print(f"[{fmt_key}] ERROR: {bundle_id} left the foreground during the capture; discarding {out_file}.")
+            if os.path.isfile(out_file):
+                os.remove(out_file)
+            failures += 1
+            continue
         if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 0:
             print(f"  ✓ Saved {out_file}")
         else:
