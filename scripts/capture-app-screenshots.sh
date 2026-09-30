@@ -180,7 +180,8 @@ if [[ -n "$mac_app" && -d "$mac_app" ]]; then
     # -HogHunterScreenshot makes the accessory app activate, open its Settings
     # window, and order it front (see HogHunterAppDelegate; it retries for
     # ~15s because the Settings scene can take a beat on a headless runner).
-    "$mac_bin" -HogHunterScreenshot &
+    app_log="$(mktemp -t hoghunter-screenshot-app)"
+    "$mac_bin" -HogHunterScreenshot >"$app_log" 2>&1 &
     app_pid=$!
     # Require a REAL on-screen HogHunter window before capturing. A
     # full-desktop screenshot of a runner with no app window was the original
@@ -213,6 +214,21 @@ PYWIN
 
     if [[ -z "$win_id" ]]; then
       echo "ERROR: no on-screen HogHunter window appeared within 60s; refusing to capture the desktop."
+      echo "--- HogHunter app output ($app_log):"
+      cat "$app_log" 2>/dev/null || echo "(no app output captured)"
+      echo "--- On-screen window snapshot (owner / layer / size / name):"
+      python3 - <<'PYDUMP'
+try:
+    import Quartz
+    windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+    for w in windows:
+        b = w.get("kCGWindowBounds", {})
+        print("  owner=%s layer=%s %sx%s name=%s" % (
+            w.get("kCGWindowOwnerName", "?"), w.get("kCGWindowLayer", "?"),
+            b.get("Width", 0), b.get("Height", 0), w.get("kCGWindowName", "")))
+except Exception as e:
+    print("  (window dump unavailable: %s)" % e)
+PYDUMP
       failures=$((failures + 1))
     else
       echo "  Capturing HogHunter window $win_id"
