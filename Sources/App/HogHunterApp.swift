@@ -27,7 +27,11 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             )
             win.title = "Hog Hunter"
             let store = HogStore()
-            win.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(store))
+            let rootView = SettingsView()
+                .environmentObject(store)
+                .frame(width: 560, height: 480)
+            win.contentViewController = NSHostingController(rootView: rootView)
+            win.setContentSize(NSSize(width: 560, height: 480))
             win.center()
             // Register with the activation manager via its existing API (the
             // windowOpened() member this called was never defined) so the app

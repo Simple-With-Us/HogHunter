@@ -198,9 +198,10 @@ try:
     import Quartz
     windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
     for w in windows:
-        if w.get("kCGWindowOwnerName") == "HogHunter" and w.get("kCGWindowLayer", -1) == 0:
+        owner = w.get("kCGWindowOwnerName", "")
+        if owner in ("Hog Hunter", "HogHunter") and w.get("kCGWindowLayer", -1) == 0:
             b = w.get("kCGWindowBounds", {})
-            if b.get("Width", 0) > 100 and b.get("Height", 0) > 100:
+            if b.get("Width", 0) > 100 and b.get("Height", 0) > 50:
                 print(w.get("kCGWindowNumber", ""))
                 break
 except Exception:
@@ -232,7 +233,7 @@ PYDUMP
       failures=$((failures + 1))
     else
       echo "  Capturing HogHunter window $win_id"
-      osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
+      osascript -e 'tell application "Hog Hunter" to activate' 2>/dev/null || osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
       sleep 1
       screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
       if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then
