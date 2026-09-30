@@ -23,12 +23,14 @@ struct NetworkView: View {
         .padding(16)
         .frame(width: 520, height: 540)
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(WindowActivator())
         .onAppear {
+            WindowActivator.front()
             if case .idle = store.state { store.refresh() }
             startRefreshTimer()
         }
         .onDisappear { refreshTask?.cancel() }
-        .navigationTitle("Network")
+        .navigationTitle("Network — Hog Hunter")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hog Hunter Network — apps with open connections")
     }

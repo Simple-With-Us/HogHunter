@@ -78,6 +78,20 @@ struct HogHunterPanel: View {
                     .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
             }
             Spacer()
+            Button {
+                HogActions.openStorageWindow(openWindow: openWindow)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "internaldrive")
+                    Text("Storage")
+                }
+                .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Open Storage and Disk Cleaner")
+            .accessibilityLabel("Open Storage and Disk Cleaner")
+
             gearMenu
         }
         .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
@@ -90,8 +104,8 @@ struct HogHunterPanel: View {
             SettingsLink {
                 Text("Settings…")
             }
-            Button("Storage…") { openWindow(id: "hoghunter.storage") }
-            Button("Network…") { openWindow(id: "hoghunter.network") }
+            Button("Storage…") { HogActions.openStorageWindow(openWindow: openWindow) }
+            Button("Network…") { HogActions.openNetworkWindow(openWindow: openWindow) }
             Divider()
             Button("Activity Monitor") { HogActions.openActivityMonitor() }
             Divider()

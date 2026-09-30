@@ -39,8 +39,8 @@ struct SettingsView: View {
                 .tag("about")
         }
         .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme ?? .light)
-        .background(SettingsWindowActivator())
-        .onAppear { SettingsWindowActivator.front() }
+        .background(WindowActivator())
+        .onAppear { WindowActivator.front() }
     }
 
     static var versionString: String {
@@ -221,9 +221,9 @@ private struct AboutSettingsTab: View {
 
                 Button("Open Activity Monitor") { HogActions.openActivityMonitor() }
                     .buttonStyle(.link)
-                Button("Storage Window…") { openWindow(id: "hoghunter.storage") }
+                Button("Storage Window…") { HogActions.openStorageWindow(openWindow: openWindow) }
                     .buttonStyle(.link)
-                Button("Network Window…") { openWindow(id: "hoghunter.network") }
+                Button("Network Window…") { HogActions.openNetworkWindow(openWindow: openWindow) }
                     .buttonStyle(.link)
             }
         }
@@ -287,29 +287,3 @@ private struct AlertsSection: View {
 }
 
 // MARK: - Window activation
-
-/// A MenuBarExtra app has no Dock icon, so the Settings window can open behind
-/// whatever the user was looking at.  This brings it forward whenever it is
-/// attached to a window.
-private struct SettingsWindowActivator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { ActivatingView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    static func front() {
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-        }
-    }
-
-    final class ActivatingView: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard let window, window.isVisible else { return }
-            DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
-                window.makeKeyAndOrderFront(nil)
-            }
-        }
-    }
-}

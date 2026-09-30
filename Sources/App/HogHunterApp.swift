@@ -30,7 +30,7 @@ struct HogHunterApp: App {
         Window("Storage", id: "hoghunter.storage") {
             StorageView { store.runningBundleIdsSnapshot() }
         }
-        .defaultSize(width: 540, height: 660)
+        .defaultSize(width: 560, height: 680)
 
         Window("Network", id: "hoghunter.network") {
             NetworkView { pid in store.lookup(pid: pid) }

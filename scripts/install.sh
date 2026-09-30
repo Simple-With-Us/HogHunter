@@ -125,6 +125,7 @@ fi
 echo "Installing to $INSTALLED_PATH."
 mkdir -p "$DEST_DIR"
 ditto "$APP_PATH" "$INSTALLED_PATH"
+xattr -cr "$INSTALLED_PATH" || true
 
 if [[ "$NO_LAUNCH" -eq 0 ]]; then
   echo "Launching Hog Hunter."
