@@ -1,7 +1,7 @@
 #!/bin/bash
 # Hog Hunter Disk Cleaner CLI Companion
 #
-# CleanMyMac-grade hard disk clutter cleaner for macOS.
+# Hard disk clutter cleaner for macOS.
 #
 # Usage:
 #   scripts/clean.sh [--scan] [--dry-run] [--clean] [--tier standard|extreme] [--confirm-extreme] [--category CAT] [--yes] [--json]

@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// CleanMyMac-grade disk cleaner view inside Hog Hunter's Storage window.
+/// Disk cleaner view inside Hog Hunter's Storage window.
 /// Offers category-by-category breakdown, selective item inspection, and safe one-click reclamation.
 struct DiskCleanerView: View {
     @StateObject private var store = DiskCleanerStore()
@@ -163,8 +163,20 @@ struct DiskCleanerView: View {
 
         case .cleaning(let progress, let currentItem):
             VStack(spacing: 8) {
-                ProgressView(value: progress, total: 1.0)
-                    .progressViewStyle(.linear)
+                if currentItem.contains("snapshot") {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                        Text("Creating APFS safety snapshot (this can take 15–30s)…")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                } else {
+                    ProgressView(value: progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                }
                 HStack {
                     Text("Cleaning: \(currentItem)")
                         .font(.system(size: 11))
@@ -172,9 +184,15 @@ struct DiskCleanerView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    Text(String(format: "%.0f%%", progress * 100))
-                        .font(.system(size: 11, weight: .semibold))
-                        .monospacedDigit()
+                    if currentItem.contains("snapshot") {
+                        Text("Working…")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(String(format: "%.0f%%", progress * 100))
+                            .font(.system(size: 11, weight: .semibold))
+                            .monospacedDigit()
+                    }
                 }
             }
             .padding(12)

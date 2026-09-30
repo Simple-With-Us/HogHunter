@@ -4,7 +4,8 @@ Mirror of the live fleet board rows for this app.  Reserve a row before starting
 
 | Date (CT) | Seat | Branch | State | Work |
 |---|---|---|---|---|
-| Mon, Sep 28, 2026 | AG | ag/disk-cleaner-tiers-and-ios-widgets | In Progress (#32) | Two-tier disk cleaner (Clean vs Extreme), APFS local snapshots + Trash put-back safety, iOS remote clean trigger, multi-size WidgetKit companion widgets for macOS stats, App Store compatibility review. Board a52b7c69. |
+| Wed, Sep 30, 2026 | AG | ag/storage-header-icon-fix | In Progress (#36) | Fix Storage view header text squishing / vertical wrapping bug, add prominent Storage button in HogHunterPanel, ensure reliable window activation and fronting, replace macOS/iOS app icon with HogHunter-RedIcon.icns, remove CleanMyMac terminology. Board a869a997. |
+| Mon, Sep 28, 2026 | AG | ag/disk-cleaner-tiers-and-ios-widgets | Landed (#33) | Two-tier disk cleaner (Clean vs Extreme), APFS local snapshots + Trash put-back safety, iOS remote clean trigger, multi-size WidgetKit companion widgets for macOS stats, App Store compatibility review. Board a52b7c69. |
 | Sun, Sep 27, 2026 | AG | ag/disk-cleaner | Landed (#30) | CleanMyMac-style hard disk cleaner: core engine (DiskCleaner.swift), Storage GUI mode selector (DiskCleanerView.swift), orphaned app leftovers detector, large/old files scanner, scripts/clean.sh, and 125 passing unit tests. |
 | Sun, Sep 27, 2026 | AG | ag/settings-tabview-redesign | Landed (#28) | Reorganized SettingsView into native macOS TabView (General, Alerts, iPhone, About) with compact 440pt panes to prevent off-screen clipping.  Updated macOS & iOS app icons from HogHunter-Icon.icns. |
 | Sun, Sep 27, 2026 | AG | ag/install-entitlements-fix | Landed (#27) | Install HogHunter 1.4.0 with Developer ID & new logo.  Fixed scripts/install.sh with CODE_SIGNING_ALLOWED=NO during build. |

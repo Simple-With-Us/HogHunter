@@ -1,6 +1,6 @@
 import Foundation
 
-/// Categories of reclaimable disk clutter supported by Hog Hunter's CleanMyMac-grade cleaner.
+/// Categories of reclaimable disk clutter supported by Hog Hunter's disk cleaner.
 enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     /// App and user caches under `~/Library/Caches/`.
     case userCaches
@@ -738,8 +738,8 @@ final class DiskCleaner: @unchecked Sendable {
                 count += 1
                 if count > 20_000 { break } // Protect against runaway directories
 
-                // Never scan into git repos
-                if fileURL.lastPathComponent == ".git" {
+                // Never scan into code repositories or package/build trees
+                if [".git", "node_modules", ".build", "Pods", ".venv", "venv", ".next", ".cache", "DerivedData"].contains(fileURL.lastPathComponent) {
                     enumerator.skipDescendants()
                     continue
                 }

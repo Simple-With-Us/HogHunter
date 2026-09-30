@@ -142,6 +142,40 @@ enum HogActions {
     static func openActivityMonitor() {
         NSWorkspace.shared.open(activityMonitorURL)
     }
+
+    @MainActor
+    static func openStorageWindow(openWindow: OpenWindowAction) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "hoghunter.storage")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            bringWindowToFront(titles: ["Storage", "Disk Cleaner", "App Storage"], id: "hoghunter.storage")
+        }
+    }
+
+    @MainActor
+    static func openNetworkWindow(openWindow: OpenWindowAction) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "hoghunter.network")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            bringWindowToFront(titles: ["Network"], id: "hoghunter.network")
+        }
+    }
+
+    @MainActor
+    static func bringWindowToFront(titles: [String], id: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        for window in NSApp.windows {
+            let matchesId = window.identifier?.rawValue.contains(id) == true
+            let matchesTitle = titles.contains(window.title)
+            if matchesId || matchesTitle {
+                if window.isMiniaturized {
+                    window.deminiaturize(nil)
+                }
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
+        }
+    }
 }
 
 /// Runs `/usr/bin/sample` against one pid and writes the report where the user

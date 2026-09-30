@@ -10,7 +10,7 @@ enum StorageTab: String, CaseIterable, Identifiable {
 
 /// Storage pane.  Shows top apps by disk usage with the bundle-vs-hidden
 /// split and, when a row is expanded, the per-category breakdown, plus
-/// a CleanMyMac-grade disk cleaner mode.
+/// a disk cleaner mode.
 ///
 /// The view holds its own `StorageStore` so the panel does not pollute the
 /// shared `HogStore`, and so opening it has no incidental effect on the CPU
@@ -33,6 +33,7 @@ struct StorageView: View {
 
             switch selectedTab {
             case .appStorage:
+                appStorageControls
                 statusRow
                 list
                 footer
@@ -43,12 +44,21 @@ struct StorageView: View {
         .padding(16)
         .frame(minWidth: 540, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(WindowActivator())
         .onAppear {
-            if case .idle = store.state { store.refresh() }
+            WindowActivator.front()
+            if selectedTab == .appStorage, case .idle = store.state {
+                store.refresh()
+            }
             startRefreshTimer()
         }
+        .onChange(of: selectedTab) { newTab in
+            if newTab == .appStorage, case .idle = store.state {
+                store.refresh()
+            }
+        }
         .onDisappear { refreshTask?.cancel() }
-        .navigationTitle(selectedTab == .diskCleaner ? "Disk Cleaner" : "Storage")
+        .navigationTitle("Storage — Hog Hunter")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hog Hunter Storage — top apps and disk cleaner")
     }
@@ -63,10 +73,12 @@ struct StorageView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(selectedTab == .diskCleaner ? "Disk Cleaner" : "Storage")
                     .font(.system(size: 17, weight: .semibold))
-                Text(selectedTab == .diskCleaner ? "CleanMyMac-grade clutter cleanup" : subtitle)
+                Text(selectedTab == .diskCleaner ? "Reclaim space from caches, leftovers, and clutter" : subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
+            .fixedSize(horizontal: true, vertical: false)
+
             Spacer()
 
             Picker("Mode", selection: $selectedTab) {
@@ -75,22 +87,33 @@ struct StorageView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 200)
+        }
+    }
 
-            if selectedTab == .appStorage {
-                Picker("Filter", selection: $filter) {
-                    Text("All").tag(StorageFilter.all)
-                    Text("Running").tag(StorageFilter.running)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 120)
+    // MARK: - App Storage Controls
 
+    private var appStorageControls: some View {
+        HStack(spacing: 10) {
+            Picker("Filter", selection: $filter) {
+                Text("All").tag(StorageFilter.all)
+                Text("Running").tag(StorageFilter.running)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 140)
+
+            Spacer()
+
+            HStack(spacing: 4) {
+                Text("Sort:")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
                 Picker("Sort", selection: $sortOrder) {
                     Text("Total").tag(StorageSort.total)
                     Text("Hidden").tag(StorageSort.hidden)
                     Text("Bundle").tag(StorageSort.bundle)
                 }
                 .pickerStyle(.menu)
-                .frame(width: 85)
+                .frame(width: 90)
             }
         }
     }
@@ -214,7 +237,9 @@ struct StorageView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                 if Task.isCancelled { return }
-                store.refresh()
+                if selectedTab == .appStorage {
+                    store.refresh()
+                }
             }
         }
     }

@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 /// Observable store managing state, scan execution, selection, and safe cleaning
-/// for Hog Hunter's CleanMyMac-grade disk cleaner.
+/// for Hog Hunter's disk cleaner.
 @MainActor
 final class DiskCleanerStore: ObservableObject {
     enum State: Equatable {
@@ -191,12 +191,20 @@ final class DiskCleanerStore: ObservableObject {
         let currentTier = selectedTier
         state = .cleaning(progress: 0, currentItem: "Preparing…")
 
+        var lastReportedTime = Date.distantPast
+        var lastReportedProgress: Double = -1.0
         let cleaner = self.cleaner
         queue.async { [weak self] in
             Task {
                 let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot) { progress, currentItem in
-                    Task { @MainActor in
-                        self?.state = .cleaning(progress: progress, currentItem: currentItem)
+                    let now = Date()
+                    let isSpecial = currentItem.contains("snapshot") || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
+                    if isSpecial {
+                        lastReportedProgress = progress
+                        lastReportedTime = now
+                        Task { @MainActor in
+                            self?.state = .cleaning(progress: progress, currentItem: currentItem)
+                        }
                     }
                 }
 
