@@ -29,9 +29,15 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             let store = HogStore()
             win.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(store))
             win.center()
-            AppActivationManager.shared.windowOpened()
+            // Register with the activation manager via its existing API (the
+            // windowOpened() member this called was never defined) so the app
+            // flips to .regular while the window is open, then re-evaluate
+            // AFTER ordering front: updatePolicy() only counts visible,
+            // titled, non-panel windows.
+            AppActivationManager.shared.registerWindow(win)
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            AppActivationManager.shared.updatePolicy()
             self.screenshotWindow = win
             self.screenshotLog("Settings NSWindow ordered front: isVisible=\(win.isVisible) frame=\(win.frame)")
         }
