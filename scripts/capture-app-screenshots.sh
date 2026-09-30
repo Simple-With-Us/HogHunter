@@ -175,7 +175,6 @@ if [[ -n "$mac_app" && -d "$mac_app" ]]; then
     # ~15s because the Settings scene can take a beat on a headless runner).
     "$mac_bin" -HogHunterScreenshot &
     app_pid=$!
-
     # Require a REAL on-screen HogHunter window before capturing. A
     # full-desktop screenshot of a runner with no app window was the original
     # defect - a desktop fallback would only mask regressions, so there is
@@ -186,19 +185,21 @@ if [[ -n "$mac_app" && -d "$mac_app" ]]; then
         echo "ERROR: HogHunter exited before showing a window."
         break
       fi
-      win_id="$(osascript -l JavaScript -e '
-        ObjC.import("Quartz");
-        const list = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)) || [];
-        let wid = "";
-        for (const w of list) {
-          const b = w["kCGWindowBounds"];
-          if (w["kCGWindowOwnerName"] === "HogHunter" && w["kCGWindowLayer"] === 0 && b && b.Width > 100 && b.Height > 100) {
-            wid = String(w["kCGWindowNumber"]);
-            break;
-          }
-        }
-        console.log(wid);
-      ' 2>/dev/null | tr -d '[:space:]')"
+      win_id="$(python3 - <<'PYWIN'
+try:
+    import Quartz
+    windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+    for w in windows:
+        if w.get("kCGWindowOwnerName") == "HogHunter" and w.get("kCGWindowLayer", -1) == 0:
+            b = w.get("kCGWindowBounds", {})
+            if b.get("Width", 0) > 100 and b.get("Height", 0) > 100:
+                print(w.get("kCGWindowNumber", ""))
+                break
+except Exception:
+    pass
+PYWIN
+      )"
+      win_id="$(echo "$win_id" | tr -d '[:space:]')"
       [[ -n "$win_id" ]] && break
       sleep 2
     done

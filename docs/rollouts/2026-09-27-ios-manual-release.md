@@ -7,7 +7,7 @@ No signing or upload was performed while preparing it.
 ## Current state and remaining blockers
 
 App Store Connect app `6816633156` uses `com.simplewithus.hoghunter.ios` and
-version `1.0.1`.  External group `79295c7f-f69f-4614-9ed3-9a16691380ff` exists
+version `1.0.4`.  External group `79295c7f-f69f-4614-9ed3-9a16691380ff` exists
 with public link `https://testflight.apple.com/join/yrHXfqSR`, but had zero builds
 when verified.  The [readiness record](2026-09-27-ios-testflight-readiness.md)
 contains the saved Apple identity and reviewer setup.

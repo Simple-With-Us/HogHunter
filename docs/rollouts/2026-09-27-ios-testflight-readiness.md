@@ -17,7 +17,7 @@ invite is not yet a usable installation path.
 - Active iOS App Store distribution profile: `6RSNAV8S3S`, UUID
   `fd48a6b9-889f-4989-af40-f6773c620097`, using the existing team
   distribution certificate.  Expires 2027-06-30.
-- Marketing version is prepared as `1.0.1` for the first upload.  The previous
+- Marketing version is prepared as `1.0.4` for the first upload.  The previous
   `1.0.0` was a simulator-only project version, not an App Store build.
 - `ios/Info.plist` declares Bonjour `_hoghunter._tcp`, local-network usage,
   and `ITSAppUsesNonExemptEncryption=false`.  The app only requests a Mac
@@ -35,7 +35,7 @@ invite is not yet a usable installation path.
    It uses Xcode automatic provisioning and validates the resulting profile.
    Do not use the previous ASC key or place a multiline private key in workflow
    `env` or `$GITHUB_ENV`.
-2. Archive and upload a `1.0.1` build with a factual What to Test entry.
+2. Archive and upload a `1.0.4` build with a factual What to Test entry.
    Validate the resulting ASC build ID, processing state, bundle ID, export
    compliance, and beta localization before submitting Apple beta review.
 3. Assign an eligible build to the existing external group, submit for beta
