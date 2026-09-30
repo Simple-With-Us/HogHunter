@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Capture app screenshots across standard device formats.
+# This lane is the visual-verification gate: it FAILS (exit 1) when any
+# expected artifact is missing, so CI can never pass with no screenshots.
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 mkdir -p screenshots/ios screenshots/macos
+failures=0
 
 # 1. iOS Companion Screenshots
 ios_app="$(find build-ios -name "HogHunter.app" -type d 2>/dev/null | head -n 1 || true)"
@@ -18,8 +21,8 @@ if [[ -n "$ios_app" && -d "$ios_app" ]]; then
   bundle_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$ios_app/Info.plist" 2>/dev/null || echo "com.simplewithus.hoghunter.ios")"
   echo "Bundle ID: $bundle_id"
 
-  python3 - "$ios_app" "$bundle_id" <<'PYIOS'
-import json, subprocess, sys, time
+  python3 - "$ios_app" "$bundle_id" <<'PYIOS' || failures=$((failures + 1))
+import json, os, subprocess, sys, time
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
 
@@ -32,12 +35,14 @@ FORMATS = {
     "ipad-11":        ("iPad_11_inch",        ["iPad Air 11-inch (M2)", "iPad Pro (11-inch) (4th generation)", "iPad (10th generation)", "iPad mini (6th generation)"], "iPad-Air-11-inch-M2")
 }
 
+failures = 0
+
 try:
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
     devices_data = json.loads(proc.stdout).get("devices", {})
 except Exception as e:
-    print(f"Warning: could not list simulators: {e}")
-    devices_data = {}
+    print(f"ERROR: could not list simulators: {e}")
+    sys.exit(1)
 
 # Build a lookup of available device name and deviceType -> udid
 available_devices = {}
@@ -52,16 +57,28 @@ for runtime, dlist in devices_data.items():
             if dtype and dtype not in available_devices:
                 available_devices[dtype] = udid
 
-# Discover available iOS runtimes for fallback creation
-latest_ios_runtime = None
+def version_key(v):
+    # "18.2" / "26.0.1" -> comparable tuple of ints
+    try:
+        return tuple(int(p) for p in str(v).split("."))
+    except ValueError:
+        return (-1,)
+
+# Discover available iOS runtimes for fallback creation, then pick the HIGHEST
+# version deterministically. The old code took the last runtime in an unsorted
+# JSON list, which silently pinned captures to an arbitrary older iOS.
+ios_runtimes = []
 try:
     rproc = subprocess.run(["xcrun", "simctl", "list", "-j", "runtimes"], capture_output=True, text=True)
     rdata = json.loads(rproc.stdout).get("runtimes", [])
     for r in rdata:
         if r.get("platform") == "iOS" and r.get("isAvailable", True):
-            latest_ios_runtime = r.get("identifier")
+            ios_runtimes.append((version_key(r.get("version", "")), r.get("identifier"), r.get("version", "")))
 except Exception:
     pass
+ios_runtimes.sort(key=lambda t: t[0])
+latest_ios_runtime = ios_runtimes[-1][1] if ios_runtimes else None
+print(f"Selected iOS runtime: {ios_runtimes[-1][2] if ios_runtimes else 'none'} ({latest_ios_runtime})")
 
 print(f"Available simulators detected: {len(available_devices)}")
 
@@ -69,6 +86,7 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
     udid = None
     chosen_device = None
     created_udid = None
+    out_file = f"screenshots/ios/{out_name}.png"
 
     for cand in candidates:
         if cand in available_devices:
@@ -93,37 +111,56 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
                 created_udid = c_proc.stdout.strip()
                 udid = created_udid
                 chosen_device = f"Created {fallback_type}"
-        except Exception:
-            pass
+            else:
+                print(f"[{fmt_key}] ERROR: could not create simulator: {c_proc.stderr.strip()}")
+        except Exception as e:
+            print(f"[{fmt_key}] ERROR: could not create simulator: {e}")
 
     if not udid:
-        print(f"[{fmt_key}] No simulator available, skipping.")
+        print(f"[{fmt_key}] ERROR: no simulator available - {out_file} will be missing.")
+        failures += 1
         continue
 
     print(f"[{fmt_key}] Using '{chosen_device}' ({udid})...")
-    out_file = f"screenshots/ios/{out_name}.png"
     try:
         subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True)
         time.sleep(8)
-        subprocess.run(["xcrun", "simctl", "install", udid, app_path], capture_output=True)
-        subprocess.run(["xcrun", "simctl", "launch", udid, bundle_id], capture_output=True)
+        inst = subprocess.run(["xcrun", "simctl", "install", udid, app_path], capture_output=True, text=True)
+        if inst.returncode != 0:
+            print(f"[{fmt_key}] ERROR: install failed: {inst.stderr.strip()}")
+            failures += 1
+            continue
+        # Launch with the sample-state flag so CompanionModel.start() shows the
+        # live dashboard, not the onboarding screen.
+        launch = subprocess.run(["xcrun", "simctl", "launch", udid, bundle_id, "-HogHunterSample"], capture_output=True, text=True)
+        if launch.returncode != 0:
+            print(f"[{fmt_key}] ERROR: launch failed: {launch.stderr.strip()}")
+            failures += 1
+            continue
         time.sleep(5)
         res = subprocess.run(["xcrun", "simctl", "io", udid, "screenshot", out_file], capture_output=True, text=True)
-        if res.returncode == 0:
+        if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 0:
             print(f"  ✓ Saved {out_file}")
         else:
-            print(f"  ✗ Screenshot error: {res.stderr.strip()}")
+            print(f"[{fmt_key}] ERROR: screenshot failed: {res.stderr.strip() or 'no file written'}")
+            failures += 1
     except Exception as e:
-        print(f"  ✗ Exception capturing {fmt_key}: {e}")
+        print(f"[{fmt_key}] ERROR: exception capturing: {e}")
+        failures += 1
     finally:
         subprocess.run(["xcrun", "simctl", "shutdown", udid], capture_output=True)
         if created_udid:
             subprocess.run(["xcrun", "simctl", "delete", created_udid], capture_output=True)
 
+if failures:
+    print(f"iOS screenshot lane FAILED: {failures} of {len(FORMATS)} formats missing.")
+sys.exit(1 if failures else 0)
+
 PYIOS
 
 else
-  echo "No iOS simulator app found; skipping iOS screenshots."
+  echo "ERROR: no iOS simulator app build found under build-ios/ or build/ - the iOS screenshot lane cannot produce artifacts."
+  failures=$((failures + 1))
 fi
 
 # 2. macOS App Screenshots
@@ -133,22 +170,57 @@ if [[ -n "$mac_app" && -d "$mac_app" ]]; then
   mac_bin="$mac_app/Contents/MacOS/HogHunter"
   if [[ -x "$mac_bin" ]]; then
     echo "Capturing macOS screenshot..."
-    "$mac_bin" &
+    # -HogHunterScreenshot makes the accessory app open its Settings window
+    # (see HogHunterAppDelegate), so there is a real app window to photograph.
+    "$mac_bin" -HogHunterScreenshot &
     app_pid=$!
-    sleep 3
+    sleep 5
     osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
     sleep 2
-    if screencapture -x screenshots/macos/HogHunter_macOS.png 2>/dev/null; then
+    # Prefer a window-specific capture: find HogHunter's on-screen window via
+    # CGWindowList (no accessibility permission needed) and grab just it.
+    win_id="$(osascript -l JavaScript -e '
+      ObjC.import("Quartz");
+      const list = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)) || [];
+      let wid = "";
+      for (const w of list) {
+        const b = w["kCGWindowBounds"];
+        if (w["kCGWindowOwnerName"] === "HogHunter" && w["kCGWindowLayer"] === 0 && b && b.Width > 100 && b.Height > 100) {
+          wid = String(w["kCGWindowNumber"]);
+          break;
+        }
+      }
+      console.log(wid);
+    ' 2>/dev/null || true)"
+    if [[ -n "$win_id" ]]; then
+      echo "  Capturing HogHunter window $win_id"
+      screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
+    fi
+    if [[ ! -s screenshots/macos/HogHunter_macOS.png ]]; then
+      echo "  Window-specific capture unavailable; falling back to full-screen capture with the app window frontmost."
+      screencapture -x screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
+    fi
+    if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then
       echo "  ✓ Saved screenshots/macos/HogHunter_macOS.png"
     else
-      echo "  Note: screencapture unavailable or denied in this environment."
+      echo "ERROR: macOS capture produced no image."
+      failures=$((failures + 1))
     fi
     kill "$app_pid" 2>/dev/null || true
+  else
+    echo "ERROR: macOS binary not executable at $mac_bin."
+    failures=$((failures + 1))
   fi
 else
-  echo "No macOS app build found; skipping macOS screenshots."
+  echo "ERROR: no macOS app build found under build/ - the macOS screenshot lane cannot produce artifacts."
+  failures=$((failures + 1))
 fi
 
 echo "=== Captured Screenshots Summary ==="
 find screenshots -type f -name "*.png" -exec ls -lh {} + 2>/dev/null || echo "No screenshots found."
+
+if [[ "$failures" -gt 0 ]]; then
+  echo "FAILED: $failures expected screenshot artifact(s) missing."
+  exit 1
+fi
 exit 0

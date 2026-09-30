@@ -55,7 +55,6 @@ jobs:
       - name: Capture app screenshots
         if: always()
         run: bash scripts/capture-app-screenshots.sh
-        continue-on-error: true
 
       - name: Upload screenshots artifact
         if: always()
@@ -63,5 +62,5 @@ jobs:
         with:
           name: app-screenshots
           path: screenshots/
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
