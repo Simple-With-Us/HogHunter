@@ -2,14 +2,35 @@ import SwiftUI
 
 /** CI screenshot hook: launched with `-HogHunterScreenshot`, the app is an accessory whose
  *  initial scene is a `MenuBarExtra`, so nothing visible exists to capture. The delegate opens
- *  the Settings window shortly after launch so the capture lane photographs a real app window
+ *  the Settings window and orders it front so the capture lane photographs a real app window
  *  instead of the runner desktop. Inert without the flag. */
 class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
+    private var screenshotWindowAttempts = 0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard ProcessInfo.processInfo.arguments.contains("-HogHunterScreenshot") else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        openSettingsForScreenshot()
+    }
+
+    private func openSettingsForScreenshot() {
+        screenshotWindowAttempts += 1
+        // Activate FIRST: an accessory (LSUIElement) app that never activates can open its
+        // window behind the previously active app - or, on a headless runner, not at all.
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        // Order every visible window front explicitly; activation alone does not guarantee
+        // z-order on a runner where Finder owns the screen.
+        for window in NSApp.windows where window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+        }
+        // The Settings scene can take a moment to materialize on a headless runner. Retry for
+        // up to ~15s; if no window exists by then the capture lane fails loudly on its own
+        // CGWindowList check instead of photographing the desktop.
+        let windowUp = NSApp.windows.contains { $0.isVisible && $0.frame.width > 100 && $0.frame.height > 100 }
+        if !windowUp && screenshotWindowAttempts < 15 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.openSettingsForScreenshot()
+            }
         }
     }
 }

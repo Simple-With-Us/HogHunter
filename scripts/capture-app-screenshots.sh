@@ -170,41 +170,53 @@ if [[ -n "$mac_app" && -d "$mac_app" ]]; then
   mac_bin="$mac_app/Contents/MacOS/HogHunter"
   if [[ -x "$mac_bin" ]]; then
     echo "Capturing macOS screenshot..."
-    # -HogHunterScreenshot makes the accessory app open its Settings window
-    # (see HogHunterAppDelegate), so there is a real app window to photograph.
+    # -HogHunterScreenshot makes the accessory app activate, open its Settings
+    # window, and order it front (see HogHunterAppDelegate; it retries for
+    # ~15s because the Settings scene can take a beat on a headless runner).
     "$mac_bin" -HogHunterScreenshot &
     app_pid=$!
-    sleep 5
-    osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
-    sleep 2
-    # Prefer a window-specific capture: find HogHunter's on-screen window via
-    # CGWindowList (no accessibility permission needed) and grab just it.
-    win_id="$(osascript -l JavaScript -e '
-      ObjC.import("Quartz");
-      const list = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)) || [];
-      let wid = "";
-      for (const w of list) {
-        const b = w["kCGWindowBounds"];
-        if (w["kCGWindowOwnerName"] === "HogHunter" && w["kCGWindowLayer"] === 0 && b && b.Width > 100 && b.Height > 100) {
-          wid = String(w["kCGWindowNumber"]);
-          break;
+
+    # Require a REAL on-screen HogHunter window before capturing. A
+    # full-desktop screenshot of a runner with no app window was the original
+    # defect - a desktop fallback would only mask regressions, so there is
+    # none: no window within 60s fails the lane.
+    win_id=""
+    for _ in $(seq 1 30); do
+      if ! kill -0 "$app_pid" 2>/dev/null; then
+        echo "ERROR: HogHunter exited before showing a window."
+        break
+      fi
+      win_id="$(osascript -l JavaScript -e '
+        ObjC.import("Quartz");
+        const list = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)) || [];
+        let wid = "";
+        for (const w of list) {
+          const b = w["kCGWindowBounds"];
+          if (w["kCGWindowOwnerName"] === "HogHunter" && w["kCGWindowLayer"] === 0 && b && b.Width > 100 && b.Height > 100) {
+            wid = String(w["kCGWindowNumber"]);
+            break;
+          }
         }
-      }
-      console.log(wid);
-    ' 2>/dev/null || true)"
-    if [[ -n "$win_id" ]]; then
-      echo "  Capturing HogHunter window $win_id"
-      screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
-    fi
-    if [[ ! -s screenshots/macos/HogHunter_macOS.png ]]; then
-      echo "  Window-specific capture unavailable; falling back to full-screen capture with the app window frontmost."
-      screencapture -x screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
-    fi
-    if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then
-      echo "  ✓ Saved screenshots/macos/HogHunter_macOS.png"
-    else
-      echo "ERROR: macOS capture produced no image."
+        console.log(wid);
+      ' 2>/dev/null | tr -d '[:space:]')"
+      [[ -n "$win_id" ]] && break
+      sleep 2
+    done
+
+    if [[ -z "$win_id" ]]; then
+      echo "ERROR: no on-screen HogHunter window appeared within 60s; refusing to capture the desktop."
       failures=$((failures + 1))
+    else
+      echo "  Capturing HogHunter window $win_id"
+      osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
+      sleep 1
+      screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
+      if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then
+        echo "  ✓ Saved screenshots/macos/HogHunter_macOS.png"
+      else
+        echo "ERROR: macOS capture produced no image."
+        failures=$((failures + 1))
+      fi
     fi
     kill "$app_pid" 2>/dev/null || true
   else
