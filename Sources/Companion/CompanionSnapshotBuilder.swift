@@ -51,7 +51,10 @@ enum CompanionSnapshotBuilder {
                     severity: severityName(severity),
                     isApp: row.isApp,
                     cpuPercent: row.cpuPercent,
-                    memoryBytes: row.memoryBytes
+                    memoryBytes: row.memoryBytes,
+                    pid: row.keys.first?.pid,
+                    canQuit: row.canQuit,
+                    quitBlockReason: row.quitBlockReason
                 )
             },
             storage: storage ?? currentStorageSummary(),
@@ -69,6 +72,7 @@ enum CompanionSnapshotBuilder {
         let freeBytes = UInt64(max(0, values.volumeAvailableCapacityForImportantUsage ?? Int64(values.volumeAvailableCapacity ?? 0)))
         let usedBytes = totalBytes > freeBytes ? totalBytes - freeBytes : 0
         let usedPct = totalBytes > 0 ? (Double(usedBytes) / Double(totalBytes)) * 100.0 : 0.0
+        let exclusions = CleanerExclusions.load()
 
         return CompanionStorageSummary(
             freeBytes: freeBytes,
@@ -77,7 +81,9 @@ enum CompanionSnapshotBuilder {
             freeText: HogFormat.memory(freeBytes) + " Free",
             totalText: HogFormat.memory(totalBytes) + " Total",
             usedText: HogFormat.memory(usedBytes) + " Used",
-            usedPercent: usedPct
+            usedPercent: usedPct,
+            excludedCategories: Array(exclusions.excludedCategories),
+            excludedPathsCount: exclusions.excludedPaths.count
         )
     }
 

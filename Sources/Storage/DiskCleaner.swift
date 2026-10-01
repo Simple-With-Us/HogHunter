@@ -138,6 +138,46 @@ enum CleanTier: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// User exclusions for disk scanning and cleaning.
+struct CleanerExclusions: Codable, Equatable, Sendable {
+    var excludedCategories: Set<String> = []
+    var excludedPaths: [String] = []
+
+    static let defaultsKey = "hoghunter.cleaner.exclusions"
+    static let suiteName = "group.com.simplewithus.hoghunter"
+
+    func isCategoryExcluded(_ category: CleanCategory) -> Bool {
+        excludedCategories.contains(category.rawValue)
+    }
+
+    func isPathExcluded(_ path: String) -> Bool {
+        let normalized = (path as NSString).standardizingPath
+        for excluded in excludedPaths {
+            let normalizedExcluded = (excluded as NSString).standardizingPath
+            if normalized == normalizedExcluded || normalized.hasPrefix(normalizedExcluded + "/") {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func load() -> CleanerExclusions {
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        guard let data = defaults.data(forKey: defaultsKey),
+              let decoded = try? JSONDecoder().decode(CleanerExclusions.self, from: data) else {
+            return CleanerExclusions()
+        }
+        return decoded
+    }
+
+    func save() {
+        let defaults = UserDefaults(suiteName: CleanerExclusions.suiteName) ?? .standard
+        if let data = try? JSONEncoder().encode(self) {
+            defaults.set(data, forKey: CleanerExclusions.defaultsKey)
+        }
+    }
+}
+
 /// Helper that manages Apple APFS local snapshots for safe rollback before disk cleaning operations.
 enum SnapshotSafety {
     /// Attempts to create an APFS local snapshot via `tmutil localsnapshot`.
@@ -180,6 +220,8 @@ struct CleanItem: Identifiable, Hashable, Sendable {
     var lastModified: Date?
     var isSelected: Bool
     var detail: String?
+
+    var path: String { url.path }
 
     var formattedSize: String {
         HogFormat.memory(bytes)
@@ -265,20 +307,21 @@ final class DiskCleaner: @unchecked Sendable {
     /// Performs a full scan across all categories matching the given tier.
     func scan(installedApps: [StorageScanner.InstalledApp] = [],
               tier: CleanTier = .standard,
+              exclusions: CleanerExclusions = CleanerExclusions.load(),
               progress: ((String) -> Void)? = nil) async -> CleanScanReport {
         var reports: [CleanCategoryReport] = []
         var overallTotal: UInt64 = 0
         var overallSelected: UInt64 = 0
 
         let categoriesToScan = CleanCategory.allCases
-            .filter { tier.isCategoryIncluded($0) }
+            .filter { tier.isCategoryIncluded($0) && !exclusions.isCategoryExcluded($0) }
             .sorted(by: { $0.sortOrder < $1.sortOrder })
 
         for category in categoriesToScan {
             if Task.isCancelled { break }
             await Task.yield()
             progress?(category.title)
-            let items = scanCategory(category, installedApps: installedApps)
+            let items = scanCategory(category, installedApps: installedApps).filter { !exclusions.isPathExcluded($0.path) }
             if Task.isCancelled { break }
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
             let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
@@ -901,13 +944,16 @@ final class DiskCleaner: @unchecked Sendable {
     func clean(items: [CleanItem],
                tier: CleanTier = .standard,
                createSnapshot: Bool = true,
+               exclusions: CleanerExclusions = CleanerExclusions.load(),
                progress: ((Double, String) -> Void)? = nil) async -> CleanResult {
         var reclaimed: UInt64 = 0
         var removedCount = 0
         var errors: [String] = []
         var snapshotCreatedName: String?
 
-        if createSnapshot {
+        let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
+
+        if createSnapshot && !activeItems.isEmpty {
             progress?(0.0, "Creating APFS safety snapshot…")
             let (success, name) = SnapshotSafety.createLocalSnapshot()
             if success {
@@ -915,9 +961,9 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        let totalItems = max(1, items.count)
+        let totalItems = max(1, activeItems.count)
 
-        for (index, item) in items.enumerated() {
+        for (index, item) in activeItems.enumerated() {
             if Task.isCancelled {
                 errors.append("Cleanup cancelled")
                 break

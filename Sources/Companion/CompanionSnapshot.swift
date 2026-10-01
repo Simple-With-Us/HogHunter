@@ -6,6 +6,7 @@ enum CompanionService {
     static let type = "_hoghunter._tcp"
     static let path = "/v1/snapshot"
     static let cleanPath = "/v1/clean"
+    static let quitPath = "/v1/quit"
     static let version = 1
 }
 
@@ -18,6 +19,15 @@ struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var snapshotCreated: Bool
     var snapshotName: String?
     var tier: String
+}
+
+/// Response returned when the iOS companion asks to quit a process on the Mac.
+struct CompanionQuitResponse: Codable, Equatable, Sendable {
+    var status: String
+    var pid: Int32
+    var name: String
+    var message: String?
+    var error: String?
 }
 
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
@@ -83,6 +93,9 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     var isApp: Bool
     var cpuPercent: Double? = nil
     var memoryBytes: UInt64? = nil
+    var pid: Int32? = nil
+    var canQuit: Bool = false
+    var quitBlockReason: String? = nil
 }
 
 struct CompanionStorageSummary: Codable, Equatable {
@@ -95,6 +108,8 @@ struct CompanionStorageSummary: Codable, Equatable {
     var usedPercent: Double
     var standardCleanableBytes: UInt64? = nil
     var standardCleanableText: String? = nil
+    var excludedCategories: [String]? = nil
+    var excludedPathsCount: Int? = nil
 }
 
 struct CompanionNetworkRow: Codable, Equatable, Identifiable {

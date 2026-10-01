@@ -34,10 +34,35 @@ final class DiskCleanerStore: ObservableObject {
     @Published var showConfirmation: Bool = false
     @Published var selectedTier: CleanTier = .standard
     @Published var acknowledgedExtremeDisclaimer: Bool = false
+    @Published var exclusions: CleanerExclusions = CleanerExclusions.load()
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
         return false
+    }
+
+    func toggleCategoryExclusion(_ category: CleanCategory) {
+        if exclusions.isCategoryExcluded(category) {
+            exclusions.excludedCategories.remove(category.rawValue)
+        } else {
+            exclusions.excludedCategories.insert(category.rawValue)
+        }
+        exclusions.save()
+        scan()
+    }
+
+    func addExcludedPath(_ path: String) {
+        let normalized = (path as NSString).standardizingPath
+        guard !normalized.isEmpty, !exclusions.excludedPaths.contains(normalized) else { return }
+        exclusions.excludedPaths.append(normalized)
+        exclusions.save()
+        scan()
+    }
+
+    func removeExcludedPath(_ path: String) {
+        exclusions.excludedPaths.removeAll { $0 == path }
+        exclusions.save()
+        scan()
     }
 
     let cleaner: DiskCleaner
@@ -97,8 +122,9 @@ final class DiskCleanerStore: ObservableObject {
         state = .scanning(category: "Starting \(currentTier.title) scan…")
 
         let cleaner = self.cleaner
+        let activeExclusions = exclusions
         scanTask = Task.detached(priority: .utility) { [weak self, cleaner] in
-            let scanReport = await cleaner.scan(tier: currentTier) { categoryTitle in
+            let scanReport = await cleaner.scan(tier: currentTier, exclusions: activeExclusions) { categoryTitle in
                 Task { @MainActor [weak self] in
                     guard let self, self.currentScanId == scanId else { return }
                     self.state = .scanning(category: categoryTitle)
@@ -234,12 +260,13 @@ final class DiskCleanerStore: ObservableObject {
         currentCleanId = cleanId
 
         let currentTier = selectedTier
+        let activeExclusions = exclusions
         state = .cleaning(progress: 0, currentItem: "Preparing…")
 
         cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
             var lastReportedTime = Date.distantPast
             var lastReportedProgress: Double = -1.0
-            let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot) { progress, currentItem in
+            let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot, exclusions: activeExclusions) { progress, currentItem in
                 let now = Date()
                 let isSpecial = currentItem.contains("snapshot") || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
                 if isSpecial {

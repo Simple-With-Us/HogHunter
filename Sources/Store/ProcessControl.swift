@@ -110,6 +110,16 @@ enum ProcessControl {
         return QuitOutcome(results: results)
     }
 
+    /// Quits a single process by PID after checking block reasons and ownership.
+    static func quit(pid: pid_t, force: Bool) -> MemberResult {
+        let name = currentName(pid) ?? "PID \(pid)"
+        let uid = currentUid(pid) ?? uid_t.max
+        if let reason = blockReason(pid: pid, uid: uid, name: name) {
+            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+        }
+        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: send(to: pid, force: force))
+    }
+
     // MARK: - Live re-checks
 
     /// True when the pid still belongs to the process the key describes.  A key

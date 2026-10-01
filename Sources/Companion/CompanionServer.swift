@@ -93,6 +93,9 @@ final class CompanionServer: @unchecked Sendable {
         receive(connection, buffer: Data())
     }
 
+    var allowRemoteQuit = false
+    var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil
+
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] data, _, isComplete, error in
             guard let self else {
@@ -110,9 +113,25 @@ final class CompanionServer: @unchecked Sendable {
                     self.receive(connection, buffer: buffer)
                     return
                 }
-                let response = CompanionHTTP.response(request: buffer, body: self.payload, token: self.token) { [weak self] _ in
-                    self?.handleRemoteClean() ?? (status: 500, body: Data("{}".utf8))
-                }
+                let response = CompanionHTTP.response(
+                    request: buffer,
+                    body: self.payload,
+                    token: self.token,
+                    cleanHandler: { [weak self] _ in
+                        self?.handleRemoteClean() ?? (status: 500, body: Data("{}".utf8))
+                    },
+                    quitHandler: { [weak self] pid, force in
+                        guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                        guard self.allowRemoteQuit else {
+                            let res = ["status": "forbidden", "error": "Remote process termination is disabled in Hog Hunter Mac Settings."]
+                            return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+                        }
+                        if let handler = self.onRemoteQuit {
+                            return handler(pid, force)
+                        }
+                        return (501, Data("{\"error\": \"Quit handler not configured\"}".utf8))
+                    }
+                )
                 connection.send(content: response, completion: .contentProcessed { _ in
                     connection.cancel()
                 })
@@ -122,12 +141,13 @@ final class CompanionServer: @unchecked Sendable {
 
     private func handleRemoteClean() -> (status: Int, body: Data) {
         let cleaner = DiskCleaner()
+        let exclusions = CleanerExclusions.load()
         let semaphore = DispatchSemaphore(value: 0)
         var resultData: Data = Data("{}".utf8)
         Task {
-            let scanReport = await cleaner.scan(tier: .standard)
+            let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
             let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
-            let cleanResult = await cleaner.clean(items: itemsToClean, tier: .standard, createSnapshot: true)
+            let cleanResult = await cleaner.clean(items: itemsToClean, tier: .standard, createSnapshot: true, exclusions: exclusions)
             let responseObj = CompanionCleanResponse(
                 status: "completed",
                 bytesReclaimed: cleanResult.bytesReclaimed,

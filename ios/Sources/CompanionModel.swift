@@ -42,6 +42,7 @@ final class CompanionModel {
     var cleanError: String?
     var showCleanDialogRequested = false
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
+    var isDemoMode = false
 
     var isRemoteSheetPresented = false
     var remoteHostDraft = ""
@@ -126,6 +127,56 @@ final class CompanionModel {
         codeError = nil
         UserDefaults.standard.removeObject(forKey: defaultsKey)
         reconcile()
+    }
+
+    func enterDemoMode() {
+        isDemoMode = true
+        snapshot = Self.sample
+        phase = .live
+    }
+
+    func exitDemoMode() {
+        isDemoMode = false
+        snapshot = nil
+        reconcile()
+    }
+
+    func quitProcess(pid: Int32, force: Bool = false) async -> CompanionQuitResponse {
+        if isDemoMode {
+            let targetName = snapshot?.rows.first(where: { $0.pid == pid })?.name ?? "Process"
+            if let index = snapshot?.rows.firstIndex(where: { $0.pid == pid }) {
+                snapshot?.rows.remove(at: index)
+            }
+            return CompanionQuitResponse(
+                status: force ? "forced" : "asked",
+                pid: pid,
+                name: targetName,
+                message: "\(force ? "Force quit" : "Quit") command delivered to Mac.",
+                error: nil
+            )
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            return CompanionQuitResponse(
+                status: "failed",
+                pid: pid,
+                name: "",
+                message: nil,
+                error: "Not connected to Mac."
+            )
+        }
+        do {
+            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, force: force)
+            Task { await refresh() }
+            return resp
+        } catch {
+            return CompanionQuitResponse(
+                status: "failed",
+                pid: pid,
+                name: "",
+                message: nil,
+                error: error.localizedDescription
+            )
+        }
     }
 
     func mac(for peerID: String) -> DiscoveredMac? {
@@ -219,6 +270,23 @@ final class CompanionModel {
 
     /// Triggers a safe Standard Clean on the connected Mac over the local network or Tailscale/Domain.
     func triggerRemoteClean() async {
+        if isDemoMode {
+            isCleaning = true
+            cleanError = nil
+            try? await Task.sleep(for: .seconds(1))
+            isCleaning = false
+            let demoRes = CompanionCleanResponse(
+                status: "success",
+                bytesReclaimed: 4_200_000_000,
+                formattedBytesReclaimed: "4.2 GB",
+                itemsRemoved: 28,
+                snapshotCreated: true,
+                snapshotName: "com.apple.TimeMachine.2026-10-01-DemoSnapshot.local",
+                tier: "standard"
+            )
+            lastCleanResult = demoRes
+            return
+        }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
         isCleaning = true
         cleanError = nil
@@ -355,9 +423,9 @@ final class CompanionModel {
             pressureSeverity: "elevated"
         ),
         rows: [
-            CompanionRow(id: "chrome", name: "Google Chrome", detail: "6 processes", cpuText: "186%", memoryText: "2.4 GB", severity: "elevated", isApp: true, cpuPercent: 186.0, memoryBytes: 2_576_980_377),
-            CompanionRow(id: "code", name: "Code", detail: "4 processes", cpuText: "92.0%", memoryText: "1.1 GB", severity: "calm", isApp: true, cpuPercent: 92.0, memoryBytes: 1_181_116_006),
-            CompanionRow(id: "node", name: "node", detail: "pid 4182", cpuText: "310%", memoryText: "640 MB", severity: "hot", isApp: false, cpuPercent: 310.0, memoryBytes: 671_088_640),
+            CompanionRow(id: "chrome", name: "Google Chrome", detail: "6 processes", cpuText: "186%", memoryText: "2.4 GB", severity: "elevated", isApp: true, cpuPercent: 186.0, memoryBytes: 2_576_980_377, pid: 1042, canQuit: true),
+            CompanionRow(id: "code", name: "Code", detail: "4 processes", cpuText: "92.0%", memoryText: "1.1 GB", severity: "calm", isApp: true, cpuPercent: 92.0, memoryBytes: 1_181_116_006, pid: 2104, canQuit: true),
+            CompanionRow(id: "node", name: "node", detail: "pid 4182", cpuText: "310%", memoryText: "640 MB", severity: "hot", isApp: false, cpuPercent: 310.0, memoryBytes: 671_088_640, pid: 4182, canQuit: true),
         ],
         storage: CompanionStorageSummary(
             freeBytes: 120_000_000_000,
@@ -368,7 +436,9 @@ final class CompanionModel {
             usedText: "380 GB Used",
             usedPercent: 76.0,
             standardCleanableBytes: 4_200_000_000,
-            standardCleanableText: "4.2 GB Cleanable"
+            standardCleanableText: "4.2 GB Cleanable",
+            excludedCategories: ["Trash Bins"],
+            excludedPathsCount: 2
         ),
         network: [
             CompanionNetworkRow(

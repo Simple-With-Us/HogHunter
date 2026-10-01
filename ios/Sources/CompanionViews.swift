@@ -115,6 +115,9 @@ struct CompanionRootView: View {
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
+                },
+                onDemoMode: {
+                    model.enterDemoMode()
                 }
             )
         case .looking, .code:
@@ -124,6 +127,9 @@ struct CompanionRootView: View {
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
+                },
+                onDemoMode: {
+                    model.enterDemoMode()
                 }
             )
         }
@@ -134,6 +140,7 @@ private struct StatusPage: View {
     let title: String
     let message: String
     var onRemoteConnect: (() -> Void)? = nil
+    var onDemoMode: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 16) {
@@ -148,12 +155,24 @@ private struct StatusPage: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            if let onRemoteConnect {
-                Button(action: onRemoteConnect) {
-                    Label("Connect via Tailscale or Domain…", systemImage: "network")
-                        .font(.subheadline.weight(.semibold))
+            if onRemoteConnect != nil || onDemoMode != nil {
+                VStack(spacing: 10) {
+                    if let onRemoteConnect {
+                        Button(action: onRemoteConnect) {
+                            Label("Connect via Tailscale or Domain…", systemImage: "network")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    if let onDemoMode {
+                        Button(action: onDemoMode) {
+                            Label("Explore Demo Mode (App Review)", systemImage: "sparkles")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
-                .buttonStyle(.bordered)
                 .padding(.top, 4)
             }
         }
@@ -202,6 +221,9 @@ private struct MacListView: View {
                     onRemoteConnect: {
                         model.remoteConnectError = nil
                         model.isRemoteSheetPresented = true
+                    },
+                    onDemoMode: {
+                        model.enterDemoMode()
                     }
                 )
             }
@@ -255,6 +277,17 @@ struct DashboardView: View {
     @State private var selectedTab: CompanionTab = .activity
     @State private var sortOrder: CompanionSort = .cpu
     @State private var showCleanConfirm = false
+    @State private var pendingQuitRow: CompanionRow?
+    @State private var isForceQuit = false
+    @State private var showQuitConfirm = false
+    @State private var lastQuitResult: CompanionQuitResponse?
+    @State private var showQuitResultAlert = false
+
+    private func confirmQuit(row: CompanionRow, force: Bool) {
+        pendingQuitRow = row
+        isForceQuit = force
+        showQuitConfirm = true
+    }
 
     private var sortedRows: [CompanionRow] {
         snapshot.rows.sorted { a, b in
@@ -275,6 +308,26 @@ struct DashboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if model.isDemoMode {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                    Text("Explore Demo Mode (App Review)")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("Exit Demo") {
+                        model.exitDemoMode()
+                    }
+                    .font(.caption2.weight(.medium))
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.12))
+            }
+
             Picker("Tab", selection: $selectedTab) {
                 ForEach(CompanionTab.allCases) { tab in
                     Text(tab.rawValue).tag(tab)
@@ -310,6 +363,40 @@ struct DashboardView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will safely trigger a Standard Clean on \(snapshot.hostName). An APFS local snapshot will be taken first, and deleted items are moved to Trash.")
+        }
+        .confirmationDialog(
+            "\(isForceQuit ? "Force Quit" : "Quit") \(pendingQuitRow?.name ?? "App")?",
+            isPresented: $showQuitConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(isForceQuit ? "Force Quit" : "Quit", role: .destructive) {
+                if let row = pendingQuitRow, let pid = row.pid {
+                    Task {
+                        let res = await model.quitProcess(pid: pid, force: isForceQuit)
+                        lastQuitResult = res
+                        showQuitResultAlert = true
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(isForceQuit
+                ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).  Any unsaved work will be lost."
+                : "Quitting \(pendingQuitRow?.name ?? "this app") will ask it to close gracefully on \(snapshot.hostName).")
+        }
+        .alert(
+            lastQuitResult?.error != nil ? "Could Not Quit" : "Quit Request Delivered",
+            isPresented: $showQuitResultAlert
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            if let error = lastQuitResult?.error {
+                Text(error)
+            } else if let message = lastQuitResult?.message {
+                Text(message)
+            } else {
+                Text("Command delivered to \(snapshot.hostName).")
+            }
         }
         .onChange(of: model.showCleanDialogRequested) { _, requested in
             if requested {
@@ -415,6 +502,31 @@ struct DashboardView: View {
                         }
                     }
                     .accessibilityElement(children: .combine)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if row.canQuit && row.pid != nil {
+                            Button(role: .destructive) {
+                                confirmQuit(row: row, force: false)
+                            } label: {
+                                Label("Quit", systemImage: "xmark.circle")
+                            }
+                        }
+                    }
+                    .contextMenu {
+                        if row.canQuit && row.pid != nil {
+                            Button {
+                                confirmQuit(row: row, force: false)
+                            } label: {
+                                Label("Quit \(row.name)", systemImage: "xmark.circle")
+                            }
+                            Button(role: .destructive) {
+                                confirmQuit(row: row, force: true)
+                            } label: {
+                                Label("Force Quit \(row.name)", systemImage: "bolt.horizontal.circle")
+                            }
+                        } else if let reason = row.quitBlockReason {
+                            Text("Protected: \(reason)")
+                        }
+                    }
                 }
             }
         } header: {
@@ -432,9 +544,15 @@ struct DashboardView: View {
         }
 
         Section {
-            Text("Read only.  Quit stays on the Mac.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            if snapshot.rows.contains(where: { $0.canQuit }) {
+                Text("Swipe or long-press an app to quit or force quit it remotely on \(snapshot.hostName).  System processes and tasks owned by other users are protected.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Remote quit is off.  Turn on 'Allow iPhone to Quit Apps & Processes' in Hog Hunter Settings on your Mac.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -524,6 +642,36 @@ struct DashboardView: View {
                 .disabled(model.isCleaning)
             }
             .padding(.vertical, 4)
+        }
+
+        if let storage = snapshot.storage {
+            let excludedCats = storage.excludedCategories ?? []
+            let excludedPathsCount = storage.excludedPathsCount ?? 0
+            if !excludedCats.isEmpty || excludedPathsCount > 0 {
+                Section("Exclusions & Safety") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label("Active Cleaner Exclusions", systemImage: "shield.lefthalf.filled")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                        }
+                        if !excludedCats.isEmpty {
+                            Text("Excluded Categories: \(excludedCats.joined(separator: ", "))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if excludedPathsCount > 0 {
+                            Text("\(excludedPathsCount) custom \(excludedPathsCount == 1 ? "folder is" : "folders are") excluded from cleaning.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("Configured in Hog Hunter Mac Settings → Cleaner.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
         }
     }
 

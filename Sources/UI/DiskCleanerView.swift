@@ -7,6 +7,7 @@ import SwiftUI
 struct DiskCleanerView: View {
     @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
+    @State private var showExclusionsSheet = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -30,6 +31,9 @@ struct DiskCleanerView: View {
         }
         .onDisappear {
             store.cancelScan()
+        }
+        .sheet(isPresented: $showExclusionsSheet) {
+            CleanerExclusionsSheet(store: store)
         }
         .confirmationDialog(
             "Confirm \(store.selectedTier.title)",
@@ -304,6 +308,19 @@ struct DiskCleanerView: View {
             .font(.system(size: 11))
             .disabled(isBusy)
 
+            Text("•")
+                .foregroundStyle(.tertiary)
+
+            Button {
+                showExclusionsSheet = true
+            } label: {
+                let count = store.exclusions.excludedCategories.count + store.exclusions.excludedPaths.count
+                Label(count > 0 ? "Exclusions (\(count))" : "Exclusions…", systemImage: "shield")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.link)
+            .disabled(isBusy)
+
             Spacer()
 
             Button {
@@ -533,3 +550,104 @@ private struct CategoryCardView: View {
         }
     }
 }
+
+// MARK: - Exclusions Sheet
+
+private struct CleanerExclusionsSheet: View {
+    @ObservedObject var store: DiskCleanerStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Cleaner Exclusions & Safety")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            Form {
+                Section("Category Exclusions") {
+                    Text("Excluded categories are skipped during scans and will never be cleaned.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(CleanCategory.allCases) { category in
+                        Toggle(isOn: Binding(
+                            get: { store.exclusions.isCategoryExcluded(category) },
+                            set: { _ in store.toggleCategoryExclusion(category) }
+                        )) {
+                            HStack(spacing: 8) {
+                                Image(systemName: category.icon)
+                                    .frame(width: 16)
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(category.title)
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(category.description)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section("Custom Excluded Folders") {
+                    Text("Files in these directories or their subfolders are preserved and skipped.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    if store.exclusions.excludedPaths.isEmpty {
+                        Text("No custom excluded folders.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(store.exclusions.excludedPaths, id: \.self) { path in
+                            HStack {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                Text(path)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button {
+                                    store.removeExcludedPath(path)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove exclusion")
+                            }
+                        }
+                    }
+
+                    Button("Add Folder…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = false
+                        panel.prompt = "Exclude Folder"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            store.addExcludedPath(url.path)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+        .frame(width: 480, height: 420)
+    }
+}
+

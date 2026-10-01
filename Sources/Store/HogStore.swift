@@ -83,11 +83,18 @@ final class HogStore: ObservableObject {
     @Published var alertThresholdPercent: Double = 300 { didSet { persist() } }
     @Published var alertSustainedMinutes: Int = 5 { didSet { persist() } }
     @Published var appearance: AppearanceChoice = .light { didSet { persist() } }
-    /// Off until the owner turns it on.  The iPhone can read the list.  It cannot quit.
+    /// Off until the owner turns it on.
     @Published var shareWithIPhone = false {
         didSet {
             persist()
             if !loadingSettings { syncCompanion() }
+        }
+    }
+    /// Off until the owner turns it on in Mac Settings.
+    @Published var allowRemoteQuit = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteQuit = allowRemoteQuit
         }
     }
     @Published private(set) var companionCode = ""
@@ -110,6 +117,7 @@ final class HogStore: ObservableObject {
         static let alertSustainedMinutes = "alertSustainedMinutes"
         static let appearance = "appearance"
         static let shareWithIPhone = "shareWithIPhone"
+        static let allowRemoteQuit = "allowRemoteQuit"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
     }
@@ -152,6 +160,7 @@ final class HogStore: ObservableObject {
         self.defaults = defaults
         self.history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
         loadSettings()
+        setupCompanionHandlers()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(defaultsChanged),
@@ -822,6 +831,7 @@ final class HogStore: ObservableObject {
         let sustained = defaults.integer(forKey: Key.alertSustainedMinutes)
         if sustained >= 1 { alertSustainedMinutes = sustained }
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
+        allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -849,6 +859,7 @@ final class HogStore: ObservableObject {
         defaults.set(alertSustainedMinutes, forKey: Key.alertSustainedMinutes)
         defaults.set(appearance.rawValue, forKey: Key.appearance)
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
+        defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
     }
 
     /// Asks for notification permission the moment alerts are switched on, and
@@ -911,7 +922,59 @@ final class HogStore: ObservableObject {
             if sharing != self.shareWithIPhone {
                 self.shareWithIPhone = sharing
             }
+            let remoteQuit = self.defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
+            if remoteQuit != self.allowRemoteQuit {
+                self.allowRemoteQuit = remoteQuit
+            }
         }
+    }
+
+    // MARK: - Companion Handlers
+
+    private func setupCompanionHandlers() {
+        companionServer.allowRemoteQuit = allowRemoteQuit
+        companionServer.onRemoteQuit = { [weak self] pid, force in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteQuit(pid: pid, force: force)
+        }
+    }
+
+    private func performRemoteQuit(pid: pid_t, force: Bool) -> (status: Int, body: Data) {
+        let result = ProcessControl.quit(pid: pid, force: force)
+        let statusStr: String
+        var errorStr: String? = nil
+        var messageStr: String? = nil
+        switch result.outcome {
+        case .asked:
+            statusStr = "asked"
+            messageStr = "Quit signal sent to \(result.name)."
+        case .forced:
+            statusStr = "forced"
+            messageStr = "Force quit signal sent to \(result.name)."
+        case .changed:
+            statusStr = "changed"
+            errorStr = "\(result.name) is no longer running or changed PID."
+        case .blocked(let reason):
+            statusStr = "blocked"
+            errorStr = "Cannot quit \(result.name): \(reason)."
+        case .failed(let reason):
+            statusStr = "failed"
+            errorStr = "Failed to quit \(result.name): \(reason)."
+        }
+        let response = CompanionQuitResponse(
+            status: statusStr,
+            pid: pid,
+            name: result.name,
+            message: messageStr,
+            error: errorStr
+        )
+        if let data = try? CompanionJSON.encoder().encode(response) {
+            let httpStatus = (result.outcome.isAction) ? 200 : 400
+            return (httpStatus, data)
+        }
+        return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
     }
 
     // MARK: - iPhone companion
