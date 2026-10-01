@@ -179,6 +179,34 @@ private struct IPhoneSettingsTab: View {
                     }
                 }
             }
+
+            if store.shareWithIPhone {
+                Section("Remote Access (Tailscale / Domain)") {
+                    let addresses = CompanionServer.detectHostAddresses()
+                    LabeledContent("Port") {
+                        Text("\(store.companionPort)")
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    if let ts = addresses.tailscaleIP {
+                        LabeledContent("Tailscale IP") {
+                            Text(ts)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if let loc = addresses.localIP {
+                        LabeledContent("Local Wi-Fi IP") {
+                            Text(loc)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text("Away from this Wi-Fi: Connect via Tailscale using your Tailscale IP or MagicDNS hostname, or forward port \(store.companionPort) on your domain.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 440)

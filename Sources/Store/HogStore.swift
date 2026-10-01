@@ -928,6 +928,8 @@ final class HogStore: ObservableObject {
         return "This Mac"
     }
 
+    var companionPort: UInt16 { companionServer.activePort }
+
     private func syncCompanion() {
         guard shareWithIPhone else {
             companionServer.stop()

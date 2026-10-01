@@ -6,6 +6,8 @@ struct SavedMac: Codable, Equatable {
     var peerID: String
     var name: String
     var token: String
+    var remoteHost: String? = nil
+    var remotePort: Int? = nil
 }
 
 struct DiscoveredMac: Identifiable, Equatable, Sendable {
@@ -24,7 +26,7 @@ enum CompanionClientError: Error, Equatable {
     case timedOut
 }
 
-/// Finds Hog Hunter on the Wi-Fi and keeps one read-only snapshot on screen.
+/// Finds Hog Hunter on the Wi-Fi or connects remotely via Tailscale / Domain.
 @MainActor
 @Observable
 final class CompanionModel {
@@ -40,6 +42,14 @@ final class CompanionModel {
     var cleanError: String?
     var showCleanDialogRequested = false
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
+
+    var isRemoteSheetPresented = false
+    var remoteHostDraft = ""
+    var remotePortDraft = "24240"
+    var remoteTokenDraft = ""
+    var remoteNameDraft = ""
+    var remoteConnectError: String?
+    var isConnectingRemote = false
 
     private var browser: NWBrowser?
     private var poll: Task<Void, Never>?
@@ -122,9 +132,62 @@ final class CompanionModel {
         discovered.first { $0.id == peerID }
     }
 
+    private func activeEndpoint(for saved: SavedMac) -> NWEndpoint? {
+        if let mac = discovered.first(where: { $0.id == saved.peerID }) {
+            return mac.endpoint
+        }
+        if let host = saved.remoteHost, let port = NWEndpoint.Port(rawValue: UInt16(saved.remotePort ?? 24240)) {
+            return NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
+        }
+        return nil
+    }
+
+    func connectRemote() async {
+        let host = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else {
+            remoteConnectError = "Enter a Tailscale MagicDNS name, IP address, or domain."
+            return
+        }
+        let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 24240
+        let token = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
+        guard token.count >= 8 else {
+            remoteConnectError = "Enter the 8 character pairing code from Mac Settings."
+            return
+        }
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(portNum)) else {
+            remoteConnectError = "Invalid port number."
+            return
+        }
+
+        isConnectingRemote = true
+        remoteConnectError = nil
+        defer { isConnectingRemote = false }
+
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
+        do {
+            let fetched = try await Self.fetch(endpoint: endpoint, token: token)
+            let trimmedName = remoteNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = trimmedName.isEmpty ? fetched.hostName : trimmedName
+            let peerID = "remote-\(host):\(portNum)"
+            saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: portNum)
+            persistSaved()
+            snapshot = fetched
+            phase = .live
+            statusLine = "\(displayName) (Remote)"
+            isRemoteSheetPresented = false
+            if let data = try? CompanionJSON.encode(fetched) {
+                UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
+            }
+        } catch CompanionClientError.unauthorized {
+            remoteConnectError = "Pairing code does not match this Mac."
+        } catch {
+            remoteConnectError = "Could not connect to \(host):\(portNum). Check that Hog Hunter is running on the Mac and the port is reachable."
+        }
+    }
+
     private func refresh() async {
-        guard let saved, let mac = discovered.first(where: { $0.id == saved.peerID }) else {
-            if didBrowse, let saved, discovered.first(where: { $0.id == saved.peerID }) == nil {
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            if didBrowse, let saved, saved.remoteHost == nil, discovered.first(where: { $0.id == saved.peerID }) == nil {
                 if phase != .code(saved.peerID) {
                     phase = .offline
                     statusLine = "Can't see \(saved.name) on this Wi-Fi."
@@ -134,10 +197,10 @@ final class CompanionModel {
         }
         if case .code = phase { return }
         do {
-            let fetched = try await Self.fetch(endpoint: mac.endpoint, token: saved.token)
+            let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token)
             snapshot = fetched
             phase = .live
-            statusLine = mac.name
+            statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
             // Persist for iOS WidgetKit extension
             if let data = try? CompanionJSON.encode(fetched) {
                 UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
@@ -149,21 +212,21 @@ final class CompanionModel {
         } catch {
             if snapshot == nil {
                 phase = .offline
-                statusLine = "The Mac did not answer."
+                statusLine = saved.remoteHost != nil ? "The Mac at \(saved.remoteHost!) did not answer." : "The Mac did not answer."
             }
         }
     }
 
-    /// Triggers a safe Standard Clean on the connected Mac over the local network.
+    /// Triggers a safe Standard Clean on the connected Mac over the local network or Tailscale/Domain.
     func triggerRemoteClean() async {
-        guard let saved, let mac = discovered.first(where: { $0.id == saved.peerID }) else { return }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
         isCleaning = true
         cleanError = nil
         let defaults = UserDefaults(suiteName: appGroupSuite)
         defaults?.set("Cleaning…", forKey: "clean_status")
         defer { isCleaning = false }
         do {
-            let res = try await CompanionConnection.triggerClean(endpoint: mac.endpoint, token: saved.token)
+            let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token)
             lastCleanResult = res
             defaults?.set("Cleaned", forKey: "clean_status")
             defaults?.set(Date().timeIntervalSince1970, forKey: "last_clean_date")
@@ -292,9 +355,38 @@ final class CompanionModel {
             pressureSeverity: "elevated"
         ),
         rows: [
-            CompanionRow(id: "chrome", name: "Google Chrome", detail: "6 processes", cpuText: "186%", memoryText: "2.4 GB", severity: "elevated", isApp: true),
-            CompanionRow(id: "code", name: "Code", detail: "4 processes", cpuText: "92.0%", memoryText: "1.1 GB", severity: "calm", isApp: true),
-            CompanionRow(id: "node", name: "node", detail: "pid 4182", cpuText: "310%", memoryText: "640 MB", severity: "hot", isApp: false),
+            CompanionRow(id: "chrome", name: "Google Chrome", detail: "6 processes", cpuText: "186%", memoryText: "2.4 GB", severity: "elevated", isApp: true, cpuPercent: 186.0, memoryBytes: 2_576_980_377),
+            CompanionRow(id: "code", name: "Code", detail: "4 processes", cpuText: "92.0%", memoryText: "1.1 GB", severity: "calm", isApp: true, cpuPercent: 92.0, memoryBytes: 1_181_116_006),
+            CompanionRow(id: "node", name: "node", detail: "pid 4182", cpuText: "310%", memoryText: "640 MB", severity: "hot", isApp: false, cpuPercent: 310.0, memoryBytes: 671_088_640),
+        ],
+        storage: CompanionStorageSummary(
+            freeBytes: 120_000_000_000,
+            totalBytes: 500_000_000_000,
+            usedBytes: 380_000_000_000,
+            freeText: "120 GB Free",
+            totalText: "500 GB Total",
+            usedText: "380 GB Used",
+            usedPercent: 76.0,
+            standardCleanableBytes: 4_200_000_000,
+            standardCleanableText: "4.2 GB Cleanable"
+        ),
+        network: [
+            CompanionNetworkRow(
+                id: "chrome",
+                name: "Google Chrome",
+                pid: 1042,
+                establishedCount: 18,
+                uniqueRemoteHosts: 8,
+                sampleRemoteHosts: ["142.250.190.46:443", "151.101.1.69:443", "172.217.16.206:443"]
+            ),
+            CompanionNetworkRow(
+                id: "slack",
+                name: "Slack",
+                pid: 1420,
+                establishedCount: 6,
+                uniqueRemoteHosts: 3,
+                sampleRemoteHosts: ["54.230.97.10:443", "3.220.12.91:443"]
+            )
         ]
     )
 }

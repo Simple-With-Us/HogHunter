@@ -53,6 +53,8 @@ struct CompanionSnapshot: Codable, Equatable {
     var cpuScale: String
     var pulse: CompanionPulse
     var rows: [CompanionRow]
+    var storage: CompanionStorageSummary? = nil
+    var network: [CompanionNetworkRow]? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
@@ -79,6 +81,29 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     /// `calm`, `elevated`, or `hot`.  Calm stays in the ordinary text color.
     var severity: String
     var isApp: Bool
+    var cpuPercent: Double? = nil
+    var memoryBytes: UInt64? = nil
+}
+
+struct CompanionStorageSummary: Codable, Equatable {
+    var freeBytes: UInt64
+    var totalBytes: UInt64
+    var usedBytes: UInt64
+    var freeText: String
+    var totalText: String
+    var usedText: String
+    var usedPercent: Double
+    var standardCleanableBytes: UInt64? = nil
+    var standardCleanableText: String? = nil
+}
+
+struct CompanionNetworkRow: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var pid: Int32
+    var establishedCount: Int
+    var uniqueRemoteHosts: Int
+    var sampleRemoteHosts: [String]
 }
 
 enum CompanionJSON {

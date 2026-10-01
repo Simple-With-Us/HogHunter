@@ -48,6 +48,49 @@ final class CompanionTests: XCTestCase {
         XCTAssertEqual(snapshot.window, "Now")
     }
 
+    func testSnapshotIncludesStorageAndNetworkRoundTrip() throws {
+        let storage = CompanionStorageSummary(
+            freeBytes: 100_000_000_000,
+            totalBytes: 500_000_000_000,
+            usedBytes: 400_000_000_000,
+            freeText: "100 GB Free",
+            totalText: "500 GB Total",
+            usedText: "400 GB Used",
+            usedPercent: 80.0,
+            standardCleanableBytes: 5_000_000_000,
+            standardCleanableText: "5 GB Cleanable"
+        )
+        let networkRow = CompanionNetworkRow(
+            id: "123",
+            name: "Safari",
+            pid: 123,
+            establishedCount: 12,
+            uniqueRemoteHosts: 4,
+            sampleRemoteHosts: ["1.1.1.1:443", "8.8.8.8:53"]
+        )
+        var snapshot = sampleSnapshot(scale: .perCore)
+        snapshot.storage = storage
+        snapshot.network = [networkRow]
+
+        let encoded = try CompanionJSON.encode(snapshot)
+        let decoded = try CompanionJSON.decode(encoded)
+
+        XCTAssertEqual(decoded.storage, storage)
+        XCTAssertEqual(decoded.network, [networkRow])
+        XCTAssertEqual(decoded.rows.first?.cpuPercent, 400)
+        XCTAssertEqual(decoded.rows.first?.memoryBytes, 2_147_483_648)
+    }
+
+    func testCompanionServerPreferredPortAndAddressDetection() {
+        let addresses = CompanionServer.detectHostAddresses()
+        if let local = addresses.localIP {
+            XCTAssertFalse(local.isEmpty)
+        }
+        if let tailscale = addresses.tailscaleIP {
+            XCTAssertTrue(tailscale.hasPrefix("100."))
+        }
+    }
+
     func testServiceNameDropsTheDomain() {
         XCTAssertEqual(CompanionServer.serviceName(from: "Studio.local"), "Studio")
         XCTAssertEqual(CompanionServer.serviceName(from: "   "), "Hog Hunter")
