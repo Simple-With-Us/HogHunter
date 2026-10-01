@@ -35,6 +35,11 @@ final class DiskCleanerStore: ObservableObject {
     @Published var selectedTier: CleanTier = .standard
     @Published var acknowledgedExtremeDisclaimer: Bool = false
 
+    var isCleaning: Bool {
+        if case .cleaning = state { return true }
+        return false
+    }
+
     let cleaner: DiskCleaner
     private var isScanInFlight = false
     private var scanTask: Task<Void, Never>?

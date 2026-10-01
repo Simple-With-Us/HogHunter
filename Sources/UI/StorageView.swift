@@ -17,6 +17,7 @@ enum StorageTab: String, CaseIterable, Identifiable {
 /// panel's cadence.
 struct StorageView: View {
     @StateObject private var store: StorageStore
+    @StateObject private var cleanerStore = DiskCleanerStore()
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
     @State private var filter: StorageFilter = .all
@@ -43,7 +44,7 @@ struct StorageView: View {
                 list
                 footer
             case .diskCleaner:
-                DiskCleanerView(isTabActive: isTabActive)
+                DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
             }
         }
         .padding(embeddedInPanel ? 0 : 16)
@@ -108,6 +109,7 @@ struct StorageView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 200)
+            .disabled(cleanerStore.isCleaning)
         }
     }
 

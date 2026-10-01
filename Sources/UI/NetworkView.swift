@@ -36,13 +36,13 @@ struct NetworkView: View {
                 WindowActivator.front()
             }
             if isTabActive {
-                if case .idle = store.state { store.refresh() }
+                store.refresh()
                 startRefreshTimer()
             }
         }
         .onChange(of: isTabActive) { active in
             if active {
-                if case .idle = store.state { store.refresh() }
+                store.refresh()
                 startRefreshTimer()
             } else {
                 refreshTask?.cancel()

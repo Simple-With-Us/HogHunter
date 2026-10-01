@@ -440,23 +440,28 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
     user_caches_dir = HOME / "Library" / "Caches"
     if user_caches_dir.exists():
         try:
-            for child in user_caches_dir.iterdir():
-                if child.name in ["Homebrew", "pnpm", "Yarn", "go-build", "CocoaPods", "pip", "com.apple.dt.Xcode"]:
-                    continue
-                if "hoghunter" in child.name.lower():
-                    continue
+            children = list(user_caches_dir.iterdir())
+        except OSError:
+            children = []
 
-                targets = [child]
-                if child.is_dir() and child.name in ["Google"]:
-                    try:
-                        subs = [c for c in child.iterdir() if c.is_dir()]
-                        if subs:
-                            targets = subs
-                    except OSError:
-                        pass
+        for child in children:
+            if child.name in ["Homebrew", "pnpm", "Yarn", "go-build", "CocoaPods", "pip", "com.apple.dt.Xcode"]:
+                continue
+            if "hoghunter" in child.name.lower():
+                continue
 
-                for target in targets:
-                    size = get_dir_size(target) if target.is_dir() else target.stat().st_size
+            targets = [child]
+            if child.is_dir() and child.name in ["Google"]:
+                try:
+                    subs = [c for c in child.iterdir() if c.is_dir()]
+                    if subs:
+                        targets = subs
+                except OSError:
+                    pass
+
+            for target in targets:
+                try:
+                    size = get_dir_size(target) if target.is_dir() else get_allocated_size(target)
                     if size >= 10 * 1024 * 1024:  # >= 10 MB
                         audit = audit_path_churn_risk(str(target))
                         display_name = f"{child.name}/{target.name}" if target != child else child.name
@@ -469,8 +474,8 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                             "churn_risk": audit["risk_level"],
                             "recommendation": audit["recommendation"]
                         })
-        except OSError:
-            pass
+                except OSError:
+                    continue
 
     # 4. Trash
     trash_dir = HOME / ".Trash"
@@ -567,9 +572,9 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
         for search_folder in [HOME / "Downloads", HOME / "Desktop", HOME / "Documents"]:
             if search_folder.exists():
                 try:
-                    for root, _, files in os.walk(search_folder):
-                        if any(part.startswith(".") for part in Path(root).parts):
-                            continue
+                    for root, dirs, files in os.walk(search_folder, topdown=True):
+                        # Prune hidden subtrees, node_modules, and build directories before descent
+                        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ["node_modules", "DerivedData", "Pods", "vendor", ".git"]]
                         for f in files:
                             if f.startswith("."):
                                 continue
@@ -579,12 +584,13 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                                 if st.st_size >= 100 * 1024 * 1024:  # >= 100 MB
                                     age_days = (time.time() - st.st_mtime) / 86400
                                     if age_days >= 30:
+                                        alloc_size = get_allocated_size(fp)
                                         categories["large_and_old_files"].append({
                                             "name": f,
                                             "path": str(fp),
-                                            "bytes": st.st_size,
-                                            "human_size": format_bytes(st.st_size),
-                                            "detail": f"Large file ({format_bytes(st.st_size)}) not modified in {int(age_days)} days",
+                                            "bytes": alloc_size,
+                                            "human_size": format_bytes(alloc_size),
+                                            "detail": f"Large file ({format_bytes(alloc_size)}) not modified in {int(age_days)} days",
                                             "churn_risk": "zero"
                                         })
                             except OSError:
@@ -715,18 +721,8 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
     total_planned_reclaimable = 0
     snapshot_name = None
 
-    if create_snapshot and not dry_run:
-        try:
-            out = subprocess.check_output(["tmutil", "localsnapshot"], text=True, stderr=subprocess.DEVNULL)
-            for line in out.splitlines():
-                if "Created local snapshot with date:" in line:
-                    snapshot_name = line.split(":")[-1].strip()
-                    break
-        except Exception:
-            snapshot_name = "Snapshot creation unavailable"
-
-    trash_dir = (HOME / ".Trash").resolve()
-
+    # Pre-validate paths before invoking tmutil to avoid creating empty snapshots
+    validated_items: List[Tuple[str, Path, int]] = []
     for p_str in paths:
         path = Path(p_str).expanduser()
         if not path.exists():
@@ -739,6 +735,21 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
             continue
 
         size = get_allocated_size(path)
+        validated_items.append((p_str, path, size))
+
+    if create_snapshot and not dry_run and validated_items:
+        try:
+            out = subprocess.check_output(["tmutil", "localsnapshot"], text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                if "Created local snapshot with date:" in line:
+                    snapshot_name = line.split(":")[-1].strip()
+                    break
+        except Exception:
+            snapshot_name = "Snapshot creation unavailable"
+
+    trash_dir = (HOME / ".Trash").resolve()
+
+    for p_str, path, size in validated_items:
         if dry_run:
             results.append({
                 "path": p_str,

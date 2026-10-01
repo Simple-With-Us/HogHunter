@@ -5,7 +5,7 @@ import SwiftUI
 /// Disk cleaner view inside Hog Hunter's Storage window.
 /// Offers category-by-category breakdown, selective item inspection, and safe one-click reclamation.
 struct DiskCleanerView: View {
-    @StateObject private var store = DiskCleanerStore()
+    @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
 
     var body: some View {
