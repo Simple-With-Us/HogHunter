@@ -339,6 +339,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         var items: [CleanItem] = []
         for url in contents {
+            if Task.isCancelled { break }
             let name = url.lastPathComponent
             if developerCacheNames.contains(name) { continue }
             if isHogHunterIdentifier(name) { continue }
@@ -369,6 +370,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         if let contents = try? fileManager.contentsOfDirectory(at: logsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
             for url in contents {
+                if Task.isCancelled { break }
                 let name = url.lastPathComponent
                 if isHogHunterIdentifier(name) { continue }
 
@@ -389,6 +391,8 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
+        if Task.isCancelled { return items.sorted { $0.bytes > $1.bytes } }
+
         // DiagnosticReports folder
         let diagReportsURL = logsURL.appendingPathComponent("DiagnosticReports", isDirectory: true)
         if fileManager.fileExists(atPath: diagReportsURL.path) && !items.contains(where: { $0.url == diagReportsURL }) {
@@ -407,6 +411,8 @@ final class DiskCleaner: @unchecked Sendable {
                 ))
             }
         }
+
+        if Task.isCancelled { return items.sorted { $0.bytes > $1.bytes } }
 
         // CrashReporter
         let crashReportsURL = userHomeURL.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
@@ -439,6 +445,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         var items: [CleanItem] = []
         for url in contents {
+            if Task.isCancelled { break }
             let name = url.lastPathComponent
             if name.hasPrefix(".") && name == ".DS_Store" { continue }
 
@@ -481,6 +488,7 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         for target in targets {
+            if Task.isCancelled { break }
             let url = userHomeURL.appendingPathComponent(target.path, isDirectory: true)
             var isDir: ObjCBool = false
             guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
@@ -530,79 +538,88 @@ final class DiskCleaner: @unchecked Sendable {
         var items: [CleanItem] = []
 
         // Inspect Containers
-        let containersURL = userHomeURL.appendingPathComponent("Library/Containers", isDirectory: true)
-        if let contents = try? fileManager.contentsOfDirectory(at: containersURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for url in contents {
-                let name = url.lastPathComponent
-                // Skip Apple system containers
-                if name.hasPrefix("com.apple.") || isHogHunterIdentifier(name) { continue }
-                if knownBundleIds.contains(name.lowercased()) { continue }
+        if !Task.isCancelled {
+            let containersURL = userHomeURL.appendingPathComponent("Library/Containers", isDirectory: true)
+            if let contents = try? fileManager.contentsOfDirectory(at: containersURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    // Skip Apple system containers
+                    if name.hasPrefix("com.apple.") || isHogHunterIdentifier(name) { continue }
+                    if knownBundleIds.contains(name.lowercased()) { continue }
 
-                let stats = directoryStats(at: url)
-                guard stats.bytes > 0 else { continue }
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
 
-                items.append(CleanItem(
-                    category: .orphanedData,
-                    title: name,
-                    subtitle: "~/Library/Containers/\(name)",
-                    url: url,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: CleanCategory.orphanedData.defaultSelected,
-                    detail: "Uninstalled application container"
-                ))
+                    items.append(CleanItem(
+                        category: .orphanedData,
+                        title: name,
+                        subtitle: "~/Library/Containers/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: CleanCategory.orphanedData.defaultSelected,
+                        detail: "Uninstalled application container"
+                    ))
+                }
             }
         }
 
         // Inspect Application Support
-        let appSupportURL = userHomeURL.appendingPathComponent("Library/Application Support", isDirectory: true)
-        if let contents = try? fileManager.contentsOfDirectory(at: appSupportURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for url in contents {
-                let name = url.lastPathComponent
-                if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
-                if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
+        if !Task.isCancelled {
+            let appSupportURL = userHomeURL.appendingPathComponent("Library/Application Support", isDirectory: true)
+            if let contents = try? fileManager.contentsOfDirectory(at: appSupportURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
+                    if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
 
-                let stats = directoryStats(at: url)
-                guard stats.bytes > 0 else { continue }
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
 
-                items.append(CleanItem(
-                    category: .orphanedData,
-                    title: name,
-                    subtitle: "~/Library/Application Support/\(name)",
-                    url: url,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: CleanCategory.orphanedData.defaultSelected,
-                    detail: "Leftover application data from removed app"
-                ))
+                    items.append(CleanItem(
+                        category: .orphanedData,
+                        title: name,
+                        subtitle: "~/Library/Application Support/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: CleanCategory.orphanedData.defaultSelected,
+                        detail: "Leftover application data from removed app"
+                    ))
+                }
             }
         }
 
         // Inspect Saved Application State
-        let savedStateURL = userHomeURL.appendingPathComponent("Library/Saved Application State", isDirectory: true)
-        if let contents = try? fileManager.contentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for url in contents {
-                let name = url.lastPathComponent
-                let bundleId = name.replacingOccurrences(of: ".savedState", with: "")
-                if bundleId.hasPrefix("com.apple.") || isHogHunterIdentifier(bundleId) { continue }
-                if knownBundleIds.contains(bundleId.lowercased()) { continue }
+        if !Task.isCancelled {
+            let savedStateURL = userHomeURL.appendingPathComponent("Library/Saved Application State", isDirectory: true)
+            if let contents = try? fileManager.contentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    let bundleId = name.replacingOccurrences(of: ".savedState", with: "")
+                    if bundleId.hasPrefix("com.apple.") || isHogHunterIdentifier(bundleId) { continue }
+                    if knownBundleIds.contains(bundleId.lowercased()) { continue }
 
-                let stats = directoryStats(at: url)
-                guard stats.bytes > 0 else { continue }
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
 
-                items.append(CleanItem(
-                    category: .orphanedData,
-                    title: name,
-                    subtitle: "~/Library/Saved Application State/\(name)",
-                    url: url,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: CleanCategory.orphanedData.defaultSelected,
-                    detail: "Saved state from uninstalled app"
-                ))
+                    items.append(CleanItem(
+                        category: .orphanedData,
+                        title: name,
+                        subtitle: "~/Library/Saved Application State/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: CleanCategory.orphanedData.defaultSelected,
+                        detail: "Saved state from uninstalled app"
+                    ))
+                }
             }
         }
 
@@ -619,6 +636,7 @@ final class DiskCleaner: @unchecked Sendable {
         let brainURL = userHomeURL.appendingPathComponent(".gemini/antigravity/brain", isDirectory: true)
         if let brainContents = try? fileManager.contentsOfDirectory(at: brainURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
             for folderURL in brainContents {
+                if Task.isCancelled { break }
                 let name = folderURL.lastPathComponent
                 if name == "tempmediaStorage" { continue }
                 guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
@@ -643,66 +661,75 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 2. Grok sessions (~/.grok/sessions)
-        let grokURL = userHomeURL.appendingPathComponent(".grok/sessions", isDirectory: true)
-        if let grokContents = try? fileManager.contentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for folderURL in grokContents {
-                guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey]),
-                      let modDate = values.contentModificationDate,
-                      modDate < sevenDaysAgo else { continue }
-                let stats = directoryStats(at: folderURL)
-                guard stats.bytes > 0 else { continue }
-                items.append(CleanItem(
-                    category: .aiArtifacts,
-                    title: "Grok Session (\(folderURL.lastPathComponent.prefix(8)))",
-                    subtitle: "~/.grok/sessions/\(folderURL.lastPathComponent)",
-                    url: folderURL,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: modDate,
-                    isSelected: false,
-                    detail: "Grok transcript older than 7 days"
-                ))
+        if !Task.isCancelled {
+            let grokURL = userHomeURL.appendingPathComponent(".grok/sessions", isDirectory: true)
+            if let grokContents = try? fileManager.contentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for folderURL in grokContents {
+                    if Task.isCancelled { break }
+                    guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                          let modDate = values.contentModificationDate,
+                          modDate < sevenDaysAgo else { continue }
+                    let stats = directoryStats(at: folderURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .aiArtifacts,
+                        title: "Grok Session (\(folderURL.lastPathComponent.prefix(8)))",
+                        subtitle: "~/.grok/sessions/\(folderURL.lastPathComponent)",
+                        url: folderURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: modDate,
+                        isSelected: false,
+                        detail: "Grok transcript older than 7 days"
+                    ))
+                }
             }
         }
 
         // 3. Codex archived sessions (~/.codex/archived_sessions)
-        let codexURL = userHomeURL.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
-        if let codexContents = try? fileManager.contentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
-            for fileURL in codexContents {
-                let stats = directoryStats(at: fileURL)
-                guard stats.bytes > 0 else { continue }
-                items.append(CleanItem(
-                    category: .aiArtifacts,
-                    title: "Codex Archived Session (\(fileURL.lastPathComponent.prefix(16)))",
-                    subtitle: "~/.codex/archived_sessions/\(fileURL.lastPathComponent)",
-                    url: fileURL,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: false,
-                    detail: "Archived Codex transcript"
-                ))
-            }
-        }
-
-        // 4. Stale BotFleet update installers & temporary downloads (~/.BotFleet.update-*)
-        if let homeContents = try? fileManager.contentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
-            for url in homeContents {
-                let name = url.lastPathComponent
-                if name.hasPrefix(".BotFleet.update-") {
-                    let stats = directoryStats(at: url)
+        if !Task.isCancelled {
+            let codexURL = userHomeURL.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
+            if let codexContents = try? fileManager.contentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+                for fileURL in codexContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: fileURL)
                     guard stats.bytes > 0 else { continue }
                     items.append(CleanItem(
                         category: .aiArtifacts,
-                        title: name,
-                        subtitle: "~/\(name)",
-                        url: url,
+                        title: "Codex Archived Session (\(fileURL.lastPathComponent.prefix(16)))",
+                        subtitle: "~/.codex/archived_sessions/\(fileURL.lastPathComponent)",
+                        url: fileURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Stale BotFleet update package"
+                        detail: "Archived Codex transcript"
                     ))
+                }
+            }
+        }
+
+        // 4. Stale BotFleet update installers & temporary downloads (~/.BotFleet.update-*)
+        if !Task.isCancelled {
+            if let homeContents = try? fileManager.contentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                for url in homeContents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if name.hasPrefix(".BotFleet.update-") {
+                        let stats = directoryStats(at: url)
+                        guard stats.bytes > 0 else { continue }
+                        items.append(CleanItem(
+                            category: .aiArtifacts,
+                            title: name,
+                            subtitle: "~/\(name)",
+                            url: url,
+                            bytes: stats.bytes,
+                            fileCount: stats.fileCount,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "Stale BotFleet update package"
+                        ))
+                    }
                 }
             }
         }
@@ -735,6 +762,7 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         for folder in searchDirectories {
+            if Task.isCancelled { break }
             let dirURL = userHomeURL.appendingPathComponent(folder, isDirectory: true)
             guard let enumerator = fileManager.enumerator(
                 at: dirURL,
@@ -744,6 +772,7 @@ final class DiskCleaner: @unchecked Sendable {
 
             var count = 0
             for case let fileURL as URL in enumerator {
+                if Task.isCancelled { break }
                 count += 1
                 if count > 20_000 { break } // Protect against runaway directories
 
@@ -1002,6 +1031,7 @@ final class DiskCleaner: @unchecked Sendable {
         var latestDate: Date?
 
         for case let fileURL as URL in enumerator {
+            if Task.isCancelled { return (0, 0, nil) }
             guard let values = try? fileURL.resourceValues(forKeys: keys) else { continue }
             if values.isDirectory == true { continue }
 

@@ -40,6 +40,7 @@ final class DiskCleanerStore: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var cleanTask: Task<Void, Never>?
     private var currentScanId: UUID?
+    private var currentCleanId: UUID?
 
     init(cleaner: DiskCleaner = DiskCleaner()) {
         self.cleaner = cleaner
@@ -73,6 +74,7 @@ final class DiskCleanerStore: ObservableObject {
     /// Cancels all background cleaner tasks (scan or deletion).
     func cancelAll() {
         cancelScan()
+        currentCleanId = nil
         cleanTask?.cancel()
         cleanTask = nil
         if case .cleaning = state {
@@ -221,11 +223,14 @@ final class DiskCleanerStore: ObservableObject {
         let itemsToClean = report.categories.flatMap { $0.items }.filter { selectedItemIds.contains($0.id) }
         guard !itemsToClean.isEmpty else { return }
 
+        cleanTask?.cancel()
+        cleanTask = nil
+        let cleanId = UUID()
+        currentCleanId = cleanId
+
         let currentTier = selectedTier
         state = .cleaning(progress: 0, currentItem: "Preparing…")
 
-        var lastReportedTime = Date.distantPast
-        var lastReportedProgress: Double = -1.0
         cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
             var lastReportedTime = Date.distantPast
             var lastReportedProgress: Double = -1.0
@@ -236,7 +241,7 @@ final class DiskCleanerStore: ObservableObject {
                     lastReportedProgress = progress
                     lastReportedTime = now
                     Task { @MainActor [weak self] in
-                        guard let self, !Task.isCancelled else { return }
+                        guard let self, self.currentCleanId == cleanId else { return }
                         self.state = .cleaning(progress: progress, currentItem: currentItem)
                     }
                 }
@@ -245,10 +250,11 @@ final class DiskCleanerStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard let self, !Task.isCancelled else { return }
+                guard let self, self.currentCleanId == cleanId else { return }
                 self.selectedItemIds.removeAll()
                 self.state = .cleaned(result)
                 self.cleanTask = nil
+                self.currentCleanId = nil
             }
         }
     }

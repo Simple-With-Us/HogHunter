@@ -28,11 +28,13 @@ struct HogHunterPanel: View {
                 }
                 .opacity(selectedTab == .activity ? 1 : 0)
                 .allowsHitTesting(selectedTab == .activity)
+                .accessibilityHidden(selectedTab != .activity)
 
                 if hasVisitedStorage {
                     StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true, isTabActive: selectedTab == .storage)
                         .opacity(selectedTab == .storage ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage)
+                        .accessibilityHidden(selectedTab != .storage)
                 }
             }
         }
