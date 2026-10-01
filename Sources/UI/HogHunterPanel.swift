@@ -117,6 +117,16 @@ struct HogHunterPanel: View {
                     .frame(width: 18, height: 15)
                 Text("Hog Hunter")
                     .font(.system(size: 17, weight: .semibold))
+                if store.isStale {
+                    Text("Sampling Behind")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(Color.orange.opacity(0.15))
+                        )
+                }
             }
             .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
             .accessibilityElement(children: .combine)

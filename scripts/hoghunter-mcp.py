@@ -55,21 +55,51 @@ HIGH_CHURN_PATTERNS = [
     (r"torch/kernels", "PyTorch compiled kernel cache")
 ]
 
-PROHIBITED_DELETE_PREFIXES = [
-    "/System",
-    "/Library",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/Applications",
-    "/Users",
-    str(HOME),
-    str(HOME / "Library"),
-    str(HOME / "Desktop"),
-    str(HOME / "Documents"),
-    str(HOME / "Downloads"),
-    str(HOME / "Code"),
-    str(HOME / "apps")
+PROHIBITED_EXACT_ROOTS = [
+    Path("/"),
+    Path("/System"),
+    Path("/Library"),
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/Applications"),
+    Path("/Users"),
+    HOME,
+    HOME / "Library",
+    HOME / "Desktop",
+    HOME / "Documents",
+    HOME / "Downloads",
+    HOME / "Code",
+    HOME / "apps"
+]
+
+PROTECTED_SUBTREE_ROOTS = [
+    Path("/System"),
+    Path("/Library"),
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/Applications"),
+    HOME / "Code",
+    HOME / "apps"
+]
+
+SENSITIVE_USER_DIRECTORIES = [
+    HOME / ".ssh",
+    HOME / ".gnupg",
+    HOME / ".aws",
+    HOME / ".config",
+    HOME / ".secrets",
+    HOME / "Library" / "Mail",
+    HOME / "Library" / "Messages",
+    HOME / "Library" / "Keychains",
+    HOME / "Library" / "Photos",
+    HOME / "Library" / "Safari",
+    HOME / "Library" / "Calendars",
+    HOME / "Library" / "Containers",
+    HOME / "Pictures",
+    HOME / "Music",
+    HOME / "Movies"
 ]
 
 SYSTEM_CRITICAL_PROCESS_NAMES = {
@@ -149,7 +179,11 @@ def get_live_top_processes(sort_by: str = "cpu", limit: int = 10) -> List[Dict[s
 def get_historical_top_processes(window: str = "1h", sort_by: str = "cpu", limit: int = 10) -> List[Dict[str, Any]]:
     """Query historical samples from HogHunter SQLite database."""
     if not HOGHUNTER_DB_PATH.exists():
-        return get_live_top_processes(sort_by=sort_by, limit=limit)
+        return [{
+            "status": "unavailable",
+            "error": f"HogHunter historical database not found at {HOGHUNTER_DB_PATH}. History is recorded when the Hog Hunter app is running.",
+            "window": window
+        }]
 
     seconds = 3600 if window == "1h" else 86400
     cutoff = int(time.time()) - seconds
@@ -198,8 +232,11 @@ def get_historical_top_processes(window: str = "1h", sort_by: str = "cpu", limit
             })
         return results
     except Exception as exc:
-        # Fall back to live processes if SQLite is locked or unavailable
-        return get_live_top_processes(sort_by=sort_by, limit=limit)
+        return [{
+            "status": "unavailable",
+            "error": f"Failed to query historical database: {exc}",
+            "window": window
+        }]
 
 
 def get_network_activity(limit: int = 10) -> List[Dict[str, Any]]:
@@ -337,18 +374,24 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                         "churn_risk": "zero"
                     })
 
-    # ~/.BotFleet.update-* in home
+    # ~/.BotFleet.update-* in home (must be older than 7 days to not interrupt active downloads)
     for item in HOME.glob(".BotFleet.update-*"):
-        size = get_dir_size(item) if item.is_dir() else item.stat().st_size
-        if size > 0:
-            categories["botfleet_debris"].append({
-                "name": item.name,
-                "path": str(item),
-                "bytes": size,
-                "human_size": format_bytes(size),
-                "detail": "Stale BotFleet update package in home directory",
-                "churn_risk": "zero"
-            })
+        try:
+            mtime = item.stat().st_mtime
+            if time.time() - mtime < 7 * 86400:
+                continue
+            size = get_dir_size(item) if item.is_dir() else item.stat().st_size
+            if size > 0:
+                categories["botfleet_debris"].append({
+                    "name": item.name,
+                    "path": str(item),
+                    "bytes": size,
+                    "human_size": format_bytes(size),
+                    "detail": "Stale BotFleet update package in home directory (inactive > 7 days)",
+                    "churn_risk": "zero"
+                })
+        except OSError:
+            pass
 
     # ~/.botfleet/native rotated logs
     bf_native = HOME / ".botfleet" / "native"
@@ -585,22 +628,35 @@ def is_safe_to_delete(path_str: str) -> Tuple[bool, str]:
     if resolved_path == HOME.resolve():
         return False, "Prohibited: cannot delete user home directory itself"
 
-    # 2. Reject exact prohibited roots and protected source trees
-    for prohibited in PROHIBITED_DELETE_PREFIXES:
-        prohibited_path = Path(prohibited).resolve()
-        if resolved_path == prohibited_path:
-            return False, f"Prohibited: path matches critical system or root folder ({prohibited})"
-
-        # Check if resolved_path is a descendant of a protected code/system root
+    # 2. Reject sensitive user directories (SSH keys, GPG, Mail, Messages, etc.)
+    for sensitive in SENSITIVE_USER_DIRECTORIES:
+        sens_path = sensitive.resolve()
+        if resolved_path == sens_path:
+            return False, f"Prohibited: path is protected sensitive directory ({sensitive})"
         try:
-            rel = resolved_path.relative_to(prohibited_path)
+            resolved_path.relative_to(sens_path)
+            return False, f"Prohibited: path is inside protected sensitive directory ({sensitive})"
+        except ValueError:
+            pass
+
+    # 3. Reject exact prohibited roots
+    for prohibited in PROHIBITED_EXACT_ROOTS:
+        prohibited_path = prohibited.resolve()
+        if resolved_path == prohibited_path:
+            return False, f"Prohibited: path matches critical root folder ({prohibited})"
+
+    # 4. Reject protected source trees and system folders (with BotFleet updater exception)
+    for protected in PROTECTED_SUBTREE_ROOTS:
+        protected_path = protected.resolve()
+        try:
+            rel = resolved_path.relative_to(protected_path)
             # Allowed exception: BotFleet update debris in ~/apps
             # e.g., ~/apps/.botfleet-server.node_modules.*
-            if prohibited_path == (HOME / "apps").resolve():
+            if protected_path == (HOME / "apps").resolve():
                 parts = rel.parts
                 if parts and parts[0].startswith(".botfleet-server.node_modules."):
                     continue
-            return False, f"Prohibited: path is inside protected folder ({prohibited})"
+            return False, f"Prohibited: path is inside protected folder ({protected})"
         except ValueError:
             pass
 
@@ -613,7 +669,8 @@ def is_safe_to_delete(path_str: str) -> Tuple[bool, str]:
 def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool = True) -> Dict[str, Any]:
     """Execute clutter cleanup with trash and APFS snapshot protection."""
     results = []
-    total_reclaimed = 0
+    total_permanently_reclaimed = 0
+    total_moved_to_trash = 0
     snapshot_name = None
 
     if create_snapshot and not dry_run:
@@ -647,13 +704,15 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
                 "bytes_reclaimable": size,
                 "human_size": format_bytes(size)
             })
-            total_reclaimed += size
+            total_permanently_reclaimed += size
         else:
             try:
                 # Move to macOS Trash via file system move, or remove if already in ~/.Trash
                 trash_target = HOME / ".Trash" / path.name
-                if trash_target.exists():
-                    trash_target = HOME / ".Trash" / f"{path.name}.{int(time.time())}"
+                counter = 1
+                while trash_target.exists():
+                    trash_target = HOME / ".Trash" / f"{path.stem}.{int(time.time())}.{counter}{path.suffix}"
+                    counter += 1
 
                 is_in_trash = False
                 try:
@@ -668,25 +727,33 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
                         shutil.rmtree(path)
                     else:
                         path.unlink()
+                    total_permanently_reclaimed += size
+                    results.append({
+                        "path": p_str,
+                        "status": "permanently_deleted",
+                        "bytes_permanently_reclaimed": size,
+                        "human_size": format_bytes(size)
+                    })
                 else:
                     # Move to Trash
                     shutil.move(str(path), str(trash_target))
-
-                total_reclaimed += size
-                results.append({
-                    "path": p_str,
-                    "status": "trashed",
-                    "bytes_reclaimed": size,
-                    "human_size": format_bytes(size)
-                })
+                    total_moved_to_trash += size
+                    results.append({
+                        "path": p_str,
+                        "status": "moved_to_trash",
+                        "bytes_moved_to_trash": size,
+                        "human_size": format_bytes(size)
+                    })
             except Exception as exc:
                 results.append({"path": p_str, "status": "failed", "error": str(exc)})
 
     return {
         "dry_run": dry_run,
         "snapshot": snapshot_name,
-        "total_bytes_reclaimed": total_reclaimed,
-        "total_human_reclaimed": format_bytes(total_reclaimed),
+        "total_bytes_permanently_reclaimed": total_permanently_reclaimed,
+        "total_human_permanently_reclaimed": format_bytes(total_permanently_reclaimed),
+        "total_bytes_moved_to_trash": total_moved_to_trash,
+        "total_human_moved_to_trash": format_bytes(total_moved_to_trash),
         "items": results
     }
 
@@ -868,6 +935,10 @@ def run_stdio_mcp_server() -> None:
         method = req.get("method")
         params = req.get("params", {})
 
+        # Handle notifications: Per JSON-RPC 2.0, the server MUST NOT reply to notifications.
+        if req_id is None or (method and method.startswith("notifications/")):
+            continue
+
         if method == "initialize":
             res = {
                 "jsonrpc": "2.0",
@@ -878,8 +949,6 @@ def run_stdio_mcp_server() -> None:
                     "capabilities": {"tools": {}}
                 }
             }
-        elif method == "notifications/initialized":
-            continue
         elif method == "ping":
             res = {"jsonrpc": "2.0", "id": req_id, "result": {}}
         elif method == "tools/list":
