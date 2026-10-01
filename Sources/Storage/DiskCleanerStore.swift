@@ -39,6 +39,7 @@ final class DiskCleanerStore: ObservableObject {
     private var isScanInFlight = false
     private var scanTask: Task<Void, Never>?
     private var cleanTask: Task<Void, Never>?
+    private var currentScanId: UUID?
 
     init(cleaner: DiskCleaner = DiskCleaner()) {
         self.cleaner = cleaner
@@ -60,6 +61,7 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Cancels any in-flight clutter scan.
     func cancelScan() {
+        currentScanId = nil
         scanTask?.cancel()
         scanTask = nil
         isScanInFlight = false
@@ -82,6 +84,8 @@ final class DiskCleanerStore: ObservableObject {
     func scan() {
         cancelScan()
         isScanInFlight = true
+        let scanId = UUID()
+        currentScanId = scanId
         let currentTier = selectedTier
         state = .scanning(category: "Starting \(currentTier.title) scan…")
 
@@ -89,7 +93,7 @@ final class DiskCleanerStore: ObservableObject {
         scanTask = Task.detached(priority: .utility) { [weak self, cleaner] in
             let scanReport = await cleaner.scan(tier: currentTier) { categoryTitle in
                 Task { @MainActor [weak self] in
-                    guard let self, !Task.isCancelled else { return }
+                    guard let self, self.currentScanId == scanId else { return }
                     self.state = .scanning(category: categoryTitle)
                 }
             }
@@ -97,7 +101,7 @@ final class DiskCleanerStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard let self, !Task.isCancelled else { return }
+                guard let self, self.currentScanId == scanId else { return }
                 self.report = scanReport
 
                 // Initialize selections according to category defaultSelected
@@ -111,6 +115,7 @@ final class DiskCleanerStore: ObservableObject {
                 self.state = .scanned(scanReport)
                 self.isScanInFlight = false
                 self.scanTask = nil
+                self.currentScanId = nil
             }
         }
     }

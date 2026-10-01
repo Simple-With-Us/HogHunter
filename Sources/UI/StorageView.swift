@@ -23,10 +23,12 @@ struct StorageView: View {
     @State private var expandedUsageId: String?
 
     private let embeddedInPanel: Bool
+    private let isTabActive: Bool
 
-    init(runningBundleIds: @escaping () -> Set<String>, embeddedInPanel: Bool = false) {
+    init(runningBundleIds: @escaping () -> Set<String>, embeddedInPanel: Bool = false, isTabActive: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
         self.embeddedInPanel = embeddedInPanel
+        self.isTabActive = isTabActive
     }
 
     var body: some View {
@@ -41,7 +43,7 @@ struct StorageView: View {
                 list
                 footer
             case .diskCleaner:
-                DiskCleanerView()
+                DiskCleanerView(isTabActive: isTabActive)
             }
         }
         .padding(embeddedInPanel ? 0 : 16)

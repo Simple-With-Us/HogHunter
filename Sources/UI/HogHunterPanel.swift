@@ -30,7 +30,7 @@ struct HogHunterPanel: View {
                 .allowsHitTesting(selectedTab == .activity)
 
                 if hasVisitedStorage {
-                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true)
+                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true, isTabActive: selectedTab == .storage)
                         .opacity(selectedTab == .storage ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage)
                 }

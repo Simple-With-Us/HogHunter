@@ -6,6 +6,7 @@ import SwiftUI
 /// Offers category-by-category breakdown, selective item inspection, and safe one-click reclamation.
 struct DiskCleanerView: View {
     @StateObject private var store = DiskCleanerStore()
+    var isTabActive: Bool = true
 
     var body: some View {
         VStack(spacing: 10) {
@@ -18,7 +19,12 @@ struct DiskCleanerView: View {
             bottomBar
         }
         .onAppear {
-            if case .idle = store.state {
+            if isTabActive, case .idle = store.state {
+                store.scan()
+            }
+        }
+        .onChange(of: isTabActive) { active in
+            if active, case .idle = store.state {
                 store.scan()
             }
         }
