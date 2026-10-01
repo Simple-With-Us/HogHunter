@@ -103,7 +103,8 @@ SENSITIVE_USER_DIRECTORIES = [
 ]
 
 SYSTEM_CRITICAL_PROCESS_NAMES = {
-    "launchd", "kernel_task", "windowserver", "loginwindow", "systemstatusbar",
+    "launchd", "kernel_task", "windowserver", "loginwindow", "systemuiserver",
+    "controlcenter", "notificationcenter", "finder", "dock", "coreaudiod",
     "hoghunter", "securityd", "opendirectoryd", "diskarbitrationd"
 }
 
@@ -218,7 +219,7 @@ def get_historical_top_processes(window: str = "1h", sort_by: str = "cpu", limit
         results = []
         for row in rows:
             results.append({
-                "pid": row[0],
+                "last_sampled_pid": row[0],
                 "name": row[1],
                 "bundle_id": row[2],
                 "avg_cpu_percent": round(row[3], 1),
@@ -228,7 +229,8 @@ def get_historical_top_processes(window: str = "1h", sort_by: str = "cpu", limit
                 "max_memory_bytes": int(row[6]),
                 "max_memory_human": format_bytes(int(row[6])),
                 "samples_recorded": row[7],
-                "window": window
+                "window": window,
+                "note": "Historical sample PID; do not pass directly to quit_process as PIDs may have been recycled. Use 'now' window for live termination."
             })
         return results
     except Exception as exc:
@@ -513,23 +515,53 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                         "recommendation": audit["recommendation"]
                     })
 
-        log_dirs = [
-            ("User Diagnostic Reports", HOME / "Library" / "Logs" / "DiagnosticReports"),
-            ("CrashReporter", HOME / "Library" / "Application Support" / "CrashReporter"),
-            ("User Logs", HOME / "Library" / "Logs")
-        ]
-        for name, p in log_dirs:
-            if p.exists():
-                size = get_dir_size(p)
-                if size >= 1024 * 1024:  # >= 1 MB
-                    categories["logs_diagnostics"].append({
-                        "name": name,
-                        "path": str(p),
-                        "bytes": size,
-                        "human_size": format_bytes(size),
-                        "detail": "Historical crash traces, diagnostic logs, and application stdout logs",
-                        "churn_risk": "zero"
-                    })
+        # CrashReporter
+        crash_reporter = HOME / "Library" / "Application Support" / "CrashReporter"
+        if crash_reporter.exists():
+            size = get_dir_size(crash_reporter)
+            if size >= 1024 * 1024:
+                categories["logs_diagnostics"].append({
+                    "name": "CrashReporter",
+                    "path": str(crash_reporter),
+                    "bytes": size,
+                    "human_size": format_bytes(size),
+                    "detail": "Application crash reporter traces",
+                    "churn_risk": "zero"
+                })
+
+        # User Diagnostic Reports
+        diag_reports = HOME / "Library" / "Logs" / "DiagnosticReports"
+        if diag_reports.exists():
+            size = get_dir_size(diag_reports)
+            if size >= 1024 * 1024:
+                categories["logs_diagnostics"].append({
+                    "name": "User Diagnostic Reports",
+                    "path": str(diag_reports),
+                    "bytes": size,
+                    "human_size": format_bytes(size),
+                    "detail": "System and user diagnostic crash reports",
+                    "churn_risk": "zero"
+                })
+
+        # Other logs in ~/Library/Logs excluding DiagnosticReports to avoid double-counting
+        user_logs = HOME / "Library" / "Logs"
+        if user_logs.exists():
+            try:
+                for child in user_logs.iterdir():
+                    if child.name in ["DiagnosticReports", ".DS_Store"] or "hoghunter" in child.name.lower():
+                        continue
+                    size = get_dir_size(child) if child.is_dir() else get_allocated_size(child)
+                    if size >= 1024 * 1024:
+                        categories["logs_diagnostics"].append({
+                            "name": f"User Logs ({child.name})",
+                            "path": str(child),
+                            "bytes": size,
+                            "human_size": format_bytes(size),
+                            "detail": "Application log files",
+                            "churn_risk": "zero"
+                        })
+            except OSError:
+                pass
 
         categories["large_and_old_files"] = []
         for search_folder in [HOME / "Downloads", HOME / "Desktop", HOME / "Documents"]:
@@ -590,14 +622,16 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
     }
 
 
-def get_dir_size(path: Path) -> int:
-    """Calculate allocated bytes of directory safely."""
-    total = 0
+def get_allocated_size(path: Path) -> int:
+    """Calculate allocated disk bytes using st_blocks * 512 consistently."""
     try:
         if path.is_symlink() or not path.exists():
             return 0
         if path.is_file():
-            return path.stat().st_size
+            st = path.stat()
+            blocks = getattr(st, "st_blocks", 0)
+            return blocks * 512 if blocks > 0 else st.st_size
+        total = 0
         for root, dirs, files in os.walk(path, topdown=True):
             # Guard against runaway recursion
             if ".git" in dirs:
@@ -606,12 +640,19 @@ def get_dir_size(path: Path) -> int:
                 try:
                     fp = os.path.join(root, f)
                     if not os.path.islink(fp):
-                        total += os.path.getsize(fp)
+                        st = os.stat(fp)
+                        blocks = getattr(st, "st_blocks", 0)
+                        total += blocks * 512 if blocks > 0 else st.st_size
                 except OSError:
                     continue
+        return total
     except OSError:
-        pass
-    return total
+        return 0
+
+
+def get_dir_size(path: Path) -> int:
+    """Calculate allocated bytes of directory safely."""
+    return get_allocated_size(path)
 
 
 def is_safe_to_delete(path_str: str) -> Tuple[bool, str]:
@@ -671,6 +712,7 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
     results = []
     total_permanently_reclaimed = 0
     total_moved_to_trash = 0
+    total_planned_reclaimable = 0
     snapshot_name = None
 
     if create_snapshot and not dry_run:
@@ -696,7 +738,7 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
             results.append({"path": p_str, "status": "rejected", "error": reason})
             continue
 
-        size = get_dir_size(path) if path.is_dir() else path.stat().st_size
+        size = get_allocated_size(path)
         if dry_run:
             results.append({
                 "path": p_str,
@@ -704,7 +746,7 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
                 "bytes_reclaimable": size,
                 "human_size": format_bytes(size)
             })
-            total_permanently_reclaimed += size
+            total_planned_reclaimable += size
         else:
             try:
                 # Move to macOS Trash via file system move, or remove if already in ~/.Trash
@@ -754,6 +796,8 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
         "total_human_permanently_reclaimed": format_bytes(total_permanently_reclaimed),
         "total_bytes_moved_to_trash": total_moved_to_trash,
         "total_human_moved_to_trash": format_bytes(total_moved_to_trash),
+        "total_bytes_planned_reclaimable": total_planned_reclaimable if dry_run else 0,
+        "total_human_planned_reclaimable": format_bytes(total_planned_reclaimable if dry_run else 0),
         "items": results
     }
 
@@ -768,24 +812,32 @@ def quit_process(pid: int, force: bool = False) -> Dict[str, Any]:
     except Exception:
         return {"success": False, "error": f"Process {pid} not found"}
 
+    try:
+        uid_str = subprocess.check_output(["ps", "-p", str(pid), "-o", "uid="], text=True).strip()
+        if int(uid_str) != os.getuid():
+            return {"success": False, "error": f"Process {pid} is owned by another user (UID {uid_str})"}
+    except Exception:
+        pass
+
     base_name = Path(proc_name).name.lower()
     if base_name in SYSTEM_CRITICAL_PROCESS_NAMES:
         return {"success": False, "error": f"Refusing to kill critical system process: {base_name}"}
 
-    try:
-        # Try graceful AppleScript quit first if it's an app
-        script = f'tell application "System Events" to set procName to name of first process whose unix id is {pid}\n' \
-                 f'tell application procName to quit'
-        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=2)
-        if res.returncode == 0:
-            return {"success": True, "method": "applescript", "pid": pid, "name": base_name}
-    except Exception:
-        pass
+    if not force:
+        try:
+            # Try graceful AppleScript quit first if it's an app
+            script = f'tell application "System Events" to set procName to name of first process whose unix id is {pid}\n' \
+                     f'tell application procName to quit'
+            res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=2)
+            if res.returncode == 0:
+                return {"success": True, "method": "applescript", "pid": pid, "name": base_name}
+        except Exception:
+            pass
 
     sig = 9 if force else 15
     try:
         os.kill(pid, sig)
-        return {"success": True, "method": f"SIGKILL" if force else "SIGTERM", "pid": pid, "name": base_name}
+        return {"success": True, "method": "SIGKILL" if force else "SIGTERM", "pid": pid, "name": base_name}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -929,6 +981,13 @@ def run_stdio_mcp_server() -> None:
         try:
             req = json.loads(line)
         except json.JSONDecodeError:
+            err_res = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error: Invalid JSON"}
+            }
+            sys.stdout.write(json.dumps(err_res) + "\n")
+            sys.stdout.flush()
             continue
 
         req_id = req.get("id")
