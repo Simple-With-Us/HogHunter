@@ -105,15 +105,20 @@ elif name == 'security':
 elif name == 'codesign':
     if '-d' in args: sys.stdout.buffer.write((root / 'entitlements.plist').read_bytes())
 elif name == 'xcrun':
-    assert args[:2] == ['altool', '--upload-app']
-    assert option('--p8-file-path') == os.environ['ASC_KEY_PATH']
+    assert args[:2] == ['altool', '--upload-package']
+    assert option('--apiKey') == os.environ['ASC_KEY_ID']
+    assert option('--apiIssuer') == os.environ['ASC_ISSUER_ID']
+    assert '--p8-file-path' not in args
     assert option('--type') == 'ios'
-    assert option('--output-format') == 'json'
+    staged = pathlib.Path.home() / '.appstoreconnect/private_keys' / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
+    assert staged.is_file(), f'missing staged key at {staged}'
     (root / 'upload-invoked').write_text('yes')
     if os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
-        print('{"product-errors": [{"message": "synthetic upload failure"}]}')
+        print('UPLOAD FAILED with 1 error')
+        print('ExitFailure (31)')
+        raise SystemExit(1)
     else:
-        print('{"success-message": "synthetic upload accepted"}')
+        print('No errors uploading package')
 else:
     raise SystemExit('unknown synthetic tool')
 '''
@@ -162,7 +167,10 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(uploaded)
         self.assertNotIn("Upload command succeeded", result.stdout)
-        self.assertIn("upload not confirmed", result.stderr)
+        self.assertTrue(
+            ("altool upload failed" in result.stderr) or ("upload failure" in result.stderr),
+            result.stderr,
+        )
 
     def test_invalid_export_stops_before_upload(self):
         result, uploaded = self.run_release(upload=True, bad_export=True)
