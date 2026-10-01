@@ -13,6 +13,7 @@ struct HogHunterPanel: View {
     @Environment(\.openWindow) private var openWindow
     @State private var selectedTab: PanelTab = .activity
     @State private var pendingQuit: HogRow?
+    @State private var hasVisitedStorage: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -28,19 +29,34 @@ struct HogHunterPanel: View {
                 .opacity(selectedTab == .activity ? 1 : 0)
                 .allowsHitTesting(selectedTab == .activity)
 
-                StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true)
-                    .opacity(selectedTab == .storage ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .storage)
+                if hasVisitedStorage {
+                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true)
+                        .opacity(selectedTab == .storage ? 1 : 0)
+                        .allowsHitTesting(selectedTab == .storage)
+                }
             }
         }
         .padding(14)
         .frame(width: 560, height: 680)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(store.appearance.colorScheme)
-        .onAppear { store.panelVisible = true }
-        .onDisappear { store.panelVisible = false }
+        .onChange(of: selectedTab) { newTab in
+            if newTab == .storage {
+                hasVisitedStorage = true
+            }
+        }
+        .onAppear {
+            store.panelVisible = true
+            if selectedTab == .storage {
+                hasVisitedStorage = true
+            }
+        }
+        .onDisappear {
+            store.panelVisible = false
+            hasVisitedStorage = false
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Hog Hunter — top processes")
+        .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : "Hog Hunter — storage and disk cleaner")
         .alert(
             pendingQuit.map { "Quit \($0.name)?" } ?? "Quit Process?",
             isPresented: Binding(
