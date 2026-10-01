@@ -183,4 +183,9 @@ jobs:
           if [[ -n "${ASC_KEY_PATH:-}" && "$ASC_KEY_PATH" == "$RUNNER_TEMP"/asc-signing.*/AuthKey.p8 ]]; then
             rm -rf "$(dirname "$ASC_KEY_PATH")"
           fi
-          rm -rf "$HOME/.appstoreconnect/private_keys"
+          # altool staging copy (AuthKey_<KEY_ID>.p8); remove only the file this
+          # run staged.  Avoid `rm -rf` of the directory -- other runs on the
+          # shared runner may have unrelated keys there.
+          if [[ -n "${ASC_KEY_ID:-}" ]]; then
+            rm -f "${HOME}/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          fi
