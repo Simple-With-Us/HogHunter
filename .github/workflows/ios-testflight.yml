@@ -183,3 +183,7 @@ jobs:
           if [[ -n "${ASC_KEY_PATH:-}" && "$ASC_KEY_PATH" == "$RUNNER_TEMP"/asc-signing.*/AuthKey.p8 ]]; then
             rm -rf "$(dirname "$ASC_KEY_PATH")"
           fi
+          # altool staging copy (AuthKey_<KEY_ID>.p8); ignore if absent or shared.
+          if [[ -n "${ASC_KEY_ID:-}" ]]; then
+            rm -f "${HOME}/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          fi
