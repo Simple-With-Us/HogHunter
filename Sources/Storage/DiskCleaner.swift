@@ -787,8 +787,7 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        let sorted = items.sorted { $0.bytes > $1.bytes }
-        return Array(sorted.prefix(200))
+        return items.sorted { $0.bytes > $1.bytes }
     }
 
     // MARK: - Cleaning Execution

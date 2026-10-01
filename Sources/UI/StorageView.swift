@@ -52,17 +52,33 @@ struct StorageView: View {
             if !embeddedInPanel {
                 WindowActivator.front()
             }
-            if selectedTab == .appStorage, case .idle = store.state {
-                store.refresh()
+            if isTabActive {
+                if selectedTab == .appStorage, case .idle = store.state {
+                    store.refresh()
+                }
+                startRefreshTimer()
             }
-            startRefreshTimer()
+        }
+        .onChange(of: isTabActive) { active in
+            if active {
+                if selectedTab == .appStorage, case .idle = store.state {
+                    store.refresh()
+                }
+                startRefreshTimer()
+            } else {
+                refreshTask?.cancel()
+                refreshTask = nil
+            }
         }
         .onChange(of: selectedTab) { newTab in
-            if newTab == .appStorage, case .idle = store.state {
+            if isTabActive, newTab == .appStorage, case .idle = store.state {
                 store.refresh()
             }
         }
-        .onDisappear { refreshTask?.cancel() }
+        .onDisappear {
+            refreshTask?.cancel()
+            refreshTask = nil
+        }
         .navigationTitle("Storage — Hog Hunter")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hog Hunter Storage — top apps and disk cleaner")
@@ -242,7 +258,7 @@ struct StorageView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                 if Task.isCancelled { return }
-                if selectedTab == .appStorage {
+                if isTabActive && selectedTab == .appStorage {
                     store.refresh()
                 }
             }
