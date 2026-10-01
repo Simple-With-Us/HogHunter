@@ -53,7 +53,6 @@ struct HogHunterPanel: View {
         }
         .onDisappear {
             store.panelVisible = false
-            hasVisitedStorage = false
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : "Hog Hunter — storage and disk cleaner")
@@ -113,6 +112,9 @@ struct HogHunterPanel: View {
                         .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
                 }
             }
+            .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter, sampling is up to date")
 
             Spacer()
 
@@ -127,9 +129,6 @@ struct HogHunterPanel: View {
 
             gearMenu
         }
-        .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter, sampling is up to date")
     }
 
     private var gearMenu: some View {

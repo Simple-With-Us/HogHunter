@@ -816,7 +816,15 @@ final class DiskCleaner: @unchecked Sendable {
         let totalItems = max(1, items.count)
 
         for (index, item) in items.enumerated() {
+            if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                break
+            }
             await Task.yield()
+            if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                break
+            }
             let progressFraction = Double(index) / Double(totalItems)
             progress?(progressFraction, item.title)
 
