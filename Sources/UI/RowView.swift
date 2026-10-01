@@ -163,6 +163,12 @@ enum HogActions {
 
     @MainActor
     static func bringWindowToFront(titles: [String], id: String) {
+        // Dismiss any open MenuBarExtra panel so the standalone window is never obscured beneath it
+        for window in NSApp.windows {
+            if window is NSPanel || window.className.contains("MenuBarExtra") || window.styleMask.contains(.nonactivatingPanel) {
+                window.orderOut(nil)
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
         for window in NSApp.windows {
             let matchesId = window.identifier?.rawValue.contains(id) == true

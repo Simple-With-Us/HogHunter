@@ -106,7 +106,8 @@ elif name == 'codesign':
     if '-d' in args: sys.stdout.buffer.write((root / 'entitlements.plist').read_bytes())
 elif name == 'xcrun':
     assert args[:2] == ['altool', '--upload-app']
-    assert option('--p8-file-path') == os.environ['ASC_KEY_PATH']
+    assert option('--api-key') == os.environ['ASC_KEY_ID']
+    assert option('--api-issuer') == os.environ['ASC_ISSUER_ID']
     assert option('--type') == 'ios'
     assert option('--output-format') == 'json'
     (root / 'upload-invoked').write_text('yes')

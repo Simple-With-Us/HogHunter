@@ -1,22 +1,35 @@
 import AppKit
 import SwiftUI
 
+enum PanelTab: String, CaseIterable, Identifiable {
+    case activity = "Activity"
+    case storage = "Storage"
+
+    var id: String { rawValue }
+}
+
 struct HogHunterPanel: View {
     @EnvironmentObject private var store: HogStore
     @Environment(\.openWindow) private var openWindow
+    @State private var selectedTab: PanelTab = .activity
     @State private var pendingQuit: HogRow?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            meters
-            captions
-            controls
-            list
-            footer
+            switch selectedTab {
+            case .activity:
+                meters
+                captions
+                controls
+                list
+                footer
+            case .storage:
+                StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true)
+            }
         }
         .padding(14)
-        .frame(width: 400, height: 580)
+        .frame(width: 560, height: 680)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(store.appearance.colorScheme)
         .onAppear { store.panelVisible = true }
@@ -60,37 +73,36 @@ struct HogHunterPanel: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "flame.fill")
-                .foregroundStyle(Color(red: 0.86, green: 0.32, blue: 0.16))
-            Text("Hog Hunter")
-                .font(.system(size: 18, weight: .semibold))
-            Circle()
-                .fill(store.isStale
-                      ? Color(red: 0.80, green: 0.52, blue: 0.10)
-                      : Color(red: 0.16, green: 0.58, blue: 0.30))
-                .frame(width: 7, height: 7)
-            if store.alertsEnabled {
-                Image(systemName: "bell.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .help("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) min.")
-                    .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
-            }
-            Spacer()
-            Button {
-                HogActions.openStorageWindow(openWindow: openWindow)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "internaldrive")
-                    Text("Storage")
+        HStack(alignment: .center, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "flame.fill")
+                    .foregroundStyle(Color(red: 0.86, green: 0.32, blue: 0.16))
+                Text("Hog Hunter")
+                    .font(.system(size: 17, weight: .semibold))
+                Circle()
+                    .fill(store.isStale
+                          ? Color(red: 0.80, green: 0.52, blue: 0.10)
+                          : Color(red: 0.16, green: 0.58, blue: 0.30))
+                    .frame(width: 7, height: 7)
+                if store.alertsEnabled {
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .help("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) min.")
+                        .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
                 }
-                .font(.system(size: 11, weight: .medium))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Open Storage and Disk Cleaner")
-            .accessibilityLabel("Open Storage and Disk Cleaner")
+
+            Spacer()
+
+            Picker("Tab", selection: $selectedTab) {
+                Label("Activity", systemImage: "flame.fill").tag(PanelTab.activity)
+                Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 190)
+
+            Spacer()
 
             gearMenu
         }
@@ -104,8 +116,8 @@ struct HogHunterPanel: View {
             SettingsLink {
                 Text("Settings…")
             }
-            Button("Storage…") { HogActions.openStorageWindow(openWindow: openWindow) }
-            Button("Network…") { HogActions.openNetworkWindow(openWindow: openWindow) }
+            Button("Open Storage Window…") { HogActions.openStorageWindow(openWindow: openWindow) }
+            Button("Network Window…") { HogActions.openNetworkWindow(openWindow: openWindow) }
             Divider()
             Button("Activity Monitor") { HogActions.openActivityMonitor() }
             Divider()

@@ -70,9 +70,25 @@ apps=("$work_dir/ipa/Payload/"*.app)
 validate_app "${apps[0]}" true
 
 if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
+  asc_keys_dir="${HOME}/.appstoreconnect/private_keys"
+  mkdir -p "$asc_keys_dir"
+  chmod 700 "$asc_keys_dir"
+  cp "$ASC_KEY_PATH" "${asc_keys_dir}/AuthKey_${ASC_KEY_ID}.p8"
+  chmod 600 "${asc_keys_dir}/AuthKey_${ASC_KEY_ID}.p8"
+  export API_PRIVATE_KEYS_DIR="$asc_keys_dir"
+
+  set +e
   xcrun altool --upload-app -f "${ipas[0]}" --type ios --output-format json \
-    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" \
-    --p8-file-path "$ASC_KEY_PATH" > "$work_dir/upload-result.json"
+    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" > "$work_dir/upload-result.json" 2>&1
+  altool_rc=$?
+  set -e
+
+  cat "$work_dir/upload-result.json"
+  if [[ $altool_rc -ne 0 ]]; then
+    echo "error: altool upload failed with exit code $altool_rc" >&2
+    exit $altool_rc
+  fi
+
   python3 - "$work_dir/upload-result.json" <<'PYUPLOAD'
 import json, sys
 try:

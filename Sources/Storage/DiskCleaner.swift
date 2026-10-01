@@ -708,12 +708,19 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
-    /// Scans user folders (Downloads, Documents, Desktop) for files >100 MB or untouched >6 months.
+    private static let itemDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        return df
+    }()
+
+    /// Scans user folders (Downloads, Documents, Desktop) for files >100 MB or untouched >6 months (>=20 MB).
     func scanLargeAndOldFiles() -> [CleanItem] {
         var items: [CleanItem] = []
         let searchDirectories = ["Downloads", "Documents", "Desktop"]
         let sixMonthsAgo = Calendar.current.date(byAdding: .month, value: -6, to: Date()) ?? Date()
         let largeThreshold: UInt64 = 100 * 1024 * 1024 // 100 MB
+        let oldThreshold: UInt64 = 20 * 1024 * 1024    // 20 MB minimum for old files
 
         let keys: Set<URLResourceKey> = [
             .fileAllocatedSizeKey,
@@ -754,15 +761,13 @@ final class DiskCleaner: @unchecked Sendable {
                 let modDate = values.contentModificationDate
 
                 let isLarge = size >= largeThreshold
-                let isOld = (modDate != nil && modDate! < sixMonthsAgo)
+                let isOld = size >= oldThreshold && (modDate != nil && modDate! < sixMonthsAgo)
 
                 if isLarge || isOld {
                     var reasons: [String] = []
                     if isLarge { reasons.append(">100 MB (\(HogFormat.memory(size)))") }
                     if isOld, let mod = modDate {
-                        let df = DateFormatter()
-                        df.dateStyle = .medium
-                        reasons.append("Last modified: \(df.string(from: mod))")
+                        reasons.append("Last modified: \(Self.itemDateFormatter.string(from: mod))")
                     }
 
                     items.append(CleanItem(
@@ -780,7 +785,8 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        return items.sorted { $0.bytes > $1.bytes }
+        let sorted = items.sorted { $0.bytes > $1.bytes }
+        return Array(sorted.prefix(200))
     }
 
     // MARK: - Cleaning Execution

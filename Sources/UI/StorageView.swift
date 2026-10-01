@@ -22,14 +22,17 @@ struct StorageView: View {
     @State private var filter: StorageFilter = .all
     @State private var expandedUsageId: String?
 
-    init(runningBundleIds: @escaping () -> Set<String>) {
+    private let embeddedInPanel: Bool
+
+    init(runningBundleIds: @escaping () -> Set<String>, embeddedInPanel: Bool = false) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+        self.embeddedInPanel = embeddedInPanel
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-                .padding(.top, 4)
+                .padding(.top, embeddedInPanel ? 0 : 4)
 
             switch selectedTab {
             case .appStorage:
@@ -41,12 +44,12 @@ struct StorageView: View {
                 DiskCleanerView()
             }
         }
-        .padding(16)
-        .frame(minWidth: 540, minHeight: 640)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .background(WindowActivator())
+        .padding(embeddedInPanel ? 0 : 16)
+        .modifier(PanelFrameModifier(embeddedInPanel: embeddedInPanel))
         .onAppear {
-            WindowActivator.front()
+            if !embeddedInPanel {
+                WindowActivator.front()
+            }
             if selectedTab == .appStorage, case .idle = store.state {
                 store.refresh()
             }
@@ -252,5 +255,20 @@ private extension StorageStore.State {
     var completedAt: Date? {
         if case .completed(let at) = self { return at }
         return nil
+    }
+}
+
+private struct PanelFrameModifier: ViewModifier {
+    let embeddedInPanel: Bool
+
+    func body(content: Content) -> some View {
+        if embeddedInPanel {
+            content
+        } else {
+            content
+                .frame(minWidth: 540, minHeight: 640)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .background(WindowActivator())
+        }
     }
 }

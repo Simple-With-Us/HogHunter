@@ -344,13 +344,25 @@ struct DiskCleanerView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 10)
                 } else {
-                    VStack(spacing: 0) {
-                        ForEach(catReport.items) { item in
+                    let displayLimit = 50
+                    let visibleItems = Array(catReport.items.prefix(displayLimit))
+                    let remainingCount = catReport.items.count - visibleItems.count
+
+                    LazyVStack(spacing: 0) {
+                        ForEach(visibleItems) { item in
                             itemRow(item)
-                            if item.id != catReport.items.last?.id {
-                                Divider()
-                                    .padding(.leading, 32)
+                            Divider()
+                                .padding(.leading, 32)
+                        }
+                        if remainingCount > 0 {
+                            HStack {
+                                Text("… and \(remainingCount) more files (all included in reclamation)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
                             }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
                         }
                     }
                     .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
