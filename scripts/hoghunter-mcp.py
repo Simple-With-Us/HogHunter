@@ -244,50 +244,60 @@ def get_historical_top_processes(window: str = "1h", sort_by: str = "cpu", limit
 def get_network_activity(limit: int = 10) -> List[Dict[str, Any]]:
     """Query active established TCP connections grouped by process."""
     try:
-        output = subprocess.check_output(
-            ["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED"],
+        proc = subprocess.run(
+            ["/usr/sbin/lsof", "-n", "-P", "-iTCP", "-sTCP:ESTABLISHED", "-F", "pcn"],
+            capture_output=True,
             text=True,
-            stderr=subprocess.DEVNULL
+            timeout=10
         )
+        if proc.returncode != 0 and not proc.stdout:
+            # lsof returns status 1 when no connections match
+            return []
+        output = proc.stdout
     except Exception as exc:
         return [{"error": f"Failed to run lsof: {exc}"}]
 
-    lines = output.strip().splitlines()
-    if len(lines) <= 1:
-        return []
-
-    # Map: pid -> {name, established_count, endpoints: set}
+    # Machine-readable -F format:
+    # p<pid>
+    # c<command>
+    # n<local>-><remote>
     process_conns: Dict[int, Dict[str, Any]] = {}
+    current_pid: Optional[int] = None
+    current_name: str = ""
 
-    for line in lines[1:]:
-        parts = line.strip().split()
-        if len(parts) < 9:
+    for line in output.splitlines():
+        if not line:
             continue
-        comm = parts[0]
-        try:
-            pid = int(parts[1])
-        except ValueError:
-            continue
-
-        endpoint_info = parts[8] if len(parts) >= 9 else ""
-        if "->" in endpoint_info:
-            remote = endpoint_info.split("->")[1]
-        else:
-            remote = endpoint_info
-
-        if pid not in process_conns:
-            process_conns[pid] = {
-                "pid": pid,
-                "name": comm,
-                "established_count": 0,
-                "remote_hosts": set()
-            }
-
-        process_conns[pid]["established_count"] += 1
-        if remote:
-            # Strip port
-            remote_host = remote.rsplit(":", 1)[0]
-            process_conns[pid]["remote_hosts"].add(remote_host)
+        field = line[0]
+        val = line[1:]
+        if field == "p":
+            try:
+                current_pid = int(val.strip())
+            except ValueError:
+                current_pid = None
+        elif field == "c":
+            current_name = val.strip()
+        elif field == "n" and current_pid is not None:
+            if current_pid not in process_conns:
+                process_conns[current_pid] = {
+                    "pid": current_pid,
+                    "name": current_name or f"PID {current_pid}",
+                    "established_count": 0,
+                    "remote_hosts": set()
+                }
+            process_conns[current_pid]["established_count"] += 1
+            if "->" in val:
+                remote = val.split("->")[1]
+                # Handle IPv6 bracketed form [::1]:port or IPv4/host:port
+                if remote.startswith("[") and "]" in remote:
+                    close_bracket = remote.find("]")
+                    remote_host = remote[1:close_bracket]
+                elif ":" in remote:
+                    remote_host = remote.rsplit(":", 1)[0]
+                else:
+                    remote_host = remote
+                if remote_host:
+                    process_conns[current_pid]["remote_hosts"].add(remote_host)
 
     results = []
     for pid, data in process_conns.items():
@@ -721,10 +731,36 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
     total_planned_reclaimable = 0
     snapshot_name = None
 
+    # Deduplicate and normalize ancestor/descendant targets to prevent double-counting
+    unique_candidates: List[Tuple[str, Path]] = []
+    seen_paths = set()
+    for p_str in paths:
+        path = Path(p_str).expanduser().resolve()
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        unique_candidates.append((p_str, path))
+
+    # Sort shallowest first so ancestors precede descendants
+    unique_candidates.sort(key=lambda item: len(item[1].parts))
+    pruned_candidates: List[Tuple[str, Path]] = []
+    for p_str, path in unique_candidates:
+        is_subpath = False
+        for _, ancestor in pruned_candidates:
+            try:
+                path.relative_to(ancestor)
+                is_subpath = True
+                break
+            except ValueError:
+                continue
+        if not is_subpath:
+            pruned_candidates.append((p_str, path))
+        else:
+            results.append({"path": p_str, "status": "skipped", "error": "Subsumed by parent directory cleanup"})
+
     # Pre-validate paths before invoking tmutil to avoid creating empty snapshots
     validated_items: List[Tuple[str, Path, int]] = []
-    for p_str in paths:
-        path = Path(p_str).expanduser()
+    for p_str, path in pruned_candidates:
         if not path.exists():
             results.append({"path": p_str, "status": "skipped", "error": "Path does not exist"})
             continue
@@ -744,8 +780,15 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
                 if "Created local snapshot with date:" in line:
                     snapshot_name = line.split(":")[-1].strip()
                     break
-        except Exception:
-            snapshot_name = "Snapshot creation unavailable"
+            if not snapshot_name:
+                snapshot_name = "Snapshot created"
+        except Exception as exc:
+            return {
+                "error": f"Failed to create APFS local snapshot: {exc}. Aborted cleanup to prevent unprotected data loss.",
+                "status": "failed",
+                "items_processed": 0,
+                "bytes_reclaimed": 0
+            }
 
     trash_dir = (HOME / ".Trash").resolve()
 
@@ -1001,12 +1044,23 @@ def run_stdio_mcp_server() -> None:
             sys.stdout.flush()
             continue
 
+        if not isinstance(req, dict):
+            err_res = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request: Expected JSON-RPC object"}
+            }
+            sys.stdout.write(json.dumps(err_res) + "\n")
+            sys.stdout.flush()
+            continue
+
         req_id = req.get("id")
         method = req.get("method")
-        params = req.get("params", {})
+        raw_params = req.get("params")
+        params = raw_params if isinstance(raw_params, dict) else {}
 
         # Handle notifications: Per JSON-RPC 2.0, the server MUST NOT reply to notifications.
-        if req_id is None or (method and method.startswith("notifications/")):
+        if req_id is None or (isinstance(method, str) and method.startswith("notifications/")):
             continue
 
         if method == "initialize":
