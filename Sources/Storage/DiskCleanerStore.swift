@@ -106,10 +106,10 @@ final class DiskCleanerStore: ObservableObject {
                 guard let self, self.currentScanId == scanId else { return }
                 self.report = scanReport
 
-                // Initialize selections according to category defaultSelected
+                // Initialize selections according to category defaultSelected and item isSelected
                 var initialSelected: Set<String> = []
                 for catReport in scanReport.categories where catReport.category.defaultSelected {
-                    for item in catReport.items {
+                    for item in catReport.items where item.isSelected {
                         initialSelected.insert(item.id)
                     }
                 }

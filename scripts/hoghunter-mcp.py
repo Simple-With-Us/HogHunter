@@ -159,19 +159,25 @@ def get_historical_top_processes(window: str = "1h", sort_by: str = "cpu", limit
         cursor = conn.cursor()
         order_col = "avg_mem" if sort_by == "memory" else "avg_cpu"
         query = f"""
-            SELECT pid, name, bundle,
-                   AVG(cpu) as avg_cpu,
+            WITH win AS (SELECT COUNT(*) AS n FROM ticks WHERE ts >= ?),
+            per_ts AS (
+              SELECT ts, pid, name, bundle,
+                     SUM(cpu) AS cpu, SUM(mem) AS mem
+              FROM samples WHERE ts >= ? GROUP BY ts, pid, name
+            )
+            SELECT pid, MIN(name) AS name, MIN(bundle) AS bundle,
+                   SUM(cpu) * 1.0 / MAX(win.n, 1) as avg_cpu,
                    MAX(cpu) as max_cpu,
-                   AVG(mem) as avg_mem,
+                   SUM(mem) * 1.0 / MAX(win.n, 1) as avg_mem,
                    MAX(mem) as max_mem,
-                   COUNT(*) as sample_count
-            FROM samples
-            WHERE ts >= ?
+                   COUNT(*) as sample_count,
+                   win.n as total_ticks
+            FROM per_ts, win
             GROUP BY pid, name
             ORDER BY {order_col} DESC
             LIMIT ?
         """
-        cursor.execute(query, (cutoff, limit))
+        cursor.execute(query, (cutoff, cutoff, limit))
         rows = cursor.fetchall()
         conn.close()
 
@@ -260,7 +266,18 @@ def get_network_activity(limit: int = 10) -> List[Dict[str, Any]]:
 
 def audit_path_churn_risk(path_str: str) -> Dict[str, Any]:
     """Check if a path has high re-download / churn penalty."""
+    p = Path(path_str)
     p_lower = path_str.lower()
+
+    if p.is_dir() and (p / "Chrome").exists():
+        return {
+            "path": path_str,
+            "is_high_churn": True,
+            "risk_level": "high",
+            "reason": "Contains Google Chrome active web session & service worker cache",
+            "recommendation": "Do not delete by default. Chrome will immediately re-download active web assets."
+        }
+
     for pattern, reason in HIGH_CHURN_PATTERNS:
         if re.search(pattern, p_lower):
             return {
@@ -374,7 +391,7 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                     "churn_risk": "zero"
                 })
 
-    # 3. User caches (with churn evaluation)
+    # 3. User caches (with churn evaluation and Chrome subfolder inspection)
     user_caches_dir = HOME / "Library" / "Caches"
     if user_caches_dir.exists():
         try:
@@ -383,18 +400,30 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                     continue
                 if "hoghunter" in child.name.lower():
                     continue
-                size = get_dir_size(child) if child.is_dir() else child.stat().st_size
-                if size >= 10 * 1024 * 1024:  # >= 10 MB
-                    audit = audit_path_churn_risk(str(child))
-                    categories["user_caches"].append({
-                        "name": child.name,
-                        "path": str(child),
-                        "bytes": size,
-                        "human_size": format_bytes(size),
-                        "detail": audit["reason"],
-                        "churn_risk": audit["risk_level"],
-                        "recommendation": audit["recommendation"]
-                    })
+
+                targets = [child]
+                if child.is_dir() and child.name in ["Google"]:
+                    try:
+                        subs = [c for c in child.iterdir() if c.is_dir()]
+                        if subs:
+                            targets = subs
+                    except OSError:
+                        pass
+
+                for target in targets:
+                    size = get_dir_size(target) if target.is_dir() else target.stat().st_size
+                    if size >= 10 * 1024 * 1024:  # >= 10 MB
+                        audit = audit_path_churn_risk(str(target))
+                        display_name = f"{child.name}/{target.name}" if target != child else child.name
+                        categories["user_caches"].append({
+                            "name": display_name,
+                            "path": str(target),
+                            "bytes": size,
+                            "human_size": format_bytes(size),
+                            "detail": audit["reason"],
+                            "churn_risk": audit["risk_level"],
+                            "recommendation": audit["recommendation"]
+                        })
         except OSError:
             pass
 
@@ -417,6 +446,76 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
                     })
         except OSError:
             pass
+
+    # 5. Extreme tier additions: AI artifacts, logs & diagnostics, large/old files
+    if tier == "extreme":
+        ai_dirs = [
+            ("HuggingFace Cache", HOME / ".cache" / "huggingface"),
+            ("Ollama Models", HOME / ".ollama" / "models"),
+            ("PyTorch Kernels & Cache", HOME / ".cache" / "torch"),
+            ("vLLM Cache", HOME / ".cache" / "vllm")
+        ]
+        for name, p in ai_dirs:
+            if p.exists():
+                size = get_dir_size(p)
+                if size > 0:
+                    audit = audit_path_churn_risk(str(p))
+                    categories["ai_artifacts"].append({
+                        "name": name,
+                        "path": str(p),
+                        "bytes": size,
+                        "human_size": format_bytes(size),
+                        "detail": audit["reason"],
+                        "churn_risk": audit["risk_level"],
+                        "recommendation": audit["recommendation"]
+                    })
+
+        log_dirs = [
+            ("User Diagnostic Reports", HOME / "Library" / "Logs" / "DiagnosticReports"),
+            ("CrashReporter", HOME / "Library" / "Application Support" / "CrashReporter"),
+            ("User Logs", HOME / "Library" / "Logs")
+        ]
+        for name, p in log_dirs:
+            if p.exists():
+                size = get_dir_size(p)
+                if size >= 1024 * 1024:  # >= 1 MB
+                    categories["logs_diagnostics"].append({
+                        "name": name,
+                        "path": str(p),
+                        "bytes": size,
+                        "human_size": format_bytes(size),
+                        "detail": "Historical crash traces, diagnostic logs, and application stdout logs",
+                        "churn_risk": "zero"
+                    })
+
+        categories["large_and_old_files"] = []
+        for search_folder in [HOME / "Downloads", HOME / "Desktop", HOME / "Documents"]:
+            if search_folder.exists():
+                try:
+                    for root, _, files in os.walk(search_folder):
+                        if any(part.startswith(".") for part in Path(root).parts):
+                            continue
+                        for f in files:
+                            if f.startswith("."):
+                                continue
+                            fp = Path(root) / f
+                            try:
+                                st = fp.stat()
+                                if st.st_size >= 100 * 1024 * 1024:  # >= 100 MB
+                                    age_days = (time.time() - st.st_mtime) / 86400
+                                    if age_days >= 30:
+                                        categories["large_and_old_files"].append({
+                                            "name": f,
+                                            "path": str(fp),
+                                            "bytes": st.st_size,
+                                            "human_size": format_bytes(st.st_size),
+                                            "detail": f"Large file ({format_bytes(st.st_size)}) not modified in {int(age_days)} days",
+                                            "churn_risk": "zero"
+                                        })
+                            except OSError:
+                                pass
+                except OSError:
+                    pass
 
     # Compute summary
     summary = {}
@@ -474,13 +573,36 @@ def get_dir_size(path: Path) -> int:
 
 def is_safe_to_delete(path_str: str) -> Tuple[bool, str]:
     """Strict safety validator for deleting paths."""
-    resolved = str(Path(path_str).resolve())
+    resolved_path = Path(path_str).resolve()
+    resolved = str(resolved_path)
+
+    # 1. Enforce real home-directory boundary
+    try:
+        resolved_path.relative_to(HOME.resolve())
+    except ValueError:
+        return False, "Prohibited: path is outside user home directory"
+
+    if resolved_path == HOME.resolve():
+        return False, "Prohibited: cannot delete user home directory itself"
+
+    # 2. Reject exact prohibited roots and protected source trees
     for prohibited in PROHIBITED_DELETE_PREFIXES:
-        if resolved == prohibited:
+        prohibited_path = Path(prohibited).resolve()
+        if resolved_path == prohibited_path:
             return False, f"Prohibited: path matches critical system or root folder ({prohibited})"
 
-    if not resolved.startswith(str(HOME)):
-        return False, "Prohibited: path is outside user home directory"
+        # Check if resolved_path is a descendant of a protected code/system root
+        try:
+            rel = resolved_path.relative_to(prohibited_path)
+            # Allowed exception: BotFleet update debris in ~/apps
+            # e.g., ~/apps/.botfleet-server.node_modules.*
+            if prohibited_path == (HOME / "apps").resolve():
+                parts = rel.parts
+                if parts and parts[0].startswith(".botfleet-server.node_modules."):
+                    continue
+            return False, f"Prohibited: path is inside protected folder ({prohibited})"
+        except ValueError:
+            pass
 
     if "/.git/" in resolved or resolved.endswith("/.git") or "/.secrets" in resolved:
         return False, "Prohibited: git directory or secrets directory"
@@ -504,6 +626,8 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
         except Exception:
             snapshot_name = "Snapshot creation unavailable"
 
+    trash_dir = (HOME / ".Trash").resolve()
+
     for p_str in paths:
         path = Path(p_str).expanduser()
         if not path.exists():
@@ -526,12 +650,19 @@ def clean_clutter(paths: List[str], dry_run: bool = True, create_snapshot: bool 
             total_reclaimed += size
         else:
             try:
-                # Move to macOS Trash via AppleScript or file system move
+                # Move to macOS Trash via file system move, or remove if already in ~/.Trash
                 trash_target = HOME / ".Trash" / path.name
                 if trash_target.exists():
                     trash_target = HOME / ".Trash" / f"{path.name}.{int(time.time())}"
 
-                if str(path).startswith(str(HOME / ".Trash")):
+                is_in_trash = False
+                try:
+                    path.resolve().relative_to(trash_dir)
+                    is_in_trash = True
+                except ValueError:
+                    is_in_trash = False
+
+                if is_in_trash:
                     # Item is already in ~/.Trash, permanently remove it
                     if path.is_dir():
                         shutil.rmtree(path)
@@ -814,7 +945,16 @@ def run_cli(args: argparse.Namespace) -> None:
         print(json.dumps(data, indent=2))
 
     elif cmd == "quit":
-        data = quit_process(args.pid, force=args.force)
+        pid = args.pid
+        if pid is None and args.paths:
+            try:
+                pid = int(args.paths[0])
+            except ValueError:
+                pass
+        if pid is None:
+            print(json.dumps({"success": False, "error": "Missing PID. Use --pid <PID> or pass <PID> as positional argument."}))
+            sys.exit(1)
+        data = quit_process(pid, force=args.force)
         print(json.dumps(data, indent=2))
 
     else:
