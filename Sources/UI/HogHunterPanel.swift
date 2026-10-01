@@ -4,6 +4,7 @@ import SwiftUI
 enum PanelTab: String, CaseIterable, Identifiable {
     case activity = "Activity"
     case storage = "Storage"
+    case network = "Network"
 
     var id: String { rawValue }
 }
@@ -14,6 +15,7 @@ struct HogHunterPanel: View {
     @State private var selectedTab: PanelTab = .activity
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage: Bool = false
+    @State private var hasVisitedNetwork: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -36,6 +38,13 @@ struct HogHunterPanel: View {
                         .allowsHitTesting(selectedTab == .storage)
                         .accessibilityHidden(selectedTab != .storage)
                 }
+
+                if hasVisitedNetwork {
+                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, embeddedInPanel: true, isTabActive: selectedTab == .network)
+                        .opacity(selectedTab == .network ? 1 : 0)
+                        .allowsHitTesting(selectedTab == .network)
+                        .accessibilityHidden(selectedTab != .network)
+                }
             }
         }
         .padding(14)
@@ -45,19 +54,23 @@ struct HogHunterPanel: View {
         .onChange(of: selectedTab) { newTab in
             if newTab == .storage {
                 hasVisitedStorage = true
+            } else if newTab == .network {
+                hasVisitedNetwork = true
             }
         }
         .onAppear {
             store.panelVisible = true
             if selectedTab == .storage {
                 hasVisitedStorage = true
+            } else if selectedTab == .network {
+                hasVisitedNetwork = true
             }
         }
         .onDisappear {
             store.panelVisible = false
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : "Hog Hunter — storage and disk cleaner")
+        .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : (selectedTab == .storage ? "Hog Hunter — storage and disk cleaner" : "Hog Hunter — network activity"))
         .alert(
             pendingQuit.map { "Quit \($0.name)?" } ?? "Quit Process?",
             isPresented: Binding(
@@ -101,21 +114,9 @@ struct HogHunterPanel: View {
                     .renderingMode(.original)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 20, height: 16)
+                    .frame(width: 18, height: 15)
                 Text("Hog Hunter")
                     .font(.system(size: 17, weight: .semibold))
-                Circle()
-                    .fill(store.isStale
-                          ? Color(red: 0.80, green: 0.52, blue: 0.10)
-                          : Color(red: 0.16, green: 0.58, blue: 0.30))
-                    .frame(width: 7, height: 7)
-                if store.alertsEnabled {
-                    Image(systemName: "bell.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .help("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) min.")
-                        .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
-                }
             }
             .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
             .accessibilityElement(children: .combine)
@@ -126,9 +127,11 @@ struct HogHunterPanel: View {
             Picker("Tab", selection: $selectedTab) {
                 Label("Activity", image: "HogProfile").tag(PanelTab.activity)
                 Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
+                Label("Network", systemImage: "network").tag(PanelTab.network)
             }
             .pickerStyle(.segmented)
-            .frame(width: 190)
+            .labelsHidden()
+            .frame(width: 270)
 
             Spacer()
 

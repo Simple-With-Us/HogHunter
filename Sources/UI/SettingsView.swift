@@ -67,6 +67,8 @@ private struct GeneralSettingsTab: View {
                     Text("2 Seconds").tag(2.0)
                     Text("3 Seconds").tag(3.0)
                     Text("5 Seconds").tag(5.0)
+                    Text("10 Seconds").tag(10.0)
+                    Text("15 Seconds").tag(15.0)
                 }
 
                 Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
