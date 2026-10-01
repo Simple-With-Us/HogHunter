@@ -97,8 +97,11 @@ struct HogHunterPanel: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "flame.fill")
-                    .foregroundStyle(Color(red: 0.86, green: 0.32, blue: 0.16))
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 20, height: 16)
                 Text("Hog Hunter")
                     .font(.system(size: 17, weight: .semibold))
                 Circle()
@@ -121,7 +124,7 @@ struct HogHunterPanel: View {
             Spacer()
 
             Picker("Tab", selection: $selectedTab) {
-                Label("Activity", systemImage: "flame.fill").tag(PanelTab.activity)
+                Label("Activity", image: "HogProfile").tag(PanelTab.activity)
                 Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
             }
             .pickerStyle(.segmented)

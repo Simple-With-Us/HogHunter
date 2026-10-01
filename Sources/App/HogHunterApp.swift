@@ -70,8 +70,12 @@ struct HogHunterApp: App {
             HogHunterPanel()
                 .environmentObject(store)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "flame.fill")
+            HStack(spacing: 4) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 18, height: 15)
                 Text(store.menuBarLabel)
                     .monospacedDigit()
             }
