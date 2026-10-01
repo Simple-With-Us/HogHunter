@@ -325,6 +325,23 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Category Scanners
 
+    /// Known high-churn caches where deletion causes immediate large re-downloads over the network.
+    /// These are unselected by default to prevent wasteful bandwidth and disk wear.
+    static let highChurnCacheIdentifiers: [(pattern: String, reason: String)] = [
+        ("com.spotify.client", "Spotify streaming & offline media cache (immediately re-downloads when played)"),
+        ("com.apple.music", "Apple Music streaming audio cache (immediately re-downloads when played)"),
+        ("com.apple.podcasts", "Apple Podcasts episode download cache"),
+        ("com.apple.itunescloudd", "iTunes Cloud media streaming cache"),
+        ("com.apple.applemediaservices", "Apple Media Services streaming cache"),
+        ("com.google.googledrive", "Google Drive cloud file streaming cache (immediately re-downloads when accessed)"),
+        ("dropbox", "Dropbox cloud file cache"),
+        ("onedrive", "Microsoft OneDrive cloud file cache"),
+        ("com.apple.safari", "Safari active web session & site cache"),
+        ("google", "Chrome active web session & service worker cache"),
+        ("huggingface", "Hugging Face AI model weights repository"),
+        ("ollama", "Ollama local LLM model weights library")
+    ]
+
     /// Scans `~/Library/Caches/` for user caches (skips Hog Hunter and developer package caches handled elsewhere).
     func scanUserCaches() -> [CleanItem] {
         let cachesURL = userHomeURL.appendingPathComponent("Library/Caches", isDirectory: true)
@@ -347,6 +364,11 @@ final class DiskCleaner: @unchecked Sendable {
             let stats = directoryStats(at: url)
             guard stats.bytes > 0 else { continue }
 
+            let lowerName = name.lowercased()
+            let highChurnMatch = Self.highChurnCacheIdentifiers.first { lowerName.contains($0.pattern) }
+            let isHighChurn = highChurnMatch != nil
+            let itemDetail = highChurnMatch?.reason
+
             items.append(CleanItem(
                 category: .userCaches,
                 title: name,
@@ -355,8 +377,8 @@ final class DiskCleaner: @unchecked Sendable {
                 bytes: stats.bytes,
                 fileCount: stats.fileCount,
                 lastModified: stats.lastModified,
-                isSelected: CleanCategory.userCaches.defaultSelected,
-                detail: nil
+                isSelected: isHighChurn ? false : CleanCategory.userCaches.defaultSelected,
+                detail: itemDetail
             ))
         }
 
@@ -734,6 +756,58 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
+        // 5. Abandoned BotFleet update/rollback node_modules (~/apps/.botfleet-server.node_modules.*)
+        if !Task.isCancelled {
+            let appsURL = userHomeURL.appendingPathComponent("apps", isDirectory: true)
+            if let appsContents = try? fileManager.contentsOfDirectory(at: appsURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                for url in appsContents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if name.hasPrefix(".botfleet-server.node_modules.") {
+                        let stats = directoryStats(at: url)
+                        guard stats.bytes > 0 else { continue }
+                        items.append(CleanItem(
+                            category: .aiArtifacts,
+                            title: name,
+                            subtitle: "~/apps/\(name)",
+                            url: url,
+                            bytes: stats.bytes,
+                            fileCount: stats.fileCount,
+                            lastModified: stats.lastModified,
+                            isSelected: true,
+                            detail: "Abandoned BotFleet update/rollback package (zero re-download penalty)"
+                        ))
+                    }
+                }
+            }
+        }
+
+        // 6. Rotated BotFleet agent transcript logs (~/.botfleet/native/*.ndjson.1)
+        if !Task.isCancelled {
+            let bfNativeURL = userHomeURL.appendingPathComponent(".botfleet/native", isDirectory: true)
+            if let nativeContents = try? fileManager.contentsOfDirectory(at: bfNativeURL, includingPropertiesForKeys: [.fileSizeKey], options: []) {
+                for url in nativeContents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if name.hasSuffix(".ndjson.1") {
+                        let stats = directoryStats(at: url)
+                        guard stats.bytes > 0 else { continue }
+                        items.append(CleanItem(
+                            category: .aiArtifacts,
+                            title: name,
+                            subtitle: "~/.botfleet/native/\(name)",
+                            url: url,
+                            bytes: stats.bytes,
+                            fileCount: 1,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "Rotated agent transcript log dump"
+                        ))
+                    }
+                }
+            }
+        }
+
         return items.sorted { $0.bytes > $1.bytes }
     }
 
@@ -979,7 +1053,9 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/.cache/huggingface/",
                 home + "/.ollama/models/blobs/"
             ]
-            let isStaleUpdate = path.contains("/.BotFleet.update-")
+            let isStaleUpdate = path.contains("/.BotFleet.update-") ||
+                               path.contains("/.botfleet-server.node_modules.") ||
+                               (path.contains("/.botfleet/native/") && path.hasSuffix(".ndjson.1"))
             let hasAllowedPrefix = allowedAIPrefixes.contains { path.hasPrefix($0) && path != $0 }
             return hasAllowedPrefix || isStaleUpdate
 
