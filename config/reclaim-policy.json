@@ -1,0 +1,140 @@
+{
+  "$comment": [
+    "Machine-readable reclaim policy for this Mac.  Single source of truth",
+    "shared by scripts/hoghunter-clean (the CLI) and Sources/Storage/",
+    "DiskCleaner.swift (the GUI).  A rule that is not listed here does not",
+    "run.  Every tier assignment is a lesson from the BF-HOUSEKEEPER wake",
+    "log -- do not relax a tier without a measured reason."
+  ],
+  "version": "1.0.0",
+  "updated": "2026-09-30",
+  "replaces": {
+    "cleanmymac": "Uninstalled 2026-09-30. A stale `brew list` entry survives (cleanmymac-cli) with no Cellar dir and `command -v` returns 1, so every cleanmymac call was a silent no-op. All callers now use hoghunter-clean."
+  },
+
+  "bands": {
+    "$comment": "CHEAP-ONLY drops every non-safe tier. Deleting caches never reduces swap; only load collapse ends a swap episode.",
+    "cheapOnlyWhen": {
+      "swapUsedPctAtOrAbove": 90,
+      "load1Above": 40
+    },
+    "disk": {
+      "criticalFreeGb": 25,
+      "acuteFreeGb": 40,
+      "healthyFreeGb": 80
+    }
+  },
+
+  "idlenessGates": {
+    "$comment": "No file touched in N minutes proves nothing is mid-write.",
+    "scratchMinutes": 180,
+    "stagingMinutes": 60,
+    "cacheMinutes": 90,
+    "deviceSupportDays": 7,
+    "simulatorRuntimeDays": 1
+  },
+
+  "rules": [
+    {
+      "name": "snapshots",
+      "tier": "semi-safe",
+      "op": "snapshot-delete",
+      "title": "APFS / Time Machine local snapshots",
+      "$rationale": "The single largest reclaim on a Mac that backs up to an external destination. A local snapshot pins Data-volume container space; the backup itself is on the destination disk, so deleting a local snapshot does NOT touch the backup. macOS recreates one on the next backup. This is a shrink, not a loss.",
+      "keepNewest": 1,
+      "whySemiSafe": "Held back under CHEAP-ONLY. Also surfaced to Jay: the count of snapshots on this Mac is itself a signal that the backup cadence is faster than the disk can absorb."
+    },
+    {
+      "name": "temp-scratch",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Orphaned per-user temp scratch",
+      "$rationale": "Long-lived fleet artifacts in DARWIN_USER_TEMP_DIR. `ssr` nests sit under RANDOM-named parents, so a top-level glob misses them -- enumerate with find -maxdepth 3 -type d -name ssr and filter on the leaf's mtime. `.com.openai.codex.*` are FILES, not directories: find -type d returns 0 and du -sh on each is wasted work. Classes are KB-scale at thousands of entries (botfleet-dsh-mcp-*, omb-*, mmx-scope-*, bf-ui-shim-*) and are deliberately not scanned.",
+      "globs": ["ssr (depth 3)", "agentic-vitest-*", "omb-api-test-*", ".com.openai.codex.*"]
+    },
+    {
+      "name": "app-staging",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Extracted but unused app updaters",
+      "$rationale": "Sparkle/electron-updater leave an extracted .app plus the source zip. Gated on the OWNING updater process, not on lsof: an active ShipIt can report zero open handles while actively writing. `ShipIt` on this Mac belongs to Grok Bot (com.anysphere.sand.ShipIt) more often than to Claude, so the product name is matched from the path, never the generic name.",
+      "neverWhile": ["a process matching the product name is alive"]
+    },
+    {
+      "name": "dev-caches",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Package manager and toolchain caches",
+      "$rationale": "All rebuild on next use. node-gyp, electron, electron-builder, deno, copilot, swiftpm, ms-playwright, npm _cacache, uv, pip, yarn. pnpm and gradle are only touched when the build fan-out is quiet -- on this Mac the fan-out is what drives load and swap, and disturbing it makes things worse.",
+      "skipWhenAny": ["xcodebuild alive", "swift-frontend alive", "clang alive", "node count > 20"]
+    },
+    {
+      "name": "xcode-artifacts",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Xcode DerivedData and device support",
+      "$rationale": "Per-project DerivedData with no build running. iOS DeviceSupport for OS versions older than 7 days is semi-safe: it re-downloads when an old device is attached. A lone xcodebuild with zero compiler children hours old is STALLED, not a real build -- check for clang/swiftc children before assuming work is in flight.",
+      "skipWhenAny": ["xcodebuild alive", "clang alive", "swift-frontend alive"]
+    },
+    {
+      "name": "simulator-runtimes",
+      "tier": "semi-safe",
+      "op": "delete",
+      "title": "iOS simulator runtimes",
+      "$rationale": "Historically the biggest single win on this Mac (18.55 GB measured 2026-09-27). Fully re-downloadable from Xcode. Deleting a runtime does NOT touch CoreSimulator/Devices, which stays ask-first. Verified after the 09-27 pass: 3 devices and 2.3 GB of user simulator state intact.",
+      "neverTouches": "~/Library/Developer/CoreSimulator/Devices"
+    },
+    {
+      "name": "logs",
+      "tier": "safe",
+      "op": "truncate",
+      "title": "Unbounded logs (tail-truncated)",
+      "$rationale": "The shrink operation CleanMyMac gets wrong. Deleting a log file while a daemon holds the fd leaves the daemon writing to an unlinked inode, so the space is NOT freed until that daemon restarts. Truncating IN PLACE fixes it. Keeps the last 16 MB -- the tail is what an operator reads.",
+      "thresholdMiB": 64,
+      "keepMiB": 16
+    },
+    {
+      "name": "sqlite-wal",
+      "tier": "safe",
+      "op": "wal-checkpoint",
+      "title": "Oversized SQLite WAL (checkpointed)",
+      "$rationale": "A large -wal beside a live database is double storage. A checkpoint TRUNCATE folds it into the main file and zeroes the WAL in constant time. Unlike VACUUM it does not rewrite the database, so it is safe on a 14 GB file. Measured on Coolify app.db 2026-09-30: freelist_count=1 means VACUUM would reclaim ~4 KB while rewriting 14.7 GB -- the WAL is the correct lever, the VACUUM is not.",
+      "thresholdMiB": 32,
+      "refusesWhen": ["another process holds the database open"]
+    },
+    {
+      "name": "brew",
+      "tier": "safe",
+      "op": "brew-cleanup",
+      "title": "Homebrew obsolete versions",
+      "$rationale": "brew cleanup --prune=all keeps the current version and symlinks. Skipped while any brew or node-gyp process is alive. 67 MB typical, so it is never worth acting on alone."
+    },
+    {
+      "name": "ask-first",
+      "tier": "ask-first",
+      "op": "report",
+      "title": "Ask-first inventory (report only, never auto-applied)",
+      "$rationale": "Surfaced so Jay or the Housekeeper can act with explicit OK instead of re-deriving the inventory. Nothing in this tier is ever deleted by the engine.",
+      "items": [
+        "Google DriveFS local cache (content cache + Logs only under Application Support/Google/DriveFS; Resources are program files -- KEEP)",
+        "Claude / Monet / Parall vm_bundles (claudevm.bundle, ~10 GB; only when pgrep -x Claude = 0 AND lsof bundle = 0)",
+        "CoreSimulator/Devices (user simulator state)",
+        "in-session ~/.grok/worktrees",
+        "BotFleet update generations (non-newest)",
+        "Documents, photos, secrets, any path under ~/Library/CloudStorage",
+        "any path with a .janitor-keep sentinel",
+        "FileProvider bulk deletes"
+      ]
+    }
+  ],
+
+  "hardRules": {
+    "neverRmRf": "rm -rf is intercepted by the mavis-trash layer on this Mac: it reports success, removes the inodes, and moves the bytes to ~/.Trash, freeing NOTHING. Every delete goes through `find <dir> -depth -delete`, and reclaim is verified with a fresh df -- never the exit code.",
+    "neverPs": "Never bare `ps`, `pgrep -l`, `pgrep -fl`, or `ps -o comm` -- argv on this Mac carries live API keys and lands them in logs. Count with `pgrep -f X | wc -l` or `pgrep -x`.",
+    "neverLsofPlusD": "lsof +D HANGS past 60s on big trees. Ask about the exact path, or corroborate with mtime.",
+    "neverOptimizeRam": "Purging resident pages into swapfiles converts RAM pressure into disk usage on the same APFS container -- the opposite of the goal. Measured +3.6 to +7.3 GB swap per run.",
+    "neverEmptyTrash": "mavis-trash parks deleted files in ~/.Trash. Never empty it without asking.",
+    "neverAppleDeleting": "$TMPDIR/Deleting-<UUID> with thousands of files fresh is ACTIVE Apple staging (stuck update, APFS snapshot, bsdtar extraction). Do not touch. Only an empty data/ subtree with no live children AND mtime > 7d is an orphan.",
+    "noTimeoutCommand": "macOS has no `timeout` (exit 127). Use run_in_background + job_output, or a Python subprocess timeout."
+  }
+}

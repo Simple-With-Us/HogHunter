@@ -1,0 +1,1088 @@
+#!/usr/bin/env python3
+"""
+hoghunter-clean — Hog Hunter's reclaim engine.
+
+Replaces CleanMyMac CLI as the Mac's cleanup driver.  CleanMyMac is
+uninstalled (stale `brew list` entry, no Cellar dir, `command -v` fails) and
+its cleanup was mostly "delete app caches."  This engine does that *and* the
+things CleanMyMac cannot do for this Mac:
+
+  SHRINK   APFS local snapshots, SQLite -wal files, unbounded logs
+  DELETE   fleet-specific regenerable staging (BotFleet, ShipIt, Sparkle,
+           mktemp `ssr` nests, simulator runtimes, device support)
+  REPORT   ask-first inventory, duplicates — surfaced, never auto-applied
+
+Every rule encodes a lesson from BF-HOUSEKEEPER's wake log; see
+config/reclaim-policy.json for the machine-readable version of the same
+policy.  This file and that JSON are the single source of truth shared with
+the Hog Hunter GUI (Sources/Storage/DiskCleaner.swift).
+
+Usage
+  hoghunter-clean --scan                 read-only, print plan
+  hoghunter-clean --clean                apply the safe tier
+  hoghunter-clean --clean --band=full   also apply semi-safe tier
+  hoghunter-clean --scan --categories=snapshots,logs --json
+
+Modes are mutually exclusive with --categories=... --policy to see everything.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Callable, Iterable, Sequence
+
+# --------------------------------------------------------------------------
+# Constants and machine facts
+# --------------------------------------------------------------------------
+
+VERSION = "1.0.0"
+HOME = Path.home()
+
+# Disk bands, in GiB free.  Acute = reclaim urgently; critical = tell Jay.
+DISK_CRITICAL_GB = 25.0
+DISK_ACUTE_GB = 40.0
+DISK_HEALTHY_GB = 80.0
+
+# Band gates.  CHEAP-ONLY when swap is nearly full or load is elevated --
+# exactly the Housekeeper rule.  Under CHEAP-ONLY only the SAFE tier runs,
+# because every reclaim is I/O and I/O is the scarce resource right now.
+SWAP_CRIT_PCT = 90.0
+LOAD_CRIT = 40.0
+
+# Idle gates.  "No file touched in N minutes" proves nothing is mid-write.
+IDLE_MIN_OK = 90
+IDLE_MIN_SCRATCH = 180   # 3h for temp scratch
+IDLE_MIN_STAGING = 60    # 1h for app-update staging
+
+# Per-rule wall clock.  A scan that takes longer than the pressure it is
+# responding to is worse than no scan: under load 500+ a TMPDIR or ~/Code
+# walk runs for minutes.  Every tree-walking rule takes a partial result
+# rather than blocking the caller.
+RULE_BUDGET_SEC = 90
+
+POLICY_PATH = Path(__file__).resolve().parent.parent / "config" / "reclaim-policy.json"
+
+# Ask-first items are the biggest trees on the Mac.  Sizing them costs a full
+# walk that can run for minutes under load, and their gate is a human
+# decision rather than a byte count -- so skip sizing unless asked.
+SIZE_ASK_FIRST = False
+
+# Never touch these, no matter what a scan finds.  Data, not waste.
+FORBIDDEN_PREFIXES = (
+    str(HOME / "Library/CloudStorage"),
+    str(HOME / "Documents"),
+    str(HOME / "Pictures"),
+    str(HOME / "Movies"),
+    str(HOME / "Desktop"),
+    str(HOME / "Desktop"),
+    str(HOME / "Library/Developer/CoreSimulator/Devices"),
+    str(HOME / ".grok/worktrees"),
+)
+KEEP_SENTINEL = ".janitor-keep"
+# APFS system volume + sealed paths.  Deleting any of these bricks the Mac.
+FORBIDDEN_EXACT = (
+    "/System", "/Library", "/private/var/db", "/private/var/folders/zz",
+    "/usr", "/bin", "/sbin", "/opt/homebrew", "/Applications",
+)
+
+
+def log(msg: str) -> None:
+    print(f"[hoghunter-clean] {msg}", file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------
+# Result types
+# --------------------------------------------------------------------------
+
+@dataclass
+class Candidate:
+    """One reclaimable thing found by a rule."""
+    category: str
+    path: str
+    bytes: int
+    reason: str
+    tier: str = "safe"          # safe | semi-safe | ask-first
+    op: str = "delete"          # delete | truncate | wal-checkpoint | snapshot-delete
+    detail: str = ""
+    applied: bool = False
+    error: str = ""
+
+    @property
+    def mib(self) -> float:
+        return self.bytes / (1024 * 1024)
+
+    def as_dict(self) -> dict:
+        d = asdict(self)
+        d["mib"] = round(self.mib, 1)
+        return d
+
+
+@dataclass
+class Band:
+    """Current resource pressure, which decides how much we may do."""
+    disk_free_gb: float
+    disk_used_pct: float
+    swap_used_pct: float
+    load1: float
+    cheap_only: bool
+    reasons: list[str] = field(default_factory=list)
+
+    @property
+    def disk_band(self) -> str:
+        if self.disk_free_gb < DISK_CRITICAL_GB:
+            return "critical"
+        if self.disk_free_gb < DISK_ACUTE_GB:
+            return "acute"
+        if self.disk_free_gb < DISK_HEALTHY_GB:
+            return "ok"
+        return "healthy"
+
+    def as_dict(self) -> dict:
+        d = asdict(self)
+        d["disk_band"] = self.disk_band
+        return d
+
+
+def _run(cmd: Sequence[str], timeout: int = 20) -> str:
+    """Run a command, return stdout.  Never raises."""
+    try:
+        p = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout)
+        return p.stdout if p.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+# --------------------------------------------------------------------------
+# Safety primitives -- the lessons that keep this from eating Jay's data
+# --------------------------------------------------------------------------
+
+def is_forbidden(path: str) -> bool:
+    """True when policy forbids touching this path outright."""
+    p = str(Path(path).expanduser())
+    for exact in FORBIDDEN_EXACT:
+        if p == exact or p.startswith(exact + "/"):
+            return True
+    for pre in FORBIDDEN_PREFIXES:
+        if p == pre or p.startswith(pre + "/"):
+            return True
+    return False
+
+
+def has_keep_sentinel(path: str) -> bool:
+    """`.janitor-keep` anywhere in the subtree means hands off."""
+    p = Path(path)
+    if (p / KEEP_SENTINEL).exists():
+        return True
+    # A sentinel on any parent also protects the child.
+    for parent in p.parents:
+        if (parent / KEEP_SENTINEL).exists():
+            return True
+    return False
+
+
+def open_handles(path: str) -> int:
+    """Count processes with this exact path open.
+
+    Housekeeper rule: `lsof +D` HANGS on big trees -- never use it.  Ask
+    lsof about the exact path instead.
+    """
+    out = _run(["/usr/sbin/lsof", "-F", "p", "--", str(path)], timeout=25)
+    pids = {ln for ln in out.splitlines() if ln.startswith("p")}
+    return len(pids)
+
+
+def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
+    """Age in minutes of the newest file under path.
+
+    0.0 means "something was written just now" -- the thing is live.
+    Returns a very large number for a missing/empty path so callers can treat
+    "nothing here" as "safely idle".
+    """
+    p = Path(path)
+    if not p.exists():
+        return 1e9
+    if p.is_file():
+        return (time.time() - p.stat().st_mtime) / 60.0
+    newest = 0.0
+    seen = 0
+    stack = [p]
+    while stack and seen < max_entries:
+        cur = stack.pop()
+        try:
+            st = cur.lstat()
+        except OSError:
+            continue
+        if cur.is_symlink():
+            continue
+        if cur.is_dir():
+            try:
+                stack.extend(cur.iterdir())
+            except OSError:
+                pass
+        else:
+            newest = max(newest, st.st_mtime)
+            seen += 1
+    if newest == 0.0:
+        return 1e9
+    return (time.time() - newest) / 60.0
+
+
+def proc_count(pattern: str) -> int:
+    """Count running processes matching a regex against argv.
+
+    Never `ps`/`pgrep -l`/`pgrep -fl` -- argv on this Mac carries live API
+    keys and lands them in logs.  Count only.
+    """
+    out = _run(["/usr/bin/pgrep", "-f", pattern], timeout=15)
+    return len([ln for ln in out.splitlines() if ln.strip()])
+
+
+def dir_bytes(path: str, max_depth: int = 8) -> int:
+    """Bytes under a path, bounded, without following symlinks."""
+    p = Path(path)
+    if not p.exists():
+        return 0
+    if p.is_file() and not p.is_symlink():
+        try:
+            return p.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    stack = [(p, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        try:
+            if cur.is_symlink():
+                continue
+            if cur.is_file():
+                total += cur.stat().st_size
+                continue
+            if not cur.is_dir():
+                continue
+            for child in cur.iterdir():
+                stack.append((child, depth + 1))
+        except OSError:
+            continue
+        if depth > max_depth:
+            # Deep tree: fall back to du rather than walking forever.
+            du = _run(["/usr/bin/du", "-sk", str(cur)], timeout=30)
+            try:
+                total += int(du.split()[0]) * 1024
+            except (IndexError, ValueError):
+                pass
+    return total
+
+
+# --------------------------------------------------------------------------
+# Apply operations
+#
+# `rm -rf` is intercepted by the mavis-trash layer on this Mac: it reports
+# success, removes the inodes, and moves the bytes to ~/.Trash, freeing
+# NOTHING.  Every delete below goes through `find -depth -delete` and the
+# result is verified against a fresh df by the caller, never the exit code.
+# --------------------------------------------------------------------------
+
+def apply_delete(path: str) -> tuple[int, str]:
+    """Delete a file or tree for real.  Returns (bytes_freed, error)."""
+    p = Path(path)
+    if is_forbidden(path):
+        return 0, "forbidden path"
+    if has_keep_sentinel(path):
+        return 0, f"{KEEP_SENTINEL} sentinel present"
+    if not p.exists():
+        return 0, ""
+    before = dir_bytes(path)
+    try:
+        if p.is_dir() and not p.is_symlink():
+            # -depth so children go before parents; -delete removes empty
+            # dirs.  Do NOT use `rm -rf` -- mavis-trash swallows it.
+            subprocess.run(
+                ["/usr/bin/find", str(p), "-depth", "-delete"],
+                capture_output=True, timeout=600,
+            )
+        else:
+            p.unlink()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+    if p.exists():
+        return 0, "path still present after delete"
+    return before, ""
+
+
+def apply_truncate(path: str, keep_mib: int) -> tuple[int, str]:
+    """Keep the LAST keep_mib of a log and drop the prefix.
+
+    Tail-truncation is the right shrink for append-only logs: the recent
+    lines are the useful ones and the reader is almost always following the
+    tail.  No data the operator can act on is lost.
+    """
+    p = Path(path)
+    if is_forbidden(path) or has_keep_sentinel(path) or not p.is_file():
+        return 0, "not a trimmable file"
+    try:
+        size = p.stat().st_size
+        keep = keep_mib * 1024 * 1024
+        if size <= keep:
+            return 0, ""
+        with p.open("r+b") as fh:
+            fh.seek(size - keep)
+            tail = fh.read()
+            nl = tail.find(b"\n")
+            tail = tail[nl + 1:] if nl != -1 else tail
+            fh.seek(0)
+            fh.write(tail)
+            fh.truncate()
+    except OSError as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+    return size - p.stat().st_size, ""
+
+
+def apply_wal_checkpoint(db: str) -> tuple[int, str]:
+    """TRUNCATE a SQLite write-ahead log.
+
+    A large -wal next to a live DB is pure double-storage.  A checkpoint
+    TRUNCATE folds it back into the main file and zeroes the WAL.  Unlike
+    VACUUM this is a constant-time, non-rewriting operation, so it is safe
+    on a 14 GB database -- it just moves pages that are already accounted
+    for.  Blocked if another process holds the DB; we refuse rather than
+    wait.
+    """
+    wal = Path(db + "-wal")
+    if not wal.is_file():
+        return 0, ""
+    before = wal.stat().st_size
+    if before < 8 * 1024 * 1024:
+        return 0, "wal under 8M"
+    if open_handles(db):
+        return 0, "database has open handles"
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=rw", uri=True, timeout=2)
+        con.execute("PRAGMA busy_timeout=2000")
+        row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        con.close()
+    except sqlite3.Error as exc:
+        return 0, f"sqlite: {exc}"
+    except OSError as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+    after = wal.stat().st_size if wal.is_file() else 0
+    if row and row[0] != 0:
+        return 0, f"checkpoint busy (code {row[0]})"
+    return max(0, before - after), ""
+
+
+def snapshot_timestamp(name: str) -> str:
+    """Convert a full APFS snapshot name into the bare stamp tmutil wants.
+
+    `tmutil deletelocalsnapshots` takes a BARE timestamp.  Handed the full name
+    "com.apple.TimeMachine.2026-09-30-045412.local" it treats the whole string
+    as a disk and fails with "... is not a valid disk" (exit 22), which is
+    silent unless you read stderr.  That broke the entire SHRINK tier on its
+    headline operation -- measured 2026-09-30 as 17G free with two prunable
+    snapshots sitting right there.
+
+    Prefixes are stripped only on a match and the `.local` suffix only when
+    present, so an already-bare timestamp passes through unchanged.
+    """
+    stamp = name
+    for pre in ("com.apple.TimeMachine.", "com.apple.backup."):
+        if stamp.startswith(pre):
+            stamp = stamp[len(pre):]
+            break
+    if stamp.endswith(".local"):
+        stamp = stamp[: -len(".local")]
+    return stamp
+
+
+def apply_snapshot_delete(name: str) -> tuple[int, str]:
+    """Delete one APFS local snapshot.  Returns (0, note) -- size is unknown.
+
+    `tmutil deletelocalsnapshots` never reports freed bytes, so the caller
+    must measure df before/after rather than trusting this.  The snapshots
+    themselves live on the destination disk, not here; what they consume is
+    the Data volume's free space held against the container.
+    """
+    out = _run(["/usr/bin/tmutil", "deletelocalsnapshots",
+                snapshot_timestamp(name)], timeout=120)
+    if "Deleted local snapshot" in out or "Deleted snapshot" in out:
+        return 0, ""
+    remaining = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=60)
+    if name not in remaining:
+        return 0, ""
+    # Surface WHY.  A bare "delete did not take effect" cost a wake cycle on
+    # 2026-09-30 because nothing in the output pointed at the argument format.
+    detail = " ".join(out.split())[:200] or "no output"
+    return 0, f"delete did not take effect: {detail}"
+
+
+# --------------------------------------------------------------------------
+# Rules -- each returns a list of Candidates
+# --------------------------------------------------------------------------
+
+def rule_snapshots() -> list[Candidate]:
+    """APFS / Time Machine LOCAL snapshots.
+
+    This is the single largest reclaim on a Mac that backs up to an external
+    destination.  A local snapshot pins container space for as long as it
+    exists, and the backup itself lives on the destination disk -- deleting a
+    local snapshot does NOT touch the backup.  macOS recreates one on the
+    next backup, so this is a shrink, not a loss.
+
+    Keep the newest; prune the rest.  This is semi-safe: it is gated behind
+    the full band.
+    """
+    out = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=60)
+    names = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.endswith(".local") and line.startswith("com.apple."):
+            names.append(line)
+    # Newest first, by the timestamp embedded in the name.
+    names.sort(reverse=True)
+    cands = []
+    for name in names[1:]:
+        cands.append(Candidate(
+            category="snapshots",
+            path=f"apfs-snapshot:{name}",
+            bytes=0,
+            reason=f"local snapshot {name}, kept newest is {names[0]}",
+            tier="semi-safe",
+            op="snapshot-delete",
+            detail="local snapshot only; the external backup is untouched",
+        ))
+    return cands
+
+
+def rule_temp_scratch() -> list[Candidate]:
+    """Orphaned mktemp scratch in the per-user TMPDIR.
+
+    Classes are long-lived fleet artifacts: `ssr` nests (which sit under
+    RANDOM-named parents, so they must be enumerated by depth, not by a
+    top-level glob), vitest/agentic scratch, omb-api-test scratch, and the
+    per-run `.com.openai.codex.*` marker files.
+
+    Gate: nothing holds the directory AND nothing was written to it for 3h.
+    """
+    tmpdir = _run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], timeout=10).strip()
+    if not tmpdir:
+        return []
+    root = Path(tmpdir.rstrip("/"))
+    if not root.is_dir():
+        return []
+    # Per-rule wall clock.  Under load 500+ a full TMPDIR walk can run for
+    # minutes, and a scan that takes longer than the pressure it is
+    # responding to is worse than no scan at all.  If the budget runs out we
+    # return what we found rather than blocking the caller.
+    deadline = time.time() + RULE_BUDGET_SEC
+    cands: list[Candidate] = []
+    seen: set[str] = set()
+
+    # ssr nests can be at depth 1 or nested under a RANDOM-named parent at
+    # depth 3, so a top-level `find -maxdepth 1 -name 'ssr-*'` misses them.
+    # Enumerate by depth and filter on the `ssr/` leaf's own mtime.
+    try:
+        res = subprocess.run(
+            ["/usr/bin/find", str(root), "-maxdepth", "3", "-type", "d", "-name", "ssr"],
+            capture_output=True, text=True, timeout=RULE_BUDGET_SEC,
+        )
+        ssr_dirs = [ln for ln in res.stdout.splitlines() if ln.strip()]
+    except (OSError, subprocess.SubprocessError):
+        ssr_dirs = []
+
+    for d in ssr_dirs:
+        if time.time() > deadline:
+            log("temp-scratch: budget exhausted, returning partial results")
+            break
+        if d in seen or is_forbidden(d) or has_keep_sentinel(d):
+            continue
+        if newest_file_age_min(d) < IDLE_MIN_SCRATCH:
+            continue
+        if open_handles(d):
+            continue
+        seen.add(d)
+        cands.append(Candidate(
+            category="temp-scratch", path=d, bytes=dir_bytes(d),
+            reason="orphaned ssr scratch, no handles, idle over 3h",
+        ))
+
+    for glob_pat, label in (
+        ("agentic-vitest-*", "agentic-vitest scratch"),
+        ("omb-api-test-*", "omb-api-test scratch"),
+    ):
+        for d in root.glob(glob_pat):
+            if time.time() > deadline:
+                log("temp-scratch: budget exhausted, returning partial results")
+                break
+            s = str(d)
+            if s in seen or is_forbidden(s) or has_keep_sentinel(s):
+                continue
+            if newest_file_age_min(s) < IDLE_MIN_SCRATCH or open_handles(s):
+                continue
+            seen.add(s)
+            cands.append(Candidate(
+                category="temp-scratch", path=s, bytes=dir_bytes(s),
+                reason=f"orphaned {label}, idle over 3h",
+            ))
+
+    # Codex per-run markers are FILES, not directories -- find -type d misses
+    # them entirely and du -sh on each is wasted work.
+    try:
+        res = subprocess.run(
+            ["/usr/bin/find", str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
+            capture_output=True, text=True, timeout=60,
+        )
+        for f in res.stdout.splitlines():
+            if not f.strip() or f in seen:
+                continue
+            seen.add(f)
+            cands.append(Candidate(
+                category="temp-scratch", path=f, bytes=dir_bytes(f),
+                reason="Codex per-run marker file (auto-rotated by Codex)",
+            ))
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    return cands
+
+
+def rule_app_staging() -> list[Candidate]:
+    """Downloaded updaters that were extracted but never swapped in.
+
+    Sparkle/electron-updater leave a full extracted .app plus the source
+    zip.  Gate on the owning updater process, NOT on lsof: an active
+    ShipIt can report zero open handles while actively writing.
+    """
+    cands: list[Candidate] = []
+    staging_globs = [
+        (HOME / "Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation",
+         "Codex Sparkle installation staging"),
+        (HOME / "Library/Caches/com.anthropic.claudefordesktop.ShipIt",
+         "Claude ShipIt staging"),
+        (HOME / "Library/Caches/@mmx-agentelectron-updater", "MMX agent updater staging"),
+        (HOME / "Library/Caches/ms-playwright", "Playwright browser downloads"),
+    ]
+    for path, label in staging_globs:
+        p = Path(path)
+        if not p.exists() or is_forbidden(str(p)) or has_keep_sentinel(str(p)):
+            continue
+        if newest_file_age_min(str(p)) < IDLE_MIN_STAGING:
+            continue
+        if open_handles(str(p)):
+            continue
+        # An updater that owns this path means it is mid-install.  Check the
+        # process list for the product name, not just the generic name --
+        # `ShipIt` on this Mac belongs to Grok Bot more often than to Claude.
+        owner = re.sub(r"[^a-z]", "", Path(path).name.lower())[:8]
+        if owner and proc_count(owner) > 0:
+            continue
+        cands.append(Candidate(
+            category="app-staging", path=str(p), bytes=dir_bytes(str(p)),
+            reason=f"{label}, idle, no owner process",
+        ))
+    return cands
+
+
+def rule_dev_caches() -> list[Candidate]:
+    """Package-manager and toolchain download caches.
+
+    All of these rebuild on next use.  pnpm and gradle are included only when
+    no build is running, because on this Mac the build fan-out is what
+    drives load and swap and disturbing it makes things worse.
+    """
+    if proc_count("xcodebuild") or proc_count("swift-frontend") or proc_count("clang"):
+        return []  # real build in flight -- leave the caches it is using alone
+    cands: list[Candidate] = []
+    paths = [
+        (HOME / "Library/Caches/node-gyp", "node-gyp headers"),
+        (HOME / "Library/Caches/electron", "Electron downloads"),
+        (HOME / "Library/Caches/electron-builder", "electron-builder cache"),
+        (HOME / "Library/Caches/deno", "Deno downloads"),
+        (HOME / "Library/Caches/copilot", "Copilot toolchain"),
+        (HOME / "Library/Caches/org.swift.swiftpm", "SwiftPM artifacts"),
+        (HOME / "Library/Caches/ms-playwright", "Playwright browsers"),
+        (HOME / "Library/Caches/@mmx-agentelectron-updater", "MMX updater staging"),
+        (HOME / ".npm/_cacache", "npm _cacache"),
+        (HOME / ".cache/uv", "uv cache"),
+        (HOME / ".cache/pip", "pip cache"),
+        (HOME / ".yarn/cache", "Yarn cache"),
+    ]
+    building = proc_count("node ") + proc_count("tsc") > 20
+    if not building:
+        paths.append((HOME / "Library/pnpm/store", "pnpm store"))
+    for path, label in paths:
+        p = Path(path)
+        if not p.exists() or is_forbidden(str(p)) or has_keep_sentinel(str(p)):
+            continue
+        if newest_file_age_min(str(p)) < IDLE_MIN_OK or open_handles(str(p)):
+            continue
+        size = dir_bytes(str(p))
+        if size < 8 * 1024 * 1024:
+            continue
+        cands.append(Candidate(
+            category="dev-caches", path=str(p), bytes=size,
+            reason=f"{label}, idle, no open handles",
+        ))
+    return cands
+
+
+def rule_xcode_artifacts() -> list[Candidate]:
+    """Xcode build products and simulator runtimes.
+
+    Simulator *runtimes* are regenerable and are historically the single
+    biggest win on this Mac (18.5 GB measured 09-27).  Simulator *Devices*
+    are NOT -- they hold user simulator state and are ask-first.
+    """
+    if proc_count("xcodebuild") or proc_count("clang") or proc_count("swift-frontend"):
+        return []
+    cands: list[Candidate] = []
+    dd = HOME / "Library/Developer/Xcode/DerivedData"
+    if dd.is_dir() and newest_file_age_min(str(dd)) > IDLE_MIN_OK:
+        for d in dd.iterdir():
+            if not d.is_dir() or has_keep_sentinel(str(d)):
+                continue
+            if newest_file_age_min(str(d)) < IDLE_MIN_OK or open_handles(str(d)):
+                continue
+            cands.append(Candidate(
+                category="xcode-artifacts", path=str(d), bytes=dir_bytes(str(d)),
+                reason="Xcode DerivedData project, no build running",
+            ))
+    support = HOME / "Library/Developer/Xcode/iOS DeviceSupport"
+    if support.is_dir() and newest_file_age_min(str(support)) > 60 * 24 * 7:
+        cands.append(Candidate(
+            category="xcode-artifacts", path=str(support),
+            bytes=dir_bytes(str(support)),
+            reason="iOS DeviceSupport for OS versions older than 7d",
+            tier="expensive",
+            detail="re-downloads when an old device is attached",
+        ))
+    return cands
+
+
+def rule_simulator_runtimes() -> list[Candidate]:
+    """Installed iOS simulator runtimes.
+
+    Large (18+ GB measured), fully re-downloadable from Xcode.  Deleting a
+    runtime does not touch CoreSimulator/Devices, which stays ask-first.
+    """
+    if proc_count("xcodebuild") or proc_count("Simulator") or proc_count("CoreSimulatorService"):
+        return []
+    cands: list[Candidate] = []
+    roots = [
+        HOME / "Library/Developer/CoreSimulator/Profiles/Runtimes",
+        Path("/Library/Developer/CoreSimulator/Profiles/Runtimes"),
+    ]
+    for root in roots:
+        if not root.is_dir() or has_keep_sentinel(str(root)):
+            continue
+        for rt in root.iterdir():
+            if not rt.is_dir() or is_forbidden(str(rt)):
+                continue
+            if newest_file_age_min(str(rt)) < 60 * 24 or open_handles(str(rt)):
+                continue
+            cands.append(Candidate(
+                category="simulator-runtimes", path=str(rt), bytes=dir_bytes(str(rt)),
+                reason="iOS simulator runtime untouched for 24h+, re-downloadable",
+                tier="expensive",
+            ))
+    return cands
+
+
+def rule_unbounded_logs() -> list[Candidate]:
+    """Log and JSONL files that grew without a rotation policy.
+
+    The shrink operation: keep the tail, drop the prefix.  This is the case
+    CleanMyMac's "delete logs" gets wrong -- deleting a live log file while a
+    daemon holds the fd leaves the daemon writing to an unlinked inode, so the
+    space is NOT freed until the daemon restarts.  Truncating in place fixes
+    that, which is strictly better.
+    """
+    cands: list[Candidate] = []
+    roots = [
+        HOME / "Library/Logs",
+        HOME / ".botfleet",
+        HOME / "apps",
+        HOME / "Code",
+    ]
+    keep_mib = 16
+    deadline = time.time() + RULE_BUDGET_SEC
+    for root in roots:
+        if not root.is_dir():
+            continue
+        if time.time() > deadline:
+            log("logs: budget exhausted, keeping partial results")
+            break
+        try:
+            res = subprocess.run(
+                ["/usr/bin/find", str(root), "-maxdepth", "3", "-type", "f",
+                 "(", "-name", "*.log", "-o", "-name", "*.jsonl", "-o", "-name", "*.out",
+                 "-o", "-name", "*.err", ")", "-size", "+64M"],
+                capture_output=True, text=True, timeout=RULE_BUDGET_SEC,
+            )
+            files = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for f in files:
+            if is_forbidden(f) or has_keep_sentinel(f):
+                continue
+            try:
+                size = Path(f).stat().st_size
+            except OSError:
+                continue
+            if size < 64 * 1024 * 1024:
+                continue
+            # A log being actively appended to is still safe to truncate in
+            # place -- that is the point.  No lsof gate here.
+            cands.append(Candidate(
+                category="logs", path=f, bytes=size,
+                reason=f"log grown to {size // (1024*1024)}M with no rotation",
+                op="truncate",
+                detail=f"keep last {keep_mib}M",
+            ))
+    return cands
+
+
+def rule_sqlite_wals() -> list[Candidate]:
+    """Oversized SQLite write-ahead logs next to a live database.
+
+    Roots are deliberately narrow and shallow.  A `find` at depth 5 across
+    ~/Library/Application Support is tens of thousands of inodes and, under
+    load, runs for minutes -- which is the whole problem we are trying to fix.
+    WAL files live one or two levels under an app's own directory, so depth 3
+    finds them without the walk.
+    """
+    cands: list[Candidate] = []
+    roots = [
+        HOME / ".botfleet",
+        HOME / "Library/Application Support/BotFleet",
+        HOME / "Library/Application Support/HogHunter",
+        HOME / "Library/Application Support/Simple-With-Us",
+    ]
+    for root in roots:
+        if not root.is_dir() or is_forbidden(str(root)):
+            continue
+        try:
+            res = subprocess.run(
+                ["/usr/bin/find", str(root), "-maxdepth", "3", "-type", "f",
+                 "-name", "*.db-wal", "-size", "+32M"],
+                capture_output=True, text=True, timeout=60,
+            )
+            files = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for wal in files:
+            db = wal[: -len("-wal")]
+            if is_forbidden(wal) or has_keep_sentinel(wal):
+                continue
+            try:
+                size = Path(wal).stat().st_size
+            except OSError:
+                continue
+            cands.append(Candidate(
+                category="sqlite-wal", path=db, bytes=size,
+                reason=f"SQLite WAL at {size // (1024*1024)}M, no open handles",
+                op="wal-checkpoint",
+                detail="keep 16M",
+            ))
+    return cands
+
+
+def rule_brew() -> list[Candidate]:
+    """Old Homebrew formula versions and cached downloads."""
+    if not shutil.which("brew"):
+        return []
+    if proc_count("brew") or proc_count("node-gyp"):
+        return []
+    out = _run(["/opt/homebrew/bin/brew", "cleanup", "--dry-run"], timeout=90)
+    if not out:
+        return []
+    lines = [ln for ln in out.splitlines() if ln.strip() and "would remove" not in ln.lower()]
+    if not lines:
+        return []
+    return [Candidate(
+        category="brew", path="/opt/homebrew", bytes=0,
+        reason=f"brew cleanup dry-run lists {len(lines)} obsolete entries",
+        op="brew-cleanup",
+        detail="aged + current symlinks retained by Homebrew",
+    )]
+
+
+def rule_ask_first_inventory() -> list[Candidate]:
+    """The ask-first list, as a report.  NEVER applied.
+
+    Surfaced so Jay (or the Housekeeper, with explicit OK) can act without
+    re-deriving the inventory each time.
+
+    Sizes are reported as 0 on purpose.  These are the largest trees on the
+    Mac (DriveFS is multi-gigabyte, Devices holds simulator state) and sizing
+    them costs a full walk that can run for minutes under load -- for a
+    category whose gate is a human decision, not a byte count.  Pass
+    --size-ask-first to opt into sizing.
+    """
+    cands: list[Candidate] = []
+    size = dir_bytes if SIZE_ASK_FIRST else (lambda _p: 0)
+    watch = [
+        (HOME / "Library/Application Support/Google/DriveFS", "DriveFS local cache (content cache + Logs only; Resources are program files)"),
+        (HOME / "Library/Developer/CoreSimulator/Devices", "Simulator devices (user simulator state)"),
+        (HOME / ".grok/worktrees", "in-session Grok worktrees"),
+    ]
+    for path, label in watch:
+        if path.exists():
+            cands.append(Candidate(
+                category="ask-first", path=str(path), bytes=size(str(path)),
+                reason=label, tier="ask-first", op="report",
+            ))
+    # Claude VM bundles under any of the known roots.
+    for root in (HOME / "Claude/vm_bundles", HOME / "Library/Application Support/Claude/vm_bundles"):
+        if root.is_dir():
+            for b in root.glob("*.bundle"):
+                cands.append(Candidate(
+                    category="ask-first", path=str(b), bytes=size(str(b)),
+                    reason="Claude VM bundle (Monet / Parall)", tier="ask-first", op="report",
+                ))
+    # BotFleet update generations -- ask once a pending update exists.
+    gens = HOME / "Library/Caches/BotFleet/updates"
+    if gens.is_dir():
+        entries = sorted(gens.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        for g in entries[1:]:
+            cands.append(Candidate(
+                category="ask-first", path=str(g), bytes=size(str(g)),
+                reason="BotFleet update generation (non-newest)", tier="ask-first", op="report",
+            ))
+    return cands
+
+
+RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
+    "snapshots": (rule_snapshots, "APFS / Time Machine local snapshots"),
+    "temp-scratch": (rule_temp_scratch, "Orphaned per-user temp scratch"),
+    "app-staging": (rule_app_staging, "Extracted but unused app updaters"),
+    "dev-caches": (rule_dev_caches, "Package manager and toolchain caches"),
+    "xcode-artifacts": (rule_xcode_artifacts, "DerivedData and device support"),
+    "simulator-runtimes": (rule_simulator_runtimes, "iOS simulator runtimes"),
+    "logs": (rule_unbounded_logs, "Unbounded logs (tail-truncated)"),
+    "sqlite-wal": (rule_sqlite_wals, "Oversized SQLite WAL (checkpointed)"),
+    "brew": (rule_brew, "Homebrew obsolete versions"),
+    "ask-first": (rule_ask_first_inventory, "Ask-first inventory (report only)"),
+}
+
+
+# --------------------------------------------------------------------------
+# Band
+# --------------------------------------------------------------------------
+
+def read_band() -> Band:
+    free_gb = 0.0
+    used_pct = 0.0
+    out = _run(["/bin/df", "-k", "/System/Volumes/Data"], timeout=15)
+    lines = out.splitlines()
+    if len(lines) >= 2:
+        parts = lines[1].split()
+        try:
+            free_gb = int(parts[3]) / (1024 * 1024)
+            used_pct = int(parts[4].rstrip("%"))
+        except (IndexError, ValueError):
+            pass
+    swap_pct = 0.0
+    sout = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], timeout=10)
+    # `vm.swapusage` prints "total = ...M  used = ...M  free = ...M  (encrypted)".
+    # total comes FIRST, so an order-sensitive regex silently reads 0 and the
+    # swap gate never fires -- which would let the engine run the full tier
+    # during exactly the episode it exists to protect.  Parse keys separately.
+    total_m = used_m = None
+    m_tot = re.search(r"\btotal\s*=\s*([\d.]+)M", sout)
+    m_used = re.search(r"\bused\s*=\s*([\d.]+)M", sout)
+    if m_tot:
+        total_m = float(m_tot.group(1))
+    if m_used:
+        used_m = float(m_used.group(1))
+    if total_m and total_m > 0:
+        swap_pct = 100.0 * (used_m or 0.0) / total_m
+    load1 = 0.0
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        pass
+    reasons = []
+    if swap_pct >= SWAP_CRIT_PCT:
+        reasons.append(f"swap {swap_pct:.0f}% >= {SWAP_CRIT_PCT:.0f}%")
+    if load1 > LOAD_CRIT:
+        reasons.append(f"load1 {load1:.0f} > {LOAD_CRIT:.0f}")
+    return Band(
+        disk_free_gb=free_gb, disk_used_pct=used_pct, swap_used_pct=swap_pct,
+        load1=load1, cheap_only=bool(reasons), reasons=reasons,
+    )
+
+
+# --------------------------------------------------------------------------
+# Driver
+# --------------------------------------------------------------------------
+
+def scan(cats: Sequence[str] | None) -> list[Candidate]:
+    out: list[Candidate] = []
+    for name, (fn, _desc) in RULES.items():
+        if cats and name not in cats:
+            continue
+        try:
+            out.extend(fn())
+        except Exception as exc:  # a broken rule must not kill the scan
+            log(f"rule {name} failed: {type(exc).__name__}: {exc}")
+    return out
+
+
+def apply_candidate(c: Candidate) -> None:
+    if c.tier == "ask-first" or c.op == "report":
+        return
+    try:
+        if c.op == "delete":
+            freed, err = apply_delete(c.path)
+        elif c.op == "truncate":
+            freed, err = apply_truncate(c.path, keep_mib=int(re.search(r"(\d+)M", c.detail).group(1)) if re.search(r"(\d+)M", c.detail) else 16)
+        elif c.op == "wal-checkpoint":
+            freed, err = apply_wal_checkpoint(c.path)
+        elif c.op == "snapshot-delete":
+            freed, err = apply_snapshot_delete(c.path.split(":", 1)[1])
+        elif c.op == "brew-cleanup":
+            _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=600)
+            freed, err = 0, ""
+        else:
+            return
+    except Exception as exc:
+        c.error = f"{type(exc).__name__}: {exc}"
+        return
+    c.applied = not err
+    c.error = err
+    if freed and not c.error:
+        c.bytes = max(c.bytes, freed) if c.op == "delete" else freed
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="hoghunter-clean", description="Hog Hunter reclaim engine")
+    p.add_argument("--scan", action="store_true", help="read-only (default)")
+    p.add_argument("--clean", action="store_true", help="apply the safe tier")
+    p.add_argument("--band", choices=("cheap", "full"), default="cheap",
+                   help="cheap=only the safe tier (default); full=also semi-safe")
+    p.add_argument("--categories", default="", help="comma-separated subset")
+    p.add_argument("--min-free-gb", type=float, default=0.0,
+                   help="skip the safe tier entirely above this much free space")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--policy", action="store_true", help="print the policy and exit")
+    p.add_argument("--list", action="store_true", help="list rule names and exit")
+    p.add_argument("--size-ask-first", action="store_true",
+                   help="also walk the ask-first trees to size them (slow under load)")
+    p.add_argument("--version", action="store_true")
+    args = p.parse_args(argv)
+
+    global SIZE_ASK_FIRST
+    SIZE_ASK_FIRST = args.size_ask_first
+
+    if args.version:
+        print(f"hoghunter-clean {VERSION}")
+        return 0
+    if args.list:
+        for name, (_fn, desc) in RULES.items():
+            print(f"{name:22s} {desc}")
+        return 0
+    if args.policy:
+        print(POLICY_PATH.read_text() if POLICY_PATH.is_file() else "{}")
+        return 0
+
+    cats = [c.strip() for c in args.categories.split(",") if c.strip()]
+    for c in cats:
+        if c not in RULES:
+            log(f"unknown category {c!r}; known: {', '.join(RULES)}")
+            return 2
+
+    band = read_band()
+    cands = scan(cats or None)
+
+    allowed = {"safe"}
+    if args.band == "full":
+        if not band.cheap_only:
+            allowed.add("semi-safe")
+            if band.disk_band in ("critical", "acute"):
+                # Bulk I/O deletes (simulator runtimes, device support) are the
+                # biggest single wins on this Mac -- 18.55 GB measured 2026-09-27
+                # -- but they are also the exact operations that thrash the disk
+                # during a load episode.  Load is calm here, so the tier is open,
+                # but only because there is real space pressure to justify it.
+                allowed.add("expensive")
+        elif band.disk_band == "critical":
+            # CHEAP-ONLY exists because reclaim is I/O and I/O is scarce during
+            # a load/swap episode.  That reasoning does not hold for the
+            # semi-safe tier, whose headline operation is
+            # `tmutil deletelocalsnapshots` -- a metadata call, not a tree walk,
+            # and it releases container space nothing else on this list can
+            # reach.  At critical disk the disk risk outweighs the I/O risk.
+            # Deliberately narrow: metadata only.  The `expensive` tier stays
+            # shut, so an 18 GB simulator-runtime delete cannot ride in on this.
+            allowed.add("semi-safe")
+            log(f"band=full held to safe for load, but disk is {band.disk_band} "
+                f"({band.disk_free_gb:.1f}G): allowing metadata-only semi-safe ops")
+        else:
+            log(f"band=full downgraded to safe: {', '.join(band.reasons)}")
+
+    if args.clean and band.disk_free_gb >= args.min_free_gb > 0:
+        log(f"free {band.disk_free_gb:.1f}G >= --min-free-gb {args.min_free_gb:.1f}; skipping")
+        return 0
+
+    actionable = [c for c in cands if c.tier in allowed]
+    if args.clean:
+        for c in actionable:
+            apply_candidate(c)
+        # Snapshots report zero bytes by nature, so trust df, not the tally.
+        after = read_band()
+        snapshot_delta = (band.disk_free_gb - after.disk_free_gb) * 1024
+        if snapshot_delta > 512:
+            log(f"snapshot prune freed {snapshot_delta:.0f}M (df-verified)")
+
+    if args.json:
+        print(json.dumps({
+            "version": VERSION,
+            "band": band.as_dict(),
+            "mode": "clean" if args.clean else "scan",
+            "tiers_applied": sorted(allowed),
+            "candidates": [c.as_dict() for c in cands],
+            "reclaimable_mib": round(
+                sum(c.bytes for c in cands if c.tier in allowed) / (1024 * 1024), 1),
+            "applied_mib": round(sum(c.bytes for c in actionable if c.applied) / (1024 * 1024), 1),
+        }, indent=2))
+        return 0
+
+    # Human report
+    if not args.json:
+        print(f"hoghunter-clean {VERSION} — {'CLEAN' if args.clean else 'SCAN'}")
+        print(f"disk {band.disk_free_gb:.1f}G free ({band.disk_band}), "
+              f"swap {band.swap_used_pct:.0f}%, load1 {band.load1:.0f}"
+              + (f"  [CHEAP-ONLY: {', '.join(band.reasons)}]" if band.cheap_only else ""))
+        print(f"tiers applied: {', '.join(sorted(allowed))}\n")
+        if not cands:
+            print("nothing reclaimable.")
+        by_cat: dict[str, list[Candidate]] = {}
+        for c in cands:
+            by_cat.setdefault(c.category, []).append(c)
+        for cat in sorted(by_cat):
+            items = sorted(by_cat[cat], key=lambda c: -c.bytes)
+            total = sum(c.bytes for c in items) / (1024 * 1024)
+            tier = items[0].tier
+            marker = "ASK" if tier == "ask-first" else ("SEMI" if tier == "semi-safe" else "safe")
+            print(f"[{marker}] {cat} — {len(items)} items, {total:.1f}M")
+            for c in items[:6]:
+                flag = "x" if c.applied else ("E" if c.error else ("R" if c.tier == "ask-first" else " "))
+                print(f"    {flag} {c.mib:9.1f}M  {c.path}")
+                if c.error:
+                    print(f"        error: {c.error}")
+            if len(items) > 6:
+                print(f"      ... and {len(items) - 6} more")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
