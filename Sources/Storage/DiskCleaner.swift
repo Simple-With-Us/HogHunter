@@ -46,7 +46,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts:
             return "Inactive AI agent session transcripts (>7 days) and temporary update downloads."
         case .largeAndOldFiles:
-            return "Files over 100 MB or untouched for over 6 months."
+            return "Files over 100 MB, or over 20 MB untouched for 6+ months."
         }
     }
 
@@ -275,9 +275,11 @@ final class DiskCleaner: @unchecked Sendable {
             .sorted(by: { $0.sortOrder < $1.sortOrder })
 
         for category in categoriesToScan {
+            if Task.isCancelled { break }
             await Task.yield()
             progress?(category.title)
             let items = scanCategory(category, installedApps: installedApps)
+            if Task.isCancelled { break }
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
             let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
             overallTotal &+= total

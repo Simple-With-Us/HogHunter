@@ -23,7 +23,14 @@ umask 077
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 work_dir="$(mktemp -d "$RUNNER_TEMP/hoghunter-release.XXXXXX")"
-trap 'rm -rf "$work_dir"' EXIT
+staged_asc_key=""
+cleanup() {
+  rm -rf "$work_dir"
+  if [[ -n "$staged_asc_key" && -f "$staged_asc_key" ]]; then
+    rm -f "$staged_asc_key"
+  fi
+}
+trap cleanup EXIT
 archive="$work_dir/HogHunterIOS.xcarchive"
 auth=(-authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
 
@@ -73,8 +80,9 @@ if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
   asc_keys_dir="${HOME}/.appstoreconnect/private_keys"
   mkdir -p "$asc_keys_dir"
   chmod 700 "$asc_keys_dir"
-  cp "$ASC_KEY_PATH" "${asc_keys_dir}/AuthKey_${ASC_KEY_ID}.p8"
-  chmod 600 "${asc_keys_dir}/AuthKey_${ASC_KEY_ID}.p8"
+  staged_asc_key="${asc_keys_dir}/AuthKey_${ASC_KEY_ID}.p8"
+  cp "$ASC_KEY_PATH" "$staged_asc_key"
+  chmod 600 "$staged_asc_key"
   export API_PRIVATE_KEYS_DIR="$asc_keys_dir"
 
   set +e

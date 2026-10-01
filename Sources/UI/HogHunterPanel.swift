@@ -17,15 +17,20 @@ struct HogHunterPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            switch selectedTab {
-            case .activity:
-                meters
-                captions
-                controls
-                list
-                footer
-            case .storage:
+            ZStack(alignment: .topLeading) {
+                VStack(alignment: .leading, spacing: 12) {
+                    meters
+                    captions
+                    controls
+                    list
+                    footer
+                }
+                .opacity(selectedTab == .activity ? 1 : 0)
+                .allowsHitTesting(selectedTab == .activity)
+
                 StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true)
+                    .opacity(selectedTab == .storage ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .storage)
             }
         }
         .padding(14)

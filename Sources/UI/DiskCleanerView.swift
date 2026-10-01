@@ -22,6 +22,9 @@ struct DiskCleanerView: View {
                 store.scan()
             }
         }
+        .onDisappear {
+            store.cancelScan()
+        }
         .confirmationDialog(
             "Confirm \(store.selectedTier.title)",
             isPresented: $store.showConfirmation,
@@ -256,7 +259,7 @@ struct DiskCleanerView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(report.categories) { catReport in
-                        categoryCard(catReport)
+                        CategoryCardView(catReport: catReport, store: store)
                     }
                 }
                 .padding(.vertical, 2)
@@ -274,9 +277,69 @@ struct DiskCleanerView: View {
         }
     }
 
-    // MARK: - Category Card
+    // MARK: - Bottom Bar
 
-    private func categoryCard(_ catReport: CleanCategoryReport) -> some View {
+    private var bottomBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button("Select All") {
+                store.selectAll()
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+            .disabled(isBusy)
+
+            Text("•")
+                .foregroundStyle(.tertiary)
+
+            Button("Deselect All") {
+                store.deselectAll()
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+            .disabled(isBusy)
+
+            Spacer()
+
+            Button {
+                store.scan()
+            } label: {
+                Label("Rescan", systemImage: "arrow.clockwise")
+                    .font(.system(size: 11))
+            }
+            .controlSize(.small)
+            .disabled(isBusy)
+
+            Button {
+                store.showConfirmation = true
+            } label: {
+                let selectedBytes = store.totalSelectedBytes()
+                Text("Reclaim \(HogFormat.memory(selectedBytes))")
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .disabled(store.totalSelectedBytes() == 0 || isBusy || (store.selectedTier == .extreme && !store.acknowledgedExtremeDisclaimer))
+        }
+        .padding(.top, 4)
+    }
+
+    private var isBusy: Bool {
+        switch store.state {
+        case .scanning, .cleaning: return true
+        default: return false
+        }
+    }
+}
+
+// MARK: - Category Card View
+
+private struct CategoryCardView: View {
+    let catReport: CleanCategoryReport
+    @ObservedObject var store: DiskCleanerStore
+    @State private var displayLimit: Int = 50
+
+    var body: some View {
         let isExpanded = store.isCategoryExpanded(catReport.category)
         let isFullySelected = store.isCategoryFullySelected(catReport.category)
         let isPartiallySelected = store.isCategoryPartiallySelected(catReport.category)
@@ -344,22 +407,34 @@ struct DiskCleanerView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 10)
                 } else {
-                    let displayLimit = 50
                     let visibleItems = Array(catReport.items.prefix(displayLimit))
                     let remainingCount = catReport.items.count - visibleItems.count
 
                     LazyVStack(spacing: 0) {
                         ForEach(visibleItems) { item in
                             itemRow(item)
-                            Divider()
-                                .padding(.leading, 32)
+                            if item.id != visibleItems.last?.id || remainingCount > 0 {
+                                Divider()
+                                    .padding(.leading, 32)
+                            }
                         }
                         if remainingCount > 0 {
-                            HStack {
-                                Text("… and \(remainingCount) more files (all included in reclamation)")
+                            HStack(spacing: 10) {
+                                Text("Showing \(visibleItems.count) of \(catReport.items.count) files")
                                     .font(.system(size: 10))
                                     .foregroundStyle(.secondary)
                                 Spacer()
+                                Button("Show Next \(min(50, remainingCount))") {
+                                    displayLimit += 50
+                                }
+                                .buttonStyle(.link)
+                                .font(.system(size: 10))
+
+                                Button("Show All (\(catReport.items.count))") {
+                                    displayLimit = catReport.items.count
+                                }
+                                .buttonStyle(.link)
+                                .font(.system(size: 10))
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -378,8 +453,6 @@ struct DiskCleanerView: View {
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
     }
-
-    // MARK: - Item Row
 
     private func itemRow(_ item: CleanItem) -> some View {
         let isSelected = store.isItemSelected(item)
@@ -432,8 +505,6 @@ struct DiskCleanerView: View {
         .padding(.vertical, 5)
     }
 
-    // MARK: - Category Icon
-
     private func categoryIconView(for category: CleanCategory) -> some View {
         let color: Color
         switch category {
@@ -453,60 +524,6 @@ struct DiskCleanerView: View {
             Image(systemName: category.icon)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(color)
-        }
-    }
-
-    // MARK: - Bottom Bar
-
-    private var bottomBar: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Button("Select All") {
-                store.selectAll()
-            }
-            .buttonStyle(.link)
-            .font(.system(size: 11))
-            .disabled(isBusy)
-
-            Text("•")
-                .foregroundStyle(.tertiary)
-
-            Button("Deselect All") {
-                store.deselectAll()
-            }
-            .buttonStyle(.link)
-            .font(.system(size: 11))
-            .disabled(isBusy)
-
-            Spacer()
-
-            Button {
-                store.scan()
-            } label: {
-                Label("Rescan", systemImage: "arrow.clockwise")
-                    .font(.system(size: 11))
-            }
-            .controlSize(.small)
-            .disabled(isBusy)
-
-            Button {
-                store.showConfirmation = true
-            } label: {
-                let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(HogFormat.memory(selectedBytes))")
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 4)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-            .disabled(store.totalSelectedBytes() == 0 || isBusy || (store.selectedTier == .extreme && !store.acknowledgedExtremeDisclaimer))
-        }
-        .padding(.top, 4)
-    }
-
-    private var isBusy: Bool {
-        switch store.state {
-        case .scanning, .cleaning: return true
-        default: return false
         }
     }
 }

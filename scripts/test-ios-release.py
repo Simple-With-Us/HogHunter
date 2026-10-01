@@ -110,6 +110,8 @@ elif name == 'xcrun':
     assert option('--api-issuer') == os.environ['ASC_ISSUER_ID']
     assert option('--type') == 'ios'
     assert option('--output-format') == 'json'
+    assert os.environ.get('API_PRIVATE_KEYS_DIR')
+    assert (pathlib.Path(os.environ['API_PRIVATE_KEYS_DIR']) / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8").is_file()
     (root / 'upload-invoked').write_text('yes')
     if os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
         print('{"product-errors": [{"message": "synthetic upload failure"}]}')
@@ -135,6 +137,7 @@ class ReleaseFlowTests(unittest.TestCase):
             key = root / "synthetic-key"
             key.write_text("synthetic-test-data")
             env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                       HOME=str(root),
                        GITHUB_ACTIONS="true", GITHUB_EVENT_NAME=event, GITHUB_REF="refs/heads/main",
                        ASC_KEY_ID="synthetic-id", ASC_ISSUER_ID="synthetic-issuer", ASC_KEY_PATH=str(key),
                        HH_BUILD_NUMBER="42", HH_TESTFLIGHT_UPLOAD=str(upload).lower(),
@@ -145,6 +148,7 @@ class ReleaseFlowTests(unittest.TestCase):
                                     env=env, text=True, capture_output=True)
             uploaded = (root / "upload-invoked").exists()
             self.assertFalse(list(root.glob("hoghunter-release.*")), "release artifacts were not cleaned")
+            self.assertFalse(list(root.glob(".appstoreconnect/private_keys/*")), "staged private key was not cleaned")
             return result, uploaded
 
     def test_export_only_never_uploads(self):

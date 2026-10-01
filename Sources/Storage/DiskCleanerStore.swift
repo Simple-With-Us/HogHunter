@@ -36,11 +36,17 @@ final class DiskCleanerStore: ObservableObject {
     @Published var acknowledgedExtremeDisclaimer: Bool = false
 
     let cleaner: DiskCleaner
-    private let queue = DispatchQueue(label: "hoghunter.cleaner", qos: .utility)
     private var isScanInFlight = false
+    private var scanTask: Task<Void, Never>?
+    private var cleanTask: Task<Void, Never>?
 
     init(cleaner: DiskCleaner = DiskCleaner()) {
         self.cleaner = cleaner
+    }
+
+    deinit {
+        scanTask?.cancel()
+        cleanTask?.cancel()
     }
 
     // MARK: - Scan
@@ -52,37 +58,59 @@ final class DiskCleanerStore: ObservableObject {
         scan()
     }
 
+    /// Cancels any in-flight clutter scan.
+    func cancelScan() {
+        scanTask?.cancel()
+        scanTask = nil
+        isScanInFlight = false
+        if case .scanning = state {
+            state = .idle
+        }
+    }
+
+    /// Cancels all background cleaner tasks (scan or deletion).
+    func cancelAll() {
+        cancelScan()
+        cleanTask?.cancel()
+        cleanTask = nil
+        if case .cleaning = state {
+            state = .idle
+        }
+    }
+
     /// Initiates a full disk clutter scan for the active tier.
     func scan() {
-        guard !isScanInFlight else { return }
+        cancelScan()
         isScanInFlight = true
         let currentTier = selectedTier
         state = .scanning(category: "Starting \(currentTier.title) scan…")
 
         let cleaner = self.cleaner
-        queue.async { [weak self] in
-            Task {
-                let scanReport = await cleaner.scan(tier: currentTier) { categoryTitle in
-                    Task { @MainActor in
-                        self?.state = .scanning(category: categoryTitle)
+        scanTask = Task.detached(priority: .utility) { [weak self, cleaner] in
+            let scanReport = await cleaner.scan(tier: currentTier) { categoryTitle in
+                Task { @MainActor [weak self] in
+                    guard let self, !Task.isCancelled else { return }
+                    self.state = .scanning(category: categoryTitle)
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard let self, !Task.isCancelled else { return }
+                self.report = scanReport
+
+                // Initialize selections according to category defaultSelected
+                var initialSelected: Set<String> = []
+                for catReport in scanReport.categories where catReport.category.defaultSelected {
+                    for item in catReport.items {
+                        initialSelected.insert(item.id)
                     }
                 }
-
-                await MainActor.run {
-                    guard let self else { return }
-                    self.report = scanReport
-
-                    // Initialize selections according to category defaultSelected
-                    var initialSelected: Set<String> = []
-                    for catReport in scanReport.categories where catReport.category.defaultSelected {
-                        for item in catReport.items {
-                            initialSelected.insert(item.id)
-                        }
-                    }
-                    self.selectedItemIds = initialSelected
-                    self.state = .scanned(scanReport)
-                    self.isScanInFlight = false
-                }
+                self.selectedItemIds = initialSelected
+                self.state = .scanned(scanReport)
+                self.isScanInFlight = false
+                self.scanTask = nil
             }
         }
     }
@@ -193,26 +221,29 @@ final class DiskCleanerStore: ObservableObject {
 
         var lastReportedTime = Date.distantPast
         var lastReportedProgress: Double = -1.0
-        let cleaner = self.cleaner
-        queue.async { [weak self] in
-            Task {
-                let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot) { progress, currentItem in
-                    let now = Date()
-                    let isSpecial = currentItem.contains("snapshot") || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
-                    if isSpecial {
-                        lastReportedProgress = progress
-                        lastReportedTime = now
-                        Task { @MainActor in
-                            self?.state = .cleaning(progress: progress, currentItem: currentItem)
-                        }
+        cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
+            var lastReportedTime = Date.distantPast
+            var lastReportedProgress: Double = -1.0
+            let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot) { progress, currentItem in
+                let now = Date()
+                let isSpecial = currentItem.contains("snapshot") || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
+                if isSpecial {
+                    lastReportedProgress = progress
+                    lastReportedTime = now
+                    Task { @MainActor [weak self] in
+                        guard let self, !Task.isCancelled else { return }
+                        self.state = .cleaning(progress: progress, currentItem: currentItem)
                     }
                 }
+            }
 
-                await MainActor.run {
-                    guard let self else { return }
-                    self.selectedItemIds.removeAll()
-                    self.state = .cleaned(result)
-                }
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard let self, !Task.isCancelled else { return }
+                self.selectedItemIds.removeAll()
+                self.state = .cleaned(result)
+                self.cleanTask = nil
             }
         }
     }
