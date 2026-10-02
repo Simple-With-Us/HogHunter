@@ -65,7 +65,7 @@ enum CompanionSnapshotBuilder {
                 )
             },
             storage: storage ?? currentStorageSummary(),
-            network: network ?? currentNetworkRows()
+            network: network
         )
     }
 

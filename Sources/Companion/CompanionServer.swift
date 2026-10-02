@@ -134,10 +134,6 @@ final class CompanionServer: @unchecked Sendable {
                     },
                     tameHandler: { [weak self] pid, action in
                         guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
-                        guard self.allowRemoteQuit else {
-                            let res = ["status": "forbidden", "error": "Remote process control is disabled in Hog Hunter Mac Settings."]
-                            return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
-                        }
                         if let handler = self.onRemoteTame {
                             return handler(pid, action)
                         }
