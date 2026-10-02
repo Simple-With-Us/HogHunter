@@ -81,6 +81,17 @@ enum CompanionSnapshotBuilder {
         let usedPct = totalBytes > 0 ? (Double(usedBytes) / Double(totalBytes)) * 100.0 : 0.0
         let exclusions = CleanerExclusions.load()
 
+        let breakdown = CleanCategory.allCases.map { cat in
+            CompanionStorageCategorySummary(
+                id: cat.rawValue,
+                title: cat.title,
+                description: cat.description,
+                icon: cat.icon,
+                isExcluded: exclusions.isCategoryExcluded(cat),
+                isExtremeOnly: cat.isExtremeOnly
+            )
+        }
+
         return CompanionStorageSummary(
             freeBytes: freeBytes,
             totalBytes: totalBytes,
@@ -90,7 +101,9 @@ enum CompanionSnapshotBuilder {
             usedText: HogFormat.memory(usedBytes) + " Used",
             usedPercent: usedPct,
             excludedCategories: Array(exclusions.excludedCategories),
-            excludedPathsCount: exclusions.excludedPaths.count
+            excludedPathsCount: exclusions.excludedPaths.count,
+            categoryBreakdown: breakdown,
+            excludedPaths: Array(exclusions.excludedPaths).sorted()
         )
     }
 

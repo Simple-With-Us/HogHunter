@@ -1049,6 +1049,92 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteTame(pid: pid, action: action)
         }
+        companionServer.onRemoteExclusionsUpdate = { [weak self] req in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteExclusionsUpdate(req)
+        }
+        companionServer.onRemoteViewUpdate = { [weak self] req in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteViewUpdate(req)
+        }
+    }
+
+    private func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {
+        var current = CleanerExclusions.load()
+        if let catId = req.toggleCategory, let cat = CleanCategory(rawValue: catId) {
+            current.toggleCategory(cat)
+        }
+        if let path = req.addPath, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            current.addPath(path)
+        }
+        if let path = req.removePath {
+            current.removePath(path)
+        }
+        current.save()
+        DispatchQueue.main.async { [weak self] in
+            self?.publishCompanion()
+        }
+        let resp = CompanionExclusionsUpdateResponse(
+            status: "ok",
+            excludedCategories: Array(current.excludedCategories),
+            excludedPaths: Array(current.excludedPaths).sorted(),
+            message: "Exclusions updated."
+        )
+        let data = (try? JSONEncoder().encode(resp)) ?? Data("{}".utf8)
+        return (200, data)
+    }
+
+    private func performRemoteViewUpdate(_ req: CompanionViewUpdateRequest) -> (status: Int, body: Data) {
+        var targetWindow: TimeWindow?
+        if let win = req.window {
+            if win.caseInsensitiveCompare("now") == .orderedSame {
+                targetWindow = .now
+            } else if win.caseInsensitiveCompare("1h") == .orderedSame || win.caseInsensitiveCompare("1 Hour") == .orderedSame || win.caseInsensitiveCompare("Past Hour") == .orderedSame || win.caseInsensitiveCompare("Past 1 Hour") == .orderedSame {
+                targetWindow = .hour
+            } else if win.caseInsensitiveCompare("24h") == .orderedSame || win.caseInsensitiveCompare("24 Hours") == .orderedSame || win.caseInsensitiveCompare("Past 24 Hours") == .orderedSame || win.caseInsensitiveCompare("day") == .orderedSame {
+                targetWindow = .day
+            }
+        }
+
+        var targetGrouping: HogGrouping?
+        if let grp = req.grouping {
+            if grp.caseInsensitiveCompare("apps") == .orderedSame {
+                targetGrouping = .apps
+            } else if grp.caseInsensitiveCompare("processes") == .orderedSame {
+                targetGrouping = .processes
+            }
+        }
+
+        var targetCpuScale: CpuScale?
+        if let sc = req.cpuScale {
+            if sc.lowercased().contains("machine") || sc.lowercased().contains("share") {
+                targetCpuScale = .machineShare
+            } else if sc.lowercased().contains("core") {
+                targetCpuScale = .perCore
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let targetWindow { self.window = targetWindow }
+            if let targetGrouping { self.grouping = targetGrouping }
+            if let targetCpuScale { self.cpuScale = targetCpuScale }
+            self.publishCompanion()
+        }
+
+        let resp = CompanionViewUpdateResponse(
+            status: "ok",
+            window: targetWindow?.rawValue ?? req.window ?? "now",
+            grouping: targetGrouping?.rawValue ?? req.grouping ?? "apps",
+            cpuScale: targetCpuScale?.rawValue ?? req.cpuScale ?? "machineShare",
+            message: "View updated."
+        )
+        let data = (try? JSONEncoder().encode(resp)) ?? Data("{}".utf8)
+        return (200, data)
     }
 
     private func performRemoteTame(pid: pid_t, action: String) -> (status: Int, body: Data) {

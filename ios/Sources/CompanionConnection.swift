@@ -115,6 +115,74 @@ enum CompanionConnection {
         }
     }
 
+    static func triggerExclusionsUpdate(
+        endpoint: NWEndpoint,
+        token: String,
+        toggleCategory: String? = nil,
+        addPath: String? = nil,
+        removePath: String? = nil
+    ) async throws -> CompanionExclusionsUpdateResponse {
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = ExclusionsResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let request = CompanionHTTP.exclusionsRequest(token: token, toggleCategory: toggleCategory, addPath: addPath, removePath: removePath)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error { reader.fail(error) }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                    default:
+                        break
+                    }
+                }
+                receiveExclusions(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .utility))
+            }
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
+        }
+    }
+
+    static func triggerViewUpdate(
+        endpoint: NWEndpoint,
+        token: String,
+        window: String? = nil,
+        grouping: String? = nil,
+        cpuScale: String? = nil
+    ) async throws -> CompanionViewUpdateResponse {
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = ViewResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let request = CompanionHTTP.viewRequest(token: token, window: window, grouping: grouping, cpuScale: cpuScale)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error { reader.fail(error) }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                    default:
+                        break
+                    }
+                }
+                receiveView(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .utility))
+            }
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
+        }
+    }
+
     private static func receive(_ connection: NWConnection, reader: ResponseReader, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
             var buffer = buffer
@@ -236,6 +304,64 @@ enum CompanionConnection {
             receiveTame(connection, reader: reader, buffer: buffer)
         }
     }
+
+    private static func receiveExclusions(_ connection: NWConnection, reader: ExclusionsResponseReader, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let parsed = CompanionHTTP.parseResponse(buffer) {
+                switch parsed.status {
+                case 200, 400:
+                    if let res = try? JSONDecoder().decode(CompanionExclusionsUpdateResponse.self, from: parsed.body) {
+                        reader.succeed(res)
+                    } else {
+                        reader.fail(CompanionClientError.badResponse)
+                    }
+                case 401:
+                    reader.fail(CompanionClientError.unauthorized)
+                default:
+                    reader.fail(CompanionClientError.badResponse)
+                }
+                connection.cancel()
+                return
+            }
+            if isComplete || error != nil {
+                reader.fail(error ?? CompanionClientError.badResponse)
+                connection.cancel()
+                return
+            }
+            receiveExclusions(connection, reader: reader, buffer: buffer)
+        }
+    }
+
+    private static func receiveView(_ connection: NWConnection, reader: ViewResponseReader, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let parsed = CompanionHTTP.parseResponse(buffer) {
+                switch parsed.status {
+                case 200, 400:
+                    if let res = try? JSONDecoder().decode(CompanionViewUpdateResponse.self, from: parsed.body) {
+                        reader.succeed(res)
+                    } else {
+                        reader.fail(CompanionClientError.badResponse)
+                    }
+                case 401:
+                    reader.fail(CompanionClientError.unauthorized)
+                default:
+                    reader.fail(CompanionClientError.badResponse)
+                }
+                connection.cancel()
+                return
+            }
+            if isComplete || error != nil {
+                reader.fail(error ?? CompanionClientError.badResponse)
+                connection.cancel()
+                return
+            }
+            receiveView(connection, reader: reader, buffer: buffer)
+        }
+    }
 }
 
 private final class CleanResponseReader: @unchecked Sendable {
@@ -315,6 +441,48 @@ private final class ResponseReader: @unchecked Sendable {
     }
 
     private func resume(_ result: Result<CompanionSnapshot, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+private final class ExclusionsResponseReader: @unchecked Sendable {
+    var continuation: CheckedContinuation<CompanionExclusionsUpdateResponse, Error>?
+    private let lock = NSLock()
+
+    func succeed(_ response: CompanionExclusionsUpdateResponse) {
+        resume(.success(response))
+    }
+
+    func fail(_ error: Error) {
+        resume(.failure(error))
+    }
+
+    private func resume(_ result: Result<CompanionExclusionsUpdateResponse, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+private final class ViewResponseReader: @unchecked Sendable {
+    var continuation: CheckedContinuation<CompanionViewUpdateResponse, Error>?
+    private let lock = NSLock()
+
+    func succeed(_ response: CompanionViewUpdateResponse) {
+        resume(.success(response))
+    }
+
+    func fail(_ error: Error) {
+        resume(.failure(error))
+    }
+
+    private func resume(_ result: Result<CompanionViewUpdateResponse, Error>) {
         lock.lock()
         let continuation = self.continuation
         self.continuation = nil

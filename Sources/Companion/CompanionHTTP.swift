@@ -9,7 +9,9 @@ enum CompanionHTTP {
         token: String,
         cleanHandler: ((String) -> (status: Int, body: Data))? = nil,
         quitHandler: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil,
-        tameHandler: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil
+        tameHandler: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil,
+        exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
+        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
     ) -> Data {
         let text = String(data: request, encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
@@ -24,7 +26,12 @@ enum CompanionHTTP {
         let method = String(parts[0])
         let fullPath = String(parts[1])
         let path = fullPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
-        guard path == CompanionService.path || path == CompanionService.cleanPath || path == CompanionService.quitPath || path == CompanionService.tamePath else {
+        guard path == CompanionService.path
+            || path == CompanionService.cleanPath
+            || path == CompanionService.quitPath
+            || path == CompanionService.tamePath
+            || path == CompanionService.exclusionsPath
+            || path == CompanionService.viewPath else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
@@ -116,6 +123,68 @@ enum CompanionHTTP {
             }
             let (code, resBody) = tameHandler(pid, action)
             return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.exclusionsPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let exclusionsHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Exclusions Not Configured".utf8))
+            }
+            var updateReq = CompanionExclusionsUpdateRequest()
+            if fullPath.contains("?") {
+                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                for param in query.split(separator: "&") {
+                    let kv = param.split(separator: "=", maxSplits: 1)
+                    if kv.count == 2 {
+                        let k = String(kv[0])
+                        let v = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                        if k == "toggleCategory" { updateReq.toggleCategory = v }
+                        if k == "addPath" { updateReq.addPath = v }
+                        if k == "removePath" { updateReq.removePath = v }
+                    }
+                }
+            }
+            if let range = request.range(of: Data("\r\n\r\n".utf8)) {
+                let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
+                if let decoded = try? JSONDecoder().decode(CompanionExclusionsUpdateRequest.self, from: bodyData) {
+                    if decoded.toggleCategory != nil { updateReq.toggleCategory = decoded.toggleCategory }
+                    if decoded.addPath != nil { updateReq.addPath = decoded.addPath }
+                    if decoded.removePath != nil { updateReq.removePath = decoded.removePath }
+                }
+            }
+            let (code, resBody) = exclusionsHandler(updateReq)
+            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.viewPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let viewHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("View Not Configured".utf8))
+            }
+            var updateReq = CompanionViewUpdateRequest()
+            if fullPath.contains("?") {
+                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                for param in query.split(separator: "&") {
+                    let kv = param.split(separator: "=", maxSplits: 1)
+                    if kv.count == 2 {
+                        let k = String(kv[0])
+                        let v = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                        if k == "window" { updateReq.window = v }
+                        if k == "grouping" { updateReq.grouping = v }
+                        if k == "cpuScale" || k == "scale" { updateReq.cpuScale = v }
+                    }
+                }
+            }
+            if let range = request.range(of: Data("\r\n\r\n".utf8)) {
+                let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
+                if let decoded = try? JSONDecoder().decode(CompanionViewUpdateRequest.self, from: bodyData) {
+                    if decoded.window != nil { updateReq.window = decoded.window }
+                    if decoded.grouping != nil { updateReq.grouping = decoded.grouping }
+                    if decoded.cpuScale != nil { updateReq.cpuScale = decoded.cpuScale }
+                }
+            }
+            let (code, resBody) = viewHandler(updateReq)
+            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
         }
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
     }
@@ -159,6 +228,50 @@ enum CompanionHTTP {
     static func tameRequest(token: String, pid: Int32, action: String = "tame") -> Data {
         let lines = [
             "POST \(CompanionService.tamePath)?pid=\(pid)&action=\(action) HTTP/1.1",
+            "Host: hoghunter",
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    static func queryAllowedValue(_ value: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: ";&=")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    static func exclusionsRequest(token: String, toggleCategory: String? = nil, addPath: String? = nil, removePath: String? = nil) -> Data {
+        var queryItems: [String] = []
+        if let toggleCategory { queryItems.append("toggleCategory=\(queryAllowedValue(toggleCategory))") }
+        if let addPath {
+            queryItems.append("addPath=\(queryAllowedValue(addPath))")
+        }
+        if let removePath {
+            queryItems.append("removePath=\(queryAllowedValue(removePath))")
+        }
+        let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
+        let lines = [
+            "POST \(CompanionService.exclusionsPath)\(queryString) HTTP/1.1",
+            "Host: hoghunter",
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    static func viewRequest(token: String, window: String? = nil, grouping: String? = nil, cpuScale: String? = nil) -> Data {
+        var queryItems: [String] = []
+        if let window { queryItems.append("window=\(queryAllowedValue(window))") }
+        if let grouping { queryItems.append("grouping=\(queryAllowedValue(grouping))") }
+        if let cpuScale { queryItems.append("cpuScale=\(queryAllowedValue(cpuScale))") }
+        let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
+        let lines = [
+            "POST \(CompanionService.viewPath)\(queryString) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",
