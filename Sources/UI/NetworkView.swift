@@ -5,6 +5,7 @@ import SwiftUI
 /// timer while the window is visible, with a manual button as the override.
 struct NetworkView: View {
     @StateObject private var store: NetworkStore
+    @ObservedObject private var bandwidth: BandwidthStore
     @State private var sortOrder: NetworkSort = .established
     @State private var refreshTask: Task<Void, Never>?
 
@@ -13,10 +14,12 @@ struct NetworkView: View {
 
     init(
         bundleResolver: @escaping (pid_t) -> (bundleId: String?, name: String),
+        bandwidth: BandwidthStore,
         embeddedInPanel: Bool = false,
         isTabActive: Bool = true
     ) {
         _store = StateObject(wrappedValue: NetworkStore(bundleResolver: bundleResolver))
+        _bandwidth = ObservedObject(wrappedValue: bandwidth)
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
     }
@@ -25,6 +28,7 @@ struct NetworkView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
                 .padding(.top, embeddedInPanel ? 0 : 4)
+            bandwidthStrip
             statusRow
             list
             footer
@@ -35,6 +39,7 @@ struct NetworkView: View {
             if !embeddedInPanel {
                 WindowActivator.front()
             }
+            bandwidth.refreshPeaks()
             if isTabActive {
                 store.refresh()
                 startRefreshTimer()
@@ -43,6 +48,7 @@ struct NetworkView: View {
         .onChange(of: isTabActive) { active in
             if active {
                 store.refresh()
+                bandwidth.refreshPeaks()
                 startRefreshTimer()
             } else {
                 refreshTask?.cancel()
@@ -55,7 +61,53 @@ struct NetworkView: View {
         }
         .navigationTitle("Network — Hog Hunter")
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Hog Hunter Network — apps with open connections")
+        .accessibilityLabel("Hog Hunter Network — bandwidth and apps with open connections")
+    }
+
+    // MARK: - Bandwidth
+
+    /// Real bytes, read from the kernel's per-interface counters.
+    ///
+    /// "Now" is a short rolling average rather than a single tick, because a
+    /// one-sample difference off a lifetime counter is mostly a packet burst.
+    /// The peak is the highest sustained rate seen over the last 24 hours and
+    /// survives restarts, because it is read back out of the history database
+    /// rather than kept in memory for the life of the window.
+    private var bandwidthStrip: some View {
+        HStack(alignment: .top, spacing: 10) {
+            BandwidthCard(
+                title: "Now",
+                down: bandwidth.reading.downBytesPerSecond,
+                up: bandwidth.reading.upBytesPerSecond,
+                footnote: nowFootnote,
+                help: "Average bytes per second over the last \(Int(bandwidth.reading.windowSeconds.rounded())) seconds."
+            )
+            BandwidthCard(
+                title: "24-Hour Peak",
+                down: bandwidth.peaks.peakDownBytesPerSecond,
+                up: bandwidth.peaks.peakUpBytesPerSecond,
+                footnote: peakFootnote,
+                help: peakHelp
+            )
+        }
+    }
+
+    private var nowFootnote: String {
+        guard bandwidth.reading.isMeasured else { return "Measuring…" }
+        return "Last \(Int(bandwidth.reading.windowSeconds.rounded())) s"
+    }
+
+    private var peakFootnote: String {
+        guard bandwidth.peaks.hasSamples else { return "No History Yet" }
+        return "Sampled \(HogFormat.duration(bandwidth.peaks.sampledSeconds))"
+    }
+
+    private var peakHelp: String {
+        guard let at = bandwidth.peaks.peakAt else {
+            return "The fastest sustained download or upload seen in the last 24 hours."
+        }
+        let when = DateFormatter.localizedString(from: at, dateStyle: .none, timeStyle: .short)
+        return "The fastest sustained rate in the last 24 hours, reached at \(when)."
     }
 
     private var header: some View {
@@ -73,8 +125,8 @@ struct NetworkView: View {
             Spacer()
             Picker("Sort", selection: $sortOrder) {
                 Text("Established").tag(NetworkSort.established)
-                Text("Remote hosts").tag(NetworkSort.remoteHosts)
-                Text("Open sockets").tag(NetworkSort.open)
+                Text("Remote Hosts").tag(NetworkSort.remoteHosts)
+                Text("Open Sockets").tag(NetworkSort.open)
             }
             .pickerStyle(.menu)
             .frame(width: 160)
@@ -152,9 +204,16 @@ struct NetworkView: View {
     }
 
     private var footer: some View {
-        Text("lsof snapshot only — refreshes every 10 s while this window is open.  Per-process byte counters are not in the public API; for those, use Activity Monitor's Network tab.")
-            .font(.system(size: 10.5))
-            .foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 3) {
+            Text("The list below is an lsof snapshot of who holds which connection.  Bandwidth above is the whole machine, read from the kernel's interface counters.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("macOS has no public per-process byte counter.  For which app moved which bytes, use Activity Monitor's Network tab.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func startRefreshTimer() {
@@ -171,6 +230,57 @@ struct NetworkView: View {
 }
 
 enum NetworkSort: Hashable { case established, remoteHosts, open }
+
+/// One bandwidth number: download on the left, upload on the right, both with
+/// the arrow that says which way the bytes are going.  Styled like the panel's
+/// meters so the two panes read as one app.
+struct BandwidthCard: View {
+    let title: String
+    let down: Double
+    let up: Double
+    let footnote: String
+    let help: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                rateLabel(down, arrow: "arrow.down", word: "Down")
+                rateLabel(up, arrow: "arrow.up", word: "Up")
+            }
+            Text(footnote)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue("Download \(HogFormat.rate(down)), Upload \(HogFormat.rate(up)).  \(footnote)")
+    }
+
+    private func rateLabel(_ bytesPerSecond: Double, arrow: String, word: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: arrow)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+            Text(HogFormat.rate(bytesPerSecond))
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+        }
+        .accessibilityLabel(word)
+    }
+}
 
 struct NetworkRowView: View {
     let usage: NetworkUsage

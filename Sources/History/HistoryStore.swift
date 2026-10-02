@@ -9,8 +9,11 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 /// Schema v2 keeps a `ticks` table beside `samples` so an average can be taken
 /// over the window's whole length rather than over the rows that happen to
 /// exist: a process seen in 3 of 120 ticks should read as a small average, not
-/// as its own busy moments.  The database URL is always explicit so tests and
-/// command-line checks never touch the installed app's file.
+/// as its own busy moments.  Schema v3 adds `net_samples`, one cumulative
+/// interface-counter reading per sample, which is what lets the Network tab
+/// show a 24-hour bandwidth peak instead of only the last few seconds.  The
+/// database URL is always explicit so tests and command-line checks never
+/// touch the installed app's file.
 ///
 /// `@unchecked Sendable` is honest here: every entry point serializes on the
 /// same lock, and the database is opened lazily inside that lock by whichever
@@ -40,6 +43,14 @@ final class HistoryStore: @unchecked Sendable {
         var tickCount: Int
         var sampledSeconds: TimeInterval
         var firstTimestamp: Date?
+    }
+
+    /// One stored interface-counter reading: a timestamp and the lifetime byte
+    /// counters as of that moment.
+    struct NetworkReading: Equatable {
+        var ts: Int64
+        var bytesIn: UInt64
+        var bytesOut: UInt64
     }
 
     /// Why a row was kept, as a bit field.
@@ -169,13 +180,147 @@ final class HistoryStore: @unchecked Sendable {
               reason INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS samples_ts ON samples(ts);
+            CREATE TABLE IF NOT EXISTS net_samples (
+              ts INTEGER PRIMARY KEY,
+              bytes_in INTEGER NOT NULL,
+              bytes_out INTEGER NOT NULL
+            );
             """,
-            label: "create v2 schema"
+            label: "create v3 schema"
         ) {
             ok = false
         }
-        if !exec("PRAGMA user_version=2;", label: "set user version") { ok = false }
+        if !exec("PRAGMA user_version=3;", label: "set user version") { ok = false }
         return ok
+    }
+
+    // MARK: - Network
+
+    /// Records one cumulative interface-counter reading.  The columns are
+    /// lifetime byte counters, not rates, so this row is only meaningful next
+    /// to its neighbours -- the same reason `ticks` exists beside `samples`.
+    /// `ts` is the primary key, so a second reading inside one second replaces
+    /// the first instead of stacking a second row for the same instant.
+    func recordNetwork(bytesIn: UInt64, bytesOut: UInt64, at date: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        openLocked()
+        guard let db else { return }
+        if !openFailed { lastError = nil }
+
+        let ts = Int64(date.timeIntervalSince1970)
+        var statement: OpaquePointer?
+        guard check(
+            sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO net_samples(ts,bytes_in,bytes_out) VALUES(?,?,?)", -1, &statement, nil),
+            "prepare net sample"
+        ) else {
+            sqlite3_finalize(statement)
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, ts)
+        sqlite3_bind_int64(statement, 2, Int64(bitPattern: bytesIn))
+        sqlite3_bind_int64(statement, 3, Int64(bitPattern: bytesOut))
+        if !check(sqlite3_step(statement), "insert net sample", expected: SQLITE_DONE) {
+            return
+        }
+    }
+
+    /// The newest interface-counter reading, or nil when nothing was ever
+    /// recorded.  `BandwidthTracker` uses it to keep showing a live rate when
+    /// the app was restarted mid-window.
+    func latestNetworkSample() -> NetworkReading? {
+        lock.lock()
+        defer { lock.unlock() }
+        openLocked()
+        guard let db else { return nil }
+        var statement: OpaquePointer?
+        let sql = "SELECT ts, bytes_in, bytes_out FROM net_samples ORDER BY ts DESC LIMIT 1"
+        guard check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), "prepare latest net sample") else {
+            sqlite3_finalize(statement)
+            return nil
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return NetworkReading(
+            ts: Int64(sqlite3_column_int64(statement, 0)),
+            bytesIn: UInt64(bitPattern: sqlite3_column_int64(statement, 1)),
+            bytesOut: UInt64(bitPattern: sqlite3_column_int64(statement, 2))
+        )
+    }
+
+    /// Peak and total traffic over `lookback`.
+    ///
+    /// Counters are cumulative and monotonic, so a rate is the difference
+    /// between two readings divided by the time between them.  Rows are folded
+    /// into one-minute buckets first (`MAX` of a monotonic counter is its
+    /// last value in the bucket) so a 24-hour query returns ~1,400 rows rather
+    /// than ~17,000, and a sampling gap cannot inflate a rate: the divisor is
+    /// the gap's real length, never an assumed tick interval.
+    func networkPeaks(lookback: TimeInterval = 24 * 60 * 60, now: Date = Date()) -> NetworkPeaks {
+        lock.lock()
+        defer { lock.unlock() }
+        openLocked()
+        guard let db else { return .empty }
+        let cutoff = Int64(now.timeIntervalSince1970 - lookback)
+        var statement: OpaquePointer?
+        let sql = """
+        SELECT CAST(ts / 60 AS INTEGER) AS bucket, MAX(bytes_in), MAX(bytes_out)
+        FROM net_samples WHERE ts >= ? GROUP BY bucket ORDER BY bucket
+        """
+        guard check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), "prepare net peaks") else {
+            sqlite3_finalize(statement)
+            return .empty
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, cutoff)
+
+        struct Bucket {
+            var at: TimeInterval
+            var bytesIn: UInt64
+            var bytesOut: UInt64
+        }
+        var buckets: [Bucket] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            buckets.append(Bucket(
+                at: Double(sqlite3_column_int64(statement, 0)) * 60,
+                bytesIn: UInt64(bitPattern: sqlite3_column_int64(statement, 1)),
+                bytesOut: UInt64(bitPattern: sqlite3_column_int64(statement, 2))
+            ))
+        }
+        guard !buckets.isEmpty else { return .empty }
+
+        // A counter that went backwards between buckets means an interface was
+        // re-created.  That segment is skipped rather than divided: it is not
+        // a burst of traffic, and a negative delta would be a negative rate.
+        var peakDown: Double = 0
+        var peakUp: Double = 0
+        var peakAt: Date?
+        var totalDown: UInt64 = 0
+        var totalUp: UInt64 = 0
+        for (previous, next) in zip(buckets, buckets.dropFirst()) {
+            let seconds = next.at - previous.at
+            guard seconds > 0, next.bytesIn >= previous.bytesIn, next.bytesOut >= previous.bytesOut else { continue }
+            let down = Double(next.bytesIn - previous.bytesIn) / seconds
+            let up = Double(next.bytesOut - previous.bytesOut) / seconds
+            totalDown += next.bytesIn - previous.bytesIn
+            totalUp += next.bytesOut - previous.bytesOut
+            // Strictly greater keeps the earliest peak of an equal pair, so the
+            // timestamp says when the high-water mark was first reached.
+            if down > peakDown { peakDown = down; peakAt = Date(timeIntervalSince1970: next.at) }
+            if up > peakUp { peakUp = up; peakAt = peakAt ?? Date(timeIntervalSince1970: next.at) }
+        }
+
+        let sampledSeconds = (buckets.last!.at - buckets.first!.at)
+        return NetworkPeaks(
+            peakDownBytesPerSecond: peakDown,
+            peakUpBytesPerSecond: peakUp,
+            peakAt: peakAt,
+            totalDownBytes: totalDown,
+            totalUpBytes: totalUp,
+            sampledSeconds: sampledSeconds,
+            hasSamples: buckets.count > 1
+        )
     }
 
     // MARK: - Recording
@@ -415,7 +560,7 @@ final class HistoryStore: @unchecked Sendable {
         if !force, now.timeIntervalSince(lastPrune) < 20 * 60 { return }
         lastPrune = now
         let cutoff = Int64(now.timeIntervalSince1970 - retention)
-        exec("DELETE FROM samples WHERE ts < \(cutoff); DELETE FROM ticks WHERE ts < \(cutoff);", label: "prune")
+        exec("DELETE FROM samples WHERE ts < \(cutoff); DELETE FROM ticks WHERE ts < \(cutoff); DELETE FROM net_samples WHERE ts < \(cutoff);", label: "prune")
         memo.removeAll()
     }
 

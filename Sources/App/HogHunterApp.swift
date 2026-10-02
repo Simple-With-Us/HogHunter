@@ -63,7 +63,6 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
 struct HogHunterApp: App {
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
     @StateObject private var store = HogStore()
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra {
@@ -94,13 +93,19 @@ struct HogHunterApp: App {
                 .environmentObject(store)
         }
 
+        // Storage and Network are tabs of the menu bar panel.  These scenes stay
+        // for the Window menu's benefit; nothing in the UI points at them.
         Window("Storage", id: "hoghunter.storage") {
             StorageView { store.runningBundleIdsSnapshot() }
         }
         .defaultSize(width: 560, height: 680)
 
         Window("Network", id: "hoghunter.network") {
-            NetworkView { pid in store.lookup(pid: pid) }
+            NetworkView(
+                bundleResolver: { pid in store.lookup(pid: pid) },
+                bandwidth: store.bandwidth
+            )
+            .environmentObject(store)
         }
         .defaultSize(width: 540, height: 560)
     }

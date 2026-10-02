@@ -19,7 +19,11 @@ enum ProcessControl {
         "ControlCenter",
         "NotificationCenter",
         "coreaudiod",
+        // The executable inside the bundle is still named HogHunter, so this
+        // is what the process table reports.  "Hog Hunter" is listed too
+        // because a sample can also pick up the bundle's display name.
         "HogHunter",
+        "Hog Hunter",
     ]
 
     static let systemProcessReason = "system process"
