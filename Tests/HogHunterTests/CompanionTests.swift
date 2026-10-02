@@ -48,9 +48,132 @@ final class CompanionTests: XCTestCase {
         XCTAssertEqual(snapshot.window, "Now")
     }
 
+    func testSnapshotIncludesStorageAndNetworkRoundTrip() throws {
+        let storage = CompanionStorageSummary(
+            freeBytes: 100_000_000_000,
+            totalBytes: 500_000_000_000,
+            usedBytes: 400_000_000_000,
+            freeText: "100 GB Free",
+            totalText: "500 GB Total",
+            usedText: "400 GB Used",
+            usedPercent: 80.0,
+            standardCleanableBytes: 5_000_000_000,
+            standardCleanableText: "5 GB Cleanable"
+        )
+        let networkRow = CompanionNetworkRow(
+            id: "123",
+            name: "Safari",
+            pid: 123,
+            establishedCount: 12,
+            uniqueRemoteHosts: 4,
+            sampleRemoteHosts: ["1.1.1.1:443", "8.8.8.8:53"]
+        )
+        var snapshot = sampleSnapshot(scale: .perCore)
+        snapshot.storage = storage
+        snapshot.network = [networkRow]
+
+        let encoded = try CompanionJSON.encode(snapshot)
+        let decoded = try CompanionJSON.decode(encoded)
+
+        XCTAssertEqual(decoded.storage, storage)
+        XCTAssertEqual(decoded.network, [networkRow])
+        XCTAssertEqual(decoded.rows.first?.cpuPercent, 400)
+        XCTAssertEqual(decoded.rows.first?.memoryBytes, 2_147_483_648)
+    }
+
+    func testCompanionServerPreferredPortAndAddressDetection() {
+        let addresses = CompanionServer.detectHostAddresses()
+        if let local = addresses.localIP {
+            XCTAssertFalse(local.isEmpty)
+        }
+        if let tailscale = addresses.tailscaleIP {
+            XCTAssertTrue(tailscale.hasPrefix("100."))
+        }
+    }
+
     func testServiceNameDropsTheDomain() {
         XCTAssertEqual(CompanionServer.serviceName(from: "Studio.local"), "Studio")
         XCTAssertEqual(CompanionServer.serviceName(from: "   "), "Hog Hunter")
+    }
+
+    func testCompanionTameRequestAndResponse() {
+        var tamedPid: pid_t?
+        var tameAction: String?
+        let handler: (pid_t, String) -> (status: Int, body: Data) = { pid, action in
+            tamedPid = pid
+            tameAction = action
+            let resp = CompanionTameResponse(status: "tamed", pid: pid, name: "test", isTamed: true, message: "OK", error: nil)
+            return (200, (try? JSONEncoder().encode(resp)) ?? Data())
+        }
+
+        let request = CompanionHTTP.tameRequest(token: "ABCD2345", pid: 9999, action: "tame")
+        let response = CompanionHTTP.response(
+            request: request,
+            body: Data(),
+            token: "ABCD2345",
+            tameHandler: handler
+        )
+        let parsed = CompanionHTTP.parseResponse(response)
+        XCTAssertEqual(parsed?.status, 200)
+        XCTAssertEqual(tamedPid, 9999)
+        XCTAssertEqual(tameAction, "tame")
+
+        let decoded = try? JSONDecoder().decode(CompanionTameResponse.self, from: parsed?.body ?? Data())
+        XCTAssertEqual(decoded?.status, "tamed")
+        XCTAssertEqual(decoded?.pid, 9999)
+        XCTAssertEqual(decoded?.isTamed, true)
+    }
+
+    func testCompanionSnapshotCarriesBatteryAndThermalAndTaming() throws {
+        var pulse = MachinePulse.empty
+        pulse.batteryPercent = 88
+        pulse.isCharging = true
+        pulse.powerSource = "AC"
+        pulse.thermalState = .serious
+
+        let row = HogRow(
+            id: "a-test",
+            keys: [],
+            name: "HogApp",
+            detail: "test",
+            cpuPercent: 250,
+            memoryBytes: 500_000_000,
+            peakMemoryBytes: nil,
+            presence: nil,
+            icon: nil,
+            path: nil,
+            isApp: true,
+            isGroup: false,
+            canQuit: true,
+            quitBlockReason: nil,
+            isTamed: true,
+            isSleepBlocker: true,
+            canTame: true
+        )
+
+        let snapshot = CompanionSnapshotBuilder.make(
+            hostName: "MacBook",
+            sampledAt: Date(),
+            hasBaseline: true,
+            window: .now,
+            grouping: .processes,
+            scale: .perCore,
+            pulse: pulse,
+            rows: [row]
+        )
+
+        XCTAssertEqual(snapshot.pulse.batteryText, "88% (AC)")
+        XCTAssertEqual(snapshot.pulse.isCharging, true)
+        XCTAssertEqual(snapshot.pulse.thermalState, "serious")
+        XCTAssertEqual(snapshot.rows.first?.isTamed, true)
+        XCTAssertEqual(snapshot.rows.first?.isSleepBlocker, true)
+        XCTAssertEqual(snapshot.rows.first?.canTame, true)
+
+        let roundTrip = try CompanionJSON.decode(try CompanionJSON.encode(snapshot))
+        XCTAssertEqual(roundTrip.pulse.batteryText, "88% (AC)")
+        XCTAssertEqual(roundTrip.pulse.thermalState, "serious")
+        XCTAssertEqual(roundTrip.rows.first?.isTamed, true)
+        XCTAssertEqual(roundTrip.rows.first?.isSleepBlocker, true)
     }
 
     private func sampleSnapshot(scale: CpuScale) -> CompanionSnapshot {

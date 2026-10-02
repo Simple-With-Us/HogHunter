@@ -110,6 +110,56 @@ enum ProcessControl {
         return QuitOutcome(results: results)
     }
 
+    /// Quits a single process by PID after checking block reasons and ownership.
+    static func quit(pid: pid_t, force: Bool) -> MemberResult {
+        let name = currentName(pid) ?? "PID \(pid)"
+        let uid = currentUid(pid) ?? uid_t.max
+        if let reason = blockReason(pid: pid, uid: uid, name: name) {
+            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+        }
+        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: send(to: pid, force: force))
+    }
+
+    // MARK: - Process Priority & Taming
+
+    /// Checks whether a process is running with background scheduling / nice priority.
+    static func isTamed(pid: pid_t) -> Bool {
+        guard pid > 1 else { return false }
+        errno = 0
+        let prio = getpriority(PRIO_PROCESS, id_t(pid))
+        if errno == 0 && prio >= 15 { return true }
+        let darwinBg = getpriority(PRIO_DARWIN_PROCESS, id_t(pid))
+        return darwinBg == 1
+    }
+
+    /// Throttles a process to background QoS and nice level 20.
+    @discardableResult
+    static func tame(pid: pid_t) -> MemberResult {
+        let name = currentName(pid) ?? "PID \(pid)"
+        let uid = currentUid(pid) ?? uid_t.max
+        if let reason = blockReason(pid: pid, uid: uid, name: name) {
+            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+        }
+        _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), PRIO_DARWIN_BG)
+        let res = setpriority(PRIO_PROCESS, id_t(pid), 20)
+        let outcome: Outcome = res == 0 ? .asked : .failed(String(cString: strerror(errno)))
+        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: outcome)
+    }
+
+    /// Restores standard scheduling priority to a previously tamed process.
+    @discardableResult
+    static func untame(pid: pid_t) -> MemberResult {
+        let name = currentName(pid) ?? "PID \(pid)"
+        let uid = currentUid(pid) ?? uid_t.max
+        if let reason = blockReason(pid: pid, uid: uid, name: name) {
+            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+        }
+        _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), 0)
+        let res = setpriority(PRIO_PROCESS, id_t(pid), 0)
+        let outcome: Outcome = res == 0 ? .asked : .failed(String(cString: strerror(errno)))
+        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: outcome)
+    }
+
     // MARK: - Live re-checks
 
     /// True when the pid still belongs to the process the key describes.  A key

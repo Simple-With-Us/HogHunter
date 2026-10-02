@@ -183,3 +183,4 @@ jobs:
           if [[ -n "${ASC_KEY_PATH:-}" && "$ASC_KEY_PATH" == "$RUNNER_TEMP"/asc-signing.*/AuthKey.p8 ]]; then
             rm -rf "$(dirname "$ASC_KEY_PATH")"
           fi
+          rm -rf "$HOME/.appstoreconnect/private_keys"

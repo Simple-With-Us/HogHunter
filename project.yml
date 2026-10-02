@@ -35,6 +35,7 @@ targets:
       - sdk: ServiceManagement.framework
       - sdk: UserNotifications.framework
       - sdk: libsqlite3.tbd
+      - sdk: IOKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos

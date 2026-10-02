@@ -47,6 +47,7 @@ enum CpuScale: String, CaseIterable, Identifiable {
 enum MenuBarLabelMode: String, CaseIterable, Identifiable {
     case machinePercent = "Machine CPU"
     case topHogName = "Top Hog"
+    case sparkline = "Live Sparkline"
 
     var id: String { rawValue }
 }
@@ -101,6 +102,8 @@ struct ProcessSample: Identifiable {
     let diskReadBytesPerSec: Double
     let diskWriteBytesPerSec: Double
     let idleWakeupsPerSec: Double
+    var isSleepBlocker: Bool = false
+    var isTamed: Bool = false
     var isKernelTask: Bool { key.isKernelTask }
 }
 
@@ -142,6 +145,9 @@ struct MachinePulse: Equatable {
     var swapOutBytesPerSec: Double
     var pressure: MemoryPressure
     var thermalState: ProcessInfo.ThermalState
+    var batteryPercent: Int? = nil
+    var isCharging: Bool? = nil
+    var powerSource: String? = nil
     var sampledAt: Date
 
     static let empty = MachinePulse(
@@ -150,7 +156,9 @@ struct MachinePulse: Equatable {
         memoryUsedBytes: 0, appMemoryBytes: 0, wiredBytes: 0, compressedBytes: 0, cachedFilesBytes: 0,
         totalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
         swapUsedBytes: 0, swapTotalBytes: 0, swapInBytesPerSec: 0, swapOutBytesPerSec: 0,
-        pressure: .unknown, thermalState: .nominal, sampledAt: .distantPast
+        pressure: .unknown, thermalState: .nominal,
+        batteryPercent: nil, isCharging: nil, powerSource: nil,
+        sampledAt: .distantPast
     )
 
     var memoryPercent: Double {
@@ -195,6 +203,9 @@ struct HogRow: Identifiable, Hashable {
     var canQuit: Bool
     /// Why Quit is unavailable: "system process", "owned by another user", "this app".
     var quitBlockReason: String?
+    var isTamed: Bool = false
+    var isSleepBlocker: Bool = false
+    var canTame: Bool = false
 
     var pid: pid_t? { keys.first?.pid }
 
@@ -218,6 +229,9 @@ struct HogRow: Identifiable, Hashable {
             && lhs.presence == rhs.presence
             && lhs.canQuit == rhs.canQuit
             && lhs.quitBlockReason == rhs.quitBlockReason
+            && lhs.isTamed == rhs.isTamed
+            && lhs.isSleepBlocker == rhs.isSleepBlocker
+            && lhs.canTame == rhs.canTame
     }
 }
 

@@ -5,7 +5,9 @@ import SwiftUI
 /// Disk cleaner view inside Hog Hunter's Storage window.
 /// Offers category-by-category breakdown, selective item inspection, and safe one-click reclamation.
 struct DiskCleanerView: View {
-    @StateObject private var store = DiskCleanerStore()
+    @ObservedObject var store: DiskCleanerStore
+    var isTabActive: Bool = true
+    @State private var showExclusionsSheet = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -18,9 +20,20 @@ struct DiskCleanerView: View {
             bottomBar
         }
         .onAppear {
-            if case .idle = store.state {
+            if isTabActive, case .idle = store.state {
                 store.scan()
             }
+        }
+        .onChange(of: isTabActive) { active in
+            if active, case .idle = store.state {
+                store.scan()
+            }
+        }
+        .onDisappear {
+            store.cancelScan()
+        }
+        .sheet(isPresented: $showExclusionsSheet) {
+            CleanerExclusionsSheet(store: store)
         }
         .confirmationDialog(
             "Confirm \(store.selectedTier.title)",
@@ -256,7 +269,7 @@ struct DiskCleanerView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(report.categories) { catReport in
-                        categoryCard(catReport)
+                        CategoryCardView(catReport: catReport, store: store)
                     }
                 }
                 .padding(.vertical, 2)
@@ -274,9 +287,82 @@ struct DiskCleanerView: View {
         }
     }
 
-    // MARK: - Category Card
+    // MARK: - Bottom Bar
 
-    private func categoryCard(_ catReport: CleanCategoryReport) -> some View {
+    private var bottomBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button("Select All") {
+                store.selectAll()
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+            .disabled(isBusy)
+
+            Text("•")
+                .foregroundStyle(.tertiary)
+
+            Button("Deselect All") {
+                store.deselectAll()
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+            .disabled(isBusy)
+
+            Text("•")
+                .foregroundStyle(.tertiary)
+
+            Button {
+                showExclusionsSheet = true
+            } label: {
+                let count = store.exclusions.excludedCategories.count + store.exclusions.excludedPaths.count
+                Label(count > 0 ? "Exclusions (\(count))" : "Exclusions…", systemImage: "shield")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.link)
+            .disabled(isBusy)
+
+            Spacer()
+
+            Button {
+                store.scan()
+            } label: {
+                Label("Rescan", systemImage: "arrow.clockwise")
+                    .font(.system(size: 11))
+            }
+            .controlSize(.small)
+            .disabled(isBusy)
+
+            Button {
+                store.showConfirmation = true
+            } label: {
+                let selectedBytes = store.totalSelectedBytes()
+                Text("Reclaim \(HogFormat.memory(selectedBytes))")
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .disabled(store.totalSelectedBytes() == 0 || isBusy || (store.selectedTier == .extreme && !store.acknowledgedExtremeDisclaimer))
+        }
+        .padding(.top, 4)
+    }
+
+    private var isBusy: Bool {
+        switch store.state {
+        case .scanning, .cleaning: return true
+        default: return false
+        }
+    }
+}
+
+// MARK: - Category Card View
+
+private struct CategoryCardView: View {
+    let catReport: CleanCategoryReport
+    @ObservedObject var store: DiskCleanerStore
+    @State private var displayLimit: Int = 50
+
+    var body: some View {
         let isExpanded = store.isCategoryExpanded(catReport.category)
         let isFullySelected = store.isCategoryFullySelected(catReport.category)
         let isPartiallySelected = store.isCategoryPartiallySelected(catReport.category)
@@ -344,13 +430,37 @@ struct DiskCleanerView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 10)
                 } else {
-                    VStack(spacing: 0) {
-                        ForEach(catReport.items) { item in
+                    let visibleItems = Array(catReport.items.prefix(displayLimit))
+                    let remainingCount = catReport.items.count - visibleItems.count
+
+                    LazyVStack(spacing: 0) {
+                        ForEach(visibleItems) { item in
                             itemRow(item)
-                            if item.id != catReport.items.last?.id {
+                            if item.id != visibleItems.last?.id || remainingCount > 0 {
                                 Divider()
                                     .padding(.leading, 32)
                             }
+                        }
+                        if remainingCount > 0 {
+                            HStack(spacing: 10) {
+                                Text("Showing \(visibleItems.count) of \(catReport.items.count) files")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Show Next \(min(50, remainingCount))") {
+                                    displayLimit += 50
+                                }
+                                .buttonStyle(.link)
+                                .font(.system(size: 10))
+
+                                Button("Show All (\(catReport.items.count))") {
+                                    displayLimit = catReport.items.count
+                                }
+                                .buttonStyle(.link)
+                                .font(.system(size: 10))
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
                         }
                     }
                     .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
@@ -366,8 +476,6 @@ struct DiskCleanerView: View {
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
     }
-
-    // MARK: - Item Row
 
     private func itemRow(_ item: CleanItem) -> some View {
         let isSelected = store.isItemSelected(item)
@@ -420,8 +528,6 @@ struct DiskCleanerView: View {
         .padding(.vertical, 5)
     }
 
-    // MARK: - Category Icon
-
     private func categoryIconView(for category: CleanCategory) -> some View {
         let color: Color
         switch category {
@@ -431,6 +537,7 @@ struct DiskCleanerView: View {
         case .developer: color = .orange
         case .orphanedData: color = .purple
         case .aiArtifacts: color = .green
+        case .localAIModels: color = .mint
         case .largeAndOldFiles: color = .teal
         }
 
@@ -443,58 +550,105 @@ struct DiskCleanerView: View {
                 .foregroundStyle(color)
         }
     }
+}
 
-    // MARK: - Bottom Bar
+// MARK: - Exclusions Sheet
 
-    private var bottomBar: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Button("Select All") {
-                store.selectAll()
+private struct CleanerExclusionsSheet: View {
+    @ObservedObject var store: DiskCleanerStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Cleaner Exclusions & Safety")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .controlSize(.small)
             }
-            .buttonStyle(.link)
-            .font(.system(size: 11))
-            .disabled(isBusy)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
 
-            Text("•")
-                .foregroundStyle(.tertiary)
+            Divider()
 
-            Button("Deselect All") {
-                store.deselectAll()
+            Form {
+                Section("Category Exclusions") {
+                    Text("Excluded categories are skipped during scans and will never be cleaned.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(CleanCategory.allCases) { category in
+                        Toggle(isOn: Binding(
+                            get: { store.exclusions.isCategoryExcluded(category) },
+                            set: { _ in store.toggleCategoryExclusion(category) }
+                        )) {
+                            HStack(spacing: 8) {
+                                Image(systemName: category.icon)
+                                    .frame(width: 16)
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(category.title)
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(category.description)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section("Custom Excluded Folders") {
+                    Text("Files in these directories or their subfolders are preserved and skipped.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    if store.exclusions.excludedPaths.isEmpty {
+                        Text("No custom excluded folders.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(store.exclusions.excludedPaths, id: \.self) { path in
+                            HStack {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                Text(path)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button {
+                                    store.removeExcludedPath(path)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove exclusion")
+                            }
+                        }
+                    }
+
+                    Button("Add Folder…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = false
+                        panel.prompt = "Exclude Folder"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            store.addExcludedPath(url.path)
+                        }
+                    }
+                }
             }
-            .buttonStyle(.link)
-            .font(.system(size: 11))
-            .disabled(isBusy)
-
-            Spacer()
-
-            Button {
-                store.scan()
-            } label: {
-                Label("Rescan", systemImage: "arrow.clockwise")
-                    .font(.system(size: 11))
-            }
-            .controlSize(.small)
-            .disabled(isBusy)
-
-            Button {
-                store.showConfirmation = true
-            } label: {
-                let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(HogFormat.memory(selectedBytes))")
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 4)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-            .disabled(store.totalSelectedBytes() == 0 || isBusy || (store.selectedTier == .extreme && !store.acknowledgedExtremeDisclaimer))
+            .formStyle(.grouped)
         }
-        .padding(.top, 4)
-    }
-
-    private var isBusy: Bool {
-        switch store.state {
-        case .scanning, .cleaning: return true
-        default: return false
-        }
+        .frame(width: 480, height: 420)
     }
 }
+

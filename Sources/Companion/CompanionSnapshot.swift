@@ -6,6 +6,8 @@ enum CompanionService {
     static let type = "_hoghunter._tcp"
     static let path = "/v1/snapshot"
     static let cleanPath = "/v1/clean"
+    static let quitPath = "/v1/quit"
+    static let tamePath = "/v1/tame"
     static let version = 1
 }
 
@@ -18,6 +20,25 @@ struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var snapshotCreated: Bool
     var snapshotName: String?
     var tier: String
+}
+
+/// Response returned when the iOS companion asks to quit a process on the Mac.
+struct CompanionQuitResponse: Codable, Equatable, Sendable {
+    var status: String
+    var pid: Int32
+    var name: String
+    var message: String?
+    var error: String?
+}
+
+/// Response returned when the iOS companion asks to tame or untame a process on the Mac.
+struct CompanionTameResponse: Codable, Equatable, Sendable {
+    var status: String
+    var pid: Int32
+    var name: String
+    var isTamed: Bool
+    var message: String?
+    var error: String?
 }
 
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
@@ -53,6 +74,8 @@ struct CompanionSnapshot: Codable, Equatable {
     var cpuScale: String
     var pulse: CompanionPulse
     var rows: [CompanionRow]
+    var storage: CompanionStorageSummary? = nil
+    var network: [CompanionNetworkRow]? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
@@ -68,6 +91,16 @@ struct CompanionPulse: Codable, Equatable {
     var swapText: String?
     var pressureText: String?
     var pressureSeverity: String
+    var thermalState: String? = nil
+    var batteryPercent: Int? = nil
+    var isCharging: Bool? = nil
+    var powerSource: String? = nil
+
+    var batteryText: String? {
+        guard let percent = batteryPercent else { return nil }
+        let src = powerSource ?? (isCharging == true ? "AC" : "Battery")
+        return "\(percent)% (\(src))"
+    }
 }
 
 struct CompanionRow: Codable, Equatable, Identifiable {
@@ -79,6 +112,37 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     /// `calm`, `elevated`, or `hot`.  Calm stays in the ordinary text color.
     var severity: String
     var isApp: Bool
+    var cpuPercent: Double? = nil
+    var memoryBytes: UInt64? = nil
+    var pid: Int32? = nil
+    var canQuit: Bool = false
+    var quitBlockReason: String? = nil
+    var isTamed: Bool? = false
+    var isSleepBlocker: Bool? = false
+    var canTame: Bool? = false
+}
+
+struct CompanionStorageSummary: Codable, Equatable {
+    var freeBytes: UInt64
+    var totalBytes: UInt64
+    var usedBytes: UInt64
+    var freeText: String
+    var totalText: String
+    var usedText: String
+    var usedPercent: Double
+    var standardCleanableBytes: UInt64? = nil
+    var standardCleanableText: String? = nil
+    var excludedCategories: [String]? = nil
+    var excludedPathsCount: Int? = nil
+}
+
+struct CompanionNetworkRow: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var pid: Int32
+    var establishedCount: Int
+    var uniqueRemoteHosts: Int
+    var sampleRemoteHosts: [String]
 }
 
 enum CompanionJSON {

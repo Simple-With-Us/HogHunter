@@ -23,7 +23,14 @@ umask 077
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 work_dir="$(mktemp -d "$RUNNER_TEMP/hoghunter-release.XXXXXX")"
-trap 'rm -rf "$work_dir"' EXIT
+staged_asc_key=""
+cleanup() {
+  rm -rf "$work_dir"
+  if [[ -n "$staged_asc_key" && -f "$staged_asc_key" ]]; then
+    rm -f "$staged_asc_key"
+  fi
+}
+trap cleanup EXIT
 archive="$work_dir/HogHunterIOS.xcarchive"
 auth=(-authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
 
@@ -70,9 +77,26 @@ apps=("$work_dir/ipa/Payload/"*.app)
 validate_app "${apps[0]}" true
 
 if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
+  asc_keys_dir="${HOME}/.appstoreconnect/private_keys"
+  mkdir -p "$asc_keys_dir"
+  chmod 700 "$asc_keys_dir"
+  staged_asc_key="${asc_keys_dir}/AuthKey_${ASC_KEY_ID}.p8"
+  cp "$ASC_KEY_PATH" "$staged_asc_key"
+  chmod 600 "$staged_asc_key"
+  export API_PRIVATE_KEYS_DIR="$asc_keys_dir"
+
+  set +e
   xcrun altool --upload-app -f "${ipas[0]}" --type ios --output-format json \
-    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" \
-    --p8-file-path "$ASC_KEY_PATH" > "$work_dir/upload-result.json"
+    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" > "$work_dir/upload-result.json" 2>&1
+  altool_rc=$?
+  set -e
+
+  cat "$work_dir/upload-result.json"
+  if [[ $altool_rc -ne 0 ]]; then
+    echo "error: altool upload failed with exit code $altool_rc" >&2
+    exit $altool_rc
+  fi
+
   python3 - "$work_dir/upload-result.json" <<'PYUPLOAD'
 import json, sys
 try:

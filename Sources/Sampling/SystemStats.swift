@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
+import IOKit.ps
 
-/// Machine-wide CPU, memory, swap, pressure and thermal state.
+/// Machine-wide CPU, memory, swap, pressure, battery, and thermal state.
 ///
 /// The mach host port is acquired once and released in `deinit`; asking for it
 /// on every tick leaks a send right.  Every reading is a pure function of the
@@ -34,6 +35,9 @@ final class SystemStats {
         var swapOutBytesPerSec: Double
         var pressure: MemoryPressure
         var thermalState: ProcessInfo.ThermalState
+        var batteryPercent: Int?
+        var isCharging: Bool?
+        var powerSource: String?
         var raw: Raw
     }
 
@@ -57,6 +61,7 @@ final class SystemStats {
         let vm = vmStatistics()
         let swap = swapUsage()
         let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let battery = batteryStatus()
 
         let raw = Raw(
             idleTicks: load.idle,
@@ -110,8 +115,29 @@ final class SystemStats {
             swapOutBytesPerSec: swapOut,
             pressure: memoryPressure(),
             thermalState: ProcessInfo.processInfo.thermalState,
+            batteryPercent: battery.percent,
+            isCharging: battery.isCharging,
+            powerSource: battery.source,
             raw: raw
         )
+    }
+
+    // MARK: - Battery status
+
+    private func batteryStatus() -> (percent: Int?, isCharging: Bool?, source: String?) {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
+              !sources.isEmpty else {
+            return (nil, nil, nil)
+        }
+        for ps in sources {
+            guard let desc = IOPSGetPowerSourceDescription(snapshot, ps)?.takeUnretainedValue() as? [String: Any] else { continue }
+            let state = desc[kIOPSPowerSourceStateKey as String] as? String
+            let cap = desc[kIOPSCurrentCapacityKey as String] as? Int
+            let charging = desc[kIOPSIsChargingKey as String] as? Bool
+            return (cap, charging, state)
+        }
+        return (nil, nil, nil)
     }
 
     // MARK: - Kernel reads

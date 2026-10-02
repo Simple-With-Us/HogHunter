@@ -37,6 +37,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(CleanCategory.developer.defaultSelected)
         XCTAssertTrue(CleanCategory.orphanedData.defaultSelected)
         XCTAssertFalse(CleanCategory.aiArtifacts.defaultSelected, "AI agent artifacts must require explicit user review")
+        XCTAssertFalse(CleanCategory.localAIModels.defaultSelected, "Local AI models must require explicit user review")
         XCTAssertFalse(CleanCategory.largeAndOldFiles.defaultSelected, "Large & old user files must never be selected by default")
     }
 
@@ -48,6 +49,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.developer))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.orphanedData))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
+        XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.localAIModels))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.largeAndOldFiles))
 
         // Extreme tier must include all categories

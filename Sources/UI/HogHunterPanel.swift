@@ -1,28 +1,76 @@
 import AppKit
 import SwiftUI
 
+enum PanelTab: String, CaseIterable, Identifiable {
+    case activity = "Activity"
+    case storage = "Storage"
+    case network = "Network"
+
+    var id: String { rawValue }
+}
+
 struct HogHunterPanel: View {
     @EnvironmentObject private var store: HogStore
     @Environment(\.openWindow) private var openWindow
+    @State private var selectedTab: PanelTab = .activity
     @State private var pendingQuit: HogRow?
+    @State private var hasVisitedStorage: Bool = false
+    @State private var hasVisitedNetwork: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            meters
-            captions
-            controls
-            list
-            footer
+            ZStack(alignment: .topLeading) {
+                VStack(alignment: .leading, spacing: 12) {
+                    meters
+                    captions
+                    controls
+                    list
+                    footer
+                }
+                .opacity(selectedTab == .activity ? 1 : 0)
+                .allowsHitTesting(selectedTab == .activity)
+                .accessibilityHidden(selectedTab != .activity)
+
+                if hasVisitedStorage {
+                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true, isTabActive: selectedTab == .storage)
+                        .opacity(selectedTab == .storage ? 1 : 0)
+                        .allowsHitTesting(selectedTab == .storage)
+                        .accessibilityHidden(selectedTab != .storage)
+                }
+
+                if hasVisitedNetwork {
+                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, embeddedInPanel: true, isTabActive: selectedTab == .network)
+                        .opacity(selectedTab == .network ? 1 : 0)
+                        .allowsHitTesting(selectedTab == .network)
+                        .accessibilityHidden(selectedTab != .network)
+                }
+            }
         }
         .padding(14)
-        .frame(width: 400, height: 580)
+        .frame(width: 560, height: 680)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(store.appearance.colorScheme)
-        .onAppear { store.panelVisible = true }
-        .onDisappear { store.panelVisible = false }
+        .onChange(of: selectedTab) { newTab in
+            if newTab == .storage {
+                hasVisitedStorage = true
+            } else if newTab == .network {
+                hasVisitedNetwork = true
+            }
+        }
+        .onAppear {
+            store.panelVisible = true
+            if selectedTab == .storage {
+                hasVisitedStorage = true
+            } else if selectedTab == .network {
+                hasVisitedNetwork = true
+            }
+        }
+        .onDisappear {
+            store.panelVisible = false
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Hog Hunter — top processes")
+        .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : (selectedTab == .storage ? "Hog Hunter — storage and disk cleaner" : "Hog Hunter — network activity"))
         .alert(
             pendingQuit.map { "Quit \($0.name)?" } ?? "Quit Process?",
             isPresented: Binding(
@@ -60,43 +108,45 @@ struct HogHunterPanel: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "flame.fill")
-                .foregroundStyle(Color(red: 0.86, green: 0.32, blue: 0.16))
-            Text("Hog Hunter")
-                .font(.system(size: 18, weight: .semibold))
-            Circle()
-                .fill(store.isStale
-                      ? Color(red: 0.80, green: 0.52, blue: 0.10)
-                      : Color(red: 0.16, green: 0.58, blue: 0.30))
-                .frame(width: 7, height: 7)
-            if store.alertsEnabled {
-                Image(systemName: "bell.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .help("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) min.")
-                    .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
-            }
-            Spacer()
-            Button {
-                HogActions.openStorageWindow(openWindow: openWindow)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "internaldrive")
-                    Text("Storage")
+        HStack(alignment: .center, spacing: 8) {
+            HStack(spacing: 6) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 18, height: 15)
+                Text("Hog Hunter")
+                    .font(.system(size: 17, weight: .semibold))
+                if store.isStale {
+                    Text("Sampling Behind")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(Color.orange.opacity(0.15))
+                        )
                 }
-                .font(.system(size: 11, weight: .medium))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Open Storage and Disk Cleaner")
-            .accessibilityLabel("Open Storage and Disk Cleaner")
+            .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter, sampling is up to date")
+
+            Spacer()
+
+            Picker("Tab", selection: $selectedTab) {
+                Label("Activity", image: "HogProfile").tag(PanelTab.activity)
+                Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
+                Label("Network", systemImage: "network").tag(PanelTab.network)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 270)
+
+            Spacer()
 
             gearMenu
         }
-        .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter, sampling is up to date")
     }
 
     private var gearMenu: some View {
@@ -104,8 +154,8 @@ struct HogHunterPanel: View {
             SettingsLink {
                 Text("Settings…")
             }
-            Button("Storage…") { HogActions.openStorageWindow(openWindow: openWindow) }
-            Button("Network…") { HogActions.openNetworkWindow(openWindow: openWindow) }
+            Button("Open Storage Window…") { HogActions.openStorageWindow(openWindow: openWindow) }
+            Button("Network Window…") { HogActions.openNetworkWindow(openWindow: openWindow) }
             Divider()
             Button("Activity Monitor") { HogActions.openActivityMonitor() }
             Divider()
@@ -179,6 +229,20 @@ struct HogHunterPanel: View {
                 severity: Self.thermalSeverity(store.pulse.thermalState),
                 help: "macOS slows the machine down as this rises."
             ))
+        }
+        if let pct = store.pulse.batteryPercent {
+            let isCharging = store.pulse.isCharging ?? false
+            let isBattery = store.pulse.powerSource == "Battery Power"
+            if isBattery || pct < 100 {
+                let severity: Severity = pct <= 20 ? .hot : (pct <= 40 ? .elevated : .calm)
+                let icon = isCharging ? "⚡ " : ""
+                let text = "\(icon)\(pct)% Battery"
+                out.append(Pill(
+                    text: text,
+                    severity: severity,
+                    help: isCharging ? "Charging (\(pct)%)." : "Running on battery (\(pct)%). High CPU processes increase discharge rate."
+                ))
+            }
         }
         return out
     }

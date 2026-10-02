@@ -70,8 +70,15 @@ struct HogHunterApp: App {
             HogHunterPanel()
                 .environmentObject(store)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "flame.fill")
+            HStack(spacing: 5) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 18, height: 15)
+                if store.menuBarLabelMode == .sparkline {
+                    CpuSparklineView(samples: store.recentCpuPercents)
+                }
                 Text(store.menuBarLabel)
                     .monospacedDigit()
             }

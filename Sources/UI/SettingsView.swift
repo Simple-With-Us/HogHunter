@@ -25,6 +25,12 @@ struct SettingsView: View {
                 }
                 .tag("alerts")
 
+            CleanerSettingsTab()
+                .tabItem {
+                    Label("Cleaner", systemImage: "sparkles")
+                }
+                .tag("cleaner")
+
             IPhoneSettingsTab()
                 .environmentObject(store)
                 .tabItem {
@@ -67,6 +73,8 @@ private struct GeneralSettingsTab: View {
                     Text("2 Seconds").tag(2.0)
                     Text("3 Seconds").tag(3.0)
                     Text("5 Seconds").tag(5.0)
+                    Text("10 Seconds").tag(10.0)
+                    Text("15 Seconds").tag(15.0)
                 }
 
                 Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
@@ -134,6 +142,7 @@ private struct AlertsSettingsTab: View {
     @AppStorage(HogStore.Key.alertsEnabled) private var alertsEnabled = false
     @AppStorage(HogStore.Key.alertThresholdPercent) private var alertThreshold: Double = 300
     @AppStorage(HogStore.Key.alertSustainedMinutes) private var alertSustainedMinutes: Int = 5
+    @AppStorage(HogStore.Key.alertWebhookURL) private var alertWebhookURL: String = ""
 
     var body: some View {
         Form {
@@ -141,11 +150,112 @@ private struct AlertsSettingsTab: View {
                 alerts: store.alerts,
                 enabled: $alertsEnabled,
                 threshold: $alertThreshold,
-                sustainedMinutes: $alertSustainedMinutes
+                sustainedMinutes: $alertSustainedMinutes,
+                webhookURL: $alertWebhookURL
             )
         }
         .formStyle(.grouped)
         .frame(width: 440)
+    }
+}
+
+// MARK: - Cleaner Tab
+
+private struct CleanerSettingsTab: View {
+    @State private var exclusions: CleanerExclusions = CleanerExclusions.load()
+
+    var body: some View {
+        Form {
+            Section("Category Exclusions") {
+                Text("Excluded categories are skipped during disk scans and will never be cleaned.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(CleanCategory.allCases) { category in
+                    Toggle(isOn: Binding(
+                        get: { exclusions.isCategoryExcluded(category) },
+                        set: { isExcluded in
+                            if isExcluded {
+                                exclusions.excludedCategories.insert(category.rawValue)
+                            } else {
+                                exclusions.excludedCategories.remove(category.rawValue)
+                            }
+                            exclusions.save()
+                        }
+                    )) {
+                        HStack(spacing: 8) {
+                            Image(systemName: category.icon)
+                                .frame(width: 16)
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(category.title)
+                                    .font(.system(size: 12, weight: .medium))
+                                Text(category.description)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section("Custom Excluded Folders") {
+                Text("Files in these directories or their subfolders are preserved and skipped.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if exclusions.excludedPaths.isEmpty {
+                    Text("No custom excluded folders.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(exclusions.excludedPaths, id: \.self) { path in
+                        HStack {
+                            Image(systemName: "folder")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Text(path)
+                                .font(.system(size: 11, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button {
+                                exclusions.excludedPaths.removeAll { $0 == path }
+                                exclusions.save()
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove exclusion")
+                        }
+                    }
+                }
+
+                Button("Add Folder…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.allowsMultipleSelection = false
+                    panel.prompt = "Exclude Folder"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        let path = (url.path as NSString).standardizingPath
+                        if !exclusions.excludedPaths.contains(path) {
+                            exclusions.excludedPaths.append(path)
+                            exclusions.save()
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 440)
+        .onAppear {
+            exclusions = CleanerExclusions.load()
+        }
     }
 }
 
@@ -158,7 +268,7 @@ private struct IPhoneSettingsTab: View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  It cannot quit anything.  Turn this off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  Remote process termination requires explicit opt-in below.  Turn this off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -175,6 +285,42 @@ private struct IPhoneSettingsTab: View {
                         Button("Copy Code") { copyCompanionCode() }
                         Button("New Code") { store.regenerateCompanionCode() }
                     }
+                }
+            }
+
+            if store.shareWithIPhone {
+                Section("Remote Process Control") {
+                    Toggle("Allow iPhone to Quit Apps & Processes", isOn: $store.allowRemoteQuit)
+                    Text("When enabled, the paired iPhone companion can request quitting or force-quitting user-owned apps.  System-critical processes and other users' processes are always protected.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Section("Remote Access (Tailscale / Domain)") {
+                    let addresses = CompanionServer.detectHostAddresses()
+                    LabeledContent("Port") {
+                        Text("\(store.companionPort)")
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    if let ts = addresses.tailscaleIP {
+                        LabeledContent("Tailscale IP") {
+                            Text(ts)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if let loc = addresses.localIP {
+                        LabeledContent("Local Wi-Fi IP") {
+                            Text(loc)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text("Away from this Wi-Fi: Connect via Tailscale using your Tailscale IP or MagicDNS hostname, or forward port \(store.companionPort) on your domain.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -241,6 +387,7 @@ private struct AlertsSection: View {
     @Binding var enabled: Bool
     @Binding var threshold: Double
     @Binding var sustainedMinutes: Int
+    @Binding var webhookURL: String
 
     var body: some View {
         Section("Alerts") {
@@ -270,6 +417,32 @@ private struct AlertsSection: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        Section("Webhooks & Pushover") {
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("Webhook URL (Slack, Discord, Pushover, generic)", text: $webhookURL)
+                    .textFieldStyle(.roundedBorder)
+                Text("Sends a JSON alert payload when a sustained hog triggers. Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button("Send Test Webhook") {
+                        alerts.sendTestWebhook(to: webhookURL)
+                    }
+                    .disabled(webhookURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if let status = alerts.lastWebhookStatus {
+                        Text(status)
+                            .font(.system(size: 11))
+                            .foregroundStyle(status.hasPrefix("Delivered") ? Color.secondary : Color.red)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.top, 2)
             }
         }
     }

@@ -14,6 +14,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case orphanedData
     /// AI agent transcripts, model download temp files, and BotFleet update installers.
     case aiArtifacts
+    /// Local AI and LLM model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, Whisper.
+    case localAIModels
     /// Large files (>100 MB) or old files (>6 months) in user working folders (Downloads, Documents, Desktop).
     case largeAndOldFiles
 
@@ -27,6 +29,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .developer: return "Developer Junk"
         case .orphanedData: return "Orphaned App Leftovers"
         case .aiArtifacts: return "AI & Agent Junk"
+        case .localAIModels: return "Local AI & LLM Models"
         case .largeAndOldFiles: return "Large & Old Files"
         }
     }
@@ -45,8 +48,10 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Support folders remaining from applications no longer installed."
         case .aiArtifacts:
             return "Inactive AI agent session transcripts (>7 days) and temporary update downloads."
+        case .localAIModels:
+            return "Downloaded LLM and model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper."
         case .largeAndOldFiles:
-            return "Files over 100 MB or untouched for over 6 months."
+            return "Files over 100 MB, or over 20 MB untouched for 6+ months."
         }
     }
 
@@ -58,6 +63,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .developer: return "hammer"
         case .orphanedData: return "app.dashed"
         case .aiArtifacts: return "sparkles"
+        case .localAIModels: return "brain.head.profile"
         case .largeAndOldFiles: return "clock.arrow.circlepath"
         }
     }
@@ -70,7 +76,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .developer: return 3
         case .orphanedData: return 4
         case .aiArtifacts: return 5
-        case .largeAndOldFiles: return 6
+        case .localAIModels: return 6
+        case .largeAndOldFiles: return 7
         }
     }
 
@@ -79,7 +86,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer:
             return false
-        case .orphanedData, .aiArtifacts, .largeAndOldFiles:
+        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return true
         }
     }
@@ -89,7 +96,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
             return true
-        case .aiArtifacts, .largeAndOldFiles:
+        case .aiArtifacts, .localAIModels, .largeAndOldFiles:
             // Large/old files and AI agent artifacts require explicit user review to prevent accidental deletion
             return false
         }
@@ -138,6 +145,46 @@ enum CleanTier: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// User exclusions for disk scanning and cleaning.
+struct CleanerExclusions: Codable, Equatable, Sendable {
+    var excludedCategories: Set<String> = []
+    var excludedPaths: [String] = []
+
+    static let defaultsKey = "hoghunter.cleaner.exclusions"
+    static let suiteName = "group.com.simplewithus.hoghunter"
+
+    func isCategoryExcluded(_ category: CleanCategory) -> Bool {
+        excludedCategories.contains(category.rawValue)
+    }
+
+    func isPathExcluded(_ path: String) -> Bool {
+        let normalized = (path as NSString).standardizingPath
+        for excluded in excludedPaths {
+            let normalizedExcluded = (excluded as NSString).standardizingPath
+            if normalized == normalizedExcluded || normalized.hasPrefix(normalizedExcluded + "/") {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func load() -> CleanerExclusions {
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        guard let data = defaults.data(forKey: defaultsKey),
+              let decoded = try? JSONDecoder().decode(CleanerExclusions.self, from: data) else {
+            return CleanerExclusions()
+        }
+        return decoded
+    }
+
+    func save() {
+        let defaults = UserDefaults(suiteName: CleanerExclusions.suiteName) ?? .standard
+        if let data = try? JSONEncoder().encode(self) {
+            defaults.set(data, forKey: CleanerExclusions.defaultsKey)
+        }
+    }
+}
+
 /// Helper that manages Apple APFS local snapshots for safe rollback before disk cleaning operations.
 enum SnapshotSafety {
     /// Attempts to create an APFS local snapshot via `tmutil localsnapshot`.
@@ -180,6 +227,8 @@ struct CleanItem: Identifiable, Hashable, Sendable {
     var lastModified: Date?
     var isSelected: Bool
     var detail: String?
+
+    var path: String { url.path }
 
     var formattedSize: String {
         HogFormat.memory(bytes)
@@ -265,19 +314,22 @@ final class DiskCleaner: @unchecked Sendable {
     /// Performs a full scan across all categories matching the given tier.
     func scan(installedApps: [StorageScanner.InstalledApp] = [],
               tier: CleanTier = .standard,
+              exclusions: CleanerExclusions = CleanerExclusions.load(),
               progress: ((String) -> Void)? = nil) async -> CleanScanReport {
         var reports: [CleanCategoryReport] = []
         var overallTotal: UInt64 = 0
         var overallSelected: UInt64 = 0
 
         let categoriesToScan = CleanCategory.allCases
-            .filter { tier.isCategoryIncluded($0) }
+            .filter { tier.isCategoryIncluded($0) && !exclusions.isCategoryExcluded($0) }
             .sorted(by: { $0.sortOrder < $1.sortOrder })
 
         for category in categoriesToScan {
+            if Task.isCancelled { break }
             await Task.yield()
             progress?(category.title)
-            let items = scanCategory(category, installedApps: installedApps)
+            let items = scanCategory(category, installedApps: installedApps).filter { !exclusions.isPathExcluded($0.path) }
+            if Task.isCancelled { break }
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
             let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
             overallTotal &+= total
@@ -316,12 +368,31 @@ final class DiskCleaner: @unchecked Sendable {
             return scanOrphanedData(installedApps: installedApps)
         case .aiArtifacts:
             return scanAIArtifacts()
+        case .localAIModels:
+            return scanLocalAIModels()
         case .largeAndOldFiles:
             return scanLargeAndOldFiles()
         }
     }
 
     // MARK: - Category Scanners
+
+    /// Known high-churn caches where deletion causes immediate large re-downloads over the network.
+    /// These are unselected by default to prevent wasteful bandwidth and disk wear.
+    static let highChurnCacheIdentifiers: [(pattern: String, reason: String)] = [
+        ("com.spotify.client", "Spotify streaming & offline media cache (immediately re-downloads when played)"),
+        ("com.apple.music", "Apple Music streaming audio cache (immediately re-downloads when played)"),
+        ("com.apple.podcasts", "Apple Podcasts episode download cache"),
+        ("com.apple.itunescloudd", "iTunes Cloud media streaming cache"),
+        ("com.apple.applemediaservices", "Apple Media Services streaming cache"),
+        ("com.google.googledrive", "Google Drive cloud file streaming cache (immediately re-downloads when accessed)"),
+        ("dropbox", "Dropbox cloud file cache"),
+        ("onedrive", "Microsoft OneDrive cloud file cache"),
+        ("com.apple.safari", "Safari active web session & site cache"),
+        ("google", "Chrome active web session & service worker cache"),
+        ("huggingface", "Hugging Face AI model weights repository"),
+        ("ollama", "Ollama local LLM model weights library")
+    ]
 
     /// Scans `~/Library/Caches/` for user caches (skips Hog Hunter and developer package caches handled elsewhere).
     func scanUserCaches() -> [CleanItem] {
@@ -337,12 +408,18 @@ final class DiskCleaner: @unchecked Sendable {
 
         var items: [CleanItem] = []
         for url in contents {
+            if Task.isCancelled { break }
             let name = url.lastPathComponent
             if developerCacheNames.contains(name) { continue }
             if isHogHunterIdentifier(name) { continue }
 
             let stats = directoryStats(at: url)
             guard stats.bytes > 0 else { continue }
+
+            let lowerName = name.lowercased()
+            let highChurnMatch = Self.highChurnCacheIdentifiers.first { lowerName.contains($0.pattern) }
+            let isHighChurn = highChurnMatch != nil
+            let itemDetail = highChurnMatch?.reason
 
             items.append(CleanItem(
                 category: .userCaches,
@@ -352,8 +429,8 @@ final class DiskCleaner: @unchecked Sendable {
                 bytes: stats.bytes,
                 fileCount: stats.fileCount,
                 lastModified: stats.lastModified,
-                isSelected: CleanCategory.userCaches.defaultSelected,
-                detail: nil
+                isSelected: isHighChurn ? false : CleanCategory.userCaches.defaultSelected,
+                detail: itemDetail
             ))
         }
 
@@ -367,6 +444,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         if let contents = try? fileManager.contentsOfDirectory(at: logsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
             for url in contents {
+                if Task.isCancelled { break }
                 let name = url.lastPathComponent
                 if isHogHunterIdentifier(name) { continue }
 
@@ -387,6 +465,8 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
+        if Task.isCancelled { return items.sorted { $0.bytes > $1.bytes } }
+
         // DiagnosticReports folder
         let diagReportsURL = logsURL.appendingPathComponent("DiagnosticReports", isDirectory: true)
         if fileManager.fileExists(atPath: diagReportsURL.path) && !items.contains(where: { $0.url == diagReportsURL }) {
@@ -405,6 +485,8 @@ final class DiskCleaner: @unchecked Sendable {
                 ))
             }
         }
+
+        if Task.isCancelled { return items.sorted { $0.bytes > $1.bytes } }
 
         // CrashReporter
         let crashReportsURL = userHomeURL.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
@@ -437,6 +519,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         var items: [CleanItem] = []
         for url in contents {
+            if Task.isCancelled { break }
             let name = url.lastPathComponent
             if name.hasPrefix(".") && name == ".DS_Store" { continue }
 
@@ -479,6 +562,7 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         for target in targets {
+            if Task.isCancelled { break }
             let url = userHomeURL.appendingPathComponent(target.path, isDirectory: true)
             var isDir: ObjCBool = false
             guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
@@ -528,79 +612,88 @@ final class DiskCleaner: @unchecked Sendable {
         var items: [CleanItem] = []
 
         // Inspect Containers
-        let containersURL = userHomeURL.appendingPathComponent("Library/Containers", isDirectory: true)
-        if let contents = try? fileManager.contentsOfDirectory(at: containersURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for url in contents {
-                let name = url.lastPathComponent
-                // Skip Apple system containers
-                if name.hasPrefix("com.apple.") || isHogHunterIdentifier(name) { continue }
-                if knownBundleIds.contains(name.lowercased()) { continue }
+        if !Task.isCancelled {
+            let containersURL = userHomeURL.appendingPathComponent("Library/Containers", isDirectory: true)
+            if let contents = try? fileManager.contentsOfDirectory(at: containersURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    // Skip Apple system containers
+                    if name.hasPrefix("com.apple.") || isHogHunterIdentifier(name) { continue }
+                    if knownBundleIds.contains(name.lowercased()) { continue }
 
-                let stats = directoryStats(at: url)
-                guard stats.bytes > 0 else { continue }
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
 
-                items.append(CleanItem(
-                    category: .orphanedData,
-                    title: name,
-                    subtitle: "~/Library/Containers/\(name)",
-                    url: url,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: CleanCategory.orphanedData.defaultSelected,
-                    detail: "Uninstalled application container"
-                ))
+                    items.append(CleanItem(
+                        category: .orphanedData,
+                        title: name,
+                        subtitle: "~/Library/Containers/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: CleanCategory.orphanedData.defaultSelected,
+                        detail: "Uninstalled application container"
+                    ))
+                }
             }
         }
 
         // Inspect Application Support
-        let appSupportURL = userHomeURL.appendingPathComponent("Library/Application Support", isDirectory: true)
-        if let contents = try? fileManager.contentsOfDirectory(at: appSupportURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for url in contents {
-                let name = url.lastPathComponent
-                if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
-                if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
+        if !Task.isCancelled {
+            let appSupportURL = userHomeURL.appendingPathComponent("Library/Application Support", isDirectory: true)
+            if let contents = try? fileManager.contentsOfDirectory(at: appSupportURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
+                    if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
 
-                let stats = directoryStats(at: url)
-                guard stats.bytes > 0 else { continue }
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
 
-                items.append(CleanItem(
-                    category: .orphanedData,
-                    title: name,
-                    subtitle: "~/Library/Application Support/\(name)",
-                    url: url,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: CleanCategory.orphanedData.defaultSelected,
-                    detail: "Leftover application data from removed app"
-                ))
+                    items.append(CleanItem(
+                        category: .orphanedData,
+                        title: name,
+                        subtitle: "~/Library/Application Support/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: CleanCategory.orphanedData.defaultSelected,
+                        detail: "Leftover application data from removed app"
+                    ))
+                }
             }
         }
 
         // Inspect Saved Application State
-        let savedStateURL = userHomeURL.appendingPathComponent("Library/Saved Application State", isDirectory: true)
-        if let contents = try? fileManager.contentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for url in contents {
-                let name = url.lastPathComponent
-                let bundleId = name.replacingOccurrences(of: ".savedState", with: "")
-                if bundleId.hasPrefix("com.apple.") || isHogHunterIdentifier(bundleId) { continue }
-                if knownBundleIds.contains(bundleId.lowercased()) { continue }
+        if !Task.isCancelled {
+            let savedStateURL = userHomeURL.appendingPathComponent("Library/Saved Application State", isDirectory: true)
+            if let contents = try? fileManager.contentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    let bundleId = name.replacingOccurrences(of: ".savedState", with: "")
+                    if bundleId.hasPrefix("com.apple.") || isHogHunterIdentifier(bundleId) { continue }
+                    if knownBundleIds.contains(bundleId.lowercased()) { continue }
 
-                let stats = directoryStats(at: url)
-                guard stats.bytes > 0 else { continue }
+                    let stats = directoryStats(at: url)
+                    guard stats.bytes > 0 else { continue }
 
-                items.append(CleanItem(
-                    category: .orphanedData,
-                    title: name,
-                    subtitle: "~/Library/Saved Application State/\(name)",
-                    url: url,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: CleanCategory.orphanedData.defaultSelected,
-                    detail: "Saved state from uninstalled app"
-                ))
+                    items.append(CleanItem(
+                        category: .orphanedData,
+                        title: name,
+                        subtitle: "~/Library/Saved Application State/\(name)",
+                        url: url,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: CleanCategory.orphanedData.defaultSelected,
+                        detail: "Saved state from uninstalled app"
+                    ))
+                }
             }
         }
 
@@ -617,6 +710,7 @@ final class DiskCleaner: @unchecked Sendable {
         let brainURL = userHomeURL.appendingPathComponent(".gemini/antigravity/brain", isDirectory: true)
         if let brainContents = try? fileManager.contentsOfDirectory(at: brainURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
             for folderURL in brainContents {
+                if Task.isCancelled { break }
                 let name = folderURL.lastPathComponent
                 if name == "tempmediaStorage" { continue }
                 guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
@@ -641,65 +735,255 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 2. Grok sessions (~/.grok/sessions)
-        let grokURL = userHomeURL.appendingPathComponent(".grok/sessions", isDirectory: true)
-        if let grokContents = try? fileManager.contentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for folderURL in grokContents {
-                guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey]),
-                      let modDate = values.contentModificationDate,
-                      modDate < sevenDaysAgo else { continue }
-                let stats = directoryStats(at: folderURL)
-                guard stats.bytes > 0 else { continue }
-                items.append(CleanItem(
-                    category: .aiArtifacts,
-                    title: "Grok Session (\(folderURL.lastPathComponent.prefix(8)))",
-                    subtitle: "~/.grok/sessions/\(folderURL.lastPathComponent)",
-                    url: folderURL,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: modDate,
-                    isSelected: false,
-                    detail: "Grok transcript older than 7 days"
-                ))
+        if !Task.isCancelled {
+            let grokURL = userHomeURL.appendingPathComponent(".grok/sessions", isDirectory: true)
+            if let grokContents = try? fileManager.contentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for folderURL in grokContents {
+                    if Task.isCancelled { break }
+                    guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                          let modDate = values.contentModificationDate,
+                          modDate < sevenDaysAgo else { continue }
+                    let stats = directoryStats(at: folderURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .aiArtifacts,
+                        title: "Grok Session (\(folderURL.lastPathComponent.prefix(8)))",
+                        subtitle: "~/.grok/sessions/\(folderURL.lastPathComponent)",
+                        url: folderURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: modDate,
+                        isSelected: false,
+                        detail: "Grok transcript older than 7 days"
+                    ))
+                }
             }
         }
 
         // 3. Codex archived sessions (~/.codex/archived_sessions)
-        let codexURL = userHomeURL.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
-        if let codexContents = try? fileManager.contentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
-            for fileURL in codexContents {
-                let stats = directoryStats(at: fileURL)
-                guard stats.bytes > 0 else { continue }
-                items.append(CleanItem(
-                    category: .aiArtifacts,
-                    title: "Codex Archived Session (\(fileURL.lastPathComponent.prefix(16)))",
-                    subtitle: "~/.codex/archived_sessions/\(fileURL.lastPathComponent)",
-                    url: fileURL,
-                    bytes: stats.bytes,
-                    fileCount: stats.fileCount,
-                    lastModified: stats.lastModified,
-                    isSelected: false,
-                    detail: "Archived Codex transcript"
-                ))
-            }
-        }
-
-        // 4. Stale BotFleet update installers & temporary downloads (~/.BotFleet.update-*)
-        if let homeContents = try? fileManager.contentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
-            for url in homeContents {
-                let name = url.lastPathComponent
-                if name.hasPrefix(".BotFleet.update-") {
-                    let stats = directoryStats(at: url)
+        if !Task.isCancelled {
+            let codexURL = userHomeURL.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
+            if let codexContents = try? fileManager.contentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+                for fileURL in codexContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: fileURL)
                     guard stats.bytes > 0 else { continue }
                     items.append(CleanItem(
                         category: .aiArtifacts,
-                        title: name,
-                        subtitle: "~/\(name)",
-                        url: url,
+                        title: "Codex Archived Session (\(fileURL.lastPathComponent.prefix(16)))",
+                        subtitle: "~/.codex/archived_sessions/\(fileURL.lastPathComponent)",
+                        url: fileURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Stale BotFleet update package"
+                        detail: "Archived Codex transcript"
+                    ))
+                }
+            }
+        }
+
+        // 4. Stale BotFleet update installers & temporary downloads (~/.BotFleet.update-*)
+        if !Task.isCancelled {
+            if let homeContents = try? fileManager.contentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                for url in homeContents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if name.hasPrefix(".BotFleet.update-") {
+                        let stats = directoryStats(at: url)
+                        guard stats.bytes > 0 else { continue }
+                        items.append(CleanItem(
+                            category: .aiArtifacts,
+                            title: name,
+                            subtitle: "~/\(name)",
+                            url: url,
+                            bytes: stats.bytes,
+                            fileCount: stats.fileCount,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "Stale BotFleet update package"
+                        ))
+                    }
+                }
+            }
+        }
+
+        // 5. Abandoned BotFleet update/rollback node_modules (~/apps/.botfleet-server.node_modules.*)
+        if !Task.isCancelled {
+            let appsURL = userHomeURL.appendingPathComponent("apps", isDirectory: true)
+            if let appsContents = try? fileManager.contentsOfDirectory(at: appsURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                for url in appsContents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if name.hasPrefix(".botfleet-server.node_modules.") {
+                        let stats = directoryStats(at: url)
+                        guard stats.bytes > 0 else { continue }
+                        items.append(CleanItem(
+                            category: .aiArtifacts,
+                            title: name,
+                            subtitle: "~/apps/\(name)",
+                            url: url,
+                            bytes: stats.bytes,
+                            fileCount: stats.fileCount,
+                            lastModified: stats.lastModified,
+                            isSelected: true,
+                            detail: "Abandoned BotFleet update/rollback package (zero re-download penalty)"
+                        ))
+                    }
+                }
+            }
+        }
+
+        // 6. Rotated BotFleet agent transcript logs (~/.botfleet/native/*.ndjson.1)
+        if !Task.isCancelled {
+            let bfNativeURL = userHomeURL.appendingPathComponent(".botfleet/native", isDirectory: true)
+            if let nativeContents = try? fileManager.contentsOfDirectory(at: bfNativeURL, includingPropertiesForKeys: [.fileSizeKey], options: []) {
+                for url in nativeContents {
+                    if Task.isCancelled { break }
+                    let name = url.lastPathComponent
+                    if name.hasSuffix(".ndjson.1") {
+                        let stats = directoryStats(at: url)
+                        guard stats.bytes > 0 else { continue }
+                        items.append(CleanItem(
+                            category: .aiArtifacts,
+                            title: name,
+                            subtitle: "~/.botfleet/native/\(name)",
+                            url: url,
+                            bytes: stats.bytes,
+                            fileCount: 1,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "Rotated agent transcript log dump"
+                        ))
+                    }
+                }
+            }
+        }
+
+        return items.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// Scans local AI model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper.
+    func scanLocalAIModels() -> [CleanItem] {
+        var items: [CleanItem] = []
+        let home = userHomeURL
+
+        // 1. Ollama Models (~/.ollama/models)
+        if !Task.isCancelled {
+            let manifestsURL = home.appendingPathComponent(".ollama/models/manifests", isDirectory: true)
+            if let manifestContents = try? fileManager.subpathsOfDirectory(atPath: manifestsURL.path) {
+                for subpath in manifestContents {
+                    if Task.isCancelled { break }
+                    let fileURL = manifestsURL.appendingPathComponent(subpath)
+                    var isDir: ObjCBool = false
+                    if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
+                        let name = subpath.replacingOccurrences(of: "registry.ollama.ai/", with: "")
+                        let stats = directoryStats(at: fileURL)
+                        items.append(CleanItem(
+                            category: .localAIModels,
+                            title: "Ollama: \(name)",
+                            subtitle: "~/.ollama/models/manifests/\(subpath)",
+                            url: fileURL,
+                            bytes: stats.bytes,
+                            fileCount: 1,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "Ollama Model Manifest"
+                        ))
+                    }
+                }
+            }
+
+            let blobsURL = home.appendingPathComponent(".ollama/models/blobs", isDirectory: true)
+            if let blobContents = try? fileManager.contentsOfDirectory(at: blobsURL, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) {
+                for blobURL in blobContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: blobURL)
+                    guard stats.bytes >= 10_000_000 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "Ollama Blob (\(blobURL.lastPathComponent.prefix(19)))",
+                        subtitle: "~/.ollama/models/blobs/\(blobURL.lastPathComponent)",
+                        url: blobURL,
+                        bytes: stats.bytes,
+                        fileCount: 1,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Ollama Model Weights (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        // 2. Hugging Face Hub Models (~/.cache/huggingface/hub)
+        if !Task.isCancelled {
+            let hfURL = home.appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
+            if let hfContents = try? fileManager.contentsOfDirectory(at: hfURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for repoURL in hfContents {
+                    if Task.isCancelled { break }
+                    let name = repoURL.lastPathComponent
+                    guard name.hasPrefix("models--") else { continue }
+                    let readableName = name.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/")
+                    let stats = directoryStats(at: repoURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "Hugging Face: \(readableName)",
+                        subtitle: "~/.cache/huggingface/hub/\(name)",
+                        url: repoURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Hugging Face Model Snapshot (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        // 3. LM Studio Models (~/.cache/lm-studio/models and ~/.lmstudio/models)
+        let lmStudioPaths = [".cache/lm-studio/models", ".lmstudio/models"]
+        for lmPath in lmStudioPaths {
+            if Task.isCancelled { break }
+            let lmURL = home.appendingPathComponent(lmPath, isDirectory: true)
+            if let lmContents = try? fileManager.contentsOfDirectory(at: lmURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for modelURL in lmContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: modelURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "LM Studio: \(modelURL.lastPathComponent)",
+                        subtitle: "~/\(lmPath)/\(modelURL.lastPathComponent)",
+                        url: modelURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "LM Studio Model Weights (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        // 4. Whisper Models (~/.cache/whisper)
+        if !Task.isCancelled {
+            let whisperURL = home.appendingPathComponent(".cache/whisper", isDirectory: true)
+            if let whisperContents = try? fileManager.contentsOfDirectory(at: whisperURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+                for modelURL in whisperContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: modelURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "Whisper: \(modelURL.lastPathComponent)",
+                        subtitle: "~/.cache/whisper/\(modelURL.lastPathComponent)",
+                        url: modelURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Whisper Model Weights (\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -708,12 +992,19 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
-    /// Scans user folders (Downloads, Documents, Desktop) for files >100 MB or untouched >6 months.
+    private static let itemDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        return df
+    }()
+
+    /// Scans user folders (Downloads, Documents, Desktop) for files >100 MB or untouched >6 months (>=20 MB).
     func scanLargeAndOldFiles() -> [CleanItem] {
         var items: [CleanItem] = []
         let searchDirectories = ["Downloads", "Documents", "Desktop"]
         let sixMonthsAgo = Calendar.current.date(byAdding: .month, value: -6, to: Date()) ?? Date()
         let largeThreshold: UInt64 = 100 * 1024 * 1024 // 100 MB
+        let oldThreshold: UInt64 = 20 * 1024 * 1024    // 20 MB minimum for old files
 
         let keys: Set<URLResourceKey> = [
             .fileAllocatedSizeKey,
@@ -726,6 +1017,7 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         for folder in searchDirectories {
+            if Task.isCancelled { break }
             let dirURL = userHomeURL.appendingPathComponent(folder, isDirectory: true)
             guard let enumerator = fileManager.enumerator(
                 at: dirURL,
@@ -735,6 +1027,7 @@ final class DiskCleaner: @unchecked Sendable {
 
             var count = 0
             for case let fileURL as URL in enumerator {
+                if Task.isCancelled { break }
                 count += 1
                 if count > 20_000 { break } // Protect against runaway directories
 
@@ -754,15 +1047,13 @@ final class DiskCleaner: @unchecked Sendable {
                 let modDate = values.contentModificationDate
 
                 let isLarge = size >= largeThreshold
-                let isOld = (modDate != nil && modDate! < sixMonthsAgo)
+                let isOld = size >= oldThreshold && (modDate != nil && modDate! < sixMonthsAgo)
 
                 if isLarge || isOld {
                     var reasons: [String] = []
                     if isLarge { reasons.append(">100 MB (\(HogFormat.memory(size)))") }
                     if isOld, let mod = modDate {
-                        let df = DateFormatter()
-                        df.dateStyle = .medium
-                        reasons.append("Last modified: \(df.string(from: mod))")
+                        reasons.append("Last modified: \(Self.itemDateFormatter.string(from: mod))")
                     }
 
                     items.append(CleanItem(
@@ -791,13 +1082,16 @@ final class DiskCleaner: @unchecked Sendable {
     func clean(items: [CleanItem],
                tier: CleanTier = .standard,
                createSnapshot: Bool = true,
+               exclusions: CleanerExclusions = CleanerExclusions.load(),
                progress: ((Double, String) -> Void)? = nil) async -> CleanResult {
         var reclaimed: UInt64 = 0
         var removedCount = 0
         var errors: [String] = []
         var snapshotCreatedName: String?
 
-        if createSnapshot {
+        let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
+
+        if createSnapshot && !activeItems.isEmpty {
             progress?(0.0, "Creating APFS safety snapshot…")
             let (success, name) = SnapshotSafety.createLocalSnapshot()
             if success {
@@ -805,10 +1099,18 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        let totalItems = max(1, items.count)
+        let totalItems = max(1, activeItems.count)
 
-        for (index, item) in items.enumerated() {
+        for (index, item) in activeItems.enumerated() {
+            if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                break
+            }
             await Task.yield()
+            if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                break
+            }
             let progressFraction = Double(index) / Double(totalItems)
             progress?(progressFraction, item.title)
 
@@ -935,9 +1237,21 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/.cache/huggingface/",
                 home + "/.ollama/models/blobs/"
             ]
-            let isStaleUpdate = path.contains("/.BotFleet.update-")
+            let isStaleUpdate = path.contains("/.BotFleet.update-") ||
+                               path.contains("/.botfleet-server.node_modules.") ||
+                               (path.contains("/.botfleet/native/") && path.hasSuffix(".ndjson.1"))
             let hasAllowedPrefix = allowedAIPrefixes.contains { path.hasPrefix($0) && path != $0 }
             return hasAllowedPrefix || isStaleUpdate
+
+        case .localAIModels:
+            let allowedModelPrefixes = [
+                home + "/.ollama/models/",
+                home + "/.cache/huggingface/hub/",
+                home + "/.cache/lm-studio/models/",
+                home + "/.lmstudio/models/",
+                home + "/.cache/whisper/"
+            ]
+            return allowedModelPrefixes.contains { path.hasPrefix($0) && path != $0 }
 
         case .largeAndOldFiles:
             let allowedUserPrefixes = [
@@ -987,6 +1301,7 @@ final class DiskCleaner: @unchecked Sendable {
         var latestDate: Date?
 
         for case let fileURL as URL in enumerator {
+            if Task.isCancelled { return (0, 0, nil) }
             guard let values = try? fileURL.resourceValues(forKeys: keys) else { continue }
             if values.isDirectory == true { continue }
 

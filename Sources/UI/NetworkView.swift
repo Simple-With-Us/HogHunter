@@ -8,28 +8,51 @@ struct NetworkView: View {
     @State private var sortOrder: NetworkSort = .established
     @State private var refreshTask: Task<Void, Never>?
 
-    init(bundleResolver: @escaping (pid_t) -> (bundleId: String?, name: String)) {
+    private let embeddedInPanel: Bool
+    private let isTabActive: Bool
+
+    init(
+        bundleResolver: @escaping (pid_t) -> (bundleId: String?, name: String),
+        embeddedInPanel: Bool = false,
+        isTabActive: Bool = true
+    ) {
         _store = StateObject(wrappedValue: NetworkStore(bundleResolver: bundleResolver))
+        self.embeddedInPanel = embeddedInPanel
+        self.isTabActive = isTabActive
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-                .padding(.top, 4)
+                .padding(.top, embeddedInPanel ? 0 : 4)
             statusRow
             list
             footer
         }
-        .padding(16)
-        .frame(width: 520, height: 540)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .background(WindowActivator())
+        .padding(embeddedInPanel ? 0 : 16)
+        .modifier(NetworkPanelFrameModifier(embeddedInPanel: embeddedInPanel))
         .onAppear {
-            WindowActivator.front()
-            if case .idle = store.state { store.refresh() }
-            startRefreshTimer()
+            if !embeddedInPanel {
+                WindowActivator.front()
+            }
+            if isTabActive {
+                store.refresh()
+                startRefreshTimer()
+            }
         }
-        .onDisappear { refreshTask?.cancel() }
+        .onChange(of: isTabActive) { active in
+            if active {
+                store.refresh()
+                startRefreshTimer()
+            } else {
+                refreshTask?.cancel()
+                refreshTask = nil
+            }
+        }
+        .onDisappear {
+            refreshTask?.cancel()
+            refreshTask = nil
+        }
         .navigationTitle("Network — Hog Hunter")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hog Hunter Network — apps with open connections")
@@ -198,6 +221,21 @@ struct NetworkRowView: View {
                     .font(.system(size: 16))
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+private struct NetworkPanelFrameModifier: ViewModifier {
+    let embeddedInPanel: Bool
+
+    func body(content: Content) -> some View {
+        if embeddedInPanel {
+            content
+        } else {
+            content
+                .frame(width: 520, height: 540)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .background(WindowActivator())
         }
     }
 }

@@ -21,9 +21,27 @@ struct HogRowView: View {
         HStack(spacing: 8) {
             icon
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.name)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(row.name)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(1)
+                    if row.isSleepBlocker {
+                        Image(systemName: "moon.fill")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.indigo)
+                            .help("Holding power assertion preventing system sleep")
+                    }
+                    if row.isTamed {
+                        Text("TAMED")
+                            .font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 0.5)
+                            .background(Color.green.opacity(0.18))
+                            .foregroundStyle(.green)
+                            .clipShape(Capsule())
+                            .help("Throttled: running at lowest priority (nice 20) with background QoS")
+                    }
+                }
                 Text(row.detail)
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
@@ -98,6 +116,14 @@ struct HogRowView: View {
     @ViewBuilder
     private var menu: some View {
         if isLive {
+            if row.canTame {
+                if row.isTamed {
+                    Button("Restore Priority (Untame)") { store.untame(row) }
+                } else {
+                    Button("Tame Hog (Background QoS)") { store.tame(row) }
+                }
+                Divider()
+            }
             Button("Copy PID") { copyPids() }
             Button("Reveal in Finder") { reveal() }
                 .disabled((row.path ?? "").isEmpty)
@@ -163,6 +189,12 @@ enum HogActions {
 
     @MainActor
     static func bringWindowToFront(titles: [String], id: String) {
+        // Dismiss any open MenuBarExtra panel so the standalone window is never obscured beneath it
+        for window in NSApp.windows {
+            if window is NSPanel || window.className.contains("MenuBarExtra") || window.styleMask.contains(.nonactivatingPanel) {
+                window.orderOut(nil)
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
         for window in NSApp.windows {
             let matchesId = window.identifier?.rawValue.contains(id) == true

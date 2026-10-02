@@ -17,19 +17,25 @@ enum StorageTab: String, CaseIterable, Identifiable {
 /// panel's cadence.
 struct StorageView: View {
     @StateObject private var store: StorageStore
+    @StateObject private var cleanerStore = DiskCleanerStore()
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
     @State private var filter: StorageFilter = .all
     @State private var expandedUsageId: String?
 
-    init(runningBundleIds: @escaping () -> Set<String>) {
+    private let embeddedInPanel: Bool
+    private let isTabActive: Bool
+
+    init(runningBundleIds: @escaping () -> Set<String>, embeddedInPanel: Bool = false, isTabActive: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+        self.embeddedInPanel = embeddedInPanel
+        self.isTabActive = isTabActive
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-                .padding(.top, 4)
+                .padding(.top, embeddedInPanel ? 0 : 4)
 
             switch selectedTab {
             case .appStorage:
@@ -38,26 +44,42 @@ struct StorageView: View {
                 list
                 footer
             case .diskCleaner:
-                DiskCleanerView()
+                DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
             }
         }
-        .padding(16)
-        .frame(minWidth: 540, minHeight: 640)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .background(WindowActivator())
+        .padding(embeddedInPanel ? 0 : 16)
+        .modifier(PanelFrameModifier(embeddedInPanel: embeddedInPanel))
         .onAppear {
-            WindowActivator.front()
-            if selectedTab == .appStorage, case .idle = store.state {
-                store.refresh()
+            if !embeddedInPanel {
+                WindowActivator.front()
             }
-            startRefreshTimer()
+            if isTabActive {
+                if selectedTab == .appStorage, case .idle = store.state {
+                    store.refresh()
+                }
+                startRefreshTimer()
+            }
+        }
+        .onChange(of: isTabActive) { active in
+            if active {
+                if selectedTab == .appStorage, case .idle = store.state {
+                    store.refresh()
+                }
+                startRefreshTimer()
+            } else {
+                refreshTask?.cancel()
+                refreshTask = nil
+            }
         }
         .onChange(of: selectedTab) { newTab in
-            if newTab == .appStorage, case .idle = store.state {
+            if isTabActive, newTab == .appStorage, case .idle = store.state {
                 store.refresh()
             }
         }
-        .onDisappear { refreshTask?.cancel() }
+        .onDisappear {
+            refreshTask?.cancel()
+            refreshTask = nil
+        }
         .navigationTitle("Storage — Hog Hunter")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hog Hunter Storage — top apps and disk cleaner")
@@ -87,6 +109,7 @@ struct StorageView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 200)
+            .disabled(cleanerStore.isCleaning)
         }
     }
 
@@ -237,7 +260,7 @@ struct StorageView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                 if Task.isCancelled { return }
-                if selectedTab == .appStorage {
+                if isTabActive && selectedTab == .appStorage {
                     store.refresh()
                 }
             }
@@ -252,5 +275,20 @@ private extension StorageStore.State {
     var completedAt: Date? {
         if case .completed(let at) = self { return at }
         return nil
+    }
+}
+
+private struct PanelFrameModifier: ViewModifier {
+    let embeddedInPanel: Bool
+
+    func body(content: Content) -> some View {
+        if embeddedInPanel {
+            content
+        } else {
+            content
+                .frame(minWidth: 540, minHeight: 640)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .background(WindowActivator())
+        }
     }
 }
