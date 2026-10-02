@@ -338,6 +338,20 @@ def audit_path_churn_risk(path_str: str) -> Dict[str, Any]:
             }
 
     # Safe transient patterns
+    if ".botfleet.update-" in p_lower:
+        try:
+            mtime = p.stat().st_mtime
+            if (time.time() - mtime) < 7 * 86400:
+                return {
+                    "path": path_str,
+                    "is_high_churn": True,
+                    "risk_level": "medium",
+                    "reason": "Active or recent BotFleet update download (<7 days old)",
+                    "recommendation": "Do not delete. May be an in-progress or pending application update."
+                }
+        except OSError:
+            pass
+
     if any(k in p_lower for k in [
         "deriveddata", "cacache", ".botfleet-server.node_modules.",
         ".botfleet.update-", "diagnosticreports", "crashreporter"
@@ -494,7 +508,10 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
             for child in trash_dir.iterdir():
                 if child.name.startswith(".DS_Store"):
                     continue
-                size = get_dir_size(child) if child.is_dir() else child.stat().st_size
+                try:
+                    size = get_dir_size(child) if child.is_dir() else child.stat().st_size
+                except OSError:
+                    continue
                 if size > 0:
                     categories["trash"].append({
                         "name": child.name,
