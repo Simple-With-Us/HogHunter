@@ -17,6 +17,7 @@ final class HogStore: ObservableObject {
 
     @Published private(set) var pulse = MachinePulse.empty
     @Published private(set) var rows: [HogRow] = []
+    @Published private(set) var recentCpuPercents: [Double] = []
     @Published private(set) var hasBaseline = false
     @Published private(set) var isStale = false
     @Published private(set) var launchesAtLogin = false
@@ -82,6 +83,12 @@ final class HogStore: ObservableObject {
     /// Per-core, so 300 means three cores fully busy.
     @Published var alertThresholdPercent: Double = 300 { didSet { persist() } }
     @Published var alertSustainedMinutes: Int = 5 { didSet { persist() } }
+    @Published var alertWebhookURL: String = "" {
+        didSet {
+            persist()
+            alerts.webhookURL = alertWebhookURL
+        }
+    }
     @Published var appearance: AppearanceChoice = .light { didSet { persist() } }
     /// Off until the owner turns it on.
     @Published var shareWithIPhone = false {
@@ -115,6 +122,7 @@ final class HogStore: ObservableObject {
         static let alertsEnabled = "alertsEnabled"
         static let alertThresholdPercent = "alertThresholdPercent"
         static let alertSustainedMinutes = "alertSustainedMinutes"
+        static let alertWebhookURL = "alertWebhookURL"
         static let appearance = "appearance"
         static let shareWithIPhone = "shareWithIPhone"
         static let allowRemoteQuit = "allowRemoteQuit"
@@ -268,6 +276,11 @@ final class HogStore: ObservableObject {
         pulse = snapshot.pulse
         hasBaseline = snapshot.hasBaseline
         isStale = false
+
+        recentCpuPercents.append(snapshot.pulse.cpuPercent)
+        if recentCpuPercents.count > 30 {
+            recentCpuPercents.removeFirst()
+        }
 
         samples = Dictionary(uniqueKeysWithValues: snapshot.processes.map { ($0.key, $0) })
         // The running-app table is the most expensive thing Hog Hunter does on
@@ -469,7 +482,10 @@ final class HogStore: ObservableObject {
                     isApp: metadata[process.key]?.activationPolicy == .regular,
                     isGroup: false,
                     canQuit: reason == nil,
-                    quitBlockReason: reason
+                    quitBlockReason: reason,
+                    isTamed: process.isTamed,
+                    isSleepBlocker: process.isSleepBlocker,
+                    canTame: reason == nil
                 )
             }
         }
@@ -481,6 +497,8 @@ final class HogStore: ObservableObject {
         return zip(ranked, anchors).map { group, anchor in
             let blocks = group.members.map { ProcessControl.blockReason(for: $0) }
             let canQuit = blocks.contains(where: { $0 == nil })
+            let isTamed = !group.members.isEmpty && group.members.allSatisfy(\.isTamed)
+            let isSleepBlocker = group.members.contains(where: \.isSleepBlocker)
             return HogRow(
                 id: Self.groupRowId(group.key),
                 keys: group.members.map(\.key),
@@ -495,7 +513,10 @@ final class HogStore: ObservableObject {
                 isApp: group.isApp,
                 isGroup: group.members.count > 1,
                 canQuit: canQuit,
-                quitBlockReason: canQuit ? nil : blocks.compactMap { $0 }.first
+                quitBlockReason: canQuit ? nil : blocks.compactMap { $0 }.first,
+                isTamed: isTamed,
+                isSleepBlocker: isSleepBlocker,
+                canTame: canQuit
             )
         }
     }
@@ -595,7 +616,10 @@ final class HogStore: ObservableObject {
                 isApp: item.bundleId != nil,
                 isGroup: false,
                 canQuit: false,
-                quitBlockReason: "only in history"
+                quitBlockReason: "only in history",
+                isTamed: false,
+                isSleepBlocker: false,
+                canTame: false
             )
         }
         if window != .now { rows = historyRows }
@@ -718,7 +742,7 @@ final class HogStore: ObservableObject {
 
     var menuBarLabel: String {
         switch menuBarLabelMode {
-        case .machinePercent:
+        case .machinePercent, .sparkline:
             return machinePercentLabel
         case .topHogName:
             guard let top = menuBarTopHog else { return machinePercentLabel }
@@ -731,6 +755,8 @@ final class HogStore: ObservableObject {
         switch menuBarLabelMode {
         case .machinePercent:
             return machinePercentHelp
+        case .sparkline:
+            return "Live CPU activity sparkline across all \(pulse.coreCount) cores."
         case .topHogName:
             // The label silently falls back to the machine percentage when no
             // row is busy, so the help has to fall back with it or it names a
@@ -748,7 +774,7 @@ final class HogStore: ObservableObject {
     /// as the value would say the same sentence twice and the number never.
     var menuBarAccessibilityValue: String {
         switch menuBarLabelMode {
-        case .machinePercent:
+        case .machinePercent, .sparkline:
             return machinePercentLabel
         case .topHogName:
             guard let top = menuBarTopHog else { return machinePercentLabel }
@@ -786,6 +812,42 @@ final class HogStore: ObservableObject {
             lastNotice = outcome.message
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.tick()
+        }
+    }
+
+    func tame(_ row: HogRow) {
+        lastError = nil
+        lastNotice = nil
+        var tamedCount = 0
+        for member in row.keys {
+            let res = ProcessControl.tame(pid: member.pid)
+            if res.outcome.isAction { tamedCount += 1 }
+        }
+        if tamedCount > 0 {
+            lastNotice = "Tamed \(row.name) (nice priority 20 & background QoS)."
+        } else {
+            lastError = "Could not tame \(row.name)."
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.tick()
+        }
+    }
+
+    func untame(_ row: HogRow) {
+        lastError = nil
+        lastNotice = nil
+        var untamedCount = 0
+        for member in row.keys {
+            let res = ProcessControl.untame(pid: member.pid)
+            if res.outcome.isAction { untamedCount += 1 }
+        }
+        if untamedCount > 0 {
+            lastNotice = "Restored priority for \(row.name)."
+        } else {
+            lastError = "Could not restore priority for \(row.name)."
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.tick()
         }
     }
@@ -830,6 +892,10 @@ final class HogStore: ObservableObject {
         if threshold >= 100 { alertThresholdPercent = threshold }
         let sustained = defaults.integer(forKey: Key.alertSustainedMinutes)
         if sustained >= 1 { alertSustainedMinutes = sustained }
+        if let webhook = defaults.string(forKey: Key.alertWebhookURL) {
+            alertWebhookURL = webhook
+            alerts.webhookURL = webhook
+        }
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
@@ -857,6 +923,7 @@ final class HogStore: ObservableObject {
         defaults.set(alertsEnabled, forKey: Key.alertsEnabled)
         defaults.set(alertThresholdPercent, forKey: Key.alertThresholdPercent)
         defaults.set(alertSustainedMinutes, forKey: Key.alertSustainedMinutes)
+        defaults.set(alertWebhookURL, forKey: Key.alertWebhookURL)
         defaults.set(appearance.rawValue, forKey: Key.appearance)
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
@@ -918,6 +985,10 @@ final class HogStore: ObservableObject {
             if sustained >= 1, sustained != self.alertSustainedMinutes {
                 self.alertSustainedMinutes = sustained
             }
+            if let webhook = self.defaults.string(forKey: Key.alertWebhookURL), webhook != self.alertWebhookURL {
+                self.alertWebhookURL = webhook
+                self.alerts.webhookURL = webhook
+            }
             let sharing = self.defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
             if sharing != self.shareWithIPhone {
                 self.shareWithIPhone = sharing
@@ -939,6 +1010,31 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteQuit(pid: pid, force: force)
         }
+        companionServer.onRemoteTame = { [weak self] pid, action in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteTame(pid: pid, action: action)
+        }
+    }
+
+    private func performRemoteTame(pid: pid_t, action: String) -> (status: Int, body: Data) {
+        let isTame = action.lowercased() == "tame"
+        let result = isTame ? ProcessControl.tame(pid: pid) : ProcessControl.untame(pid: pid)
+        let isNowTamed = ProcessControl.isTamed(pid: pid)
+        let response = CompanionTameResponse(
+            status: result.outcome.isAction ? "ok" : "blocked",
+            pid: pid,
+            name: result.name,
+            isTamed: isNowTamed,
+            message: result.outcome.isAction ? (isTame ? "Process tamed" : "Process restored") : "Action blocked",
+            error: nil
+        )
+        let data = (try? JSONEncoder().encode(response)) ?? Data()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.tick()
+        }
+        return (200, data)
     }
 
     private func performRemoteQuit(pid: pid_t, force: Bool) -> (status: Int, body: Data) {

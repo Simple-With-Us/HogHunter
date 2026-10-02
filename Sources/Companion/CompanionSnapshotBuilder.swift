@@ -37,7 +37,11 @@ enum CompanionSnapshotBuilder {
                 memoryCaption: "Memory in use",
                 swapText: pulse.swapUsedBytes > 0 ? "\(HogFormat.memory(pulse.swapUsedBytes)) swapped" : nil,
                 pressureText: pulse.pressure == .unknown ? nil : "Pressure \(pulse.pressure.label)",
-                pressureSeverity: severityName(pressure)
+                pressureSeverity: severityName(pressure),
+                thermalState: thermalStateName(pulse.thermalState),
+                batteryPercent: pulse.batteryPercent,
+                isCharging: pulse.isCharging,
+                powerSource: pulse.powerSource
             ),
             rows: rows.map { row in
                 let display = displayedCPU(row.cpuPercent, scale: scale, coreCount: cores)
@@ -54,7 +58,10 @@ enum CompanionSnapshotBuilder {
                     memoryBytes: row.memoryBytes,
                     pid: row.keys.first?.pid,
                     canQuit: row.canQuit,
-                    quitBlockReason: row.quitBlockReason
+                    quitBlockReason: row.quitBlockReason,
+                    isTamed: row.isTamed,
+                    isSleepBlocker: row.isSleepBlocker,
+                    canTame: row.canTame
                 )
             },
             storage: storage ?? currentStorageSummary(),
@@ -125,6 +132,16 @@ enum CompanionSnapshotBuilder {
         case .calm: return "calm"
         case .elevated: return "elevated"
         case .hot: return "hot"
+        }
+    }
+
+    private static func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
         }
     }
 

@@ -142,6 +142,7 @@ private struct AlertsSettingsTab: View {
     @AppStorage(HogStore.Key.alertsEnabled) private var alertsEnabled = false
     @AppStorage(HogStore.Key.alertThresholdPercent) private var alertThreshold: Double = 300
     @AppStorage(HogStore.Key.alertSustainedMinutes) private var alertSustainedMinutes: Int = 5
+    @AppStorage(HogStore.Key.alertWebhookURL) private var alertWebhookURL: String = ""
 
     var body: some View {
         Form {
@@ -149,7 +150,8 @@ private struct AlertsSettingsTab: View {
                 alerts: store.alerts,
                 enabled: $alertsEnabled,
                 threshold: $alertThreshold,
-                sustainedMinutes: $alertSustainedMinutes
+                sustainedMinutes: $alertSustainedMinutes,
+                webhookURL: $alertWebhookURL
             )
         }
         .formStyle(.grouped)
@@ -385,6 +387,7 @@ private struct AlertsSection: View {
     @Binding var enabled: Bool
     @Binding var threshold: Double
     @Binding var sustainedMinutes: Int
+    @Binding var webhookURL: String
 
     var body: some View {
         Section("Alerts") {
@@ -414,6 +417,32 @@ private struct AlertsSection: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        Section("Webhooks & Pushover") {
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("Webhook URL (Slack, Discord, Pushover, generic)", text: $webhookURL)
+                    .textFieldStyle(.roundedBorder)
+                Text("Sends a JSON alert payload when a sustained hog triggers. Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button("Send Test Webhook") {
+                        alerts.sendTestWebhook(to: webhookURL)
+                    }
+                    .disabled(webhookURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if let status = alerts.lastWebhookStatus {
+                        Text(status)
+                            .font(.system(size: 11))
+                            .foregroundStyle(status.hasPrefix("Delivered") ? Color.secondary : Color.red)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.top, 2)
             }
         }
     }

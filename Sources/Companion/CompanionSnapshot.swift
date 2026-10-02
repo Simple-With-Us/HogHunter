@@ -7,6 +7,7 @@ enum CompanionService {
     static let path = "/v1/snapshot"
     static let cleanPath = "/v1/clean"
     static let quitPath = "/v1/quit"
+    static let tamePath = "/v1/tame"
     static let version = 1
 }
 
@@ -26,6 +27,16 @@ struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var status: String
     var pid: Int32
     var name: String
+    var message: String?
+    var error: String?
+}
+
+/// Response returned when the iOS companion asks to tame or untame a process on the Mac.
+struct CompanionTameResponse: Codable, Equatable, Sendable {
+    var status: String
+    var pid: Int32
+    var name: String
+    var isTamed: Bool
     var message: String?
     var error: String?
 }
@@ -80,6 +91,16 @@ struct CompanionPulse: Codable, Equatable {
     var swapText: String?
     var pressureText: String?
     var pressureSeverity: String
+    var thermalState: String? = nil
+    var batteryPercent: Int? = nil
+    var isCharging: Bool? = nil
+    var powerSource: String? = nil
+
+    var batteryText: String? {
+        guard let percent = batteryPercent else { return nil }
+        let src = powerSource ?? (isCharging == true ? "AC" : "Battery")
+        return "\(percent)% (\(src))"
+    }
 }
 
 struct CompanionRow: Codable, Equatable, Identifiable {
@@ -96,6 +117,9 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     var pid: Int32? = nil
     var canQuit: Bool = false
     var quitBlockReason: String? = nil
+    var isTamed: Bool? = false
+    var isSleepBlocker: Bool? = false
+    var canTame: Bool? = false
 }
 
 struct CompanionStorageSummary: Codable, Equatable {

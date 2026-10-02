@@ -154,6 +154,14 @@ def get_live_top_processes(sort_by: str = "cpu", limit: int = 10) -> List[Dict[s
             if pid == 0:
                 continue
 
+            is_tamed = False
+            try:
+                prio = os.getpriority(os.PRIO_PROCESS, pid)
+                if prio >= 15:
+                    is_tamed = True
+            except OSError:
+                pass
+
             processes.append({
                 "pid": pid,
                 "ppid": ppid,
@@ -164,7 +172,8 @@ def get_live_top_processes(sort_by: str = "cpu", limit: int = 10) -> List[Dict[s
                 "memory_bytes": rss_kb * 1024,
                 "memory_human": format_bytes(rss_kb * 1024),
                 "cpu_time": cpu_time,
-                "is_hog": cpu >= 50.0 or (rss_kb * 1024) >= 1_000_000_000
+                "is_hog": cpu >= 50.0 or (rss_kb * 1024) >= 1_000_000_000,
+                "is_tamed": is_tamed
             })
         except ValueError:
             continue
@@ -527,8 +536,11 @@ def scan_storage_clutter(tier: str = "standard", include_details: bool = True) -
     # 5. Extreme tier additions: AI artifacts, logs & diagnostics, large/old files
     if tier == "extreme":
         ai_dirs = [
-            ("HuggingFace Cache", HOME / ".cache" / "huggingface"),
-            ("Ollama Models", HOME / ".ollama" / "models"),
+            ("HuggingFace Cache & Weights", HOME / ".cache" / "huggingface"),
+            ("Ollama Models & Blobs", HOME / ".ollama" / "models"),
+            ("LM Studio Models", HOME / ".cache" / "lm-studio" / "models"),
+            ("LM Studio App Models", HOME / ".lmstudio" / "models"),
+            ("Whisper Models & Cache", HOME / ".cache" / "whisper"),
             ("PyTorch Kernels & Cache", HOME / ".cache" / "torch"),
             ("vLLM Cache", HOME / ".cache" / "vllm")
         ]
@@ -913,9 +925,66 @@ def quit_process(pid: int, force: bool = False) -> Dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+def tame_process(pid: int, untame: bool = False) -> Dict[str, Any]:
+    """Tame or untame a process by adjusting nice level and Darwin background policy."""
+    if pid <= 1:
+        return {"success": False, "error": "Cannot modify priority of PID <= 1"}
+
+    try:
+        proc_name = subprocess.check_output(["ps", "-p", str(pid), "-o", "comm="], text=True).strip()
+    except Exception:
+        return {"success": False, "error": f"Process {pid} not found"}
+
+    try:
+        uid_str = subprocess.check_output(["ps", "-p", str(pid), "-o", "uid="], text=True).strip()
+        if int(uid_str) != os.getuid():
+            return {"success": False, "error": f"Process {pid} is owned by another user (UID {uid_str})"}
+    except Exception:
+        pass
+
+    base_name = Path(proc_name).name.lower()
+    if base_name in SYSTEM_CRITICAL_PROCESS_NAMES:
+        return {"success": False, "error": f"Refusing to tame critical system process: {base_name}"}
+
+    darwin_proc = getattr(os, "PRIO_DARWIN_PROCESS", 4)
+    darwin_bg = getattr(os, "PRIO_DARWIN_BG", 4096)
+
+    try:
+        if untame:
+            # Restore normal priority and background policy
+            try:
+                os.setpriority(darwin_proc, pid, 0)
+            except OSError:
+                pass
+            os.setpriority(os.PRIO_PROCESS, pid, 0)
+            return {"success": True, "action": "untamed", "pid": pid, "name": base_name, "priority": 0}
+        else:
+            # Set Darwin background QoS and POSIX nice level 20
+            try:
+                os.setpriority(darwin_proc, pid, darwin_bg)
+            except OSError:
+                pass
+            os.setpriority(os.PRIO_PROCESS, pid, 20)
+            return {"success": True, "action": "tamed", "pid": pid, "name": base_name, "priority": 20, "darwin_bg": True}
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "pid": pid, "name": base_name}
+
+
 # MARK: - MCP Server Protocol Handling
 
 TOOLS = [
+    {
+        "name": "hoghunter_tame_process",
+        "description": "Tame a runaway process by lowering its CPU priority to nice level 20 and Darwin background I/O policy, or restore normal priority (untame). Keeps the process running without killing it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer", "description": "Process PID to tame or untame."},
+                "untame": {"type": "boolean", "default": False, "description": "If true, restores normal priority (untames) instead of deprioritizing."}
+            },
+            "required": ["pid"]
+        }
+    },
     {
         "name": "hoghunter_top_processes",
         "description": "Get current or historical top CPU and memory hog processes on macOS. Pulls live process data or historical snapshots from HogHunter's SQLite database.",
@@ -1037,6 +1106,12 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         pid = arguments.get("pid")
         force = arguments.get("force", False)
         data = quit_process(pid, force=force)
+        return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
+
+    elif name == "hoghunter_tame_process":
+        pid = arguments.get("pid")
+        untame = arguments.get("untame", False)
+        data = tame_process(pid, untame=untame)
         return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
 
     else:
@@ -1167,14 +1242,27 @@ def run_cli(args: argparse.Namespace) -> None:
         data = quit_process(pid, force=args.force)
         print(json.dumps(data, indent=2))
 
+    elif cmd == "tame":
+        pid = args.pid
+        if pid is None and args.paths:
+            try:
+                pid = int(args.paths[0])
+            except ValueError:
+                pass
+        if pid is None:
+            print(json.dumps({"success": False, "error": "Missing PID. Use --pid <PID> or pass <PID> as positional argument."}))
+            sys.exit(1)
+        data = tame_process(pid, untame=args.untame)
+        print(json.dumps(data, indent=2))
+
     else:
-        print("Specify a command: top, network, scan, audit, clean, or quit")
+        print("Specify a command: top, network, scan, audit, clean, quit, or tame")
         sys.exit(1)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="HogHunter MCP Server & Agent Backend")
-    parser.add_argument("--cli", dest="command", choices=["top", "network", "scan", "audit", "clean", "quit"],
+    parser.add_argument("--cli", dest="command", choices=["top", "network", "scan", "audit", "clean", "quit", "tame"],
                         help="Run in CLI mode")
     parser.add_argument("--window", default="now", choices=["now", "1h", "24h"])
     parser.add_argument("--sort-by", default="cpu", choices=["cpu", "memory"])
@@ -1182,11 +1270,12 @@ def main() -> None:
     parser.add_argument("--tier", default="standard", choices=["standard", "extreme"])
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--path", help="Path for audit")
-    parser.add_argument("paths", nargs="*", help="Paths for clean command")
+    parser.add_argument("paths", nargs="*", help="Paths for clean or PID for quit/tame")
     parser.add_argument("--dry-run", action="store_true", default=False)
     parser.add_argument("--no-snapshot", action="store_true", default=False)
-    parser.add_argument("--pid", type=int, help="PID for quit command")
+    parser.add_argument("--pid", type=int, help="PID for quit or tame command")
     parser.add_argument("--force", action="store_true", default=False)
+    parser.add_argument("--untame", action="store_true", default=False, help="Restore normal priority (untame)")
 
     args = parser.parse_args()
 

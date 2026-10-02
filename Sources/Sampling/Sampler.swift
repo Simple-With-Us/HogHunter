@@ -43,6 +43,7 @@ final class Sampler: @unchecked Sendable {
         var unreadable = 0
         var visibleCpu = 0.0
         var next: [ProcessKey: Previous] = [:]
+        let sleepBlockers = PowerAssertions.sleepBlockerPids()
 
         for pid in listPids() {
             // Hog Hunter is itself readable, so its own row would otherwise
@@ -128,7 +129,9 @@ final class Sampler: @unchecked Sendable {
                     threadCount: task.map { Int($0.pti_threadnum) } ?? 0,
                     diskReadBytesPerSec: diskRead,
                     diskWriteBytesPerSec: diskWrite,
-                    idleWakeupsPerSec: wakeups
+                    idleWakeupsPerSec: wakeups,
+                    isSleepBlocker: sleepBlockers.contains(pid),
+                    isTamed: ProcessControl.isTamed(pid: pid)
                 )
             )
         }
@@ -158,6 +161,9 @@ final class Sampler: @unchecked Sendable {
             swapOutBytesPerSec: reading.swapOutBytesPerSec,
             pressure: reading.pressure,
             thermalState: reading.thermalState,
+            batteryPercent: reading.batteryPercent,
+            isCharging: reading.isCharging,
+            powerSource: reading.powerSource,
             sampledAt: Date()
         )
 

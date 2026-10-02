@@ -87,6 +87,34 @@ enum CompanionConnection {
         }
     }
 
+    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, action: String = "tame") async throws -> CompanionTameResponse {
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = TameResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let request = CompanionHTTP.tameRequest(token: token, pid: pid, action: action)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error { reader.fail(error) }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                    default:
+                        break
+                    }
+                }
+                receiveTame(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .utility))
+            }
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
+        }
+    }
+
     private static func receive(_ connection: NWConnection, reader: ResponseReader, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
             var buffer = buffer
@@ -176,6 +204,38 @@ enum CompanionConnection {
             receiveQuit(connection, reader: reader, buffer: buffer)
         }
     }
+
+    private static func receiveTame(_ connection: NWConnection, reader: TameResponseReader, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let parsed = CompanionHTTP.parseResponse(buffer) {
+                switch parsed.status {
+                case 200, 400, 403:
+                    if let res = try? JSONDecoder().decode(CompanionTameResponse.self, from: parsed.body) {
+                        reader.succeed(res)
+                    } else if let errJson = try? JSONSerialization.jsonObject(with: parsed.body) as? [String: Any],
+                              let err = errJson["error"] as? String {
+                        reader.succeed(CompanionTameResponse(status: "error", pid: 0, name: "", isTamed: false, message: nil, error: err))
+                    } else {
+                        reader.fail(CompanionClientError.badResponse)
+                    }
+                case 401:
+                    reader.fail(CompanionClientError.unauthorized)
+                default:
+                    reader.fail(CompanionClientError.badResponse)
+                }
+                connection.cancel()
+                return
+            }
+            if isComplete || error != nil {
+                reader.fail(error ?? CompanionClientError.badResponse)
+                connection.cancel()
+                return
+            }
+            receiveTame(connection, reader: reader, buffer: buffer)
+        }
+    }
 }
 
 private final class CleanResponseReader: @unchecked Sendable {
@@ -212,6 +272,27 @@ private final class QuitResponseReader: @unchecked Sendable {
     }
 
     private func resume(_ result: Result<CompanionQuitResponse, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+private final class TameResponseReader: @unchecked Sendable {
+    var continuation: CheckedContinuation<CompanionTameResponse, Error>?
+    private let lock = NSLock()
+
+    func succeed(_ response: CompanionTameResponse) {
+        resume(.success(response))
+    }
+
+    func fail(_ error: Error) {
+        resume(.failure(error))
+    }
+
+    private func resume(_ result: Result<CompanionTameResponse, Error>) {
         lock.lock()
         let continuation = self.continuation
         self.continuation = nil

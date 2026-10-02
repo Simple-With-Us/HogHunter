@@ -452,13 +452,19 @@ struct DashboardView: View {
                 )
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-            if snapshot.pulse.swapText != nil || snapshot.pulse.pressureText != nil {
+            if snapshot.pulse.swapText != nil || snapshot.pulse.pressureText != nil || snapshot.pulse.batteryText != nil || (snapshot.pulse.thermalState != nil && snapshot.pulse.thermalState != "nominal") {
                 HStack(spacing: 8) {
                     if let swap = snapshot.pulse.swapText {
                         Pill(text: swap, severity: snapshot.pulse.pressureSeverity)
                     }
                     if let pressure = snapshot.pulse.pressureText {
                         Pill(text: pressure, severity: snapshot.pulse.pressureSeverity)
+                    }
+                    if let battery = snapshot.pulse.batteryText {
+                        Pill(text: (snapshot.pulse.isCharging == true ? "⚡ " : "🔋 ") + battery, severity: "calm")
+                    }
+                    if let thermal = snapshot.pulse.thermalState, thermal != "nominal" {
+                        Pill(text: "Thermal: \(thermal)", severity: (thermal == "critical" || thermal == "serious") ? "hot" : "elevated")
                     }
                 }
             }
@@ -483,9 +489,25 @@ struct DashboardView: View {
                             .accessibilityHidden(true)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(row.name)
-                                .font(.body.weight(.medium))
-                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                Text(row.name)
+                                    .font(.body.weight(.medium))
+                                    .lineLimit(1)
+                                if row.isSleepBlocker == true {
+                                    Image(systemName: "moon.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.indigo)
+                                        .accessibilityLabel("Preventing Sleep")
+                                }
+                                if row.isTamed == true {
+                                    Text("TAMED")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Capsule().fill(Color.orange))
+                                }
+                            }
                             Text(row.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -511,7 +533,42 @@ struct DashboardView: View {
                             }
                         }
                     }
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        if row.canTame != false, let pid = row.pid {
+                            if row.isTamed == true {
+                                Button {
+                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                } label: {
+                                    Label("Restore", systemImage: "hare")
+                                }
+                                .tint(.blue)
+                            } else {
+                                Button {
+                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                } label: {
+                                    Label("Tame", systemImage: "tortoise")
+                                }
+                                .tint(.orange)
+                            }
+                        }
+                    }
                     .contextMenu {
+                        if row.canTame != false, let pid = row.pid {
+                            if row.isTamed == true {
+                                Button {
+                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                } label: {
+                                    Label("Restore Normal Priority", systemImage: "hare")
+                                }
+                            } else {
+                                Button {
+                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                } label: {
+                                    Label("Tame Hog (Lower Priority)", systemImage: "tortoise")
+                                }
+                            }
+                        }
+
                         if row.canQuit && row.pid != nil {
                             Button {
                                 confirmQuit(row: row, force: false)
@@ -545,7 +602,7 @@ struct DashboardView: View {
 
         Section {
             if snapshot.rows.contains(where: { $0.canQuit }) {
-                Text("Swipe or long-press an app to quit or force quit it remotely on \(snapshot.hostName).  System processes and tasks owned by other users are protected.")
+                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName). System processes and tasks owned by other users are protected.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {

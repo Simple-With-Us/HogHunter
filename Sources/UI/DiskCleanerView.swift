@@ -537,6 +537,7 @@ private struct CategoryCardView: View {
         case .developer: color = .orange
         case .orphanedData: color = .purple
         case .aiArtifacts: color = .green
+        case .localAIModels: color = .mint
         case .largeAndOldFiles: color = .teal
         }
 

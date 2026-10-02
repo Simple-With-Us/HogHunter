@@ -14,6 +14,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case orphanedData
     /// AI agent transcripts, model download temp files, and BotFleet update installers.
     case aiArtifacts
+    /// Local AI and LLM model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, Whisper.
+    case localAIModels
     /// Large files (>100 MB) or old files (>6 months) in user working folders (Downloads, Documents, Desktop).
     case largeAndOldFiles
 
@@ -27,6 +29,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .developer: return "Developer Junk"
         case .orphanedData: return "Orphaned App Leftovers"
         case .aiArtifacts: return "AI & Agent Junk"
+        case .localAIModels: return "Local AI & LLM Models"
         case .largeAndOldFiles: return "Large & Old Files"
         }
     }
@@ -45,6 +48,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Support folders remaining from applications no longer installed."
         case .aiArtifacts:
             return "Inactive AI agent session transcripts (>7 days) and temporary update downloads."
+        case .localAIModels:
+            return "Downloaded LLM and model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper."
         case .largeAndOldFiles:
             return "Files over 100 MB, or over 20 MB untouched for 6+ months."
         }
@@ -58,6 +63,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .developer: return "hammer"
         case .orphanedData: return "app.dashed"
         case .aiArtifacts: return "sparkles"
+        case .localAIModels: return "brain.head.profile"
         case .largeAndOldFiles: return "clock.arrow.circlepath"
         }
     }
@@ -70,7 +76,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .developer: return 3
         case .orphanedData: return 4
         case .aiArtifacts: return 5
-        case .largeAndOldFiles: return 6
+        case .localAIModels: return 6
+        case .largeAndOldFiles: return 7
         }
     }
 
@@ -79,7 +86,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer:
             return false
-        case .orphanedData, .aiArtifacts, .largeAndOldFiles:
+        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return true
         }
     }
@@ -89,7 +96,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
             return true
-        case .aiArtifacts, .largeAndOldFiles:
+        case .aiArtifacts, .localAIModels, .largeAndOldFiles:
             // Large/old files and AI agent artifacts require explicit user review to prevent accidental deletion
             return false
         }
@@ -361,6 +368,8 @@ final class DiskCleaner: @unchecked Sendable {
             return scanOrphanedData(installedApps: installedApps)
         case .aiArtifacts:
             return scanAIArtifacts()
+        case .localAIModels:
+            return scanLocalAIModels()
         case .largeAndOldFiles:
             return scanLargeAndOldFiles()
         }
@@ -854,6 +863,135 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+    /// Scans local AI model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper.
+    func scanLocalAIModels() -> [CleanItem] {
+        var items: [CleanItem] = []
+        let home = userHomeURL
+
+        // 1. Ollama Models (~/.ollama/models)
+        if !Task.isCancelled {
+            let manifestsURL = home.appendingPathComponent(".ollama/models/manifests", isDirectory: true)
+            if let manifestContents = try? fileManager.subpathsOfDirectory(atPath: manifestsURL.path) {
+                for subpath in manifestContents {
+                    if Task.isCancelled { break }
+                    let fileURL = manifestsURL.appendingPathComponent(subpath)
+                    var isDir: ObjCBool = false
+                    if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
+                        let name = subpath.replacingOccurrences(of: "registry.ollama.ai/", with: "")
+                        let stats = directoryStats(at: fileURL)
+                        items.append(CleanItem(
+                            category: .localAIModels,
+                            title: "Ollama: \(name)",
+                            subtitle: "~/.ollama/models/manifests/\(subpath)",
+                            url: fileURL,
+                            bytes: stats.bytes,
+                            fileCount: 1,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "Ollama Model Manifest"
+                        ))
+                    }
+                }
+            }
+
+            let blobsURL = home.appendingPathComponent(".ollama/models/blobs", isDirectory: true)
+            if let blobContents = try? fileManager.contentsOfDirectory(at: blobsURL, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) {
+                for blobURL in blobContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: blobURL)
+                    guard stats.bytes >= 10_000_000 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "Ollama Blob (\(blobURL.lastPathComponent.prefix(19)))",
+                        subtitle: "~/.ollama/models/blobs/\(blobURL.lastPathComponent)",
+                        url: blobURL,
+                        bytes: stats.bytes,
+                        fileCount: 1,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Ollama Model Weights (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        // 2. Hugging Face Hub Models (~/.cache/huggingface/hub)
+        if !Task.isCancelled {
+            let hfURL = home.appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
+            if let hfContents = try? fileManager.contentsOfDirectory(at: hfURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for repoURL in hfContents {
+                    if Task.isCancelled { break }
+                    let name = repoURL.lastPathComponent
+                    guard name.hasPrefix("models--") else { continue }
+                    let readableName = name.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/")
+                    let stats = directoryStats(at: repoURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "Hugging Face: \(readableName)",
+                        subtitle: "~/.cache/huggingface/hub/\(name)",
+                        url: repoURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Hugging Face Model Snapshot (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        // 3. LM Studio Models (~/.cache/lm-studio/models and ~/.lmstudio/models)
+        let lmStudioPaths = [".cache/lm-studio/models", ".lmstudio/models"]
+        for lmPath in lmStudioPaths {
+            if Task.isCancelled { break }
+            let lmURL = home.appendingPathComponent(lmPath, isDirectory: true)
+            if let lmContents = try? fileManager.contentsOfDirectory(at: lmURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for modelURL in lmContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: modelURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "LM Studio: \(modelURL.lastPathComponent)",
+                        subtitle: "~/\(lmPath)/\(modelURL.lastPathComponent)",
+                        url: modelURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "LM Studio Model Weights (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        // 4. Whisper Models (~/.cache/whisper)
+        if !Task.isCancelled {
+            let whisperURL = home.appendingPathComponent(".cache/whisper", isDirectory: true)
+            if let whisperContents = try? fileManager.contentsOfDirectory(at: whisperURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+                for modelURL in whisperContents {
+                    if Task.isCancelled { break }
+                    let stats = directoryStats(at: modelURL)
+                    guard stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .localAIModels,
+                        title: "Whisper: \(modelURL.lastPathComponent)",
+                        subtitle: "~/.cache/whisper/\(modelURL.lastPathComponent)",
+                        url: modelURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Whisper Model Weights (\(HogFormat.memory(stats.bytes)))"
+                    ))
+                }
+            }
+        }
+
+        return items.sorted { $0.bytes > $1.bytes }
+    }
+
     private static let itemDateFormatter: DateFormatter = {
         let df = DateFormatter()
         df.dateStyle = .medium
@@ -1104,6 +1242,16 @@ final class DiskCleaner: @unchecked Sendable {
                                (path.contains("/.botfleet/native/") && path.hasSuffix(".ndjson.1"))
             let hasAllowedPrefix = allowedAIPrefixes.contains { path.hasPrefix($0) && path != $0 }
             return hasAllowedPrefix || isStaleUpdate
+
+        case .localAIModels:
+            let allowedModelPrefixes = [
+                home + "/.ollama/models/",
+                home + "/.cache/huggingface/hub/",
+                home + "/.cache/lm-studio/models/",
+                home + "/.lmstudio/models/",
+                home + "/.cache/whisper/"
+            ]
+            return allowedModelPrefixes.contains { path.hasPrefix($0) && path != $0 }
 
         case .largeAndOldFiles:
             let allowedUserPrefixes = [

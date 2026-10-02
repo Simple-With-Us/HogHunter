@@ -230,6 +230,20 @@ struct HogHunterPanel: View {
                 help: "macOS slows the machine down as this rises."
             ))
         }
+        if let pct = store.pulse.batteryPercent {
+            let isCharging = store.pulse.isCharging ?? false
+            let isBattery = store.pulse.powerSource == "Battery Power"
+            if isBattery || pct < 100 {
+                let severity: Severity = pct <= 20 ? .hot : (pct <= 40 ? .elevated : .calm)
+                let icon = isCharging ? "⚡ " : ""
+                let text = "\(icon)\(pct)% Battery"
+                out.append(Pill(
+                    text: text,
+                    severity: severity,
+                    help: isCharging ? "Charging (\(pct)%)." : "Running on battery (\(pct)%). High CPU processes increase discharge rate."
+                ))
+            }
+        }
         return out
     }
 

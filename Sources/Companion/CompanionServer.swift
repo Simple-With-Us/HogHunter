@@ -95,6 +95,7 @@ final class CompanionServer: @unchecked Sendable {
 
     var allowRemoteQuit = false
     var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil
+    var onRemoteTame: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil
 
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] data, _, isComplete, error in
@@ -130,6 +131,17 @@ final class CompanionServer: @unchecked Sendable {
                             return handler(pid, force)
                         }
                         return (501, Data("{\"error\": \"Quit handler not configured\"}".utf8))
+                    },
+                    tameHandler: { [weak self] pid, action in
+                        guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                        guard self.allowRemoteQuit else {
+                            let res = ["status": "forbidden", "error": "Remote process control is disabled in Hog Hunter Mac Settings."]
+                            return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+                        }
+                        if let handler = self.onRemoteTame {
+                            return handler(pid, action)
+                        }
+                        return (501, Data("{\"error\": \"Tame handler not configured\"}".utf8))
                     }
                 )
                 connection.send(content: response, completion: .contentProcessed { _ in

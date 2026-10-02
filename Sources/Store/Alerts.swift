@@ -89,6 +89,10 @@ final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate
     @Published private(set) var authorizationDenied = false
     /// The last thing the notification centre refused to do, if anything.
     @Published private(set) var lastError: String?
+    /// Optional webhook URL for remote sustained-hog notification dispatch (Slack, Discord, Pushover).
+    @Published var webhookURL: String = ""
+    /// Result or status of the most recent webhook dispatch.
+    @Published private(set) var lastWebhookStatus: String?
 
     private var policy = AlertPolicy()
     private var didRequestAuthorization = false
@@ -179,23 +183,90 @@ final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate
     }
 
     private func notify(candidate: Candidate, seconds: TimeInterval) {
-        guard let center else { return }
-        if !didRequestAuthorization { requestAuthorization() }
-        let content = UNMutableNotificationContent()
-        content.title = "Hog Hunter"
-        content.body = Self.message(name: candidate.name, cpuPercent: candidate.cpuPercent, seconds: seconds)
-        content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: "hog-\(candidate.id)-\(Int(Date().timeIntervalSince1970))",
-            content: content,
-            trigger: nil
-        )
-        center.add(request) { error in
-            guard let error else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.lastError = error.localizedDescription
+        if let center {
+            if !didRequestAuthorization { requestAuthorization() }
+            let content = UNMutableNotificationContent()
+            content.title = "Hog Hunter"
+            content.body = Self.message(name: candidate.name, cpuPercent: candidate.cpuPercent, seconds: seconds)
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: "hog-\(candidate.id)-\(Int(Date().timeIntervalSince1970))",
+                content: content,
+                trigger: nil
+            )
+            center.add(request) { error in
+                guard let error else { return }
+                DispatchQueue.main.async { [weak self] in
+                    self?.lastError = error.localizedDescription
+                }
             }
         }
+
+        let trimmedWebhook = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedWebhook.isEmpty {
+            sendWebhook(candidate: candidate, seconds: seconds, webhookURL: trimmedWebhook, isTest: false)
+        }
+    }
+
+    /// Sends a test webhook notification to verify endpoint connectivity.
+    func sendTestWebhook(to urlString: String) {
+        let testCandidate = Candidate(id: "test", name: "Test Process (Hog Hunter)", cpuPercent: 350.0)
+        sendWebhook(candidate: testCandidate, seconds: 300, webhookURL: urlString, isTest: true)
+    }
+
+    private func sendWebhook(candidate: Candidate, seconds: TimeInterval, webhookURL: String, isTest: Bool) {
+        let trimmed = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https" else {
+            self.lastWebhookStatus = "Invalid webhook URL"
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+
+        let alertMsg = isTest
+            ? "Test alert from Hog Hunter: Sustained hog webhook dispatch is functioning properly."
+            : Self.message(name: candidate.name, cpuPercent: candidate.cpuPercent, seconds: seconds)
+
+        let payload: [String: Any] = [
+            "text": alertMsg,
+            "content": alertMsg,
+            "message": alertMsg,
+            "title": "Hog Hunter Alert",
+            "candidate": candidate.name,
+            "cpu_percent": candidate.cpuPercent,
+            "duration_seconds": seconds,
+            "is_test": isTest,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        } catch {
+            self.lastWebhookStatus = "Failed to encode JSON: \(error.localizedDescription)"
+            return
+        }
+
+        self.lastWebhookStatus = "Sending..."
+
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error = error {
+                    self.lastWebhookStatus = "Failed: \(error.localizedDescription)"
+                } else if let http = response as? HTTPURLResponse {
+                    if (200...299).contains(http.statusCode) {
+                        let formatter = DateFormatter()
+                        formatter.timeStyle = .medium
+                        self.lastWebhookStatus = "Delivered (\(http.statusCode)) at \(formatter.string(from: Date()))"
+                    } else {
+                        self.lastWebhookStatus = "HTTP Error \(http.statusCode)"
+                    }
+                }
+            }
+        }.resume()
     }
 }
 

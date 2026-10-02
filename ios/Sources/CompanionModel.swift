@@ -179,6 +179,47 @@ final class CompanionModel {
         }
     }
 
+    func tameProcess(pid: Int32, action: String = "tame") async -> CompanionTameResponse {
+        if isDemoMode {
+            let targetName = snapshot?.rows.first(where: { $0.pid == pid })?.name ?? "Process"
+            if let index = snapshot?.rows.firstIndex(where: { $0.pid == pid }) {
+                snapshot?.rows[index].isTamed = (action == "tame")
+            }
+            return CompanionTameResponse(
+                status: "success",
+                pid: pid,
+                name: targetName,
+                isTamed: action == "tame",
+                message: action == "tame" ? "Process priority lowered to background QoS." : "Process priority restored to normal.",
+                error: nil
+            )
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            return CompanionTameResponse(
+                status: "failed",
+                pid: pid,
+                name: "",
+                isTamed: false,
+                message: nil,
+                error: "Not connected to Mac."
+            )
+        }
+        do {
+            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, action: action)
+            Task { await refresh() }
+            return resp
+        } catch {
+            return CompanionTameResponse(
+                status: "failed",
+                pid: pid,
+                name: "",
+                isTamed: false,
+                message: nil,
+                error: error.localizedDescription
+            )
+        }
+    }
+
     func mac(for peerID: String) -> DiscoveredMac? {
         discovered.first { $0.id == peerID }
     }
@@ -420,12 +461,16 @@ final class CompanionModel {
             memoryCaption: "Memory in use",
             swapText: "1.2 GB swapped",
             pressureText: "Pressure warning",
-            pressureSeverity: "elevated"
+            pressureSeverity: "elevated",
+            thermalState: "fair",
+            batteryPercent: 88,
+            isCharging: true,
+            powerSource: "AC"
         ),
         rows: [
-            CompanionRow(id: "chrome", name: "Google Chrome", detail: "6 processes", cpuText: "186%", memoryText: "2.4 GB", severity: "elevated", isApp: true, cpuPercent: 186.0, memoryBytes: 2_576_980_377, pid: 1042, canQuit: true),
-            CompanionRow(id: "code", name: "Code", detail: "4 processes", cpuText: "92.0%", memoryText: "1.1 GB", severity: "calm", isApp: true, cpuPercent: 92.0, memoryBytes: 1_181_116_006, pid: 2104, canQuit: true),
-            CompanionRow(id: "node", name: "node", detail: "pid 4182", cpuText: "310%", memoryText: "640 MB", severity: "hot", isApp: false, cpuPercent: 310.0, memoryBytes: 671_088_640, pid: 4182, canQuit: true),
+            CompanionRow(id: "chrome", name: "Google Chrome", detail: "6 processes", cpuText: "186%", memoryText: "2.4 GB", severity: "elevated", isApp: true, cpuPercent: 186.0, memoryBytes: 2_576_980_377, pid: 1042, canQuit: true, isTamed: false, isSleepBlocker: true, canTame: true),
+            CompanionRow(id: "code", name: "Code", detail: "4 processes", cpuText: "92.0%", memoryText: "1.1 GB", severity: "calm", isApp: true, cpuPercent: 92.0, memoryBytes: 1_181_116_006, pid: 2104, canQuit: true, isTamed: false, isSleepBlocker: false, canTame: true),
+            CompanionRow(id: "node", name: "node", detail: "pid 4182", cpuText: "310%", memoryText: "640 MB", severity: "hot", isApp: false, cpuPercent: 310.0, memoryBytes: 671_088_640, pid: 4182, canQuit: true, isTamed: true, isSleepBlocker: false, canTame: true),
         ],
         storage: CompanionStorageSummary(
             freeBytes: 120_000_000_000,
