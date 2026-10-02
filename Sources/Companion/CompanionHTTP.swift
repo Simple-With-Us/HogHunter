@@ -237,16 +237,20 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
+    static func queryAllowedValue(_ value: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: ";&=")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
     static func exclusionsRequest(token: String, toggleCategory: String? = nil, addPath: String? = nil, removePath: String? = nil) -> Data {
         var queryItems: [String] = []
-        if let toggleCategory { queryItems.append("toggleCategory=\(toggleCategory)") }
+        if let toggleCategory { queryItems.append("toggleCategory=\(queryAllowedValue(toggleCategory))") }
         if let addPath {
-            let enc = addPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? addPath
-            queryItems.append("addPath=\(enc)")
+            queryItems.append("addPath=\(queryAllowedValue(addPath))")
         }
         if let removePath {
-            let enc = removePath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? removePath
-            queryItems.append("removePath=\(enc)")
+            queryItems.append("removePath=\(queryAllowedValue(removePath))")
         }
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
         let lines = [
@@ -262,9 +266,9 @@ enum CompanionHTTP {
 
     static func viewRequest(token: String, window: String? = nil, grouping: String? = nil, cpuScale: String? = nil) -> Data {
         var queryItems: [String] = []
-        if let window { queryItems.append("window=\(window.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? window)") }
-        if let grouping { queryItems.append("grouping=\(grouping.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? grouping)") }
-        if let cpuScale { queryItems.append("cpuScale=\(cpuScale.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? cpuScale)") }
+        if let window { queryItems.append("window=\(queryAllowedValue(window))") }
+        if let grouping { queryItems.append("grouping=\(queryAllowedValue(grouping))") }
+        if let cpuScale { queryItems.append("cpuScale=\(queryAllowedValue(cpuScale))") }
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
         let lines = [
             "POST \(CompanionService.viewPath)\(queryString) HTTP/1.1",

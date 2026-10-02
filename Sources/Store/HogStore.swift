@@ -1089,38 +1089,48 @@ final class HogStore: ObservableObject {
     }
 
     private func performRemoteViewUpdate(_ req: CompanionViewUpdateRequest) -> (status: Int, body: Data) {
+        var targetWindow: TimeWindow?
+        if let win = req.window {
+            if win.caseInsensitiveCompare("now") == .orderedSame {
+                targetWindow = .now
+            } else if win.caseInsensitiveCompare("1h") == .orderedSame || win.caseInsensitiveCompare("1 Hour") == .orderedSame || win.caseInsensitiveCompare("Past Hour") == .orderedSame || win.caseInsensitiveCompare("Past 1 Hour") == .orderedSame {
+                targetWindow = .hour
+            } else if win.caseInsensitiveCompare("24h") == .orderedSame || win.caseInsensitiveCompare("24 Hours") == .orderedSame || win.caseInsensitiveCompare("Past 24 Hours") == .orderedSame || win.caseInsensitiveCompare("day") == .orderedSame {
+                targetWindow = .day
+            }
+        }
+
+        var targetGrouping: HogGrouping?
+        if let grp = req.grouping {
+            if grp.caseInsensitiveCompare("apps") == .orderedSame {
+                targetGrouping = .apps
+            } else if grp.caseInsensitiveCompare("processes") == .orderedSame {
+                targetGrouping = .processes
+            }
+        }
+
+        var targetCpuScale: CpuScale?
+        if let sc = req.cpuScale {
+            if sc.lowercased().contains("machine") || sc.lowercased().contains("share") {
+                targetCpuScale = .machineShare
+            } else if sc.lowercased().contains("core") {
+                targetCpuScale = .perCore
+            }
+        }
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if let win = req.window {
-                if win.caseInsensitiveCompare("now") == .orderedSame {
-                    self.window = .now
-                } else if win.caseInsensitiveCompare("1h") == .orderedSame || win.caseInsensitiveCompare("1 Hour") == .orderedSame || win.caseInsensitiveCompare("Past Hour") == .orderedSame || win.caseInsensitiveCompare("Past 1 Hour") == .orderedSame {
-                    self.window = .hour
-                } else if win.caseInsensitiveCompare("24h") == .orderedSame || win.caseInsensitiveCompare("24 Hours") == .orderedSame || win.caseInsensitiveCompare("Past 24 Hours") == .orderedSame || win.caseInsensitiveCompare("day") == .orderedSame {
-                    self.window = .day
-                }
-            }
-            if let grp = req.grouping {
-                if grp.caseInsensitiveCompare("apps") == .orderedSame {
-                    self.grouping = .apps
-                } else if grp.caseInsensitiveCompare("processes") == .orderedSame {
-                    self.grouping = .processes
-                }
-            }
-            if let sc = req.cpuScale {
-                if sc.lowercased().contains("machine") || sc.lowercased().contains("share") {
-                    self.cpuScale = .machineShare
-                } else if sc.lowercased().contains("core") {
-                    self.cpuScale = .perCore
-                }
-            }
+            if let targetWindow { self.window = targetWindow }
+            if let targetGrouping { self.grouping = targetGrouping }
+            if let targetCpuScale { self.cpuScale = targetCpuScale }
             self.publishCompanion()
         }
+
         let resp = CompanionViewUpdateResponse(
             status: "ok",
-            window: req.window ?? self.window.rawValue,
-            grouping: req.grouping ?? self.grouping.rawValue,
-            cpuScale: req.cpuScale ?? self.cpuScale.rawValue,
+            window: targetWindow?.rawValue ?? req.window ?? "now",
+            grouping: targetGrouping?.rawValue ?? req.grouping ?? "apps",
+            cpuScale: targetCpuScale?.rawValue ?? req.cpuScale ?? "machineShare",
             message: "View updated."
         )
         let data = (try? JSONEncoder().encode(resp)) ?? Data("{}".utf8)
