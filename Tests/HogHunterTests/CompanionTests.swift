@@ -176,6 +176,117 @@ final class CompanionTests: XCTestCase {
         XCTAssertEqual(roundTrip.rows.first?.isSleepBlocker, true)
     }
 
+    func testCompanionExclusionsRequestAndResponse() {
+        var receivedReq: CompanionExclusionsUpdateRequest?
+        let handler: (CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) = { req in
+            receivedReq = req
+            let resp = CompanionExclusionsUpdateResponse(
+                status: "ok",
+                excludedCategories: ["userCaches"],
+                excludedPaths: ["/Users/jay/Excluded"],
+                message: "OK"
+            )
+            return (200, (try? JSONEncoder().encode(resp)) ?? Data())
+        }
+
+        let request = CompanionHTTP.exclusionsRequest(
+            token: "ABCD2345",
+            toggleCategory: "userCaches",
+            addPath: "/Users/jay/Excluded"
+        )
+        let response = CompanionHTTP.response(
+            request: request,
+            body: Data(),
+            token: "ABCD2345",
+            exclusionsHandler: handler
+        )
+        let parsed = CompanionHTTP.parseResponse(response)
+        XCTAssertEqual(parsed?.status, 200)
+        XCTAssertEqual(receivedReq?.toggleCategory, "userCaches")
+        XCTAssertEqual(receivedReq?.addPath, "/Users/jay/Excluded")
+
+        let decoded = try? JSONDecoder().decode(CompanionExclusionsUpdateResponse.self, from: parsed?.body ?? Data())
+        XCTAssertEqual(decoded?.status, "ok")
+        XCTAssertEqual(decoded?.excludedCategories, ["userCaches"])
+        XCTAssertEqual(decoded?.excludedPaths, ["/Users/jay/Excluded"])
+    }
+
+    func testCompanionViewRequestAndResponse() {
+        var receivedReq: CompanionViewUpdateRequest?
+        let handler: (CompanionViewUpdateRequest) -> (status: Int, body: Data) = { req in
+            receivedReq = req
+            let resp = CompanionViewUpdateResponse(
+                status: "ok",
+                window: req.window ?? "Now",
+                grouping: req.grouping ?? "Apps",
+                cpuScale: req.cpuScale ?? "Per Core",
+                message: "OK"
+            )
+            return (200, (try? JSONEncoder().encode(resp)) ?? Data())
+        }
+
+        let request = CompanionHTTP.viewRequest(
+            token: "ABCD2345",
+            window: "Past Hour",
+            grouping: "Processes",
+            cpuScale: "Machine Share"
+        )
+        let response = CompanionHTTP.response(
+            request: request,
+            body: Data(),
+            token: "ABCD2345",
+            viewHandler: handler
+        )
+        let parsed = CompanionHTTP.parseResponse(response)
+        XCTAssertEqual(parsed?.status, 200)
+        XCTAssertEqual(receivedReq?.window, "Past Hour")
+        XCTAssertEqual(receivedReq?.grouping, "Processes")
+        XCTAssertEqual(receivedReq?.cpuScale, "Machine Share")
+
+        let decoded = try? JSONDecoder().decode(CompanionViewUpdateResponse.self, from: parsed?.body ?? Data())
+        XCTAssertEqual(decoded?.status, "ok")
+        XCTAssertEqual(decoded?.window, "Past Hour")
+        XCTAssertEqual(decoded?.grouping, "Processes")
+        XCTAssertEqual(decoded?.cpuScale, "Machine Share")
+    }
+
+    func testCompanionStorageSummaryBreakdownAndExclusions() throws {
+        let category = CompanionStorageCategorySummary(
+            id: "userCaches",
+            title: "User Caches",
+            description: "Caches that can be rebuilt",
+            icon: "arrow.triangle.2.circlepath",
+            isExcluded: false,
+            isExtremeOnly: false
+        )
+        let summary = CompanionStorageSummary(
+            freeBytes: 100_000_000_000,
+            totalBytes: 500_000_000_000,
+            usedBytes: 400_000_000_000,
+            freeText: "100 GB Free",
+            totalText: "500 GB Total",
+            usedText: "400 GB Used",
+            usedPercent: 80.0,
+            standardCleanableBytes: 4_000_000_000,
+            standardCleanableText: "4 GB Cleanable",
+            excludedCategories: ["trash"],
+            excludedPathsCount: 1,
+            categoryBreakdown: [category],
+            excludedPaths: ["/Users/jay/Keep"]
+        )
+
+        let encoded = try JSONEncoder().encode(summary)
+        let decoded = try JSONDecoder().decode(CompanionStorageSummary.self, from: encoded)
+
+        XCTAssertEqual(decoded.categoryBreakdown?.count, 1)
+        XCTAssertEqual(decoded.categoryBreakdown?.first?.title, "User Caches")
+        XCTAssertEqual(decoded.excludedPaths, ["/Users/jay/Keep"])
+
+        let currentSummary = CompanionSnapshotBuilder.currentStorageSummary()
+        XCTAssertNotNil(currentSummary?.categoryBreakdown)
+        XCTAssertEqual(currentSummary?.categoryBreakdown?.count, CleanCategory.allCases.count)
+    }
+
     private func sampleSnapshot(scale: CpuScale) -> CompanionSnapshot {
         let pulse = MachinePulse(
             cpuPercent: 40,

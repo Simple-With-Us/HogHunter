@@ -168,6 +168,26 @@ struct CleanerExclusions: Codable, Equatable, Sendable {
         return false
     }
 
+    mutating func toggleCategory(_ category: CleanCategory) {
+        if excludedCategories.contains(category.rawValue) {
+            excludedCategories.remove(category.rawValue)
+        } else {
+            excludedCategories.insert(category.rawValue)
+        }
+    }
+
+    mutating func addPath(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if !excludedPaths.contains(trimmed) {
+            excludedPaths.append(trimmed)
+        }
+    }
+
+    mutating func removePath(_ path: String) {
+        excludedPaths.removeAll { $0 == path }
+    }
+
     static func load() -> CleanerExclusions {
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         guard let data = defaults.data(forKey: defaultsKey),

@@ -274,7 +274,7 @@ private struct CodeEntryView: View {
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
-    @State private var selectedTab: CompanionTab = .activity
+    @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
@@ -282,6 +282,8 @@ struct DashboardView: View {
     @State private var showQuitConfirm = false
     @State private var lastQuitResult: CompanionQuitResponse?
     @State private var showQuitResultAlert = false
+    @State private var showAddPathAlert = false
+    @State private var newPathInput = ""
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
         pendingQuitRow = row
@@ -398,6 +400,18 @@ struct DashboardView: View {
                 Text("Command delivered to \(snapshot.hostName).")
             }
         }
+        .alert("Exclude Folder", isPresented: $showAddPathAlert) {
+            TextField("Folder path (e.g. ~/Code/Project)", text: $newPathInput)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            Button("Exclude") {
+                let p = newPathInput
+                Task { await model.addExcludedPath(p) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Enter a folder path on \(snapshot.hostName) to exclude from all disk cleaning.")
+        }
         .onChange(of: model.showCleanDialogRequested) { _, requested in
             if requested {
                 showCleanConfirm = true
@@ -468,6 +482,53 @@ struct DashboardView: View {
                     }
                 }
             }
+        }
+
+        Section {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Lookback")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 68, alignment: .leading)
+                    Picker("Window", selection: Binding(
+                        get: {
+                            let w = snapshot.window.lowercased()
+                            if w.contains("24") || w.contains("day") { return "24h" }
+                            if w.contains("1") || w.contains("hour") { return "1h" }
+                            return "now"
+                        },
+                        set: { next in
+                            let win = next == "24h" ? "Past 24 Hours" : (next == "1h" ? "Past Hour" : "Now")
+                            Task { await model.switchWindow(win) }
+                        }
+                    )) {
+                        Text("Now").tag("now")
+                        Text("1 Hour").tag("1h")
+                        Text("24 Hours").tag("24h")
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Grouping")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 68, alignment: .leading)
+                    Picker("Grouping", selection: Binding(
+                        get: { snapshot.grouping.lowercased() == "processes" ? "processes" : "apps" },
+                        set: { next in
+                            let grp = next == "processes" ? "Processes" : "Apps"
+                            Task { await model.switchGrouping(grp) }
+                        }
+                    )) {
+                        Text("Apps").tag("apps")
+                        Text("Processes").tag("processes")
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .padding(.vertical, 2)
         }
 
         Section {
@@ -702,32 +763,108 @@ struct DashboardView: View {
         }
 
         if let storage = snapshot.storage {
-            let excludedCats = storage.excludedCategories ?? []
-            let excludedPathsCount = storage.excludedPathsCount ?? 0
-            if !excludedCats.isEmpty || excludedPathsCount > 0 {
-                Section("Exclusions & Safety") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Label("Active Cleaner Exclusions", systemImage: "shield.lefthalf.filled")
-                                .font(.subheadline.weight(.semibold))
+            Section("Cleanable Categories") {
+                if let breakdown = storage.categoryBreakdown, !breakdown.isEmpty {
+                    ForEach(breakdown) { category in
+                        HStack(spacing: 12) {
+                            Image(systemName: category.icon)
+                                .font(.system(size: 18))
+                                .frame(width: 24)
+                                .foregroundStyle(category.isExcluded ? Color.secondary : Color.accentColor)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(category.title)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(category.isExcluded ? .secondary : .primary)
+                                    if category.isExtremeOnly {
+                                        Text("EXTREME ONLY")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundStyle(.purple)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(
+                                                Capsule().fill(Color.purple.opacity(0.12))
+                                            )
+                                    }
+                                }
+                                Text(category.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                             Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { !category.isExcluded },
+                                set: { _ in
+                                    Task { await model.toggleCategoryExclusion(id: category.id) }
+                                }
+                            ))
+                            .labelsHidden()
                         }
-                        if !excludedCats.isEmpty {
-                            Text("Excluded Categories: \(excludedCats.joined(separator: ", "))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if excludedPathsCount > 0 {
-                            Text("\(excludedPathsCount) custom \(excludedPathsCount == 1 ? "folder is" : "folders are") excluded from cleaning.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("Configured in Hog Hunter Mac Settings → Cleaner.")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                        .padding(.vertical, 2)
                     }
-                    .padding(.vertical, 2)
+                } else {
+                    let excludedCats = storage.excludedCategories ?? []
+                    if !excludedCats.isEmpty {
+                        Text("Excluded: \(excludedCats.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("All standard categories included.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+            }
+
+            Section("Custom Excluded Folders") {
+                let paths = storage.excludedPaths ?? []
+                if paths.isEmpty {
+                    Text("No custom folders excluded. Tap below to protect specific folders from cleaning.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(paths, id: \.self) { path in
+                        HStack(spacing: 10) {
+                            Image(systemName: "folder.badge.minus")
+                                .foregroundStyle(.secondary)
+                            Text(path)
+                                .font(.caption.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button(role: .destructive) {
+                                Task { await model.removeExcludedPath(path) }
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .onDelete { indices in
+                        for index in indices {
+                            let path = paths[index]
+                            Task { await model.removeExcludedPath(path) }
+                        }
+                    }
+                }
+
+                Button {
+                    newPathInput = ""
+                    showAddPathAlert = true
+                } label: {
+                    Label("Exclude Folder…", systemImage: "plus.circle")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+
+            Section {
+                Text("Excluded categories and folders are safely preserved across both Standard and Extreme clean runs on \(snapshot.hostName).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
     }

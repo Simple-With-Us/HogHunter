@@ -220,6 +220,106 @@ final class CompanionModel {
         }
     }
 
+    func toggleCategoryExclusion(id: String) async {
+        if isDemoMode {
+            guard var storage = snapshot?.storage else { return }
+            var breakdown = storage.categoryBreakdown ?? []
+            if let idx = breakdown.firstIndex(where: { $0.id == id }) {
+                breakdown[idx].isExcluded.toggle()
+                storage.categoryBreakdown = breakdown
+                var excluded = storage.excludedCategories ?? []
+                let catTitle = breakdown[idx].title
+                if breakdown[idx].isExcluded {
+                    if !excluded.contains(catTitle) { excluded.append(catTitle) }
+                } else {
+                    excluded.removeAll { $0 == catTitle }
+                }
+                storage.excludedCategories = excluded
+                snapshot?.storage = storage
+            }
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        do {
+            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, toggleCategory: id)
+            await refresh()
+        } catch {}
+    }
+
+    func addExcludedPath(_ path: String) async {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if isDemoMode {
+            guard var storage = snapshot?.storage else { return }
+            var paths = storage.excludedPaths ?? []
+            if !paths.contains(trimmed) {
+                paths.append(trimmed)
+                storage.excludedPaths = paths
+                storage.excludedPathsCount = paths.count
+                snapshot?.storage = storage
+            }
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        do {
+            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, addPath: trimmed)
+            await refresh()
+        } catch {}
+    }
+
+    func removeExcludedPath(_ path: String) async {
+        if isDemoMode {
+            guard var storage = snapshot?.storage else { return }
+            var paths = storage.excludedPaths ?? []
+            paths.removeAll { $0 == path }
+            storage.excludedPaths = paths
+            storage.excludedPathsCount = paths.count
+            snapshot?.storage = storage
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        do {
+            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, removePath: path)
+            await refresh()
+        } catch {}
+    }
+
+    func switchWindow(_ window: String) async {
+        if isDemoMode {
+            snapshot?.window = window
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        do {
+            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, window: window)
+            await refresh()
+        } catch {}
+    }
+
+    func switchGrouping(_ grouping: String) async {
+        if isDemoMode {
+            snapshot?.grouping = grouping
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        do {
+            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, grouping: grouping)
+            await refresh()
+        } catch {}
+    }
+
+    func switchCpuScale(_ scale: String) async {
+        if isDemoMode {
+            snapshot?.cpuScale = scale
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        do {
+            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, cpuScale: scale)
+            await refresh()
+        } catch {}
+    }
+
     func mac(for peerID: String) -> DiscoveredMac? {
         discovered.first { $0.id == peerID }
     }
@@ -483,7 +583,21 @@ final class CompanionModel {
             standardCleanableBytes: 4_200_000_000,
             standardCleanableText: "4.2 GB Cleanable",
             excludedCategories: ["Trash Bins"],
-            excludedPathsCount: 2
+            excludedPathsCount: 2,
+            categoryBreakdown: [
+                CompanionStorageCategorySummary(id: "userCaches", title: "User Caches", description: "Application cache directories that can be safely rebuilt.", icon: "arrow.triangle.2.circlepath", isExcluded: false, isExtremeOnly: false),
+                CompanionStorageCategorySummary(id: "logsAndDiagnostics", title: "Logs & Diagnostics", description: "Old log files, diagnostic reports, and crash dumps.", icon: "doc.text.magnifyingglass", isExcluded: false, isExtremeOnly: false),
+                CompanionStorageCategorySummary(id: "trash", title: "Trash Bins", description: "Items sitting in the macOS Trash bin.", icon: "trash", isExcluded: true, isExtremeOnly: false),
+                CompanionStorageCategorySummary(id: "developer", title: "Developer Junk", description: "Xcode DerivedData, Archives, iOS DeviceSupport, and package manager caches.", icon: "hammer", isExcluded: false, isExtremeOnly: false),
+                CompanionStorageCategorySummary(id: "orphanedData", title: "Orphaned App Leftovers", description: "Support folders remaining from applications no longer installed.", icon: "app.dashed", isExcluded: false, isExtremeOnly: true),
+                CompanionStorageCategorySummary(id: "aiArtifacts", title: "AI & Agent Junk", description: "Inactive AI agent session transcripts (>7 days) and temporary update downloads.", icon: "sparkles", isExcluded: false, isExtremeOnly: true),
+                CompanionStorageCategorySummary(id: "localAIModels", title: "Local AI & LLM Models", description: "Downloaded LLM and model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper.", icon: "brain.head.profile", isExcluded: false, isExtremeOnly: true),
+                CompanionStorageCategorySummary(id: "largeAndOldFiles", title: "Large & Old Files", description: "Files over 100 MB, or over 20 MB untouched for 6+ months.", icon: "clock.arrow.circlepath", isExcluded: false, isExtremeOnly: true)
+            ],
+            excludedPaths: [
+                "/Users/jay/Code/HogHunter",
+                "/Users/jay/Documents/CriticalArchive"
+            ]
         ),
         network: [
             CompanionNetworkRow(

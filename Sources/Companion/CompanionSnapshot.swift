@@ -8,6 +8,8 @@ enum CompanionService {
     static let cleanPath = "/v1/clean"
     static let quitPath = "/v1/quit"
     static let tamePath = "/v1/tame"
+    static let exclusionsPath = "/v1/exclusions"
+    static let viewPath = "/v1/view"
     static let version = 1
 }
 
@@ -39,6 +41,37 @@ struct CompanionTameResponse: Codable, Equatable, Sendable {
     var isTamed: Bool
     var message: String?
     var error: String?
+}
+
+/// Request sent by the iOS companion to update cleaner category and folder exclusions on the Mac.
+struct CompanionExclusionsUpdateRequest: Codable, Equatable, Sendable {
+    var toggleCategory: String? = nil
+    var addPath: String? = nil
+    var removePath: String? = nil
+}
+
+/// Response returned after updating cleaner exclusions on the Mac.
+struct CompanionExclusionsUpdateResponse: Codable, Equatable, Sendable {
+    var status: String
+    var excludedCategories: [String]
+    var excludedPaths: [String]
+    var message: String?
+}
+
+/// Request sent by the iOS companion to switch time window, grouping, or CPU scale on the Mac.
+struct CompanionViewUpdateRequest: Codable, Equatable, Sendable {
+    var window: String? = nil
+    var grouping: String? = nil
+    var cpuScale: String? = nil
+}
+
+/// Response returned after updating view settings on the Mac.
+struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
+    var status: String
+    var window: String
+    var grouping: String
+    var cpuScale: String
+    var message: String?
 }
 
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
@@ -122,6 +155,15 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     var canTame: Bool? = false
 }
 
+struct CompanionStorageCategorySummary: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var description: String
+    var icon: String
+    var isExcluded: Bool
+    var isExtremeOnly: Bool
+}
+
 struct CompanionStorageSummary: Codable, Equatable {
     var freeBytes: UInt64
     var totalBytes: UInt64
@@ -134,6 +176,8 @@ struct CompanionStorageSummary: Codable, Equatable {
     var standardCleanableText: String? = nil
     var excludedCategories: [String]? = nil
     var excludedPathsCount: Int? = nil
+    var categoryBreakdown: [CompanionStorageCategorySummary]? = nil
+    var excludedPaths: [String]? = nil
 }
 
 struct CompanionNetworkRow: Codable, Equatable, Identifiable {
