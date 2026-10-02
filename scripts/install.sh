@@ -48,7 +48,7 @@ USER_APPLICATIONS="$HOME/Applications"
 if [[ -n "$DEST_ARG" ]]; then
   DEST_DIR="$DEST_ARG"
   echo "Destination: $DEST_DIR (explicit --dest)."
-elif [[ -d "$SYSTEM_APPLICATIONS/HogHunter.app" ]]; then
+elif [[ -d "$SYSTEM_APPLICATIONS/Hog Hunter.app" || -d "$SYSTEM_APPLICATIONS/HogHunter.app" ]]; then
   DEST_DIR="$SYSTEM_APPLICATIONS"
   echo "Destination: $DEST_DIR (found an existing install there)."
 else
@@ -56,7 +56,13 @@ else
   echo "Destination: $DEST_DIR (default; no existing install found in $SYSTEM_APPLICATIONS)."
 fi
 
-INSTALLED_PATH="$DEST_DIR/HogHunter.app"
+# The bundle is installed under its display name, "Hog Hunter.app", so Finder,
+# Get Info and LaunchServices all agree on what the app is called.  The
+# executable inside is still named HogHunter, which is what `pgrep -x` matches.
+INSTALLED_PATH="$DEST_DIR/Hog Hunter.app"
+# Releases before 2026-10-01 installed as HogHunter.app.  Those copies are
+# retired below so there is never a stale second copy holding the menu bar.
+LEGACY_PATH="$DEST_DIR/HogHunter.app"
 
 version_of() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || echo "unknown"
@@ -115,6 +121,9 @@ echo "Entitlements (get-task-allow should be absent):"
 codesign -d --entitlements - "$APP_PATH"
 
 echo "Quitting the running Hog Hunter, if any."
+# Both names: an old copy is still called HogHunter on disk, and AppleScript
+# resolves the app by its installed display name.
+osascript -e 'tell application "Hog Hunter" to quit' >/dev/null 2>&1 || true
 osascript -e 'tell application "HogHunter" to quit' >/dev/null 2>&1 || true
 sleep 5
 if pgrep -x HogHunter >/dev/null 2>&1; then
@@ -126,6 +135,19 @@ echo "Installing to $INSTALLED_PATH."
 mkdir -p "$DEST_DIR"
 ditto "$APP_PATH" "$INSTALLED_PATH"
 xattr -cr "$INSTALLED_PATH" || true
+
+# Retire the pre-rename copy, but only after confirming it is this app and not
+# something else that happens to share the old filename.
+if [[ -d "$LEGACY_PATH" && "$LEGACY_PATH" != "$INSTALLED_PATH" ]]; then
+  legacy_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$LEGACY_PATH/Contents/Info.plist" 2>/dev/null || echo "")
+  new_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INSTALLED_PATH/Contents/Info.plist" 2>/dev/null || echo "")
+  if [[ -n "$legacy_id" && "$legacy_id" == "$new_id" ]]; then
+    echo "Removing the pre-rename copy at $LEGACY_PATH (same bundle id)."
+    rm -rf "$LEGACY_PATH"
+  else
+    echo "Warning: $LEGACY_PATH exists but its bundle id is not $new_id -- leaving it alone."
+  fi
+fi
 
 if [[ "$NO_LAUNCH" -eq 0 ]]; then
   echo "Launching Hog Hunter."
@@ -142,8 +164,12 @@ if [[ "$DEST_DIR" == "$SYSTEM_APPLICATIONS" ]]; then
 elif [[ "$DEST_DIR" == "$USER_APPLICATIONS" ]]; then
   OTHER_DIR="$SYSTEM_APPLICATIONS"
 fi
-if [[ -n "$OTHER_DIR" && -d "$OTHER_DIR/HogHunter.app" ]]; then
-  echo "Warning: a duplicate copy also exists at $OTHER_DIR/HogHunter.app -- consider removing it."
+if [[ -n "$OTHER_DIR" ]]; then
+  for other in "$OTHER_DIR/Hog Hunter.app" "$OTHER_DIR/HogHunter.app"; do
+    if [[ -d "$other" ]]; then
+      echo "Warning: a duplicate copy also exists at $other -- consider removing it."
+    fi
+  done
 fi
 
 echo "Installed Hog Hunter $(version_of "$INSTALLED_PATH") to $INSTALLED_PATH."

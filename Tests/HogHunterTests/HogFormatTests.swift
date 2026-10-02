@@ -124,4 +124,24 @@ final class HogFormatTests: XCTestCase {
         XCTAssertTrue(HogFormat.cpu(12.5).contains("."))
         XCTAssertTrue(HogFormat.memory(1_610_612_736).contains("."))
     }
+
+    // MARK: - Process counts
+
+    /// The attribution line is the only place a process count is printed, and
+    /// four digits without a separator is unreadable at 10 pt.
+    func testCountGroupsThousands() {
+        XCTAssertEqual(HogFormat.count(0), "0")
+        XCTAssertEqual(HogFormat.count(999), "999")
+        XCTAssertEqual(HogFormat.count(1_115), "1,115")
+        XCTAssertEqual(HogFormat.count(12_345), "12,345")
+        XCTAssertEqual(HogFormat.count(1_234_567), "1,234,567")
+    }
+
+    /// Hand-rolled grouping rather than `NumberFormatter`, so the separator is
+    /// a comma in every locale the way every other number here is.
+    func testCountSeparatorIsACommaRegardlessOfCount() {
+        XCTAssertFalse(HogFormat.count(1_115).contains("."))
+        XCTAssertFalse(HogFormat.count(1_115).contains(" "))
+        XCTAssertFalse(HogFormat.count(1_115).contains("\u{202f}"))
+    }
 }

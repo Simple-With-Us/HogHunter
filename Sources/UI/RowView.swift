@@ -165,8 +165,63 @@ enum HogActions {
         fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"
     )
 
+    /// Activity Monitor's own icon, so a button that opens it is
+    /// recognisably that app rather than another chart.  The generic glyph
+    /// fallback covers a machine where the app has been moved off
+    /// `/System/Applications/Utilities`, and a blank image past that -- a
+    /// force unwrap here would take the whole panel down over a decorative
+    /// image.
+    static let activityMonitorIcon: NSImage = {
+        let icon = NSWorkspace.shared.icon(forFile: activityMonitorURL.path)
+        guard icon.isValid else {
+            return NSImage(systemSymbolName: "gauge.with.dots.needle.50percent", accessibilityDescription: "Activity Monitor")
+                ?? NSImage(systemSymbolName: "chart.bar", accessibilityDescription: "Activity Monitor")
+                ?? NSImage(size: NSSize(width: 15, height: 15))
+        }
+        return icon
+    }()
+
     static func openActivityMonitor() {
         NSWorkspace.shared.open(activityMonitorURL)
+    }
+
+    /// Opens Settings, or brings the already-open Settings window forward.
+    ///
+    /// `showSettingsWindow:` is the only way into a SwiftUI `Settings` scene
+    /// from code, and on an app whose activation policy flips between accessory
+    /// and regular it is a no-op when the window is already up: the second
+    /// click used to look like nothing had happened, with the window only
+    /// findable in the Dock.  So the window is matched by role afterwards and
+    /// ordered front, with the menu bar panel dismissed on the way so the two
+    /// are never stacked.  It is retried because the scene creates the window
+    /// asynchronously the first time.
+    @MainActor
+    static func openSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        NSApp.activate(ignoringOtherApps: true)
+        for attempt in 0..<4 {
+            let delay = Double(attempt) * 0.1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                frontSettingsWindow()
+            }
+        }
+    }
+
+    @MainActor
+    static func frontSettingsWindow() {
+        // The panel is only dismissed once there is a real window to put in
+        // front of it.  Closing the panel first and then failing to find the
+        // window would leave the user with nothing open at all.
+        guard let window = AppActivationManager.shared.window(for: .settings)
+                ?? NSApp.windows.first(where: { $0.title.contains("Settings") && $0.styleMask.contains(.titled) }) else {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        hidePanels()
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor
@@ -190,11 +245,7 @@ enum HogActions {
     @MainActor
     static func bringWindowToFront(titles: [String], id: String) {
         // Dismiss any open MenuBarExtra panel so the standalone window is never obscured beneath it
-        for window in NSApp.windows {
-            if window is NSPanel || window.className.contains("MenuBarExtra") || window.styleMask.contains(.nonactivatingPanel) {
-                window.orderOut(nil)
-            }
-        }
+        hidePanels()
         NSApp.activate(ignoringOtherApps: true)
         for window in NSApp.windows {
             let matchesId = window.identifier?.rawValue.contains(id) == true
@@ -205,6 +256,18 @@ enum HogActions {
                 }
                 window.makeKeyAndOrderFront(nil)
                 window.orderFrontRegardless()
+            }
+        }
+    }
+
+    /// Closes the menu bar panel for good.  It is a transient popover: leaving
+    /// it open under a real window looks like the new window opened behind
+    /// something, which is exactly the bug this hides.
+    @MainActor
+    static func hidePanels() {
+        for window in NSApp.windows {
+            if window is NSPanel || window.className.contains("MenuBarExtra") || window.styleMask.contains(.nonactivatingPanel) {
+                window.orderOut(nil)
             }
         }
     }

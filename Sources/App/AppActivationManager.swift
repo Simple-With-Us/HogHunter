@@ -10,12 +10,21 @@ import SwiftUI
 final class AppActivationManager {
     static let shared = AppActivationManager()
 
+    /// Which Hog Hunter window a registered window is, so a caller can ask for
+    /// "the Settings window" instead of guessing from a title string.
+    enum WindowRole {
+        case settings
+        case auxiliary
+    }
+
     private var activeWindowTokens: Set<ObjectIdentifier> = []
+    private var roles: [ObjectIdentifier: WindowRole] = [:]
 
     private init() {}
 
-    func registerWindow(_ window: NSWindow) {
+    func registerWindow(_ window: NSWindow, role: WindowRole = .auxiliary) {
         let token = ObjectIdentifier(window)
+        roles[token] = role
         guard !activeWindowTokens.contains(token) else { return }
         activeWindowTokens.insert(token)
         updatePolicy()
@@ -29,6 +38,7 @@ final class AppActivationManager {
                 guard let self else { return }
                 if let window {
                     self.activeWindowTokens.remove(ObjectIdentifier(window))
+                    self.roles.removeValue(forKey: ObjectIdentifier(window))
                 }
                 // Delay slightly so window.isVisible is updated by AppKit before rechecking
                 DispatchQueue.main.async {
@@ -36,6 +46,16 @@ final class AppActivationManager {
                 }
             }
         }
+    }
+
+    /// The registered window playing `role`, if it is still open.  A closed
+    /// window is dropped from `roles` on `willClose`, so this never returns a
+    /// window the user has dismissed.
+    func window(for role: WindowRole) -> NSWindow? {
+        for window in NSApp.windows where roles[ObjectIdentifier(window)] == role {
+            return window
+        }
+        return nil
     }
 
     func updatePolicy() {
@@ -57,7 +77,13 @@ final class AppActivationManager {
 /// NSViewRepresentable that attaches to any SwiftUI window view to register it
 /// with AppActivationManager and ensure it is brought forward cleanly.
 struct WindowActivator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { ActivatingView() }
+    var role: AppActivationManager.WindowRole = .auxiliary
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ActivatingView()
+        view.role = role
+        return view
+    }
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 
@@ -69,10 +95,12 @@ struct WindowActivator: NSViewRepresentable {
     }
 
     final class ActivatingView: NSView {
+        var role: AppActivationManager.WindowRole = .auxiliary
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard let window else { return }
-            AppActivationManager.shared.registerWindow(window)
+            AppActivationManager.shared.registerWindow(window, role: role)
             DispatchQueue.main.async {
                 if window.isMiniaturized {
                     window.deminiaturize(nil)

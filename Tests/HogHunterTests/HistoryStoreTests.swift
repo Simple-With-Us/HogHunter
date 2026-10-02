@@ -317,7 +317,7 @@ final class HistoryStoreTests: XCTestCase {
 
     // MARK: - Migration
 
-    func testV1DatabaseMigratesToV2Schema() throws {
+    func testV1DatabaseMigratesToCurrentSchema() throws {
         let scratchDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("HogHunterTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
@@ -343,11 +343,18 @@ final class HistoryStoreTests: XCTestCase {
         store = nil  // Closes the connection so a fresh process can reopen the file.
 
         let version = try runSQLite(at: dbURL.path, sql: "PRAGMA user_version;").trimmed
-        XCTAssertEqual(version, "2")
+        XCTAssertEqual(version, "3")
 
         let schema = try runSQLite(at: dbURL.path, sql: "PRAGMA table_info(samples);")
         for column in ["ts", "pid", "start", "key", "group_key", "name", "bundle", "cpu", "mem", "reason"] {
-            XCTAssertTrue(schema.contains(column), "expected v2 column '\(column)' in migrated schema:\n\(schema)")
+            XCTAssertTrue(schema.contains(column), "expected column '\(column)' in migrated schema:\n\(schema)")
+        }
+
+        // v3 added the network counters, so an upgraded database has them too --
+        // the Network tab's 24-hour peak reads this table.
+        let net = try runSQLite(at: dbURL.path, sql: "PRAGMA table_info(net_samples);")
+        for column in ["ts", "bytes_in", "bytes_out"] {
+            XCTAssertTrue(net.contains(column), "expected net_samples column '\(column)' in migrated schema:\n\(net)")
         }
     }
 }

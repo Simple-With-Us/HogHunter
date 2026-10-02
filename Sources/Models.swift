@@ -42,6 +42,18 @@ enum CpuScale: String, CaseIterable, Identifiable {
     case machineShare = "Share of Machine"
 
     var id: String { rawValue }
+
+    /// What the settings picker shows, which is not always the stored name:
+    /// the machine-wide scale carries the core count it divides by, and
+    /// "10 cores" is the whole point of picking it.  `machineShare` keeps its
+    /// original raw value because that string is already in every user's
+    /// defaults -- rewriting it would silently reset the setting.
+    func displayLabel(coreCount: Int) -> String {
+        switch self {
+        case .perCore: return "Per Core"
+        case .machineShare: return "Per Machine (\(max(1, coreCount)) Cores)"
+        }
+    }
 }
 
 enum MenuBarLabelMode: String, CaseIterable, Identifiable {
@@ -119,6 +131,17 @@ enum MemoryPressure: Int, Equatable {
         case .normal: return "normal"
         case .warning: return "warning"
         case .critical: return "critical"
+        }
+    }
+
+    /// Title Case, for anything shown inside a pill or other labelled chrome.
+    /// `label` stays lowercase because it is spoken, not read.
+    var displayLabel: String {
+        switch self {
+        case .unknown: return "Unknown"
+        case .normal: return "Normal"
+        case .warning: return "Warning"
+        case .critical: return "Critical"
         }
     }
 }
@@ -273,12 +296,48 @@ enum Severity: Equatable {
         }
     }
 
+    /// Disk, on the fraction-spent scale.  A full volume is the only disk
+    /// problem there is, so the bar only turns colour when it is genuinely
+    /// getting tight rather than at some arbitrary half-way mark.
+    static func forDisk(_ usedFraction: Double) -> Severity {
+        if usedFraction >= 0.9 { return .hot }
+        if usedFraction >= 0.75 { return .elevated }
+        return .calm
+    }
+
     var color: Color {
         switch self {
         case .calm: return Color(red: 0.18, green: 0.42, blue: 0.78)
         case .elevated: return Color(red: 0.80, green: 0.52, blue: 0.10)
         case .hot: return Color(red: 0.75, green: 0.18, blue: 0.16)
         }
+    }
+}
+
+/// Free space on the boot volume, read straight from the filesystem -- no
+/// scan, so it is cheap enough to sit in the panel.
+///
+/// `volumeAvailableCapacityForImportantUsage` is the number that matters on
+/// APFS: it counts purgeable space the volume can hand back on demand, where
+/// `volumeAvailableCapacity` does not and makes a healthy disk look full.
+struct DiskSpace: Equatable {
+    var freeBytes: UInt64
+    var totalBytes: UInt64
+
+    /// 0-1 of the volume that is spoken for.
+    var usedFraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return max(0, min(1, 1 - Double(freeBytes) / Double(totalBytes)))
+    }
+
+    /// Nil when the volume cannot be read at all, which the panel must not
+    /// confuse with an empty disk.
+    static func current() -> DiskSpace? {
+        guard let values = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]
+        ), let total = values.volumeTotalCapacity, total > 0 else { return nil }
+        let free = values.volumeAvailableCapacityForImportantUsage ?? 0
+        return DiskSpace(freeBytes: UInt64(max(0, free)), totalBytes: UInt64(total))
     }
 }
 
@@ -335,5 +394,19 @@ enum HogFormat {
 
     static func percent(_ fraction: Double) -> String {
         String(format: "%.0f%%", locale: posix, max(0, min(1, fraction)) * 100)
+    }
+
+    /// "1,115" -- a process count is unreadable at four digits without a
+    /// separator.  Hand-rolled rather than `NumberFormatter` so the separator
+    /// stays a comma in every locale, like every other number here.
+    static func count(_ value: Int) -> String {
+        let digits = String(value)
+        guard digits.count > 3 else { return digits }
+        var grouped = ""
+        for (offset, character) in digits.reversed().enumerated() {
+            if offset > 0, offset % 3 == 0 { grouped.append(",") }
+            grouped.append(character)
+        }
+        return String(grouped.reversed())
     }
 }
