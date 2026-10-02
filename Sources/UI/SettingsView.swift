@@ -7,23 +7,57 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var store: HogStore
 
-    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.light.rawValue
+    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.system.rawValue
+
+    /// Settings opens on General every time.  Held as state rather than left to
+    /// the scene's implicit default so the tab the window comes back to is a
+    /// decision, not whatever was clicked last.
+    @State private var selection = SettingsTab.general
 
     var body: some View {
-        TabView {
+        VStack(alignment: .leading, spacing: 0) {
+            // Quit lives in the content, not the window's toolbar.  A SwiftUI
+            // Settings scene spends its whole title bar on the tab strip, so a
+            // toolbar item here does not render as a button at all -- it falls
+            // into the toolbar's overflow chevron, which is the one place a
+            // button asking you to quit an app has no business hiding in.
+            HStack {
+                Spacer(minLength: 0)
+                Button("Quit Hog Hunter") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q", modifiers: .command)
+                    .help("Quit Hog Hunter")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            TabView(selection: $selection) {
             GeneralSettingsTab()
                 .environmentObject(store)
                 .tabItem {
                     Label("General", systemImage: "gearshape")
                 }
-                .tag("general")
+                .tag(SettingsTab.general)
 
             AlertsSettingsTab()
                 .environmentObject(store)
                 .tabItem {
                     Label("Alerts", systemImage: "bell")
                 }
-                .tag("alerts")
+                .tag(SettingsTab.alerts)
+
+            StartupSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("Startup", systemImage: "power")
+                }
+                .tag(SettingsTab.startup)
+
+            ThemeSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("Theme", systemImage: "paintbrush")
+                }
+                .tag(SettingsTab.theme)
 
             CleanerSettingsTab()
                 .tabItem {
@@ -36,24 +70,40 @@ struct SettingsView: View {
                 .tabItem {
                     Label("iPhone", systemImage: "iphone")
                 }
-                .tag("iphone")
+                .tag(SettingsTab.iphone)
 
             AboutSettingsTab()
+                .environmentObject(store)
                 .tabItem {
                     Label("About", systemImage: "info.circle")
                 }
-                .tag("about")
+                .tag(SettingsTab.about)
+            }
+            .padding(.top, 6)
         }
-        .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme ?? .light)
-        .background(WindowActivator())
+        .frame(width: SettingsView.windowWidth, height: SettingsView.windowHeight)
+        // A stored value nobody recognises falls back to nil -- i.e. follow the Mac.
+        .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme)
+        .background(WindowActivator(role: .settings))
         .onAppear { WindowActivator.front() }
     }
+
+    /// Wide enough that six tabs fit on one row without the labels truncating,
+    /// and short enough that the shortest tab has no scroll bar.
+    static let windowWidth: CGFloat = 560
+    static let windowHeight: CGFloat = 430
 
     static var versionString: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
         return "\(version) (\(build))"
     }
+}
+
+/// Selection identity for the Settings tabs.  Explicit rather than raw strings
+/// so the default tab is written once and cannot drift out of sync with a tab.
+enum SettingsTab: Hashable {
+    case general, alerts, startup, theme, iphone, about
 }
 
 // MARK: - General Tab
@@ -64,7 +114,6 @@ private struct GeneralSettingsTab: View {
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 3
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
-    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.light.rawValue
 
     var body: some View {
         Form {
@@ -81,29 +130,43 @@ private struct GeneralSettingsTab: View {
                     ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }
                 }
 
-                Picker("CPU Scale", selection: $cpuScale) {
-                    ForEach(CpuScale.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                Picker("CPU Rows Show", selection: $cpuScale) {
+                    ForEach(CpuScale.allCases) {
+                        Text($0.displayLabel(coreCount: store.pulse.coreCount)).tag($0.rawValue)
+                    }
                 }
                 Text(scaleExplanation)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsView.windowWidth - 80)
+    }
 
-            Section("Appearance") {
-                Picker("Theme", selection: $appearance) {
-                    ForEach(AppearanceChoice.allCases) { Text($0.rawValue).tag($0.rawValue) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Text("Light is the default.  System follows the Mac's own setting.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+    private var scaleExplanation: String {
+        let cores = max(1, store.pulse.coreCount)
+        switch CpuScale(rawValue: cpuScale) ?? .perCore {
+        case .perCore:
+            return "Per Core matches Activity Monitor: 100% is one core fully busy, so one row can read \(100 * cores)%."
+        case .machineShare:
+            return "Per Machine divides every row by all \(cores) cores, so 100% means the whole machine and one row never exceeds 100%."
+        }
+    }
+}
 
+// MARK: - Startup Tab
+
+private struct StartupSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+
+    var body: some View {
+        Form {
             Section("Startup") {
+                // The same control the panel's footer used to carry, now with
+                // room beside it to say what it does and to show a failure.
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    // The same name the panel's footer and the coverage note use.
                     Toggle("Launch at Login", isOn: Binding(
                         get: { store.launchesAtLogin },
                         set: { _ in store.toggleLoginItem() }
@@ -115,22 +178,40 @@ private struct GeneralSettingsTab: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text("History only covers the time Hog Hunter has been running.")
+                Text("Hog Hunter opens with your Mac and samples in the background.  History only covers the time it has been running, so this is also what makes the Past Hour and Past 24 Hours views able to reach a full day.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: SettingsView.windowWidth - 80)
     }
+}
 
-    private var scaleExplanation: String {
-        switch CpuScale(rawValue: cpuScale) ?? .perCore {
-        case .perCore:
-            return "Per Core matches Activity Monitor: 100% is one core fully busy, so a row can read 400%."
-        case .machineShare:
-            return "Share of Machine puts rows on the header's scale: 100% is every core fully busy."
+// MARK: - Theme Tab
+
+private struct ThemeSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+
+    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.system.rawValue
+
+    var body: some View {
+        Form {
+            Section("Theme") {
+                Picker("Theme", selection: $appearance) {
+                    ForEach(AppearanceChoice.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("System is the default, so Hog Hunter follows the Mac.  Light and Dark pin it either way, here and in the menu bar panel.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .formStyle(.grouped)
+        .frame(width: SettingsView.windowWidth - 80)
     }
 }
 
@@ -155,7 +236,7 @@ private struct AlertsSettingsTab: View {
             )
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: SettingsView.windowWidth - 80)
     }
 }
 
@@ -325,7 +406,7 @@ private struct IPhoneSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: SettingsView.windowWidth - 80)
     }
 
     private func spacedCode(_ code: String) -> String {
@@ -343,8 +424,6 @@ private struct IPhoneSettingsTab: View {
 // MARK: - About Tab
 
 private struct AboutSettingsTab: View {
-    @Environment(\.openWindow) private var openWindow
-
     var body: some View {
         Form {
             Section("About") {
@@ -365,16 +444,17 @@ private struct AboutSettingsTab: View {
                 }
                 .padding(.vertical, 4)
 
+                // Storage and Network are tabs of the menu bar panel now, not
+                // windows of their own, so there is nothing to link to.
                 Button("Open Activity Monitor") { HogActions.openActivityMonitor() }
                     .buttonStyle(.link)
-                Button("Storage Window…") { HogActions.openStorageWindow(openWindow: openWindow) }
-                    .buttonStyle(.link)
-                Button("Network Window…") { HogActions.openNetworkWindow(openWindow: openWindow) }
-                    .buttonStyle(.link)
+                Text("Storage and Network are tabs in the menu bar panel.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: SettingsView.windowWidth - 80)
     }
 }
 

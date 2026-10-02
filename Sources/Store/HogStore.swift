@@ -89,8 +89,11 @@ final class HogStore: ObservableObject {
             alerts.webhookURL = alertWebhookURL
         }
     }
-    @Published var appearance: AppearanceChoice = .light { didSet { persist() } }
-    /// Off until the owner turns it on.
+    /// System, not light: the fleet-wide owner ruling (FLEET-UI-COPY.md, 2026-09-19)
+    /// is that first paint follows the OS.  A stored Light or Dark still wins --
+    /// only the no-preference fallback changes.
+    @Published var appearance: AppearanceChoice = .system { didSet { persist() } }
+    /// Off until the owner turns it on.  The iPhone can read the list.  It cannot quit.
     @Published var shareWithIPhone = false {
         didSet {
             persist()
@@ -110,6 +113,16 @@ final class HogStore: ObservableObject {
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
     let alerts = Alerts()
+
+    /// Free space on the boot volume, for the panel's third card.  Nil until
+    /// the first read succeeds and whenever the volume cannot be read, which
+    /// the card shows as unavailable rather than as an empty disk.
+    @Published private(set) var diskSpace: DiskSpace?
+
+    /// Interface byte counters and their 24-hour peaks, for the Network tab.
+    /// Owned here rather than by the tab so the sampling -- and therefore the
+    /// peak -- keeps running whether or not anyone is looking.
+    let bandwidth: BandwidthStore
 
     /// UserDefaults keys, shared with any `@AppStorage` view that edits them.
     enum Key {
@@ -162,11 +175,16 @@ final class HogStore: ObservableObject {
     /// History is written every fifth tick, so one history tick covers five
     /// refresh intervals.
     private static let recordEvery = 5
+    /// Free space is a stat call, not a sample: once a minute is far more often
+    /// than a human watches a disk fill up.
+    private static let diskRefreshEvery = 20
     private static let rowLimit = 25
 
     init(historyURL: URL? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
+        let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
+        self.history = history
+        self.bandwidth = BandwidthStore(history: history)
         loadSettings()
         setupCompanionHandlers()
         NotificationCenter.default.addObserver(
@@ -195,6 +213,7 @@ final class HogStore: ObservableObject {
         // The queue is serial, so this lands before the first tick's snapshot.
         let history = self.history
         queue.async { history.openIfNeeded() }
+        bandwidth.start()
         // Settle the notification decision now rather than at the moment the
         // first alert fires, which would post before the prompt was answered.
         if alertsEnabled { alerts.requestAuthorization() }
@@ -323,6 +342,9 @@ final class HogStore: ObservableObject {
 
         if tickIndex % Self.recordEvery == 0 {
             record(snapshot.processes, groupKeys: groupKeyByProcess, coreCount: snapshot.pulse.coreCount)
+        }
+        if tickIndex % Self.diskRefreshEvery == 0 || diskSpace == nil {
+            diskSpace = DiskSpace.current()
         }
         if tickIndex % 60 == 0 {
             resolver.prune(live: Set(samples.keys))
@@ -641,6 +663,13 @@ final class HogStore: ObservableObject {
         "\(gigabytes(pulse.memoryUsedBytes)) of \(gigabytes(pulse.totalMemoryBytes)) GB"
     }
 
+    /// Free space, said the way the memory caption says memory: the number you
+    /// would act on first, out of the number it sits in.
+    var diskSpaceCaption: String {
+        guard let diskSpace else { return "Reading…" }
+        return "\(gigabytes(diskSpace.freeBytes)) of \(gigabytes(diskSpace.totalBytes)) GB free"
+    }
+
     var memoryCaption: String {
         var parts = [memorySizeCaption]
         if pulse.swapUsedBytes > 0 {
@@ -675,9 +704,9 @@ final class HogStore: ObservableObject {
         if pulse.visibleCpuPercent <= 0,
            pulse.invisibleCpuPercent <= 0,
            unreadable == 0 { return nil }
-        var pieces = ["\(visible) attributed to \(pulse.readableProcessCount) visible processes"]
+        var pieces = ["\(visible) attributed to \(HogFormat.count(pulse.readableProcessCount)) visible processes (shown below)"]
         if pulse.invisibleCpuPercent > 0 || unreadable > 0 {
-            pieces.append("\(rest) other users, root and kernel (\(unreadable) processes not readable)")
+            pieces.append("\(rest) other users, root and kernel (\(HogFormat.count(unreadable)) not readable)")
         }
         return pieces.joined(separator: " · ")
     }
@@ -690,9 +719,13 @@ final class HogStore: ObservableObject {
     }
 
     var coverageNote: String {
-        if window == .now { return "Live snapshot.  100% CPU is one core fully busy." }
+        // Nothing is said about what "100% CPU" means on the live view.  The
+        // only CPU on the page is the header meter, which is always the whole
+        // machine; repeating the per-core rule there reads as a correction to
+        // a number nobody is looking at.
+        if window == .now { return "Live snapshot." }
         guard coverage.tickCount > 0 else {
-            return "History starts when Hog Hunter is open.  Turn on Launch at Login for a full day."
+            return "History starts when Hog Hunter is open.  Turn on Launch at Login in Settings for a full day."
         }
         let windowLabel = window == .day ? "24 h" : "hour"
         return "Sampled \(HogFormat.duration(coverage.sampledSeconds)) of the last \(windowLabel)."

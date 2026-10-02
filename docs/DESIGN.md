@@ -210,7 +210,7 @@ FROM per_ts, win GROUP BY k ORDER BY <avg_cpu | avg_mem> DESC LIMIT 40
 ## Build, signing, install
 
 - `project.yml` gains a `HogHunterTests` unit-test target and Release settings `ENABLE_HARDENED_RUNTIME = YES`, `CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO`, `CODE_SIGN_ENTITLEMENTS = HogHunter.entitlements` (an empty dict).
-- `scripts/install.sh` builds Release, signs with "Developer ID Application" when that identity is in the keychain and signing does not prompt within 20 s, otherwise adhoc, then `ditto`s to `~/Applications/HogHunter.app`, quits the running instance, and relaunches.  `build.sh` stays as the plain build.
+- `scripts/install.sh` builds Release, signs with "Developer ID Application" when that identity is in the keychain and signing does not prompt within 20 s, otherwise adhoc, then `ditto`s to `~/Applications/Hog Hunter.app`, quits the running instance, and relaunches.  `build.sh` stays as the plain build.
 - CI runs on `macos-15`: `brew install xcodegen`, `xcodegen generate`, `xcodebuild -scheme HogHunter -destination 'platform=macOS' test CODE_SIGNING_ALLOWED=NO`.
 
 ## Copy rules

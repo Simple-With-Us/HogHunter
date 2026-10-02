@@ -11,7 +11,6 @@ enum PanelTab: String, CaseIterable, Identifiable {
 
 struct HogHunterPanel: View {
     @EnvironmentObject private var store: HogStore
-    @Environment(\.openWindow) private var openWindow
     @State private var selectedTab: PanelTab = .activity
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage: Bool = false
@@ -20,6 +19,7 @@ struct HogHunterPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+                .frame(width: Self.contentWidth)
             ZStack(alignment: .topLeading) {
                 VStack(alignment: .leading, spacing: 12) {
                     meters
@@ -40,15 +40,21 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedNetwork {
-                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, embeddedInPanel: true, isTabActive: selectedTab == .network)
+                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: selectedTab == .network)
                         .opacity(selectedTab == .network ? 1 : 0)
                         .allowsHitTesting(selectedTab == .network)
                         .accessibilityHidden(selectedTab != .network)
                 }
             }
+            // Every child is laid out at exactly the panel's inner width.  A
+            // `VStack` sizes itself to its widest child's *ideal* width, and a
+            // long unwrapped caption -- the attribution line especially -- is
+            // wider than the panel, so without this the whole column is laid
+            // out past the edge and clipped on both sides instead of wrapping.
+            .frame(width: Self.contentWidth, alignment: .leading)
         }
-        .padding(14)
-        .frame(width: 560, height: 680)
+        .padding(Self.inset)
+        .frame(width: Self.panelWidth, height: Self.panelHeight)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(store.appearance.colorScheme)
         .onChange(of: selectedTab) { newTab in
@@ -92,8 +98,15 @@ struct HogHunterPanel: View {
         }
     }
 
-    private var quitMessage: String {
-        guard let row = pendingQuit else { return "" }
+    // MARK: - Metrics
+
+    static let panelWidth: CGFloat = 620
+    static let panelHeight: CGFloat = 680
+    static let inset: CGFloat = 14
+    /// What is left of the panel once the inset is taken off both sides.
+    static var contentWidth: CGFloat { panelWidth - inset * 2 }
+
+    private var quitMessage: String {        guard let row = pendingQuit else { return "" }
         let count = max(1, row.keys.count)
         let included = count == 1
             ? "1 process is included."
@@ -141,46 +154,63 @@ struct HogHunterPanel: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 270)
+            .frame(width: 290)
 
             Spacer()
 
-            gearMenu
+            activityMonitorButton
+            settingsButton
         }
     }
 
-    private var gearMenu: some View {
-        Menu {
-            SettingsLink {
-                Text("Settings…")
-            }
-            Button("Open Storage Window…") { HogActions.openStorageWindow(openWindow: openWindow) }
-            Button("Network Window…") { HogActions.openNetworkWindow(openWindow: openWindow) }
-            Divider()
-            Button("Activity Monitor") { HogActions.openActivityMonitor() }
-            Divider()
-            Button("Quit Hog Hunter") { NSApp.terminate(nil) }
+    /// Activity Monitor's own icon rather than a look-alike SF Symbol, so the
+    /// button is recognisably that app and not another chart.  A borderless
+    /// button matches the gear beside it.
+    private var activityMonitorButton: some View {
+        Button {
+            HogActions.openActivityMonitor()
+        } label: {
+            Image(nsImage: HogActions.activityMonitorIcon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 15, height: 15)
+        }
+        .buttonStyle(.borderless)
+        .fixedSize()
+        .help("Open Activity Monitor")
+        .accessibilityLabel("Open Activity Monitor")
+    }
+
+    /// Opens Settings rather than a menu.  Storage and Network left this menu
+    /// when they became tabs in this window, so what was left was one action,
+    /// and one action does not need a menu to hold it.
+    private var settingsButton: some View {
+        Button {
+            HogActions.openSettings()
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 13))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.borderless)
         .fixedSize()
-        .help("Settings, Storage, Network, Other Actions")
-        .accessibilityLabel("Settings, Storage, Network, Other Actions")
+        .help("Settings")
+        .accessibilityLabel("Settings")
     }
 
     // MARK: - Meters
 
     private var meters: some View {
         HStack(alignment: .top, spacing: 10) {
-            Meter(
-                title: "CPU",
-                value: store.pulse.cpuPercent,
-                caption: store.hasBaseline ? store.cpuCaption : "Measuring…",
-                severity: Severity.forMachineCpu(store.pulse.cpuPercent)
-            )
+            VStack(alignment: .leading, spacing: 6) {
+                Meter(
+                    title: "CPU",
+                    value: store.pulse.cpuPercent,
+                    caption: store.hasBaseline ? store.cpuCaption : "Measuring…",
+                    severity: Severity.forMachineCpu(store.pulse.cpuPercent)
+                )
+                pillRow(thermalPills)
+                diskCard
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Meter(
                     title: "Memory",
@@ -189,12 +219,40 @@ struct HogHunterPanel: View {
                     severity: Severity.forPressure(store.pulse.pressure),
                     accessibilityDetail: store.memoryCaption
                 )
-                if !pills.isEmpty {
-                    HStack(spacing: 4) {
-                        ForEach(pills, id: \.text) { pill in
-                            MeterPill(text: pill.text, severity: pill.severity, help: pill.help)
-                        }
-                    }
+                pillRow(memoryPills)
+            }
+        }
+    }
+
+    /// The third card, under CPU: how full the boot volume is.  It is a button
+    /// because the answer to "how full is it" is usually "which app did that",
+    /// which is one click away in the Storage tab.
+    private var diskCard: some View {
+        Button {
+            selectedTab = .storage
+            hasVisitedStorage = true
+        } label: {
+            Meter(
+                title: "Storage",
+                value: (store.diskSpace?.usedFraction ?? 0) * 100,
+                caption: store.diskSpaceCaption,
+                severity: Severity.forDisk(store.diskSpace?.usedFraction ?? 0)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Free space on the startup volume.  Click for the Storage tab.")
+        .accessibilityLabel("Storage")
+        .accessibilityValue(store.diskSpaceCaption)
+    }
+
+    /// Empty when there is nothing to say, so the row collapses instead of
+    /// reserving an empty band under the meter.
+    @ViewBuilder
+    private func pillRow(_ pills: [Pill]) -> some View {
+        if !pills.isEmpty {
+            WrappingHStack(spacing: 4, lineSpacing: 4) {
+                ForEach(pills, id: \.text) { pill in
+                    MeterPill(text: pill.text, severity: pill.severity, help: pill.help)
                 }
             }
         }
@@ -206,30 +264,27 @@ struct HogHunterPanel: View {
         var help: String
     }
 
-    /// Swap, pressure and thermal, in the order they usually start to matter.
-    private var pills: [Pill] {
+    /// Swap and memory pressure: both are statements about RAM.
+    private var memoryPills: [Pill] {
         var out: [Pill] = []
         if store.pulse.swapUsedBytes > 0 {
             out.append(Pill(
-                text: "\(HogFormat.memory(store.pulse.swapUsedBytes)) swapped",
+                text: "\(HogFormat.memory(store.pulse.swapUsedBytes)) Swapped",
                 severity: Severity.forPressure(store.pulse.pressure),
                 help: "Memory the Mac has written to disk because RAM ran short."
             ))
         }
         if store.pulse.pressure != .unknown {
             out.append(Pill(
-                text: "Pressure \(store.pulse.pressure.label)",
+                text: "Pressure \(store.pulse.pressure.displayLabel)",
                 severity: Severity.forPressure(store.pulse.pressure),
                 help: "How hard the Mac is working to find free memory."
             ))
         }
-        if store.pulse.thermalState != .nominal {
-            out.append(Pill(
-                text: "Thermal \(Self.thermalLabel(store.pulse.thermalState))",
-                severity: Self.thermalSeverity(store.pulse.thermalState),
-                help: "macOS slows the machine down as this rises."
-            ))
-        }
+        // Battery came in with #50 and stays exactly where it was.  Thermal
+        // used to live here too and does not any more: it moved to
+        // `thermalPills` under CPU, because `ProcessInfo.thermalState` is a
+        // machine-wide die reading rather than anything about RAM.
         if let pct = store.pulse.batteryPercent {
             let isCharging = store.pulse.isCharging ?? false
             let isBattery = store.pulse.powerSource == "Battery Power"
@@ -247,13 +302,26 @@ struct HogHunterPanel: View {
         return out
     }
 
+    /// Thermal state sits under CPU, not Memory.  `ProcessInfo.thermalState` is
+    /// a single machine-wide reading of the SoC die, so it has nothing to do
+    /// with RAM -- what it predicts is clock throttling, which is what the CPU
+    /// meter above it is measuring.
+    private var thermalPills: [Pill] {
+        guard store.pulse.thermalState != .nominal else { return [] }
+        return [Pill(
+            text: "Thermal \(Self.thermalLabel(store.pulse.thermalState))",
+            severity: Self.thermalSeverity(store.pulse.thermalState),
+            help: "How hot the CPU and GPU are running.  macOS slows the machine down when this stays high."
+        )]
+    }
+
     private static func thermalLabel(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
-        case .nominal: return "nominal"
-        case .fair: return "fair"
-        case .serious: return "serious"
-        case .critical: return "critical"
-        @unknown default: return "unknown"
+        case .nominal: return "Nominal"
+        case .fair: return "Fair"
+        case .serious: return "Serious"
+        case .critical: return "Critical"
+        @unknown default: return "Unknown"
         }
     }
 
@@ -307,27 +375,40 @@ struct HogHunterPanel: View {
 
     // MARK: - Controls
 
+    /// All three pickers on one row.
+    ///
+    /// A segmented picker given no width takes its ideal width -- which for
+    /// "Past 24 Hours" is far wider than the words need, because every segment
+    /// is padded to the longest label.  So the two short ones take exactly
+    /// their ideal width and the time window, whose labels genuinely are long,
+    /// gets the remainder.  That keeps "CPU" and "Memory" from each claiming a
+    /// third of the window surrounded by empty track, and it is why the panel
+    /// is 620 rather than 560 wide.
     private var controls: some View {
-        VStack(spacing: 8) {
+        HStack(spacing: 8) {
             Picker("Window", selection: $store.window) {
                 ForEach(TimeWindow.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
 
-            HStack {
-                Picker("Show", selection: $store.grouping) {
-                    ForEach(HogGrouping.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-
-                Picker("Sort", selection: $store.sort) {
-                    ForEach(HogSort.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 150)
+            Picker("Show", selection: $store.grouping) {
+                ForEach(HogGrouping.allCases) { Text($0.rawValue).tag($0) }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+
+            Picker("Sort", selection: $store.sort) {
+                ForEach(HogSort.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+
+            Spacer(minLength: 0)
         }
-        .labelsHidden()
     }
 
     // MARK: - Rows
@@ -363,22 +444,11 @@ struct HogHunterPanel: View {
 
     // MARK: - Footer
 
+    /// Launch at Login moved to Settings -> Startup, where there is room to
+    /// explain what it does and to report a failure.  What is left here is
+    /// only what is true of the numbers on screen.
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { store.launchesAtLogin },
-                    set: { _ in store.toggleLoginItem() }
-                ))
-                .toggleStyle(.checkbox)
-                .font(.system(size: 12))
-                if let error = store.loginItemError {
-                    Text(error)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
             Text(store.coverageNote)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)

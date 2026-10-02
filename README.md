@@ -32,7 +32,7 @@ xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build
 open build/Build/Products/Release/HogHunter.app
 ```
 
-To build, sign, and install to `/Applications/HogHunter.app` in one step, use `scripts/install.sh` instead.  It signs Release builds with the "Developer ID Application" identity when one is in the keychain, falling back to an adhoc signature otherwise, then quits any running copy and relaunches the new one.  It installs to `/Applications` by default when a copy already lives there, otherwise to `~/Applications`; pass `--dest PATH` to pick a destination explicitly (for example `--dest ~/Applications`).  Pass `--dry-run` to see what it would do without touching anything, or `--no-launch` to install without opening the app.
+To build, sign, and install to `/Applications/Hog Hunter.app` in one step, use `scripts/install.sh` instead.  It signs Release builds with the "Developer ID Application" identity when one is in the keychain, falling back to an adhoc signature otherwise, then quits any running copy and relaunches the new one.  It installs to `/Applications` by default when a copy already lives there, otherwise to `~/Applications`; pass `--dest PATH` to pick a destination explicitly (for example `--dest ~/Applications`).  Pass `--dry-run` to see what it would do without touching anything, or `--no-launch` to install without opening the app.
 
 No LaunchAgent.  The app is the sampler.  Quitting it stops history.
 

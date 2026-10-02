@@ -44,7 +44,11 @@ No LaunchAgent.  The running menu bar app is the sampler.  History only covers t
 
 ## Copy
 
-Light default.  Title Case chrome.  Body sentence case with two ASCII spaces.
+Theme default is **system** — the fleet-wide owner ruling of 2026-09-19 in
+`/Users/jay/apps/FLEET-UI-COPY.md` supersedes this repo's earlier "Light
+default".  Only the no-stored-preference fallback changed; a user who picked
+Light or Dark stays on it.  Title Case chrome.  Body sentence case with two
+ASCII spaces.
 
 ## Bundle identifiers
 
@@ -79,10 +83,29 @@ installed copy.  They are kept stable across the bundle-ID migration.
 
 - `Sources/History/HistoryStore.swift:83` — `Library/Application Support/HogHunter/`
   (history SQLite + samples directory).
-- `Sources/Store/ProcessControl.swift:22` — `"HogHunter"` display name used
-  for `osascript -e 'tell application "HogHunter" to quit'` and `pgrep -x HogHunter`.
-- `Sources/UI/RowView.swift:156` — `~/Library/Logs/HogHunter/` (Sample-for-3-Seconds
+- `Sources/Store/ProcessControl.swift:22` — `"HogHunter"` in the denylist.  That
+  string is the **executable** name: `PRODUCT_NAME` stays one word because it
+  names the binary inside the bundle, which is what `pgrep -x` and `pkill -x`
+  match.  `"Hog Hunter"` is listed beside it for samples that pick up the
+  bundle's display name.
+- `Sources/UI/RowView.swift:256` — `~/Library/Logs/HogHunter/` (Sample-for-3-Seconds
   report target).
+
+### App name vs executable name (changed 2026-10-01)
+
+The owner asked for the app to be called **"Hog Hunter"** everywhere a person
+sees it, while the executable inside the bundle stays `HogHunter`:
+
+| Surface | Value | Where |
+|---|---|---|
+| Installed bundle | `Hog Hunter.app` | `scripts/install.sh` copies the built `HogHunter.app` to `"$DEST_DIR/Hog Hunter.app"`, then retires a pre-rename `HogHunter.app` (only after confirming the same `CFBundleIdentifier`) |
+| `CFBundleName` / `CFBundleDisplayName` | `Hog Hunter` | `project.yml` `INFOPLIST_KEY_CFBundleName` / `...DisplayName` |
+| Executable | `HogHunter` | `project.yml` `PRODUCT_NAME` |
+| Quit-by-name | both | `scripts/install.sh` sends `tell application "Hog Hunter" to quit`, then `"HogHunter"`, because an older copy is still on disk under the old name |
+
+Changing `PRODUCT_NAME` to "Hog Hunter" would rename the executable and break
+every `pgrep -x` / `pkill -x` path, so it is deliberately not done.
+
 
 ## Inter-agent coordination
 

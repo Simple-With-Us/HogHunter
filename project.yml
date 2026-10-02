@@ -39,9 +39,14 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos
+        # PRODUCT_NAME stays one word: it names the executable inside the
+        # bundle, which is what `pgrep -x` and the install script match.  The
+        # two name keys below are what a person sees -- Finder, Get Info,
+        # LaunchServices, Activity Monitor -- and they are "Hog Hunter".
         PRODUCT_NAME: HogHunter
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
+        INFOPLIST_KEY_CFBundleName: "Hog Hunter"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright 2026 Jay Wedgeworth"
