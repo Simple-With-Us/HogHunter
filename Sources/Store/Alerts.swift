@@ -161,6 +161,12 @@ final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate
         now: Date = Date()
     ) {
         policy.sustained = max(1, sustained)
+        // Infisical-overridable cooldown (minutes); the 30-minute built-in
+        // stands when Infisical is not configured.
+        if let minutes = InfisicalStore.shared.double(for: InfisicalKey.alertCooldownMinutes),
+           minutes > 0 {
+            policy.cooldown = minutes * 60
+        }
         var live: Set<String> = []
         live.reserveCapacity(candidates.count)
         for candidate in candidates {

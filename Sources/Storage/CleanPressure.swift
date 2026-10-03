@@ -37,7 +37,13 @@ struct CleanPressure: Equatable, Sendable {
     /// Below this idle percentage the host is considered to be paging rather
     /// than working.  Chosen against observed normal operation, not guessed:
     /// this Mac idles between roughly 7% and 27% under real fleet load.
-    static let idleFloorPercent: Double = 12.0
+    /// Thrash-detection floor for CPU idle %.  Infisical-overridable
+    /// (`hoghunter.reclaim.cpuIdleFloorPercent`); the built-in 12.0 stands
+    /// when Infisical is not configured, which keeps the existing tests
+    /// deterministic.
+    static var idleFloorPercent: Double {
+        InfisicalStore.shared.double(for: InfisicalKey.reclaimCpuIdleFloorPercent) ?? 12.0
+    }
 
     // MARK: - Derived
 
@@ -55,11 +61,17 @@ struct CleanPressure: Equatable, Sendable {
         return "Calm"
     }
 
-    /// Free-space band, matching the engine's `DiskSpace` bands.
+    /// Free-space band, matching the engine's `DiskSpace` bands.  The
+    /// thresholds are Infisical-overridable (`hoghunter.reclaim.*FreeGb`);
+    /// the built-ins stand when Infisical is not configured.
     var diskBand: String {
-        if diskFreeGB < 25 { return "critical" }
-        if diskFreeGB < 40 { return "acute" }
-        if diskFreeGB < 80 { return "ok" }
+        let cache = InfisicalStore.shared
+        let critical = cache.double(for: InfisicalKey.reclaimCriticalFreeGb) ?? 25
+        let acute = cache.double(for: InfisicalKey.reclaimAcuteFreeGb) ?? 40
+        let healthy = cache.double(for: InfisicalKey.reclaimHealthyFreeGb) ?? 80
+        if diskFreeGB < critical { return "critical" }
+        if diskFreeGB < acute { return "acute" }
+        if diskFreeGB < healthy { return "ok" }
         return "healthy"
     }
 
@@ -71,28 +83,36 @@ struct CleanPressure: Equatable, Sendable {
 
     /// How many candidates to apply per chunk.  Pressure makes the burst
     /// smaller, never zero -- a chunk size of 0 would be the old bug wearing
-    /// a new hat.
+    /// a new hat.  The pressure thresholds are Infisical-overridable; the
+    /// chunk sizes come from the regimen's Infisical-overridable effective
+    /// values.
     func chunkSize(regimen: CleanRegimen) -> Int {
         if isThrashing { return 1 }
-        if swapUsedPercent >= 90 || load1 > 40 {
-            return max(1, regimen.pressuredTargetsPerChunk)
+        let cache = InfisicalStore.shared
+        let swapPct = cache.double(for: InfisicalKey.reclaimSwapUsedPct) ?? 90
+        let load1Threshold = cache.double(for: InfisicalKey.reclaimLoad1Threshold) ?? 40
+        if swapUsedPercent >= swapPct || load1 > load1Threshold {
+            return max(1, regimen.effectivePressuredTargetsPerChunk)
         }
-        return max(1, regimen.targetsPerChunk)
+        return max(1, regimen.effectiveTargetsPerChunk)
     }
 
     func pauseSeconds(regimen: CleanRegimen) -> Double {
-        if isThrashing { return regimen.pressuredChunkPauseSeconds * 2 }
-        if swapUsedPercent >= 90 || load1 > 40 {
-            return regimen.pressuredChunkPauseSeconds
+        if isThrashing { return regimen.effectivePressuredChunkPauseSeconds * 2 }
+        let cache = InfisicalStore.shared
+        let swapPct = cache.double(for: InfisicalKey.reclaimSwapUsedPct) ?? 90
+        let load1Threshold = cache.double(for: InfisicalKey.reclaimLoad1Threshold) ?? 40
+        if swapUsedPercent >= swapPct || load1 > load1Threshold {
+            return regimen.effectivePressuredChunkPauseSeconds
         }
-        return regimen.chunkPauseSeconds
+        return regimen.effectiveChunkPauseSeconds
     }
 
     /// The expensive tier is metadata-and-bulk-delete work: simulator
     /// runtimes and device support, the biggest wins on this machine and the
     /// biggest I/O bursts.  It opens on disk pressure alone.
     func allowsExpensiveTier(regimen: CleanRegimen) -> Bool {
-        hasSpacePressure && diskFreeGB < regimen.expensiveTierFreeGB
+        hasSpacePressure && diskFreeGB < regimen.effectiveExpensiveTierFreeGB
     }
 
     // MARK: - Reading

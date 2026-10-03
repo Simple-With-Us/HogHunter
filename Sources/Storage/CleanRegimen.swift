@@ -78,6 +78,38 @@ struct CleanRegimen: Codable, Equatable, Sendable {
     /// space pressure.
     var expensiveTierFreeGB: Double = 40
 
+    // MARK: - Infisical-overridable effective values
+
+    /// The stored properties above are the local fallback (the regimen JSON
+    /// in the app-group defaults, edited in the Cleaner tab).  A value
+    /// present in Infisical wins: Infisical is the source of truth for these
+    /// tunable knobs.  Every read below is an in-memory cache lookup -- never
+    /// a network call.  See INFISICAL.md.
+    var effectiveIntervalHours: Double {
+        InfisicalStore.shared.double(for: InfisicalKey.regimenIntervalHours) ?? intervalHours
+    }
+
+    var effectiveTargetsPerChunk: Int {
+        InfisicalStore.shared.int(for: InfisicalKey.regimenTargetsPerChunk) ?? targetsPerChunk
+    }
+
+    var effectiveChunkPauseSeconds: Double {
+        InfisicalStore.shared.double(for: InfisicalKey.regimenChunkPauseSeconds) ?? chunkPauseSeconds
+    }
+
+    var effectivePressuredTargetsPerChunk: Int {
+        InfisicalStore.shared.int(for: InfisicalKey.regimenPressuredTargetsPerChunk) ?? pressuredTargetsPerChunk
+    }
+
+    var effectivePressuredChunkPauseSeconds: Double {
+        InfisicalStore.shared.double(for: InfisicalKey.regimenPressuredChunkPauseSeconds)
+            ?? pressuredChunkPauseSeconds
+    }
+
+    var effectiveExpensiveTierFreeGB: Double {
+        InfisicalStore.shared.double(for: InfisicalKey.regimenExpensiveTierFreeGb) ?? expensiveTierFreeGB
+    }
+
     // MARK: - Defaults
 
     /// Explicit memberwise-style defaults initializer.

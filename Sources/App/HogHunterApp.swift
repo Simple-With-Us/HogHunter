@@ -71,6 +71,14 @@ struct HogHunterApp: App {
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
     @StateObject private var store = HogStore()
 
+    init() {
+        // Infisical SOT bootstrap: fetches app-level settings into the
+        // in-memory cache on a background task.  Never blocks launch; when
+        // Infisical is not configured (or unreachable) every built-in default
+        // and UserDefaults value stands exactly as before.  See INFISICAL.md.
+        Task { @MainActor in await InfisicalSettings.shared.bootstrap() }
+    }
+
     var body: some Scene {
         MenuBarExtra {
             HogHunterPanel()

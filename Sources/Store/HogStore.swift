@@ -67,7 +67,13 @@ final class HogStore: ObservableObject {
     @Published var sort: HogSort = .cpu { didSet { persist(); scheduleChoiceChanged() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
-    @Published var refreshInterval: TimeInterval = 3 { didSet { persist(); restartTimer() } }
+    @Published var refreshInterval: TimeInterval = 3 {
+        didSet {
+            persist()
+            restartTimer()
+            writeThroughInfisical(key: InfisicalKey.refreshInterval, value: String(refreshInterval))
+        }
+    }
     @Published var alertsEnabled = false {
         didSet {
             persist()
@@ -81,12 +87,23 @@ final class HogStore: ObservableObject {
         }
     }
     /// Per-core, so 300 means three cores fully busy.
-    @Published var alertThresholdPercent: Double = 300 { didSet { persist() } }
-    @Published var alertSustainedMinutes: Int = 5 { didSet { persist() } }
+    @Published var alertThresholdPercent: Double = 300 {
+        didSet {
+            persist()
+            writeThroughInfisical(key: InfisicalKey.alertThresholdPercent, value: String(alertThresholdPercent))
+        }
+    }
+    @Published var alertSustainedMinutes: Int = 5 {
+        didSet {
+            persist()
+            writeThroughInfisical(key: InfisicalKey.alertSustainedMinutes, value: String(alertSustainedMinutes))
+        }
+    }
     @Published var alertWebhookURL: String = "" {
         didSet {
             persist()
             alerts.webhookURL = alertWebhookURL
+            writeThroughInfisical(key: InfisicalKey.alertWebhookURL, value: alertWebhookURL)
         }
     }
     /// System, not light: the fleet-wide owner ruling (FLEET-UI-COPY.md, 2026-09-19)
@@ -160,6 +177,9 @@ final class HogStore: ObservableObject {
     private var started = false
     private var tickIndex = 0
     private var loadingSettings = false
+    /// True while Infisical values are being applied over the local settings,
+    /// so the apply does not write the same values back to Infisical.
+    private var applyingInfisical = false
     private var lastTickAt = Date.distantPast
 
     private var samples: [ProcessKey: ProcessSample] = [:]
@@ -191,6 +211,12 @@ final class HogStore: ObservableObject {
             self,
             selector: #selector(defaultsChanged),
             name: UserDefaults.didChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(infisicalDidRefresh),
+            name: .infisicalSettingsDidRefresh,
             object: nil
         )
         start()
@@ -942,6 +968,53 @@ final class HogStore: ObservableObject {
         } else {
             companionPeerID = UUID().uuidString
             defaults.set(companionPeerID, forKey: Key.companionPeerID)
+        }
+    }
+
+    // MARK: - Infisical SOT
+
+    /// Applies Infisical values over the local settings for the migrated
+    /// knobs.  Infisical is the source of truth: a present value wins over
+    /// UserDefaults.  Runs at launch (no-op until the first refresh lands)
+    /// and after every successful background refresh.  See INFISICAL.md.
+    private func applyInfisicalOverrides() {
+        let cache = InfisicalStore.shared
+        applyingInfisical = true
+        defer { applyingInfisical = false }
+        if let interval = cache.double(for: InfisicalKey.refreshInterval), interval >= 1 {
+            refreshInterval = interval
+        }
+        if let threshold = cache.double(for: InfisicalKey.alertThresholdPercent), threshold >= 100 {
+            alertThresholdPercent = threshold
+        }
+        if let sustained = cache.int(for: InfisicalKey.alertSustainedMinutes), sustained >= 1 {
+            alertSustainedMinutes = sustained
+        }
+        // An empty webhook in Infisical means "not filled by admin yet" -- it
+        // must never wipe a locally configured URL.
+        if let webhook = cache.string(for: InfisicalKey.alertWebhookURL),
+           !webhook.isEmpty, webhook != alertWebhookURL {
+            alertWebhookURL = webhook
+        }
+    }
+
+    @objc private func infisicalDidRefresh() {
+        Task { @MainActor [weak self] in
+            self?.applyInfisicalOverrides()
+        }
+    }
+
+    /// Write-through for a migrated knob the admin just changed.  The PATCH
+    /// to Infisical happens first inside `InfisicalSettings.set`; the local
+    /// cache updates only after it succeeds.  A failed write keeps the local
+    /// value (the app stays usable offline) and surfaces on
+    /// `InfisicalSettings.lastError` for the Advanced tab -- never silent --
+    /// and the next successful refresh re-asserts the Infisical value.
+    private func writeThroughInfisical(key: String, value: String) {
+        guard !loadingSettings, !applyingInfisical else { return }
+        Task { @MainActor [weak self] in
+            guard self != nil else { return }
+            try? await InfisicalSettings.shared.set(value, forKey: key)
         }
     }
 
