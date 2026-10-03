@@ -1,8 +1,8 @@
 # Hog Hunter
 
-A Mac menu bar utility that names the processes and apps eating CPU and memory right now, over the past hour, and over the past 24 hours.  Quit a hog from the list after a confirm.
+A Mac menu bar utility that names the processes and apps eating CPU and memory right now, over the past hour, and over the past 24 hours.  Quit a hog from the list after a confirm.  It also shows what is using your disk and your network, and it can clean reclaimable disk clutter.
 
-Local only.  Not on the App Store.  Not TestFlight.
+The Mac app is a direct download.  The iPhone companion has TestFlight builds.  Neither is on the App Store.
 
 ## What it shows
 
@@ -15,13 +15,21 @@ Local only.  Not on the App Store.  Not TestFlight.
 
 History only covers time the menu bar app has been running.  Turn on **Launch at Login** if you want a real day of data.
 
+## Storage
+
+- Top-25 installed apps by disk usage, split into bundle size and the hidden cost behind it — containers, caches, saved state, logs, cookies, HTTP storage, and Application Support.
+- A per-app category breakdown so you can see where the bytes actually live.
+- **All installed** / **Running now** filters, and **Total** / **Hidden** / **Bundle** sort orders.
+- A disk cleaner for caches, logs, Trash, developer junk, orphaned app leftovers, stale AI agent transcripts and models, and large or old files.  A standard clean preserves recoverability through an APFS snapshot; a deep clean goes further.
+- Per-directory walks are capped, and a capped row is flagged as approximate in the UI rather than reported as exact.
+
 ## iPhone
 
 Hog Hunter on iPhone shows the same list the Mac is showing, over the Wi-Fi you are both on.  It cannot quit anything.
 
 On the Mac, open Settings and turn on **Share With iPhone**.  Type the pairing code into the phone.  Leave the switch off on a network you do not trust.
 
-Build the phone app for the simulator with scheme `HogHunterIOS`.  It is not on the App Store.
+Build the phone app for the simulator with scheme `HogHunterIOS`.  TestFlight builds come from the release workflow; there is no App Store release, and no public install link is published here.
 
 ## Build and run
 
@@ -53,4 +61,4 @@ Apache License 2.0.  See [LICENSE](LICENSE) for details.
 
 ## Notes
 
-Light appearance is the default.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.
+Theme follows the system by default; Light and Dark are available in Settings.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.
