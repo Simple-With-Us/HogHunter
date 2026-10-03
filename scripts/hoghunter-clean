@@ -53,11 +53,36 @@ DISK_CRITICAL_GB = 25.0
 DISK_ACUTE_GB = 40.0
 DISK_HEALTHY_GB = 80.0
 
-# Band gates.  CHEAP-ONLY when swap is nearly full or load is elevated --
-# exactly the Housekeeper rule.  Under CHEAP-ONLY only the SAFE tier runs,
-# because every reclaim is I/O and I/O is the scarce resource right now.
+# Pressure gates.  OWNER RULING 2026-10-02: pressure changes the SHAPE of the
+# work, never its SCOPE.  The old rule ("swap >= 90 OR load1 > 40 => do less")
+# was a guard whose threshold sat INSIDE this host's normal operating band --
+# load1 runs 15-30 here continuously from real fleet build work -- so it was
+# true nearly always, and wedded to a near-permanent swap reading it meant
+# cleaning almost never ran.  A guard whose threshold equals the normal state
+# is an outage, not a guard.  Same defect class as the disk janitor's binary
+# pressure gate, diagnosed 2026-10-02.
+#
+# What is still true, and what these numbers are FOR: deleting caches never
+# reduces swap, so pressure governs how we sequence the work (chunk size,
+# spacing) and which *tier* of risk we open -- not whether we clean at all.
 SWAP_CRIT_PCT = 90.0
+# Retained for reporting and for the expensive-tier gate only.  It must NEVER
+# be a reason to skip work: on this Mac it is true nearly always.
 LOAD_CRIT = 40.0
+
+# Chunking under pressure.  Target how many candidates to apply per batch and
+# how long to pause between batches so the host gets breathing room while the
+# deletes land.  A chunk is deliberately small: 2-3 targets, measured working
+# 2026-10-02 21:24 (3 chunks, ~1.9G by du, load1 25.7 -> 15.1, zero kills).
+CHUNK_TARGETS = 3
+CHUNK_PAUSE_SEC = 5.0
+# Above this load the chunks get smaller and the pauses get longer rather than
+# the work being skipped.  Still not a skip.
+CHUNK_LOAD_HIGH = 40.0
+# Idle-percent floor below which we pause longer between chunks.  Read
+# together with load1 and kernel_task: high load with HIGH idle is real work
+# (keep going), high load with LOW idle is thrash (back off the burst).
+CHUNK_IDLE_LOW_PCT = 12.0
 
 # Idle gates.  "No file touched in N minutes" proves nothing is mid-write.
 IDLE_MIN_OK = 90
@@ -129,13 +154,27 @@ class Candidate:
 
 @dataclass
 class Band:
-    """Current resource pressure, which decides how much we may do."""
+    """Current resource pressure.
+
+    `chunk_size` / `chunk_pause_sec` are how pressure shapes the work.
+    `cheap_only` is retained as a REPORTING field and as the expensive-tier
+    gate; it is never a reason to skip the safe or semi-safe tiers.
+    """
     disk_free_gb: float
     disk_used_pct: float
     swap_used_pct: float
     load1: float
+    # Retained for compatibility and reporting.  See the OWNER RULING note at
+    # SWAP_CRIT_PCT: pressure must not suppress work, so this no longer gates
+    # the safe or semi-safe tiers.
     cheap_only: bool
     reasons: list[str] = field(default_factory=list)
+    # Added 2026-10-02.  High load1 alone does not mean thrash.
+    cpu_idle_pct: float = 0.0
+    kernel_task_pct: float = 0.0
+    chunk_size: int = CHUNK_TARGETS
+    chunk_pause_sec: float = CHUNK_PAUSE_SEC
+    throttling: bool = False
 
     @property
     def disk_band(self) -> str:
@@ -147,9 +186,29 @@ class Band:
             return "ok"
         return "healthy"
 
+    @property
+    def is_thrashing(self) -> bool:
+        """True only when the host is genuinely paging, not merely busy.
+
+        load1 counts uninterruptible page-in as running, so it is a LAGGING
+        indicator.  2026-10-02 21:00: load1 25.68 with 27% idle and kernel_task
+        absent from the top-CPU sample was real fleet work, not thrash.
+        """
+        return self.cpu_idle_pct < CHUNK_IDLE_LOW_PCT
+
+    @property
+    def pressure_label(self) -> str:
+        if self.is_thrashing:
+            return "throttling"
+        if self.swap_used_pct >= SWAP_CRIT_PCT or self.load1 > CHUNK_LOAD_HIGH:
+            return "elevated (chunked)"
+        return "calm"
+
     def as_dict(self) -> dict:
         d = asdict(self)
         d["disk_band"] = self.disk_band
+        d["is_thrashing"] = self.is_thrashing
+        d["pressure_label"] = self.pressure_label
         return d
 
 
@@ -878,6 +937,45 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
 # Band
 # --------------------------------------------------------------------------
 
+def _read_cpu_pressures() -> tuple[float, float]:
+    """Return (cpu_idle_pct, kernel_task_pct).
+
+    Idle comes from `top -l 1`, which prints a CPU table with no command
+    arguments, so this stays inside the never-bare-`ps` rule.  The format is
+    "CPU usage: 40.39% user, 40.28% sys, 19.32% idle" -- the NUMBER precedes
+    the label, so match "<pct>% idle" rather than reading the token after it.
+
+    kernel_task is not in `top`'s CPU summary.  It is read from `ps -A -o
+    pcpu=,comm=`, which prints only the executable name and never argv, so it
+    cannot leak the API keys that bare `ps` would.
+
+    Returns (0.0, 0.0) when a reading is unavailable.  An unknown value must
+    NOT be read as thrash, so the caller treats a missing idle as "unknown"
+    rather than "0% idle" -- see the guard in is_thrashing's caller.
+    """
+    out = _run(["/usr/bin/top", "-l", "1", "-n", "0"], timeout=15)
+    idle = -1.0
+    for line in out.splitlines():
+        m = re.search(r"CPU usage:.*?([\d.]+)%\s*idle", line)
+        if m:
+            idle = float(m.group(1))
+            break
+
+    kernel = 0.0
+    pout = _run(["/bin/ps", "-A", "-o", "pcpu=,comm="], timeout=15)
+    for line in pout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip() == "kernel_task":
+            try:
+                kernel = float(parts[0])
+            except ValueError:
+                pass
+            break
+
+    # Unknown idle (-1) is reported as 100 so it never trips the thrash gate.
+    return (idle if idle >= 0 else 100.0), kernel
+
+
 def read_band() -> Band:
     free_gb = 0.0
     used_pct = 0.0
@@ -910,14 +1008,37 @@ def read_band() -> Band:
         load1 = os.getloadavg()[0]
     except OSError:
         pass
+
+    # load1 alone cannot tell real work from memory thrash: tasks blocked in
+    # uninterruptible page-in count as running, so load1 lags.  Read CPU idle
+    # and kernel_task alongside it.  Never bare `ps` -- argv on this Mac
+    # carries live API keys; parse the `top -l 1` CPU table instead, which
+    # prints no arguments.
+    cpu_idle_pct, kernel_task_pct = _read_cpu_pressures()
+
+    # Pressure shapes the work; it never shrinks it.  (Owner ruling
+    # 2026-10-02.)  The only outcome that opens the expensive tier is real
+    # space pressure, not a busy CPU.
     reasons = []
     if swap_pct >= SWAP_CRIT_PCT:
         reasons.append(f"swap {swap_pct:.0f}% >= {SWAP_CRIT_PCT:.0f}%")
     if load1 > LOAD_CRIT:
         reasons.append(f"load1 {load1:.0f} > {LOAD_CRIT:.0f}")
+
+    thrashing = cpu_idle_pct < CHUNK_IDLE_LOW_PCT
+    chunk_size = CHUNK_TARGETS
+    pause = CHUNK_PAUSE_SEC
+    if thrashing:
+        # Smallest burst, longest pause.  Still cleaning.
+        chunk_size, pause = 1, CHUNK_PAUSE_SEC * 4
+    elif swap_pct >= SWAP_CRIT_PCT or load1 > CHUNK_LOAD_HIGH:
+        chunk_size, pause = 2, CHUNK_PAUSE_SEC * 2
+
     return Band(
         disk_free_gb=free_gb, disk_used_pct=used_pct, swap_used_pct=swap_pct,
         load1=load1, cheap_only=bool(reasons), reasons=reasons,
+        cpu_idle_pct=cpu_idle_pct, kernel_task_pct=kernel_task_pct,
+        chunk_size=chunk_size, chunk_pause_sec=pause, throttling=thrashing,
     )
 
 
@@ -1003,31 +1124,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     band = read_band()
     cands = scan(cats or None)
 
+    # The safe tier ALWAYS runs.  Pressure no longer removes it.  (Owner
+    # ruling 2026-10-02: "swap high should mean that you do the same stuff you
+    # otherwise would but just divide the tasks into maybe 2-4 separate smaller
+    # tasks".)  Pressure now selects the CHUNK SIZE instead -- see the
+    # batched apply loop below.
     allowed = {"safe"}
     if args.band == "full":
-        if not band.cheap_only:
-            allowed.add("semi-safe")
-            if band.disk_band in ("critical", "acute"):
-                # Bulk I/O deletes (simulator runtimes, device support) are the
-                # biggest single wins on this Mac -- 18.55 GB measured 2026-09-27
-                # -- but they are also the exact operations that thrash the disk
-                # during a load episode.  Load is calm here, so the tier is open,
-                # but only because there is real space pressure to justify it.
-                allowed.add("expensive")
-        elif band.disk_band == "critical":
-            # CHEAP-ONLY exists because reclaim is I/O and I/O is scarce during
-            # a load/swap episode.  That reasoning does not hold for the
-            # semi-safe tier, whose headline operation is
-            # `tmutil deletelocalsnapshots` -- a metadata call, not a tree walk,
-            # and it releases container space nothing else on this list can
-            # reach.  At critical disk the disk risk outweighs the I/O risk.
-            # Deliberately narrow: metadata only.  The `expensive` tier stays
-            # shut, so an 18 GB simulator-runtime delete cannot ride in on this.
-            allowed.add("semi-safe")
-            log(f"band=full held to safe for load, but disk is {band.disk_band} "
-                f"({band.disk_free_gb:.1f}G): allowing metadata-only semi-safe ops")
-        else:
-            log(f"band=full downgraded to safe: {', '.join(band.reasons)}")
+        # semi-safe is metadata work (tmutil deletelocalsnapshots) plus small
+        # deletes.  It is the largest reclaim available on this Mac, so
+        # pressure throttles its pacing but must not gate it shut.  The old
+        # `if not band.cheap_only` made semi-safe unreachable whenever load
+        # exceeded 40 -- which on this host is almost always.
+        allowed.add("semi-safe")
+        if band.disk_band in ("critical", "acute"):
+            # Bulk I/O deletes (simulator runtimes, device support) are the
+            # biggest single wins -- 18.55 GB measured 2026-09-27 -- but they
+            # are also the operations that thrash the disk.  This stays gated
+            # on real SPACE pressure, which is the honest signal, and is no
+            # longer additionally gated on a busy CPU.
+            allowed.add("expensive")
+
+    log(f"band={args.band} pressure={band.pressure_label} "
+        f"({band.cpu_idle_pct:.0f}% idle, load1 {band.load1:.0f}, "
+        f"swap {band.swap_used_pct:.0f}%) -> chunks of {band.chunk_size}, "
+        f"{band.chunk_pause_sec:.0f}s apart; tiers {sorted(allowed)}")
 
     if args.clean and band.disk_free_gb >= args.min_free_gb > 0:
         log(f"free {band.disk_free_gb:.1f}G >= --min-free-gb {args.min_free_gb:.1f}; skipping")
@@ -1035,8 +1156,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     actionable = [c for c in cands if c.tier in allowed]
     if args.clean:
-        for c in actionable:
-            apply_candidate(c)
+        # CHUNKED APPLY.  Under pressure the work is split into small batches
+        # with a pause and a re-read between them, so the host gets breathing
+        # room while deletes land.  The SCOPE is unchanged -- same candidates,
+        # same tiers -- only the burst size shrinks.  (Owner ruling
+        # 2026-10-02.)
+        total = len(actionable)
+        size = max(1, band.chunk_size)
+        for idx in range(0, total, size):
+            batch = actionable[idx:idx + size]
+            for c in batch:
+                apply_candidate(c)
+            n = idx // size + 1
+            log(f"chunk {n}/{(total + size - 1) // size}: applied {len(batch)} "
+                f"({total} total)")
+            if idx + size < total and band.chunk_pause_sec > 0:
+                time.sleep(band.chunk_pause_sec)
+                mid = read_band()
+                log(f"  after chunk: load1 {mid.load1:.0f}, "
+                    f"{mid.cpu_idle_pct:.0f}% idle, "
+                    f"swap {mid.swap_used_pct:.0f}%, {mid.pressure_label}")
         # Snapshots report zero bytes by nature, so trust df, not the tally.
         after = read_band()
         snapshot_delta = (band.disk_free_gb - after.disk_free_gb) * 1024
@@ -1061,7 +1200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"hoghunter-clean {VERSION} — {'CLEAN' if args.clean else 'SCAN'}")
         print(f"disk {band.disk_free_gb:.1f}G free ({band.disk_band}), "
               f"swap {band.swap_used_pct:.0f}%, load1 {band.load1:.0f}"
-              + (f"  [CHEAP-ONLY: {', '.join(band.reasons)}]" if band.cheap_only else ""))
+              + (f"  [pressure: {band.pressure_label}"
+                 f"{', ' + ', '.join(band.reasons) if band.reasons else ''}]"))
         print(f"tiers applied: {', '.join(sorted(allowed))}\n")
         if not cands:
             print("nothing reclaimable.")

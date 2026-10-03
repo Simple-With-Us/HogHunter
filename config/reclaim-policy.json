@@ -13,10 +13,25 @@
   },
 
   "bands": {
-    "$comment": "CHEAP-ONLY drops every non-safe tier. Deleting caches never reduces swap; only load collapse ends a swap episode.",
+    "$comment": "OWNER RULING 2026-10-02 (Jay): pressure changes the SHAPE of the work (2-4 bounded chunks), never its SCOPE. The previous rule -- 'swap >= 90 OR load1 > 40 => do less' -- was a guard whose threshold sat INSIDE this host's normal operating band: load1 runs 15-30 here continuously from real fleet build work, so it was true almost always, and wedded to a near-permanent swap reading it meant cleaning almost never ran. A guard whose threshold equals the normal state is an outage, not a guard. Deleting caches never reduces swap, and that still holds -- but it constrains what fixes swap, NOT how much regenerable waste may be cleared.",
+    "pressureShapesWorkNotScope": true,
+    "chunking": {
+      "targetsPerChunk": 3,
+      "pauseSeconds": 5.0,
+      "underPressure": "swap >= 90% or load1 > 40 => 2 targets, 2x pause",
+      "whileThrashing": "cpu idle < 12% => 1 target, 4x pause",
+      "$note": "A chunk is 2-3 targets with a df + uptime re-read between. Verified 2026-10-02 21:24: 3 chunks, ~1.9G by du, load1 25.7 -> 15.1, zero process kills."
+    },
     "cheapOnlyWhen": {
       "swapUsedPctAtOrAbove": 90,
-      "load1Above": 40
+      "load1Above": 40,
+      "$deprecated": "Retained for reporting and as the EXPENSIVE-tier context only. These must never suppress the safe or semi-safe tiers. The load1 threshold in particular is true nearly always on this host and so cannot gate work."
+    },
+    "thrashDetection": {
+      "$why": "load1 counts uninterruptible page-in as running, so it is a LAGGING indicator. High load1 with HIGH cpu idle and kernel_task absent from the top-CPU sample is real work, not thrash (2026-10-02 21:00: load1 25.68, 27% idle).",
+      "cpuIdlePctBelow": 12,
+      "readTogether": ["cpu idle %", "kernel_task %", "load1"],
+      "neverKeyASkipOn": "load1 alone"
     },
     "disk": {
       "criticalFreeGb": 25,
