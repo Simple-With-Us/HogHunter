@@ -11,6 +11,10 @@ enum PanelTab: String, CaseIterable, Identifiable {
 
 struct HogHunterPanel: View {
     @EnvironmentObject private var store: HogStore
+    /// SwiftUI's own "open the Settings scene" action.  Sending
+    /// `showSettingsWindow:` to `NSApp` by hand is silently dropped here and
+    /// the gear button did nothing; this is the supported path.
+    @Environment(\.openSettings) private var openSettings
     @State private var selectedTab: PanelTab = .activity
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage: Bool = false
@@ -34,6 +38,8 @@ struct HogHunterPanel: View {
 
                 if hasVisitedStorage {
                     StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true, isTabActive: selectedTab == .storage)
+                        .frame(width: Self.contentWidth, alignment: .leading)
+                        .clipped()
                         .opacity(selectedTab == .storage ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage)
                         .accessibilityHidden(selectedTab != .storage)
@@ -41,6 +47,17 @@ struct HogHunterPanel: View {
 
                 if hasVisitedNetwork {
                     NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: selectedTab == .network)
+                        // Both lines are load-bearing.  A tab's own content
+                        // decides its ideal width, and a long unwrapped string
+                        // anywhere in it (a hostname list, a footer sentence)
+                        // pushes that past the panel.  `ZStack` lays a child out
+                        // at its ideal width *before* the enclosing frame is
+                        // applied, so without this the panel briefly renders
+                        // wider than itself and crops.  Fixing it at the
+                        // container means no child can ever do that again,
+                        // whatever text is added later.
+                        .frame(width: Self.contentWidth, alignment: .leading)
+                        .clipped()
                         .opacity(selectedTab == .network ? 1 : 0)
                         .allowsHitTesting(selectedTab == .network)
                         .accessibilityHidden(selectedTab != .network)
@@ -105,6 +122,10 @@ struct HogHunterPanel: View {
     static let inset: CGFloat = 14
     /// What is left of the panel once the inset is taken off both sides.
     static var contentWidth: CGFloat { panelWidth - inset * 2 }
+    /// Fixed so the control row cannot resize itself when a segment changes.
+    static let windowPickerWidth: CGFloat = 300
+    static let groupPickerWidth: CGFloat = 130
+    static let sortPickerWidth: CGFloat = 110
 
     private var quitMessage: String {        guard let row = pendingQuit else { return "" }
         let count = max(1, row.keys.count)
@@ -173,7 +194,9 @@ struct HogHunterPanel: View {
             Image(nsImage: HogActions.activityMonitorIcon)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 15, height: 15)
+                // 15 pt rendered as a dark unreadable blob next to a gear that
+                // is 17 pt.  Both buttons now read at the same size.
+                .frame(width: 19, height: 19)
         }
         .buttonStyle(.borderless)
         .fixedSize()
@@ -186,10 +209,15 @@ struct HogHunterPanel: View {
     /// and one action does not need a menu to hold it.
     private var settingsButton: some View {
         Button {
-            HogActions.openSettings()
+            if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
+            // The scene builds its window asynchronously, so the "already
+            // open? come forward" pass has to be retried, not run once.
+            HogActions.scheduleFrontSettingsWindow()
         } label: {
             Image(systemName: "gearshape")
-                .font(.system(size: 13))
+                .font(.system(size: 17, weight: .regular))
         }
         .buttonStyle(.borderless)
         .fixedSize()
@@ -385,27 +413,37 @@ struct HogHunterPanel: View {
     /// third of the window surrounded by empty track, and it is why the panel
     /// is 620 rather than 560 wide.
     private var controls: some View {
+        // Every picker gets a fixed width AND its selection's animation turned
+        // off.  A segmented control re-measures when its selection changes --
+        // the selected segment is drawn with different insets -- and a flexible
+        // width let that re-measure reach the HStack, which animated the whole
+        // row growing and recentring before snapping back.  A fixed width means
+        // there is nothing to re-measure, and `.animation(nil, ...)` means even
+        // if something did, it moves instantly instead of travelling.
         HStack(spacing: 8) {
             Picker("Window", selection: $store.window) {
                 ForEach(TimeWindow.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: .infinity)
+            .frame(width: Self.windowPickerWidth)
+            .animation(nil, value: store.window)
 
             Picker("Show", selection: $store.grouping) {
                 ForEach(HogGrouping.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .fixedSize()
+            .frame(width: Self.groupPickerWidth)
+            .animation(nil, value: store.grouping)
 
             Picker("Sort", selection: $store.sort) {
                 ForEach(HogSort.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .fixedSize()
+            .frame(width: Self.sortPickerWidth)
+            .animation(nil, value: store.sort)
 
             Spacer(minLength: 0)
         }

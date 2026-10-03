@@ -336,3 +336,41 @@ final class CompanionTests: XCTestCase {
         )
     }
 }
+
+/// The iPhone shows a "Mac Disk Usage" section only when the snapshot carries
+/// a `storage` summary; with none, it renders "Disk telemetry will update with
+/// next sample" and there is no way for the user to tell that from a Mac that
+/// simply has no disk.  Both the builder's fallback and the iOS view landed in
+/// the same PR, so a stale Mac and a stale phone look identical.  This pins
+/// the Mac half so a regression here shows up as a test failure rather than as
+/// a blank panel on someone's phone.
+final class CompanionStorageTelemetryTests: XCTestCase {
+
+    func testStorageSummaryIsBuiltFromTheLiveVolume() throws {
+        let summary = try XCTUnwrap(CompanionSnapshotBuilder.currentStorageSummary(),
+                                    "the startup volume must always be readable")
+        XCTAssertGreaterThan(summary.totalBytes, 0)
+        XCTAssertLessThanOrEqual(summary.freeBytes, summary.totalBytes)
+        XCTAssertEqual(summary.usedBytes, summary.totalBytes - summary.freeBytes)
+        // Percent has to agree with the byte counts it was derived from, or the
+        // iPhone shows a bar that contradicts its own caption.
+        let expected = Double(summary.usedBytes) / Double(summary.totalBytes) * 100
+        XCTAssertEqual(summary.usedPercent, expected, accuracy: 0.001)
+        XCTAssertFalse(summary.freeText.isEmpty)
+        XCTAssertFalse(summary.usedText.isEmpty)
+    }
+
+    /// A snapshot built without an explicit summary must still carry one, so a
+    /// plain tick is never the reason the phone shows nothing.
+    func testBuilderFallsBackToLiveStorageWhenNoneIsPassed() {
+        var pulse = MachinePulse.empty
+        pulse.cpuPercent = 10
+        pulse.coreCount = 10
+        pulse.memoryUsedBytes = 8_000_000_000
+        let snapshot = CompanionSnapshotBuilder.make(
+            hostName: "test", sampledAt: Date(), hasBaseline: true,
+            window: .now, grouping: .apps, scale: .perCore, pulse: pulse, rows: []
+        )
+        XCTAssertNotNil(snapshot.storage, "the phone renders nothing without this")
+    }
+}
