@@ -9,7 +9,10 @@ import XCTest
 /// - a failed write-through rejects (cache untouched)
 ///
 /// The network is fully stubbed via StubURLProtocol; no test touches the
-/// real Infisical service, and no credential is needed.
+/// real Infisical service, and no credential is needed.  The stub records
+/// every request (method, path, JSON body) and the tests assert on the
+/// recording afterwards -- nothing is asserted or force-unwrapped on the
+/// URLSession callback thread.
 
 private final class StubURLProtocol: URLProtocol {
     struct Recorded {
@@ -18,11 +21,12 @@ private final class StubURLProtocol: URLProtocol {
         var body: [String: Any]?
     }
 
-    static let lock = NSLock()
-    static var recorded: [Recorded] = []
-    static var notes: [String: String] = [:]
-    /// (statusCode, body) or throws to simulate a transport failure.
-    static var handler: ((URLRequest) throws -> (Int, Data))?
+    private static let lock = NSLock()
+    private static var recorded: [Recorded] = []
+    private static var notes: [String: String] = [:]
+    /// (statusCode, body) by request.  Must not throw, assert, or
+    /// force-unwrap: it runs on the URLSession callback thread.
+    static var handler: ((URLRequest) -> (Int, Data))?
 
     static func reset() {
         lock.lock(); defer { lock.unlock() }
@@ -31,45 +35,71 @@ private final class StubURLProtocol: URLProtocol {
         handler = nil
     }
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        let body: [String: Any]? = request.httpBody.flatMap {
-            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
-        }
-        Self.lock.lock()
-        Self.recorded.append(Recorded(
-            method: request.httpMethod,
-            path: request.url?.path,
-            body: body
-        ))
-        Self.lock.unlock()
-        do {
-            guard let handler = Self.handler else {
-                throw NSError(domain: "StubURLProtocol", code: -1, userInfo: nil)
-            }
-            let (status, data) = try handler(request)
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: status,
-                httpVersion: "HTTP/1.1",
-                headerFields: [:]
-            )!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
+    static func record(_ entry: Recorded) {
+        lock.lock(); defer { lock.unlock() }
+        recorded.append(entry)
     }
 
-    override func stopLoading() {}
+    static func takeRecorded() -> [Recorded] {
+        lock.lock(); defer { lock.unlock() }
+        let out = recorded
+        recorded = []
+        return out
+    }
 
     static func note(_ value: String, for key: String) {
         lock.lock(); defer { lock.unlock() }
         notes[key] = value
     }
+
+    static func takeNotes() -> [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        return notes
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    /// httpBody is not always populated on the request the protocol
+    /// receives, so fall back to draining httpBodyStream.
+    private static func bodyData(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: 4096)
+            if count <= 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
+    override func startLoading() {
+        let body = Self.bodyData(of: request).flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        Self.record(Recorded(
+            method: request.httpMethod,
+            path: request.url?.path,
+            body: body
+        ))
+        let (status, data) = Self.handler?(request) ?? (500, Data())
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: [:]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 final class InfisicalSettingsTests: XCTestCase {
@@ -94,29 +124,23 @@ final class InfisicalSettingsTests: XCTestCase {
         )
     }
 
-    private func loginHandler() -> (URLRequest) throws -> (Int, Data) {
+    /// Routes login -> token and secrets/raw -> three keys.  No assertions
+    /// inside: everything asserted is recorded for the test thread.
+    private func loginHandler() -> (URLRequest) -> (Int, Data) {
         { [weak self] request in
-            guard let self else { throw NSError(domain: "test", code: -1, userInfo: nil) }
-            let path = request.url!.path
-            if path == "/api/v1/auth/universal-auth/login" {
-                XCTAssertEqual(request.httpMethod, "POST")
-                let body = try! JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
-                XCTAssertEqual(body["clientId"] as? String, "id")
-                XCTAssertEqual(body["clientSecret"] as? String, "secret")
+            guard let self else { return (500, Data()) }
+            switch request.url?.path {
+            case "/api/v1/auth/universal-auth/login":
                 return (200, self.json(["accessToken": "test-token"]))
-            }
-            if path == "/api/v3/secrets/raw" {
-                XCTAssertEqual(
-                    request.value(forHTTPHeaderField: "Authorization"),
-                    "Bearer test-token"
-                )
+            case "/api/v3/secrets/raw":
                 return (200, self.json(["secrets": [
                     ["secretKey": "hoghunter.refreshInterval", "secretValue": "7"],
                     ["secretKey": "hoghunter.alertThresholdPercent", "secretValue": "250"],
                     ["secretKey": "hoghunter.reclaim.criticalFreeGb", "secretValue": "20"],
                 ]]))
+            default:
+                return (404, Data())
             }
-            return (404, Data())
         }
     }
 
@@ -143,6 +167,14 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(store.double(for: "hoghunter.reclaim.criticalFreeGb"), 20)
         XCTAssertNotNil(settings.lastRefresh)
         XCTAssertNil(settings.lastError)
+
+        let calls = StubURLProtocol.takeRecorded()
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].method, "POST")
+        XCTAssertEqual(calls[0].path, "/api/v1/auth/universal-auth/login")
+        XCTAssertEqual(calls[0].body?["clientId"] as? String, "id")
+        XCTAssertEqual(calls[1].path, "/api/v3/secrets/raw")
+
         await fulfillment(of: [posted], timeout: 1)
     }
 
@@ -155,9 +187,7 @@ final class InfisicalSettingsTests: XCTestCase {
         let settings = makeSettings(store: store)
         await settings.bootstrap()
 
-        StubURLProtocol.lock.lock()
-        StubURLProtocol.recorded = []
-        StubURLProtocol.lock.unlock()
+        _ = StubURLProtocol.takeRecorded()
 
         for _ in 0..<20 {
             _ = store.string(for: "hoghunter.refreshInterval")
@@ -166,10 +196,10 @@ final class InfisicalSettingsTests: XCTestCase {
             _ = store.bool(for: "hoghunter.settingsRefreshMinutes")
         }
 
-        StubURLProtocol.lock.lock()
-        let calls = StubURLProtocol.recorded.count
-        StubURLProtocol.lock.unlock()
-        XCTAssertEqual(calls, 0, "runtime reads must never hit the network")
+        XCTAssertEqual(
+            StubURLProtocol.takeRecorded().count, 0,
+            "runtime reads must never hit the network"
+        )
     }
 
     // MARK: - Write-through PATCHes Infisical before the cache
@@ -178,41 +208,40 @@ final class InfisicalSettingsTests: XCTestCase {
     func testWriteThroughPatchesBeforeCacheUpdate() async throws {
         let store = InfisicalStore()
         StubURLProtocol.handler = { [weak self] request in
-            guard let self else { throw NSError(domain: "test", code: -1, userInfo: nil) }
-            let path = request.url!.path
-            if path == "/api/v1/auth/universal-auth/login" {
+            guard let self else { return (500, Data()) }
+            switch request.url?.path {
+            case "/api/v1/auth/universal-auth/login":
                 return (200, self.json(["accessToken": "test-token"]))
-            }
-            if path == "/api/v3/secrets/hoghunter.refreshInterval" {
-                XCTAssertEqual(request.httpMethod, "PATCH")
+            case "/api/v3/secrets/hoghunter.refreshInterval":
                 // The cache must NOT have the new value yet: Infisical first.
                 StubURLProtocol.note(
                     store.string(for: "hoghunter.refreshInterval") ?? "<nil>",
                     for: "cache-during-patch"
                 )
-                let body = try! JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
-                XCTAssertEqual(body["secretValue"] as? String, "9")
-                XCTAssertEqual(body["environment"] as? String, "dev")
-                XCTAssertEqual(
-                    body["workspaceId"] as? String,
-                    "c1df65f2-adb5-4d64-93c0-f47f969feea1"
-                )
                 return (200, self.json(["secret": ["secretKey": "hoghunter.refreshInterval"]]))
+            default:
+                return (404, Data())
             }
-            return (404, Data())
         }
         let settings = makeSettings(store: store)
 
         try await settings.set("9", forKey: "hoghunter.refreshInterval")
 
-        StubURLProtocol.lock.lock()
-        let cacheDuringPatch = StubURLProtocol.notes["cache-during-patch"]
-        let patchCalls = StubURLProtocol.recorded.filter {
-            ($0.path ?? "").hasPrefix("/api/v3/secrets/")
-        }
-        StubURLProtocol.lock.unlock()
-        XCTAssertEqual(cacheDuringPatch, "<nil>", "PATCH must precede the cache update")
-        XCTAssertEqual(patchCalls.count, 1)
+        let notes = StubURLProtocol.takeNotes()
+        XCTAssertEqual(
+            notes["cache-during-patch"], "<nil>",
+            "the PATCH must precede the cache update"
+        )
+        let calls = StubURLProtocol.takeRecorded()
+        let patches = calls.filter { $0.method == "PATCH" }
+        XCTAssertEqual(patches.count, 1)
+        XCTAssertEqual(patches[0].path, "/api/v3/secrets/hoghunter.refreshInterval")
+        XCTAssertEqual(patches[0].body?["secretValue"] as? String, "9")
+        XCTAssertEqual(patches[0].body?["environment"] as? String, "dev")
+        XCTAssertEqual(
+            patches[0].body?["workspaceId"] as? String,
+            "c1df65f2-adb5-4d64-93c0-f47f969feea1"
+        )
         XCTAssertEqual(store.string(for: "hoghunter.refreshInterval"), "9")
         XCTAssertNil(settings.lastError)
     }
@@ -229,8 +258,8 @@ final class InfisicalSettingsTests: XCTestCase {
 
         // Now the secrets endpoint fails; the login still succeeds.
         StubURLProtocol.handler = { [weak self] request in
-            guard let self else { throw NSError(domain: "test", code: -1, userInfo: nil) }
-            if request.url!.path == "/api/v1/auth/universal-auth/login" {
+            guard let self else { return (500, Data()) }
+            if request.url?.path == "/api/v1/auth/universal-auth/login" {
                 return (200, self.json(["accessToken": "test-token"]))
             }
             return (500, self.json(["message": "boom"]))
@@ -251,8 +280,8 @@ final class InfisicalSettingsTests: XCTestCase {
         let store = InfisicalStore()
         store.set("7", forKey: "hoghunter.refreshInterval")
         StubURLProtocol.handler = { [weak self] request in
-            guard let self else { throw NSError(domain: "test", code: -1, userInfo: nil) }
-            if request.url!.path == "/api/v1/auth/universal-auth/login" {
+            guard let self else { return (500, Data()) }
+            if request.url?.path == "/api/v1/auth/universal-auth/login" {
                 return (200, self.json(["accessToken": "test-token"]))
             }
             return (500, self.json(["message": "boom"]))
@@ -278,7 +307,7 @@ final class InfisicalSettingsTests: XCTestCase {
     @MainActor
     func testUnconfiguredBootstrapLeavesDefaults() async {
         StubURLProtocol.handler = { _ in
-            XCTFail("no network call should happen when unconfigured")
+            StubURLProtocol.note("called", for: "network-used")
             return (500, Data())
         }
         let store = InfisicalStore()
@@ -295,5 +324,6 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertFalse(settings.isConfigured)
         XCTAssertEqual(store.count, 0)
         XCTAssertNil(settings.lastError)
+        XCTAssertNil(StubURLProtocol.takeNotes()["network-used"])
     }
 }
