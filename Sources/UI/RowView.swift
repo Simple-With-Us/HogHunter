@@ -185,28 +185,16 @@ enum HogActions {
         NSWorkspace.shared.open(activityMonitorURL)
     }
 
-    /// Opens Settings, or brings the already-open Settings window forward.
+    /// Brings an already-open Settings window forward, or dismisses the menu
+    /// bar panel if there is nothing to bring forward.
     ///
-    /// `showSettingsWindow:` is the only way into a SwiftUI `Settings` scene
-    /// from code, and on an app whose activation policy flips between accessory
-    /// and regular it is a no-op when the window is already up: the second
-    /// click used to look like nothing had happened, with the window only
-    /// findable in the Dock.  So the window is matched by role afterwards and
-    /// ordered front, with the menu bar panel dismissed on the way so the two
-    /// are never stacked.  It is retried because the scene creates the window
-    /// asynchronously the first time.
-    @MainActor
-    static func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
-        for attempt in 0..<4 {
-            let delay = Double(attempt) * 0.1
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                frontSettingsWindow()
-            }
-        }
-    }
-
+    /// Opening Settings itself is *not* done here: it goes through SwiftUI's
+    /// `openSettings` environment action, which is the only supported way into
+    /// a `Settings` scene.  Sending `showSettingsWindow:` to `NSApp` by hand
+    /// looks equivalent and is not — it is silently dropped on this app, so
+    /// the gear button did nothing at all and there was no window anywhere to
+    /// find.  `Sources/App/UISmokeTest.swift` reproduces that failure and now
+    /// guards the fix.
     @MainActor
     static func frontSettingsWindow() {
         // The panel is only dismissed once there is a real window to put in
@@ -214,14 +202,28 @@ enum HogActions {
         // window would leave the user with nothing open at all.
         guard let window = AppActivationManager.shared.window(for: .settings)
                 ?? NSApp.windows.first(where: { $0.title.contains("Settings") && $0.styleMask.contains(.titled) }) else {
-            NSApp.activate(ignoringOtherApps: true)
             return
         }
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
         hidePanels()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
+        AppActivationManager.shared.updatePolicy()
+    }
+
+    /// Retries the "bring it forward" pass.  The scene builds its window
+    /// asynchronously the first time, so a single synchronous check gives up
+    /// before the window exists.
+    @MainActor
+    static func scheduleFrontSettingsWindow() {
+        for attempt in 0..<6 {
+            let delay = 0.08 + Double(attempt) * 0.12
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                frontSettingsWindow()
+            }
+        }
     }
 
     @MainActor

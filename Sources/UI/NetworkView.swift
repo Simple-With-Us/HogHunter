@@ -203,15 +203,40 @@ struct NetworkView: View {
         }
     }
 
+    /// What the two numbers on each row mean.  A bare "3/9" and "4 hosts" is
+    /// the same kind of noise as an unlabelled column of pids: correct, and
+    /// useless without the key.  This is the key, and it is a hover, so it
+    /// costs no vertical space on a panel that is already tall.
+    private var columnLegend: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+            Text("Connections column is established/open.  Hosts is distinct remote machines.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+        }
+        .help("Established / open sockets for the process, and how many distinct remote hosts it is talking to.  An app with a lot of hosts is usually a chat or sync client; one with many established sockets and no host variety is usually a local service or a stuck retry loop.")
+        .accessibilityElement(children: .combine)
+    }
+
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("The list below is an lsof snapshot of who holds which connection.  Bandwidth above is the whole machine, read from the kernel's interface counters.")
+        VStack(alignment: .leading, spacing: 4) {
+            columnLegend
+            Text("The list is an lsof snapshot of who is holding which connection, refreshed every 10 seconds.  The two cards above are the whole machine's bandwidth, read from the kernel's interface counters.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
+                // `maxWidth: .infinity` is load-bearing, not cosmetic: without
+                // it these long strings report their *unwrapped* width as their
+                // ideal size, and the whole Network tab measured 747 pt inside a
+                // 592 pt panel -- which is what made the window jump and crop
+                // for a second every time the tab was opened.
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("macOS has no public per-process byte counter.  For which app moved which bytes, use Activity Monitor's Network tab.")
+            Text("macOS publishes no per-process byte counter, so Hog Hunter cannot rank apps by bytes moved.  Activity Monitor's Network tab can — it uses private APIs.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -289,24 +314,33 @@ struct NetworkRowView: View {
         HStack(alignment: .center, spacing: 10) {
             iconView
                 .frame(width: 24, height: 24)
+            // A long hostname list under a process name is the widest thing in
+            // this row.  `lineLimit(1)` truncates it when it draws but still
+            // reports the full string as its ideal width, so without
+            // `maxWidth: .infinity` a row with a chat client in it stretches
+            // the whole tab.
             VStack(alignment: .leading, spacing: 2) {
                 Text(usage.name)
                     .font(.system(size: 12.5, weight: .medium))
                     .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text(usage.topRemoteHosts.prefix(3).joined(separator: ", "))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 1) {
                 Text("\(usage.establishedSockets)/\(usage.openSockets)")
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                Text("\(usage.remoteHostCount) hosts")
+                Text("\(usage.remoteHostCount) host\(usage.remoteHostCount == 1 ? "" : "s")")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
+            .help("\(usage.establishedSockets) established of \(usage.openSockets) open sockets, across \(usage.remoteHostCount) distinct remote hosts.")
+            .accessibilityElement(children: .combine)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

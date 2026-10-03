@@ -117,12 +117,17 @@ struct StorageView: View {
 
     private var appStorageControls: some View {
         HStack(spacing: 10) {
+            // `labelsHidden` is what was missing: the picker's "Filter" label
+            // was rendering inside a 140 pt control and wrapping mid-word as
+            // "Filt / er".  The segmented control only needs room for the two
+            // segments, so it now sizes to them.
             Picker("Filter", selection: $filter) {
                 Text("All").tag(StorageFilter.all)
                 Text("Running").tag(StorageFilter.running)
             }
             .pickerStyle(.segmented)
-            .frame(width: 140)
+            .labelsHidden()
+            .fixedSize()
 
             Spacer()
 
@@ -136,7 +141,9 @@ struct StorageView: View {
                     Text("Bundle").tag(StorageSort.bundle)
                 }
                 .pickerStyle(.menu)
-                .frame(width: 90)
+                // 90 pt truncated every option to "T…".  A menu style picker
+                // only needs room for the widest label plus the chevron.
+                .frame(width: 132)
             }
         }
     }

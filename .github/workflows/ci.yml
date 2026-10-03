@@ -54,6 +54,17 @@ jobs:
           xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
 
+      - name: Headless UI smoke test
+        run: |
+          set -o pipefail
+          xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build-ui \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
+          # Drives the real views and the real NSApp window list with nobody
+          # logged in, then exits non-zero on the first failed check.  This is
+          # the gate that was missing: Settings once failed to open at all and
+          # 147 unit tests were green.
+          "build-ui/Build/Products/Release/HogHunter.app/Contents/MacOS/HogHunter" -HogHunterUISmoke
+
       - name: Capture app screenshots
         if: always()
         run: bash scripts/capture-app-screenshots.sh

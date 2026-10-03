@@ -23,8 +23,11 @@ struct SettingsView: View {
             // button asking you to quit an app has no business hiding in.
             HStack {
                 Spacer(minLength: 0)
+                // No Cmd-Q here.  Claiming the app-wide quit shortcut inside a
+                // settings window silently swallows it everywhere else in the
+                // app, which is a much worse bug than the one it was papering
+                // over.
                 Button("Quit Hog Hunter") { NSApp.terminate(nil) }
-                    .keyboardShortcut("q", modifiers: .command)
                     .help("Quit Hog Hunter")
             }
             .padding(.horizontal, 16)

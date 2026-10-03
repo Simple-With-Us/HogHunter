@@ -167,9 +167,15 @@ struct DiskCleanerView: View {
                     Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                Spacer()
+                // The number a person actually weighs the decision against is
+                // not "13 GB is reclaimable" but "13 GB against how much room
+                // is left".  Without the volume side of that ratio the button
+                // is a leap of faith.
+                volumeGauge
+                    .frame(width: 152)
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
@@ -259,6 +265,40 @@ struct DiskCleanerView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         }
+    }
+
+    /// Free space on the startup volume, and how much of it this clean would
+    /// hand back.  `DiskSpace` is the same reading the panel's Storage card
+    /// uses, so the two can never disagree.
+    private var volumeGauge: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text("Startup Volume")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+            Text(volumeCaption)
+                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+            ProgressView(value: min(max(volumeUsedFraction, 0), 1))
+                .tint(Severity.forDisk(volumeUsedFraction).color)
+            Text(volumeDetail)
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+        .help("Reclaiming everything selected would take free space from this to the number below.  macOS counts purgeable space as available, so a healthy disk can look nearly full here and still be fine.")
+    }
+
+    private var volumeSpace: DiskSpace? { DiskSpace.current() }
+
+    private var volumeUsedFraction: Double { volumeSpace?.usedFraction ?? 0 }
+
+    private var volumeCaption: String {
+        guard let volumeSpace else { return "Reading…" }
+        return "\(HogFormat.memory(volumeSpace.freeBytes)) free"
+    }
+
+    private var volumeDetail: String {
+        guard let volumeSpace else { return "" }
+        let after = max(0, volumeSpace.freeBytes) + store.totalSelectedBytes()
+        return "→ \(HogFormat.memory(after)) of \(HogFormat.memory(volumeSpace.totalBytes))"
     }
 
     // MARK: - Content Body

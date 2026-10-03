@@ -14,6 +14,13 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Headless UI smoke test.  Runs before anything else touches the app so
+        // it is not racing the sampler, the bandwidth timer, or the screenshot
+        // hook.  See UISmokeTest for why this exists.
+        if ProcessInfo.processInfo.arguments.contains("-HogHunterUISmoke") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { UISmokeTest.run() }
+            return
+        }
         guard ProcessInfo.processInfo.arguments.contains("-HogHunterScreenshot") else { return }
         screenshotLog("flag seen; applicationDidFinishLaunching fired (isActive=\(NSApp.isActive))")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
