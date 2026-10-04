@@ -76,6 +76,12 @@ def test_find_output_keeps_a_newline_inside_a_path(hh):
     assert hh.split_find_output(b"\0\0") == []
 
 
+def test_report_path_stays_on_one_line(hh):
+    shown = hh.report_path("/tmp/has\nnewline.log")
+    assert shown == "/tmp/has\\nnewline.log"
+    assert "\n" not in shown
+
+
 def test_log_scan_skips_repo_trees(hh):
     """~/Code and ~/apps hold source checkouts, not rotatable daemon logs."""
     roots = {p.resolve() for p in hh.log_scan_roots()}
