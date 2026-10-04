@@ -65,6 +65,25 @@ def test_snapshot_derivation_is_lossless(hh):
         assert len(stamp) == len("2026-01-02-030405"), stamp
 
 
+def test_find_output_keeps_a_newline_inside_a_path(hh):
+    """find -print0 must not split a path that contains a newline.
+
+    A newline-split path would truncate or delete the wrong file.
+    """
+    raw = b"/tmp/plain.log\0/tmp/has\nnewline.log\0"
+    assert hh.split_find_output(raw) == ["/tmp/plain.log", "/tmp/has\nnewline.log"]
+    assert hh.split_find_output(b"") == []
+    assert hh.split_find_output(b"\0\0") == []
+
+
+def test_log_scan_skips_repo_trees(hh):
+    """~/Code and ~/apps hold source checkouts, not rotatable daemon logs."""
+    roots = {p.resolve() for p in hh.log_scan_roots()}
+    assert (hh.HOME / "Code").resolve() not in roots
+    assert (hh.HOME / "apps").resolve() not in roots
+    assert (hh.HOME / "Library/Logs").resolve() in roots
+
+
 def test_disk_bands(hh):
     """Band thresholds are what decide whether the semi-safe and expensive tiers
     open at all, so they are pinned here instead of left to drift with a
