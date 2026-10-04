@@ -1134,6 +1134,33 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteViewUpdate(req)
         }
+        
+        companionServer.onRemotePair = { [weak self] deviceName in
+            guard let self = self else {
+                return (500, Data())
+            }
+            var approved = false
+            let sema = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Pair Request"
+                alert.informativeText = "\(deviceName) wants to connect to Hog Hunter. Allow?"
+                alert.addButton(withTitle: "Allow")
+                alert.addButton(withTitle: "Deny")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    approved = true
+                }
+                sema.signal()
+            }
+            sema.wait()
+            if approved {
+                let json = "{\"token\":\"\(self.companionCode)\"}"
+                return (200, Data(json.utf8))
+            } else {
+                return (403, Data("{\"error\":\"Denied\"}".utf8))
+            }
+        }
     }
 
     private func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {

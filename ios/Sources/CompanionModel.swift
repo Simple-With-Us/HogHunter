@@ -45,6 +45,7 @@ final class CompanionModel {
     var isDemoMode = false
 
     var isRemoteSheetPresented = false
+    var showForgetConfirm = false
     var remoteHostDraft = ""
     var remotePortDraft = "24240"
     var remoteTokenDraft = ""

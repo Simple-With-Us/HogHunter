@@ -11,7 +11,8 @@ enum CompanionHTTP {
         quitHandler: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil,
         tameHandler: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
-        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
+        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
+        pairHandler: ((String) -> (status: Int, body: Data))? = nil
     ) -> Data {
         let text = String(data: request, encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
@@ -31,8 +32,24 @@ enum CompanionHTTP {
             || path == CompanionService.quitPath
             || path == CompanionService.tamePath
             || path == CompanionService.exclusionsPath
-            || path == CompanionService.viewPath else {
+            || path == CompanionService.viewPath
+            || path == CompanionService.pairPath else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
+        }
+
+        if path == CompanionService.pairPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            if let pairHandler = pairHandler {
+                // Extract device name from body if present
+                let requestBodyData = request.suffix(from: (text.components(separatedBy: "\r\n\r\n").first?.count ?? 0) + 4)
+                let deviceName = String(data: requestBodyData, encoding: .utf8) ?? "Unknown Device"
+                let res = pairHandler(deviceName)
+                return message(status: res.status, reason: res.status == 200 ? "OK" : "Forbidden", body: res.body)
+            } else {
+                return message(status: 403, reason: "Forbidden", body: Data("Pairing disabled".utf8))
+            }
         }
 
         let presented = bearerToken(in: lines)

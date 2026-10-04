@@ -71,12 +71,20 @@ struct CompanionRootView: View {
                     }
                     if model.saved != nil {
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button("Forget Mac") { model.forget() }
+                            Button { model.showForgetConfirm = true } label: {
+                                Image(systemName: "link.badge.minus")
+                            }
                         }
                     }
                 }
         }
         .onAppear { model.start() }
+        .alert("Forget Mac?", isPresented: $model.showForgetConfirm) {
+            Button("Forget", role: .destructive) { model.forget() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to forget this Mac?")
+        }
         .sheet(isPresented: codePresented) {
             CodeEntryView(model: model)
                 .presentationDetents([.medium])
@@ -283,6 +291,7 @@ struct DashboardView: View {
     @State private var lastQuitResult: CompanionQuitResponse?
     @State private var showQuitResultAlert = false
     @State private var showAddPathAlert = false
+    @State private var showForgetConfirm = false
     @State private var newPathInput = ""
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
@@ -544,7 +553,7 @@ struct DashboardView: View {
                             .foregroundStyle(rank <= 3 ? Color.orange : Color.secondary)
                             .frame(width: 26, alignment: .leading)
 
-                        Image(systemName: row.isApp ? "app.fill" : "gearshape")
+                        Image(systemName: row.isApp ? "app.fill" : "cpu")
                             .frame(width: 20)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)

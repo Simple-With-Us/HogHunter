@@ -194,9 +194,7 @@ struct HogHunterPanel: View {
             Image(nsImage: HogActions.activityMonitorIcon)
                 .resizable()
                 .interpolation(.high)
-                // 15 pt rendered as a dark unreadable blob next to a gear that
-                // is 17 pt.  Both buttons now read at the same size.
-                .frame(width: 19, height: 19)
+                .frame(width: 24, height: 24)
         }
         .buttonStyle(.borderless)
         .fixedSize()
@@ -211,6 +209,9 @@ struct HogHunterPanel: View {
         Button {
             if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
             NSApp.activate(ignoringOtherApps: true)
+            // openSettings() from Environment sometimes fails for accessory apps.
+            // sendAction is the robust fallback.
+            NSApp.sendAction(Selector("showSettingsWindow:"), to: nil, from: nil)
             openSettings()
             // The scene builds its window asynchronously, so the "already
             // open? come forward" pass has to be retried, not run once.

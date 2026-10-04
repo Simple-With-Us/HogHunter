@@ -10,6 +10,7 @@ enum CompanionService {
     static let tamePath = "/v1/tame"
     static let exclusionsPath = "/v1/exclusions"
     static let viewPath = "/v1/view"
+    static let pairPath = "/v1/pair"
     static let version = 1
 }
 

@@ -97,6 +97,7 @@ final class CompanionServer: @unchecked Sendable {
     var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil
     var onRemoteTame: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil
     var onRemoteExclusionsUpdate: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil
+    var onRemotePair: ((String) -> (status: Int, body: Data))? = nil
     var onRemoteViewUpdate: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
 
     private func receive(_ connection: NWConnection, buffer: Data) {
