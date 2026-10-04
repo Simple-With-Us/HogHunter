@@ -765,7 +765,18 @@ def find_paths(args: list[str], timeout: float) -> list[str]:
         capture_output=True,
         timeout=timeout,
     )
+    if res.returncode != 0:
+        # find exits non-zero when a directory is unreadable and still prints
+        # the paths it could read.  Keep those paths.  A rejected primary must
+        # not look like an empty tree.
+        err = res.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200]
+        log(f"find exited {res.returncode}: {err}")
     return split_find_output(res.stdout)
+
+
+def report_path(path: str) -> str:
+    """One report line per path.  A newline inside the path stays on that line."""
+    return path.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def log_scan_roots() -> list[Path]:
@@ -1230,7 +1241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[{marker}] {cat} — {len(items)} items, {total:.1f}M")
             for c in items[:6]:
                 flag = "x" if c.applied else ("E" if c.error else ("R" if c.tier == "ask-first" else " "))
-                print(f"    {flag} {c.mib:9.1f}M  {c.path}")
+                print(f"    {flag} {c.mib:9.1f}M  {report_path(c.path)}")
                 if c.error:
                     print(f"        error: {c.error}")
             if len(items) > 6:
