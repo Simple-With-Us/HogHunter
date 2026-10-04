@@ -152,7 +152,8 @@ def get_dir_size(path, file_cap=25000):
 def scan_user_caches():
     caches_dir = os.path.join(home, "Library/Caches")
     items = []
-    dev_names = {"Homebrew", "CocoaPods", "Yarn", "pnpm", "go-build", "pip", "com.apple.dt.Xcode"}
+    dev_names = {"Homebrew", "CocoaPods", "Yarn", "pnpm", "go-build", "pip", "com.apple.dt.Xcode",
+                 "dev.kdrag0n.MacVirt", "com.docker.docker"}
     if os.path.exists(caches_dir):
         for entry in os.listdir(caches_dir):
             if entry.startswith(".") or entry in dev_names:
@@ -215,6 +216,10 @@ def scan_developer():
         ("Gradle Caches", ".gradle/caches"),
         ("Cargo Registry Cache", ".cargo/registry/cache"),
         ("Go Build Cache", "Library/Caches/go-build"),
+        ("OrbStack Cache", "Library/Caches/dev.kdrag0n.MacVirt"),
+        ("OrbStack Engine Cache", "Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches"),
+        ("Docker Buildx Cache", ".docker/buildx/cache"),
+        ("Docker Desktop Cache", "Library/Caches/com.docker.docker"),
     ]
     for name, rel in targets:
         p = os.path.join(home, rel)

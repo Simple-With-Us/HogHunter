@@ -190,6 +190,15 @@ final class DiskCleanerTests: XCTestCase {
         let brewCacheURL = URL(fileURLWithPath: "\(home)/Library/Caches/Homebrew/downloads")
         XCTAssertTrue(cleaner.isSafeToDelete(url: brewCacheURL, category: .developer))
 
+        let orbstackCacheURL = URL(fileURLWithPath: "\(home)/Library/Caches/dev.kdrag0n.MacVirt/data")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: orbstackCacheURL, category: .developer))
+
+        let orbstackGroupCacheURL = URL(fileURLWithPath: "\(home)/Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches/data")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: orbstackGroupCacheURL, category: .developer))
+
+        let dockerBuildxURL = URL(fileURLWithPath: "\(home)/.docker/buildx/cache/cache.db")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: dockerBuildxURL, category: .developer))
+
         // Valid Orphaned Data
         let orphanContainerURL = URL(fileURLWithPath: "\(home)/Library/Containers/com.uninstalled.company.app")
         XCTAssertTrue(cleaner.isSafeToDelete(url: orphanContainerURL, category: .orphanedData))

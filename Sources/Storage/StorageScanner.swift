@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Reads the on-disk footprint of every installed app and groups the bytes
 /// by bundle id.  The scanner is intentionally pure: it takes its inputs
@@ -61,14 +62,23 @@ final class StorageScanner: @unchecked Sendable {
             seen[bundleId] = InstalledApp(bundleId: bundleId, name: bundleId, url: nil, groupContainers: [])
         }
 
+        var shared = ScanShared()
         return seen.values
             .sorted { lhs, rhs in lhs.idKey < rhs.idKey }
-            .map { app in scan(app: app, isRunning: app.bundleId.map { runningBundleIds.contains($0) } ?? false) }
+            .map { app in scan(app: app, isRunning: app.bundleId.map { runningBundleIds.contains($0) } ?? false, shared: &shared) }
     }
 
     /// Walks a single app's footprint and returns its rows.  Public so tests
     /// and on-demand refresh can target one app at a time.
     func scan(app: InstalledApp, isRunning: Bool) -> StorageUsage {
+        var shared = ScanShared()
+        return scan(app: app, isRunning: isRunning, shared: &shared)
+    }
+
+    /// Per-app scan sharing group-container ownership across one pass, so a
+    /// container claimed by an earlier app is neither re-walked nor
+    /// re-counted.
+    func scan(app: InstalledApp, isRunning: Bool, shared: inout ScanShared) -> StorageUsage {
         var slices: [StorageSlice] = []
 
         // The bundle itself, walked recursively.  An .app is a directory.
@@ -129,24 +139,50 @@ final class StorageScanner: @unchecked Sendable {
                 ))
             }
 
-            // Group containers — the bundle's Info.plist declares its
-            // `com.apple.security.application-groups` array.  Each entry is
-            // an App Group ID; the on-disk directory is usually
-            // `Library/Group Containers/<id>` but Apple Sandbox prepends the
-            // team ID, so we look up by both forms.
+            // Group containers — on macOS, App Groups are stored in `Library/Group Containers/`.
+            // The directory name is either the group ID directly, or prefixed with the Team ID (e.g. `<TeamID>.<groupID>`).
+            // We resolve known entitlements first, with fallback to bundle-ID suffix matching for sandboxed apps.
+            var checkedGroupContainerURLs: Set<URL> = []
+            let groupContainersBase = library.appendingPathComponent("Group Containers", isDirectory: true)
+
             for groupID in app.groupContainers {
-                for pathSuffix in [groupID, "<unknown>/\(groupID)"] {
-                    let url = library.appendingPathComponent("Group Containers/\(pathSuffix)", isDirectory: true)
-                    let (bytes, approx) = directoryBytes(at: url)
-                    guard bytes > 0 else { continue }
-                    slices.append(StorageSlice(
-                        category: .groupContainers,
-                        path: url.path,
-                        bytes: bytes,
-                        approximate: approx
-                    ))
-                    break
+                let directURL = groupContainersBase.appendingPathComponent(groupID, isDirectory: true)
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: directURL.path, isDirectory: &isDir), isDir.boolValue {
+                    checkedGroupContainerURLs.insert(directURL)
                 }
+            }
+
+            let candidateSuffixes = app.groupContainers + [app.bundleId].compactMap { $0 }
+            if !candidateSuffixes.isEmpty {
+                // The Group Containers directory is listed once per pass, not
+                // once per installed app.
+                if shared.groupContainersListing == nil {
+                    shared.groupContainersListing = try? fileManager.contentsOfDirectory(at: groupContainersBase, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+                }
+                if let contents = shared.groupContainersListing {
+                    for item in contents {
+                        let folderName = item.lastPathComponent
+                        for suffix in candidateSuffixes where !suffix.isEmpty {
+                            if folderName == suffix || folderName.hasSuffix("." + suffix) {
+                                var isDir: ObjCBool = false
+                                if fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
+                                    checkedGroupContainerURLs.insert(item)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A container shared by several apps (main app + helper/extension)
+            // is attributed to the first claimant only: no double-counting,
+            // and the tree is not re-walked for every claimant.
+            for url in checkedGroupContainerURLs where !shared.claimedGroupContainers.contains(url) {
+                shared.claimedGroupContainers.insert(url)
+                let (bytes, approx) = directoryBytes(at: url)
+                guard bytes > 0 else { continue }
+                slices.append(StorageSlice(category: .groupContainers, path: url.path, bytes: bytes, approximate: approx))
             }
         }
 
@@ -187,6 +223,17 @@ final class StorageScanner: @unchecked Sendable {
     }
 
     // MARK: - Discovery
+
+    /// Mutable state shared across the per-app scans of a single
+    /// `installedApps()` pass.  A group container owned by several apps
+    /// (main app + helper/extension declaring the same
+    /// `com.apple.security.application-groups`) is attributed to the first
+    /// claimant only, so its bytes are not counted once per app — and its
+    /// tree is not re-walked once per app either.
+    struct ScanShared {
+        var claimedGroupContainers = Set<URL>()
+        var groupContainersListing: [URL]?
+    }
 
     /// A bundle the scanner knows about, ready to be walked.
     struct InstalledApp: Hashable, Sendable {
@@ -242,9 +289,9 @@ final class StorageScanner: @unchecked Sendable {
         return out
     }
 
-    /// Reads `Info.plist` for the bundle id, display name, executable name,
-    /// and application-group identifiers.  Returns sensible fallbacks when
-    /// the plist is missing or the bundle is malformed.
+    /// Reads `Info.plist` and Mach-O code-signing entitlements for the bundle id,
+    /// display name, executable name, and application-group identifiers.  Returns
+    /// sensible fallbacks when the plist is missing or the bundle is malformed.
     func readInfo(at url: URL) -> (bundleId: String?, name: String, executable: String?, applicationGroups: [String]) {
         let infoURL = url.appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: infoURL),
@@ -260,8 +307,53 @@ final class StorageScanner: @unchecked Sendable {
             ?? (plist["CFBundleName"] as? String)
             ?? url.deletingPathExtension().lastPathComponent
         let executable = plist["CFBundleExecutable"] as? String
-        let groups = plist["com.apple.security.application-groups"] as? [String] ?? []
+
+        // When Info.plist already declares the groups, the code-signature
+        // parse below is skipped.  Otherwise the entitlements are read once
+        // per bundle URL and cached: readInfo runs once per app in
+        // installedApps() and again per app in DiskCleaner.scanOrphanedData,
+        // and the Sec* pair has no deadline of its own.
+        let groups: [String]
+        if let plistGroups = plist["com.apple.security.application-groups"] as? [String], !plistGroups.isEmpty {
+            groups = plistGroups
+        } else {
+            groups = Self.codeSignatureApplicationGroups(for: url)
+        }
+
         return (bundleId: bundleId, name: name, executable: executable, applicationGroups: groups)
+    }
+
+    /// Code-signing `com.apple.security.application-groups`, cached per bundle
+    /// URL so a full refresh does not re-parse every signature.
+    private static var codeSignatureGroupsCache: [URL: [String]] = [:]
+    private static let codeSignatureGroupsLock = NSLock()
+
+    private static func codeSignatureApplicationGroups(for url: URL) -> [String] {
+        codeSignatureGroupsLock.lock()
+        if let cached = codeSignatureGroupsCache[url] {
+            codeSignatureGroupsLock.unlock()
+            return cached
+        }
+        codeSignatureGroupsLock.unlock()
+
+        var groups: [String] = []
+        // On macOS, App Groups are code-signing entitlements embedded in the Mach-O binary
+        var staticCode: SecStaticCode?
+        if SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess,
+           let code = staticCode {
+            var info: CFDictionary?
+            if SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+               let dict = info as? [String: Any],
+               let entitlements = dict[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
+               let codeGroups = entitlements["com.apple.security.application-groups"] as? [String] {
+                groups.append(contentsOf: codeGroups)
+            }
+        }
+
+        codeSignatureGroupsLock.lock()
+        codeSignatureGroupsCache[url] = groups
+        codeSignatureGroupsLock.unlock()
+        return groups
     }
 
     // MARK: - Walking

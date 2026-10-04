@@ -427,7 +427,8 @@ final class DiskCleaner: @unchecked Sendable {
 
         // Developer package managers that live in Caches are attributed to Developer category instead
         let developerCacheNames: Set<String> = [
-            "Homebrew", "CocoaPods", "Yarn", "pnpm", "go-build", "pip", "com.apple.dt.Xcode"
+            "Homebrew", "CocoaPods", "Yarn", "pnpm", "go-build", "pip", "com.apple.dt.Xcode",
+            "dev.kdrag0n.MacVirt", "com.docker.docker"
         ]
 
         var items: [CleanItem] = []
@@ -582,7 +583,11 @@ final class DiskCleaner: @unchecked Sendable {
             ("CocoaPods Cache", "Library/Caches/CocoaPods", "CocoaPods dependency specifications and downloads"),
             ("Gradle Caches", ".gradle/caches", "Java and Kotlin Gradle dependency cache"),
             ("Cargo Registry Cache", ".cargo/registry/cache", "Rust Cargo crate registry cache"),
-            ("Go Build Cache", "Library/Caches/go-build", "Golang build compilation cache")
+            ("Go Build Cache", "Library/Caches/go-build", "Golang build compilation cache"),
+            ("OrbStack Cache", "Library/Caches/dev.kdrag0n.MacVirt", "OrbStack temporary and network caches"),
+            ("OrbStack Engine Cache", "Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches", "OrbStack container engine caches"),
+            ("Docker Buildx Cache", ".docker/buildx/cache", "Docker buildx local build cache"),
+            ("Docker Desktop Cache", "Library/Caches/com.docker.docker", "Docker desktop temporary cache")
         ]
 
         for target in targets {
@@ -1233,23 +1238,29 @@ final class DiskCleaner: @unchecked Sendable {
             return path.hasPrefix(trashPrefix) && path != trashPrefix
 
         case .developer:
+            // Stored without a trailing slash: `path` is standardized, so a
+            // trailing-slash prefix could never match the directory itself.
             let allowedDeveloperPrefixes = [
-                home + "/Library/Developer/Xcode/DerivedData/",
-                home + "/Library/Developer/Xcode/Archives/",
-                home + "/Library/Developer/Xcode/iOS DeviceSupport/",
-                home + "/Library/Developer/CoreSimulator/Caches/",
-                home + "/Library/Caches/Homebrew/",
-                home + "/.npm/_cacache/",
-                home + "/Library/Caches/Yarn/",
-                home + "/.cache/yarn/",
-                home + "/Library/Caches/pnpm/",
-                home + "/.local/share/pnpm/store/",
-                home + "/Library/Caches/CocoaPods/",
-                home + "/.gradle/caches/",
-                home + "/.cargo/registry/cache/",
-                home + "/Library/Caches/go-build/"
+                home + "/Library/Developer/Xcode/DerivedData",
+                home + "/Library/Developer/Xcode/Archives",
+                home + "/Library/Developer/Xcode/iOS DeviceSupport",
+                home + "/Library/Developer/CoreSimulator/Caches",
+                home + "/Library/Caches/Homebrew",
+                home + "/.npm/_cacache",
+                home + "/Library/Caches/Yarn",
+                home + "/.cache/yarn",
+                home + "/Library/Caches/pnpm",
+                home + "/.local/share/pnpm/store",
+                home + "/Library/Caches/CocoaPods",
+                home + "/.gradle/caches",
+                home + "/.cargo/registry/cache",
+                home + "/Library/Caches/go-build",
+                home + "/Library/Caches/dev.kdrag0n.MacVirt",
+                home + "/Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches",
+                home + "/.docker/buildx/cache",
+                home + "/Library/Caches/com.docker.docker"
             ]
-            return allowedDeveloperPrefixes.contains { path.hasPrefix($0) }
+            return allowedDeveloperPrefixes.contains { path == $0 || path.hasPrefix($0 + "/") }
 
         case .orphanedData:
             let allowedOrphanPrefixes = [
