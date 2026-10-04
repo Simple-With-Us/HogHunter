@@ -94,12 +94,14 @@ struct DiskCleanerView: View {
             Text("Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini/Grok/Codex, temporary update downloads, and large/old files.\nWhile git repositories and critical directories are strictly protected, local AI tools may need to re-download model caches, re-index workspaces, or re-authenticate ephemeral CLI sessions.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Toggle(isOn: $store.acknowledgedExtremeDisclaimer) {
                 Text("I understand this targets AI tool caches, orphaned app data, and older transcripts.")
                     .font(.system(size: 10, weight: .medium))
             }
             .toggleStyle(.checkbox)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
@@ -445,6 +447,7 @@ private struct CategoryCardView: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    .layoutPriority(1)
 
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -457,6 +460,7 @@ private struct CategoryCardView: View {
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
+                .layoutPriority(1)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -536,13 +540,13 @@ private struct CategoryCardView: View {
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
                 Text(item.subtitle)
-                    .font(.system(size: 9.5))
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let detail = item.detail {
                     Text(detail)
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
             }
