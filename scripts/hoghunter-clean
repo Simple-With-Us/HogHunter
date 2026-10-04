@@ -775,8 +775,21 @@ def find_paths(args: list[str], timeout: float) -> list[str]:
 
 
 def report_path(path: str) -> str:
-    """One report line per path.  A newline inside the path stays on that line."""
-    return path.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    """One report line per path.  Newlines and terminal controls stay visible as text."""
+    raw = path.encode("utf-8", "backslashreplace").decode("ascii")
+    out: list[str] = []
+    for ch in raw:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def log_scan_roots() -> list[Path]:
@@ -1243,7 +1256,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flag = "x" if c.applied else ("E" if c.error else ("R" if c.tier == "ask-first" else " "))
                 print(f"    {flag} {c.mib:9.1f}M  {report_path(c.path)}")
                 if c.error:
-                    print(f"        error: {c.error}")
+                    print(f"        error: {report_path(c.error)}")
             if len(items) > 6:
                 print(f"      ... and {len(items) - 6} more")
     return 0

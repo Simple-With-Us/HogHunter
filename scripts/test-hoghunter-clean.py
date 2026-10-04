@@ -80,6 +80,8 @@ def test_report_path_stays_on_one_line(hh):
     shown = hh.report_path("/tmp/has\nnewline.log")
     assert shown == "/tmp/has\\nnewline.log"
     assert "\n" not in shown
+    assert "\x1b" not in hh.report_path("/tmp/\x1b[2Jcleared")
+    assert "\n" not in hh.report_path("oops\npath")
 
 
 def test_log_scan_skips_repo_trees(hh):
