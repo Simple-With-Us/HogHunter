@@ -99,7 +99,7 @@ final class CleanRegimenRunner: ObservableObject {
     func isDue(regimen: CleanRegimen, lastRunAt: Date?) -> Bool {
         guard regimen.isEnabled else { return false }
         guard let lastRunAt else { return true }
-        return now().timeIntervalSince(lastRunAt) >= regimen.intervalHours * 3600
+        return now().timeIntervalSince(lastRunAt) >= regimen.effectiveIntervalHours * 3600
     }
 
     private func tick() {
@@ -115,7 +115,7 @@ final class CleanRegimenRunner: ObservableObject {
     private func updateNextRun(regimen: CleanRegimen, lastRunAt: Date?) {
         guard regimen.isEnabled else { nextRunDate = nil; return }
         let base = lastRunAt ?? now()
-        nextRunDate = base.addingTimeInterval(regimen.intervalHours * 3600)
+        nextRunDate = base.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
     }
 
     // MARK: - Running

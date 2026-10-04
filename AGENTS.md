@@ -38,6 +38,10 @@ Prefer `scripts/install.sh` over the manual steps above — it builds Release, s
 
 UI changes must be covered by automated visual verification where feasible: Playwright screenshot assertions for web surfaces, `xcrun simctl io booted screenshot` for iOS simulator. The owner never takes manual screenshots and does not run local UI preview sessions. Native Mac app UI is verified through code review and CI.
 
+## Infisical sole source of truth
+
+App-level settings (secrets, env config, tunable knobs) live in Infisical, not in code or config files.  The contract is [`INFISICAL.md`](INFISICAL.md) -- read it before touching any setting.  Implementation: `Sources/Infisical/InfisicalSettings.swift` (`InfisicalClient` for the REST API, `InfisicalStore` for the thread-safe in-memory cache, `InfisicalSettings` for bootstrap/refresh/write-through).  Rules: never fetch per-request (runtime reads come from `InfisicalStore.shared` only); refresh failures keep last-known-good; admin saves write through to Infisical first; no secret values in code, logs, PRs, or chat -- names only.  The Mac app owns the Infisical read (no backend exists); the local user is the admin and the credential lives in the Keychain, entered in Settings > Advanced.  The iOS companion never touches Infisical.  Per-user display/consent/device settings stay in UserDefaults -- the boundary is documented in INFISICAL.md.  Tests: `Tests/HogHunterTests/InfisicalSettingsTests.swift` (network fully stubbed).
+
 The iPhone app is `ios/Sources`, scheme `HogHunterIOS`.  It is a read-only viewer of the Mac snapshot over Bonjour (`_hoghunter._tcp`).  Share With iPhone is off until the owner turns it on in Mac Settings.  The pairing code is not advertised.  There is no quit route.  The owner authorized external TestFlight on 2026-09-27; see issue #22 and `docs/rollouts/2026-09-27-ios-testflight-readiness.md`.  Companion design: `docs/rollouts/2026-09-26-ios-companion.md`.
 
 No LaunchAgent.  The running menu bar app is the sampler.  History only covers time it has been open.

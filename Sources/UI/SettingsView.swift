@@ -81,6 +81,13 @@ struct SettingsView: View {
                     Label("About", systemImage: "info.circle")
                 }
                 .tag(SettingsTab.about)
+
+            AdvancedSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("Advanced", systemImage: "gearshape.2")
+                }
+                .tag(SettingsTab.advanced)
             }
             .padding(.top, 6)
         }
@@ -106,7 +113,7 @@ struct SettingsView: View {
 /// Selection identity for the Settings tabs.  Explicit rather than raw strings
 /// so the default tab is written once and cannot drift out of sync with a tab.
 enum SettingsTab: Hashable {
-    case general, alerts, startup, theme, iphone, about
+    case general, alerts, startup, theme, iphone, about, advanced
 }
 
 // MARK: - General Tab
@@ -543,3 +550,134 @@ private struct AlertsSection: View {
 }
 
 // MARK: - Window activation
+
+// MARK: - Advanced Tab
+
+/// The admin surface for the Infisical source of truth.  Hog Hunter is a
+/// single-user local app, so the local user IS the admin and this gate is
+/// that fact made visible, not a parallel auth system.  See INFISICAL.md.
+private struct AdvancedSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+    @ObservedObject private var infisical = InfisicalSettings.shared
+
+    @State private var clientId = ""
+    @State private var clientSecret = ""
+    @State private var notice: String?
+    @State private var isWorking = false
+
+    var body: some View {
+        Form {
+            Section("Infisical Settings Sync") {
+                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the Keychain, never in the app or its files.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text("Status")
+                    Spacer()
+                    Text(infisical.isConfigured ? "Configured" : "Not Configured")
+                        .foregroundStyle(infisical.isConfigured ? .green : .secondary)
+                }
+                if let last = infisical.lastRefresh {
+                    HStack {
+                        Text("Last Sync")
+                        Spacer()
+                        Text(last, style: .relative)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let error = infisical.lastError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let notice {
+                    Text(notice)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Section("Credential") {
+                TextField("Client ID", text: $clientId)
+                SecureField("Client Secret", text: $clientSecret)
+                HStack {
+                    Button("Save to Keychain") { saveCredential() }
+                        .disabled(clientId.isEmpty || clientSecret.isEmpty || isWorking)
+                    Button("Clear") { clearCredential() }
+                        .disabled(!infisical.isConfigured || isWorking)
+                    Spacer()
+                    Button("Sync Now") { syncNow() }
+                        .disabled(!infisical.isConfigured || infisical.isRefreshing)
+                }
+            }
+
+            Section("Seed") {
+                Text("Push the current local values of the migrated settings to Infisical.  Secrets are never pushed from here; fill those in the Infisical dashboard.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Push Current Values to Infisical") { pushCurrent() }
+                    .disabled(!infisical.isConfigured || isWorking)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsView.windowWidth - 80)
+    }
+
+    private func saveCredential() {
+        notice = nil
+        isWorking = true
+        Task { @MainActor in
+            defer { isWorking = false }
+            do {
+                try infisical.saveCredential(clientId: clientId, clientSecret: clientSecret)
+                clientSecret = ""
+                await infisical.refresh()
+                notice = "Credential saved to the Keychain."
+            } catch {
+                notice = "Save failed: \(error)"
+            }
+        }
+    }
+
+    private func clearCredential() {
+        infisical.clearCredential()
+        clientId = ""
+        clientSecret = ""
+        notice = "Credential removed.  Local defaults stand until a credential is saved again."
+    }
+
+    private func syncNow() {
+        Task { @MainActor in
+            await infisical.refresh()
+        }
+    }
+
+    private func pushCurrent() {
+        notice = nil
+        isWorking = true
+        Task { @MainActor in
+            defer { isWorking = false }
+            do {
+                // Live values for the knobs the store owns; shipped defaults
+                // for the rest.  alertWebhookURL is a secret and is never
+                // pushed from here.
+                var values = InfisicalDefaults.values
+                values[InfisicalKey.refreshInterval] = String(store.refreshInterval)
+                values[InfisicalKey.alertThresholdPercent] = String(store.alertThresholdPercent)
+                values[InfisicalKey.alertSustainedMinutes] = String(store.alertSustainedMinutes)
+                for (key, value) in values {
+                    try await infisical.set(value, forKey: key)
+                }
+                await infisical.refresh()
+                notice = "Pushed \(values.count) settings to Infisical."
+            } catch {
+                notice = "Push failed: \(error)"
+            }
+        }
+    }
+}
