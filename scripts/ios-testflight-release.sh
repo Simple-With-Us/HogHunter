@@ -115,6 +115,13 @@ if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
     echo 'error: altool output reports upload failure' >&2
     exit 1
   fi
+  # A zero altool exit with no failure tokens is not proof of delivery
+  # (unrecognized transporter errors, truncated/empty capture, or benign
+  # ITMS- warnings would all pass).  Require the positive success marker.
+  if ! grep -q 'success-message' "$work_dir/upload-result.txt"; then
+    echo 'error: altool did not report an unambiguous success' >&2
+    exit 1
+  fi
   result='Upload command succeeded.  Confirm Apple processing, the build identity, and beta review separately before sharing an install link.'
 else
   result='Archive and export validated.  Upload was disabled for this manual run.'
