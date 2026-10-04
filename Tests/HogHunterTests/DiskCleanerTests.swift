@@ -237,4 +237,38 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertEqual(result.itemsRemoved, 42)
         XCTAssertTrue(result.errors.isEmpty)
     }
+
+    func testCleanDeletesNothingWhenTheSnapshotFails() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hoghunter-snapshot-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: file)
+
+        let home = NSHomeDirectory()
+        let caches = URL(fileURLWithPath: home + "/Library/Caches/HogHunterTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: caches, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: caches) }
+        let cacheFile = caches.appendingPathComponent("cache.bin")
+        try Data("cache".utf8).write(to: cacheFile)
+
+        let cleaner = DiskCleaner(makeSnapshot: { (false, nil) })
+        let item = CleanItem(
+            category: .userCaches,
+            title: "cache.bin",
+            subtitle: cacheFile.path,
+            url: cacheFile,
+            bytes: 5,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let result = await cleaner.clean(items: [item], createSnapshot: true)
+        XCTAssertEqual(result.itemsRemoved, 0)
+        XCTAssertTrue(result.errors.contains { $0.contains("Nothing was deleted") })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
 }

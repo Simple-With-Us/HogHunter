@@ -282,15 +282,33 @@ enum CompanionHTTP {
     }
 
     /// Status code and body from a complete HTTP/1.1 response.  Nil when the
-    /// bytes are not a response yet.
+    /// bytes are not a response yet.  A buffer that contains the header break
+    /// but fewer body bytes than `Content-Length` is still incomplete: the
+    /// first TCP segment of a snapshot often ends there, and treating it as
+    /// the whole reply makes the phone fail pairing.
     static func parseResponse(_ data: Data) -> (status: Int, body: Data)? {
         guard let range = data.range(of: Data("\r\n\r\n".utf8)) else { return nil }
         let head = data.subdata(in: data.startIndex..<range.lowerBound)
-        let body = data.subdata(in: range.upperBound..<data.endIndex)
+        let rawBody = data.subdata(in: range.upperBound..<data.endIndex)
         guard let text = String(data: head, encoding: .isoLatin1) else { return nil }
-        let statusLine = text.components(separatedBy: "\r\n").first ?? ""
+        let lines = text.components(separatedBy: "\r\n")
+        let statusLine = lines.first ?? ""
         let pieces = statusLine.split(separator: " ")
         guard pieces.count >= 2, let status = Int(pieces[1]) else { return nil }
+        var declaredLength: Int?
+        for line in lines.dropFirst() {
+            let halves = line.split(separator: ":", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+            guard halves.count == 2, halves[0].caseInsensitiveCompare("Content-Length") == .orderedSame else { continue }
+            declaredLength = Int(halves[1])
+            break
+        }
+        let body: Data
+        if let declaredLength {
+            guard declaredLength >= 0, rawBody.count >= declaredLength else { return nil }
+            body = rawBody.prefix(declaredLength)
+        } else {
+            body = rawBody
+        }
         return (status, body)
     }
 

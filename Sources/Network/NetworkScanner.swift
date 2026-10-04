@@ -84,7 +84,7 @@ final class NetworkScanner: @unchecked Sendable {
         } catch LsofError.binaryMissing(let path) {
             return .unavailable(reason: "lsof binary missing at \(path).")
         } catch LsofError.denied(let message) {
-            return .unavailable(reason: "lsof denied: \(message). Grant Full Disk Access to HogHunter.")
+            return .unavailable(reason: "lsof denied: \(message). Grant Full Disk Access to Hog Hunter.")
         } catch {
             return .unavailable(reason: "\(error)")
         }
