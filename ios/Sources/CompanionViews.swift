@@ -411,6 +411,12 @@ struct DashboardView: View {
     @State private var pendingSampleRow: CompanionRow?
     @State private var showSampleConfirm = false
 
+    private func consumeCleanRequest() {
+        guard model.showCleanDialogRequested else { return }
+        showCleanConfirm = true
+        model.showCleanDialogRequested = false
+    }
+
     private func confirmQuit(row: CompanionRow, force: Bool) {
         pendingQuitRow = row
         isForceQuit = force
@@ -639,11 +645,9 @@ struct DashboardView: View {
         } message: {
             Text(model.controlError ?? "")
         }
-        .onChange(of: model.showCleanDialogRequested) { _, requested in
-            if requested {
-                showCleanConfirm = true
-                model.showCleanDialogRequested = false
-            }
+        .onAppear { consumeCleanRequest() }
+        .onChange(of: model.showCleanDialogRequested) { _, _ in
+            consumeCleanRequest()
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
