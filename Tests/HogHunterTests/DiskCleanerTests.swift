@@ -19,6 +19,24 @@ final class DiskCleanerTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSharedVendorFoldersAreNotOrphans() {
+        for name in ["Google", "Mozilla", "Microsoft", "MobileSync", "CrashReporter", "  google  "] {
+            XCTAssertTrue(DiskCleaner.isSharedVendorContainer(name), name)
+        }
+        XCTAssertFalse(DiskCleaner.isSharedVendorContainer("com.removed.App"))
+        XCTAssertFalse(DiskCleaner.isSharedVendorContainer("SomeUninstalledApp"))
+        XCTAssertTrue(DiskCleaner.holdsInstalledProduct(
+            childNames: ["Chrome"],
+            knownBundleIds: ["com.google.chrome"],
+            knownNames: ["chrome", "google chrome"]
+        ))
+        XCTAssertFalse(DiskCleaner.holdsInstalledProduct(
+            childNames: ["OldProduct"],
+            knownBundleIds: ["com.google.chrome"],
+            knownNames: ["chrome"]
+        ))
+    }
+
     // MARK: - Category Metadata Tests
 
     func testCategoryMetadata() {

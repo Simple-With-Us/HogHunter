@@ -947,7 +947,10 @@ final class DiskCleaner: @unchecked Sendable {
                     if Task.isCancelled { break }
                     let name = url.lastPathComponent
                     if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
+                    if Self.isSharedVendorContainer(name) { continue }
                     if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
+                    let childNames = (try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.map(\.lastPathComponent) ?? []
+                    if Self.holdsInstalledProduct(childNames: childNames, knownBundleIds: knownBundleIds, knownNames: knownNames) { continue }
 
                     let stats = directoryStats(at: url)
                     guard stats.bytes > 0 else { continue }
@@ -1740,6 +1743,23 @@ final class DiskCleaner: @unchecked Sendable {
             "/library/saved application state/com.jayservices.hoghunter"
         ]
         return markers.contains { lower.contains($0) }
+    }
+
+    /// Shared vendor folders hold several live products.  They are not one uninstalled app.
+    static func isSharedVendorContainer(_ name: String) -> Bool {
+        let shared: Set<String> = [
+            "google", "mozilla", "microsoft", "mobilesync", "crashreporter"
+        ]
+        return shared.contains(name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    /// True when a folder still contains a product that is installed.
+    static func holdsInstalledProduct(childNames: [String], knownBundleIds: Set<String>, knownNames: Set<String>) -> Bool {
+        for child in childNames {
+            let lower = child.lowercased()
+            if knownBundleIds.contains(lower) || knownNames.contains(lower) { return true }
+        }
+        return false
     }
 
     private func isAppleOrSystemFolder(_ name: String) -> Bool {
