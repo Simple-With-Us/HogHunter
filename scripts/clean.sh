@@ -215,6 +215,10 @@ def scan_developer():
         ("Gradle Caches", ".gradle/caches"),
         ("Cargo Registry Cache", ".cargo/registry/cache"),
         ("Go Build Cache", "Library/Caches/go-build"),
+        ("OrbStack Cache", "Library/Caches/dev.kdrag0n.MacVirt"),
+        ("OrbStack Engine Cache", "Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches"),
+        ("Docker Buildx Cache", ".docker/buildx/cache"),
+        ("Docker Desktop Cache", "Library/Caches/com.docker.docker"),
     ]
     for name, rel in targets:
         p = os.path.join(home, rel)

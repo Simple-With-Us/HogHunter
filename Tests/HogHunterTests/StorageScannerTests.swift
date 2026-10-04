@@ -44,6 +44,14 @@ final class StorageScannerTests: XCTestCase {
         XCTAssertEqual(info.applicationGroups, ["group.com.example.shared"])
     }
 
+    func testReadInfoExtractsCodeSignatureEntitlementsWhenSignedAppExists() {
+        let orbURL = URL(fileURLWithPath: "/Applications/OrbStack.app")
+        guard FileManager.default.fileExists(atPath: orbURL.path) else { return }
+        let info = scanner.readInfo(at: orbURL)
+        XCTAssertEqual(info.name, "OrbStack")
+        XCTAssertTrue(info.applicationGroups.contains("HUAQ24HBR6.dev.orbstack"))
+    }
+
     func testReadInfoFallsBackToBundleNameWhenDisplayNameMissing() throws {
         let appURL = try makeApp(
             under: tempHome.appendingPathComponent("Foo.app"),

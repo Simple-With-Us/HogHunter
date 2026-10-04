@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Reads the on-disk footprint of every installed app and groups the bytes
 /// by bundle id.  The scanner is intentionally pure: it takes its inputs
@@ -129,24 +130,39 @@ final class StorageScanner: @unchecked Sendable {
                 ))
             }
 
-            // Group containers — the bundle's Info.plist declares its
-            // `com.apple.security.application-groups` array.  Each entry is
-            // an App Group ID; the on-disk directory is usually
-            // `Library/Group Containers/<id>` but Apple Sandbox prepends the
-            // team ID, so we look up by both forms.
+            // Group containers — on macOS, App Groups are stored in `Library/Group Containers/`.
+            // The directory name is either the group ID directly, or prefixed with the Team ID (e.g. `<TeamID>.<groupID>`).
+            // We resolve known entitlements first, with fallback to bundle-ID suffix matching for sandboxed apps.
+            var checkedGroupContainerURLs: Set<URL> = []
+            let groupContainersBase = library.appendingPathComponent("Group Containers", isDirectory: true)
+
             for groupID in app.groupContainers {
-                for pathSuffix in [groupID, "<unknown>/\(groupID)"] {
-                    let url = library.appendingPathComponent("Group Containers/\(pathSuffix)", isDirectory: true)
-                    let (bytes, approx) = directoryBytes(at: url)
-                    guard bytes > 0 else { continue }
-                    slices.append(StorageSlice(
-                        category: .groupContainers,
-                        path: url.path,
-                        bytes: bytes,
-                        approximate: approx
-                    ))
-                    break
+                let directURL = groupContainersBase.appendingPathComponent(groupID, isDirectory: true)
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: directURL.path, isDirectory: &isDir), isDir.boolValue {
+                    checkedGroupContainerURLs.insert(directURL)
                 }
+            }
+
+            let candidateSuffixes = app.groupContainers + [app.bundleId].compactMap { $0 }
+            if !candidateSuffixes.isEmpty, let contents = try? fileManager.contentsOfDirectory(at: groupContainersBase, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for item in contents {
+                    let folderName = item.lastPathComponent
+                    for suffix in candidateSuffixes where !suffix.isEmpty {
+                        if folderName == suffix || folderName.hasSuffix("." + suffix) {
+                            var isDir: ObjCBool = false
+                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
+                                checkedGroupContainerURLs.insert(item)
+                            }
+                        }
+                    }
+                }
+            }
+
+            for url in checkedGroupContainerURLs {
+                let (bytes, approx) = directoryBytes(at: url)
+                guard bytes > 0 else { continue }
+                slices.append(StorageSlice(category: .groupContainers, path: url.path, bytes: bytes, approximate: approx))
             }
         }
 
@@ -242,9 +258,9 @@ final class StorageScanner: @unchecked Sendable {
         return out
     }
 
-    /// Reads `Info.plist` for the bundle id, display name, executable name,
-    /// and application-group identifiers.  Returns sensible fallbacks when
-    /// the plist is missing or the bundle is malformed.
+    /// Reads `Info.plist` and Mach-O code-signing entitlements for the bundle id,
+    /// display name, executable name, and application-group identifiers.  Returns
+    /// sensible fallbacks when the plist is missing or the bundle is malformed.
     func readInfo(at url: URL) -> (bundleId: String?, name: String, executable: String?, applicationGroups: [String]) {
         let infoURL = url.appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: infoURL),
@@ -260,7 +276,27 @@ final class StorageScanner: @unchecked Sendable {
             ?? (plist["CFBundleName"] as? String)
             ?? url.deletingPathExtension().lastPathComponent
         let executable = plist["CFBundleExecutable"] as? String
-        let groups = plist["com.apple.security.application-groups"] as? [String] ?? []
+
+        var groups: [String] = []
+        // On macOS, App Groups are code-signing entitlements embedded in the Mach-O binary
+        var staticCode: SecStaticCode?
+        if SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess,
+           let code = staticCode {
+            var info: CFDictionary?
+            if SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+               let dict = info as? [String: Any],
+               let entitlements = dict[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
+               let codeGroups = entitlements["com.apple.security.application-groups"] as? [String] {
+                groups.append(contentsOf: codeGroups)
+            }
+        }
+        // Augment or fallback from Info.plist
+        if let plistGroups = plist["com.apple.security.application-groups"] as? [String] {
+            for g in plistGroups where !groups.contains(g) {
+                groups.append(g)
+            }
+        }
+
         return (bundleId: bundleId, name: name, executable: executable, applicationGroups: groups)
     }
 

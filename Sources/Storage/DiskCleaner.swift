@@ -582,7 +582,11 @@ final class DiskCleaner: @unchecked Sendable {
             ("CocoaPods Cache", "Library/Caches/CocoaPods", "CocoaPods dependency specifications and downloads"),
             ("Gradle Caches", ".gradle/caches", "Java and Kotlin Gradle dependency cache"),
             ("Cargo Registry Cache", ".cargo/registry/cache", "Rust Cargo crate registry cache"),
-            ("Go Build Cache", "Library/Caches/go-build", "Golang build compilation cache")
+            ("Go Build Cache", "Library/Caches/go-build", "Golang build compilation cache"),
+            ("OrbStack Cache", "Library/Caches/dev.kdrag0n.MacVirt", "OrbStack temporary and network caches"),
+            ("OrbStack Engine Cache", "Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches", "OrbStack container engine caches"),
+            ("Docker Buildx Cache", ".docker/buildx/cache", "Docker buildx local build cache"),
+            ("Docker Desktop Cache", "Library/Caches/com.docker.docker", "Docker desktop temporary cache")
         ]
 
         for target in targets {
@@ -1247,7 +1251,11 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Library/Caches/CocoaPods/",
                 home + "/.gradle/caches/",
                 home + "/.cargo/registry/cache/",
-                home + "/Library/Caches/go-build/"
+                home + "/Library/Caches/go-build/",
+                home + "/Library/Caches/dev.kdrag0n.MacVirt/",
+                home + "/Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches/",
+                home + "/.docker/buildx/cache/",
+                home + "/Library/Caches/com.docker.docker/"
             ]
             return allowedDeveloperPrefixes.contains { path.hasPrefix($0) }
 
