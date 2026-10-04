@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Observation
+import UIKit
 
 struct SavedMac: Codable, Equatable {
     var peerID: String
@@ -343,9 +344,11 @@ final class CompanionModel {
         }
         let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 24240
         let token = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
-        guard token.count >= 8 else {
-            remoteConnectError = "Enter the 8 character pairing code from Mac Settings."
-            return
+        if !token.isEmpty {
+            guard token.count >= 8 else {
+                remoteConnectError = "Enter the 8 character pairing code from Mac Settings."
+                return
+            }
         }
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(portNum)) else {
             remoteConnectError = "Invalid port number."
@@ -357,12 +360,28 @@ final class CompanionModel {
         defer { isConnectingRemote = false }
 
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
+        // No code typed: ask the Mac owner to approve pairing instead of
+        // requiring the 8-character code up front.
+        let actualToken: String
+        if token.isEmpty {
+            do {
+                actualToken = try await CompanionConnection.requestPair(endpoint: endpoint, deviceName: UIDevice.current.name)
+            } catch CompanionClientError.unauthorized {
+                remoteConnectError = "The Mac denied the pairing request."
+                return
+            } catch {
+                remoteConnectError = "Pairing failed. Check that Hog Hunter is running on the Mac and approve the request there."
+                return
+            }
+        } else {
+            actualToken = token
+        }
         do {
-            let fetched = try await Self.fetch(endpoint: endpoint, token: token)
+            let fetched = try await Self.fetch(endpoint: endpoint, token: actualToken)
             let trimmedName = remoteNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayName = trimmedName.isEmpty ? fetched.hostName : trimmedName
             let peerID = "remote-\(host):\(portNum)"
-            saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: portNum)
+            saved = SavedMac(peerID: peerID, name: displayName, token: actualToken, remoteHost: host, remotePort: portNum)
             persistSaved()
             snapshot = fetched
             phase = .live

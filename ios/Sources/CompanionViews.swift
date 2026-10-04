@@ -74,6 +74,7 @@ struct CompanionRootView: View {
                             Button { model.showForgetConfirm = true } label: {
                                 Image(systemName: "link.badge.minus")
                             }
+                            .accessibilityLabel("Forget Mac")
                         }
                     }
                 }

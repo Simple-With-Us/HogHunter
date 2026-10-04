@@ -1153,8 +1153,13 @@ final class HogStore: ObservableObject {
                 }
                 sema.signal()
             }
-            sema.wait()
-            if approved {
+            // Bound the wait: /v1/pair is unauthenticated, so an unbounded
+            // wait lets any host stall the serial companion queue behind an
+            // open dialog for as long as the owner takes to dismiss it.
+            // `approved` is only read when the wait succeeded, which gives a
+            // happens-before edge from the main-queue write.
+            let answered = sema.wait(timeout: .now() + 120) == .success
+            if answered, approved {
                 let json = "{\"token\":\"\(self.companionCode)\"}"
                 return (200, Data(json.utf8))
             } else {

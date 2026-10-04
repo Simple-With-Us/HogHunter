@@ -36,7 +36,7 @@ new_content = content.replace(
             }
             sema.wait()
             if approved {
-                let json = "{\\"token\\":\\"\\(self.pairingToken)\\"}"
+                let json = "{\\"token\\":\\"\\(self.companionCode)\\"}"
                 return (200, Data(json.utf8))
             } else {
                 return (403, Data("{\\"error\\":\\"Denied\\"}".utf8))

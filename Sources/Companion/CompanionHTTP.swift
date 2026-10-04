@@ -42,9 +42,17 @@ enum CompanionHTTP {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
             }
             if let pairHandler = pairHandler {
-                // Extract device name from body if present
-                let requestBodyData = request.suffix(from: (text.components(separatedBy: "\r\n\r\n").first?.count ?? 0) + 4)
-                let deviceName = String(data: requestBodyData, encoding: .utf8) ?? "Unknown Device"
+                // Extract device name from body if present.  A request
+                // without a header/body separator must not trap in
+                // suffix(from:); it simply has no device name.
+                let deviceName: String
+                if let range = request.range(of: Data("\r\n\r\n".utf8)) {
+                    let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
+                    let parsed = String(data: bodyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    deviceName = parsed.isEmpty ? "Unknown Device" : String(parsed.prefix(64))
+                } else {
+                    deviceName = "Unknown Device"
+                }
                 let res = pairHandler(deviceName)
                 return message(status: res.status, reason: res.status == 200 ? "OK" : "Forbidden", body: res.body)
             } else {
@@ -252,6 +260,19 @@ enum CompanionHTTP {
             "",
         ]
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    static func pairRequest(deviceName: String) -> Data {
+        let body = Data(deviceName.utf8)
+        let lines = [
+            "POST \(CompanionService.pairPath) HTTP/1.1",
+            "Host: hoghunter",
+            "Content-Type: text/plain; charset=utf-8",
+            "Content-Length: \(body.count)",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8) + body
     }
 
     static func queryAllowedValue(_ value: String) -> String {

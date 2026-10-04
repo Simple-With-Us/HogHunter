@@ -159,6 +159,13 @@ final class CompanionServer: @unchecked Sendable {
                             return handler(req)
                         }
                         return (501, Data("{\"error\": \"View handler not configured\"}".utf8))
+                    },
+                    pairHandler: { [weak self] deviceName in
+                        guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                        if let handler = self.onRemotePair {
+                            return handler(deviceName)
+                        }
+                        return (501, Data("{\"error\": \"Pair handler not configured\"}".utf8))
                     }
                 )
                 connection.send(content: response, completion: .contentProcessed { _ in

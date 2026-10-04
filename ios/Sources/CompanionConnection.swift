@@ -4,32 +4,38 @@ import Network
 /// One HTTP GET over the Bonjour endpoint the browser already resolved.
 enum CompanionConnection {
     static func requestPair(endpoint: NWEndpoint, deviceName: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let connection = NWConnection(to: endpoint, using: .tcp)
-            let reader = PairResponseReader()
-            reader.continuation = continuation
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    let req = CompanionHTTP.request(method: "POST", path: CompanionService.pairPath, token: "", body: Data(deviceName.utf8))
-                    connection.send(content: req, completion: .contentProcessed { error in
-                        if let error {
-                            reader.fail(error)
-                            connection.cancel()
-                        } else {
-                            receivePair(connection, reader: reader, buffer: Data())
-                        }
-                    })
-                case .failed(let error):
-                    reader.fail(error)
-                case .cancelled:
-                    reader.fail(CompanionClientError.timedOut)
-                default:
-                    break
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = PairResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let req = CompanionHTTP.pairRequest(deviceName: deviceName)
+                        connection.send(content: req, completion: .contentProcessed { error in
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            } else {
+                                receivePair(connection, reader: reader, buffer: Data())
+                            }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                    case .waiting(let error):
+                        reader.fail(error)
+                    case .cancelled:
+                        reader.fail(CompanionClientError.timedOut)
+                    default:
+                        break
+                    }
                 }
+                connection.start(queue: .global())
             }
-            connection.start(queue: .global())
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
         }
     }
 
