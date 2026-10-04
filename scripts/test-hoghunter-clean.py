@@ -82,6 +82,11 @@ def test_report_path_stays_on_one_line(hh):
     assert "\n" not in shown
     assert "\x1b" not in hh.report_path("/tmp/\x1b[2Jcleared")
     assert "\n" not in hh.report_path("oops\npath")
+    # Printable non-ASCII must not crash the report or get mangled.
+    assert hh.report_path("/tmp/caf\u00e9.log") == "/tmp/caf\u00e9.log"
+    assert hh.report_path("/tmp/\u65e5\u672c\u8a9e.log") == "/tmp/\u65e5\u672c\u8a9e.log"
+    # Lone surrogates from os.fsdecode become visible \udcXX text, not a crash.
+    assert "\\udc80" in hh.report_path("/tmp/\udc80odd.log")
 
 
 def test_log_scan_skips_repo_trees(hh):

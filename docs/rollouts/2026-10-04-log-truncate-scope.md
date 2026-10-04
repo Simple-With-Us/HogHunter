@@ -17,7 +17,7 @@ Effort row: `grok-build/hh-log-truncate`, issue #66, pull request #70.  State st
 
 Log scans now cover `~/Library/Logs` and `~/.botfleet` only.  Path listings use `find -print0`.  Temp-scratch and SQLite WAL scans use the same splitter.  Deletes still use `find -depth -delete` and do not parse a path list.  A non-zero `find` is logged and the paths it did print are kept.  The human report escapes newlines so one candidate stays one line.  The path passed to truncate or delete is unchanged.
 
-## Decisions and trade-offs
+## Decisions & Trade-offs
 
 Repo checkouts are out of the default log scan.  A huge build log under `~/Code` will not be tail-truncated by the safe tier.  An operator who wants that file shrunk does it on purpose.  `~/.botfleet` stays in the scan because that tree is the housekeeper's own log, not a source checkout.
 
@@ -25,7 +25,7 @@ Repo checkouts are out of the default log scan.  A huge build log under `~/Code`
 
 ## Verification
 
-`python3 scripts/test-hoghunter-clean.py`.
+`python3 scripts/test-hoghunter-clean.py` — 6/6 passed (2026-10-04), covering the newline-in-path splitter, the one-line report escaping (including non-ASCII and lone-surrogate paths), and the repo-tree exclusion.
 
 ## Not in this pull request
 

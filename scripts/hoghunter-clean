@@ -776,9 +776,8 @@ def find_paths(args: list[str], timeout: float) -> list[str]:
 
 def report_path(path: str) -> str:
     """One report line per path.  Newlines and terminal controls stay visible as text."""
-    raw = path.encode("utf-8", "backslashreplace").decode("ascii")
     out: list[str] = []
-    for ch in raw:
+    for ch in path:
         if ch == "\\":
             out.append("\\\\")
         elif ch == "\n":
@@ -788,7 +787,10 @@ def report_path(path: str) -> str:
         elif ch < " " or ch == "\x7f":
             out.append(f"\\x{ord(ch):02x}")
         else:
-            out.append(ch)
+            # Printable non-ASCII (caf\u00e9, \u65e5\u672c\u8a9e) passes through unchanged;
+            # lone surrogates from os.fsdecode become visible \udcXX text instead
+            # of raising UnicodeEncodeError on the way to stdout.
+            out.append(ch.encode("utf-8", "backslashreplace").decode("utf-8"))
     return "".join(out)
 
 
