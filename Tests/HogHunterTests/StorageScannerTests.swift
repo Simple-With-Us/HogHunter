@@ -44,12 +44,18 @@ final class StorageScannerTests: XCTestCase {
         XCTAssertEqual(info.applicationGroups, ["group.com.example.shared"])
     }
 
-    func testReadInfoExtractsCodeSignatureEntitlementsWhenSignedAppExists() {
-        let orbURL = URL(fileURLWithPath: "/Applications/OrbStack.app")
-        guard FileManager.default.fileExists(atPath: orbURL.path) else { return }
-        let info = scanner.readInfo(at: orbURL)
-        XCTAssertEqual(info.name, "OrbStack")
-        XCTAssertTrue(info.applicationGroups.contains("HUAQ24HBR6.dev.orbstack"))
+    func testReadInfoExtractsCodeSignatureEntitlementsFromAdHocSignedApp() throws {
+        // The SecStaticCodeCreateWithPath / SecCodeCopySigningInformation
+        // block had zero effective coverage on machines without
+        // /Applications/OrbStack.app, so sign a throwaway bundle ad-hoc
+        // instead of probing the real /Applications.
+        let appURL = try makeSignedApp(
+            under: tempHome.appendingPathComponent("Signed.app"),
+            applicationGroups: ["TEAMID.dev.orbstack"]
+        )
+        let info = scanner.readInfo(at: appURL)
+        XCTAssertTrue(info.applicationGroups.contains("TEAMID.dev.orbstack"),
+                      "expected signature entitlements, got \(info.applicationGroups)")
     }
 
     func testReadInfoFallsBackToBundleNameWhenDisplayNameMissing() throws {
@@ -249,5 +255,36 @@ final class StorageScannerTests: XCTestCase {
     private func writeBlob(at url: URL, bytes: Int) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(count: bytes).write(to: url)
+    }
+
+    /// Builds a bundle like `makeApp` but signs it ad-hoc carrying the given
+    /// application-groups entitlement, so `readInfo` exercises the
+    /// code-signature path instead of the Info.plist fallback.  The
+    /// placeholder executable is replaced with a real Mach-O (`/bin/ls`),
+    /// which ad-hoc codesign requires.
+    private func makeSignedApp(under appURL: URL, applicationGroups: [String]) throws -> URL {
+        _ = try makeApp(under: appURL,
+                        bundleId: "com.example.SignedApp",
+                        displayName: "SignedApp",
+                        applicationGroups: [])
+        let exeURL = appURL.appendingPathComponent("Contents/MacOS/Fake")
+        try FileManager.default.removeItem(at: exeURL)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: exeURL)
+
+        let entitlementsURL = tempHome.appendingPathComponent("entitlements-\(UUID().uuidString).plist")
+        let entitlements: [String: Any] = ["com.apple.security.application-groups": applicationGroups]
+        let entitlementsData = try PropertyListSerialization.data(fromPropertyList: entitlements, format: .xml, options: 0)
+        try entitlementsData.write(to: entitlementsURL)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--force", "--sign", "-", "--entitlements", entitlementsURL.path, appURL.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "HogHunterTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "ad-hoc codesign failed with status \(process.terminationStatus)"])
+        }
+        return appURL
     }
 }
