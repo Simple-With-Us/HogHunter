@@ -171,24 +171,26 @@ struct HogHunterSmallWidgetView: View {
 
                 Spacer(minLength: 0)
 
-                // Clean status pill
-                HStack(spacing: 3) {
-                    Image(systemName: "sparkles")
-                        .font(.caption2)
-                    if let bytes = entry.lastCleanBytes {
-                        Text("Clean: \(bytes)")
-                            .font(.caption2.weight(.medium))
-                    } else {
-                        Text(entry.cleanStatus)
-                            .font(.caption2.weight(.medium))
+                // Clean status pill.  Only this control asks to clean.  The rest of the widget opens the app.
+                Link(destination: URL(string: "hoghunter://clean")!) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "sparkles")
+                            .font(.caption2)
+                        if let bytes = entry.lastCleanBytes {
+                            Text("Clean: \(bytes)")
+                                .font(.caption2.weight(.medium))
+                        } else {
+                            Text(entry.cleanStatus)
+                                .font(.caption2.weight(.medium))
+                        }
                     }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
                 }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.06), in: Capsule())
             }
-            .widgetURL(URL(string: "hoghunter://clean"))
+            .widgetURL(URL(string: "hoghunter://open"))
         } else {
             EmptyWidgetView(title: "Hog Hunter", message: "Open companion to view Mac")
                 .widgetURL(URL(string: "hoghunter://open"))
