@@ -45,7 +45,7 @@ struct DiskCleanerView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to clean \(HogFormat.memory(store.totalSelectedBytes())) across \(store.totalSelectedItemsCount()) items?\n\n• APFS Local Snapshot: Automatically created before cleaning for instant rollback.\n• Recoverability: Non-trash items will be safely moved to macOS Trash for Put-Back.")
+            Text("Are you sure you want to clean \(HogFormat.memory(store.totalSelectedBytes())) across \(store.totalSelectedItemsCount()) items?  An APFS local snapshot is created first.  If that snapshot fails, nothing is deleted.  Items that are not already in the Trash move to the Trash, where Put Back still works.  Items already in the Trash are removed permanently.")
         }
     }
 
@@ -94,12 +94,14 @@ struct DiskCleanerView: View {
             Text("Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini/Grok/Codex, temporary update downloads, and large/old files.\nWhile git repositories and critical directories are strictly protected, local AI tools may need to re-download model caches, re-index workspaces, or re-authenticate ephemeral CLI sessions.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Toggle(isOn: $store.acknowledgedExtremeDisclaimer) {
                 Text("I understand this targets AI tool caches, orphaned app data, and older transcripts.")
                     .font(.system(size: 10, weight: .medium))
             }
             .toggleStyle(.checkbox)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
@@ -418,6 +420,7 @@ private struct CategoryCardView: View {
                         .foregroundStyle(isFullySelected || isPartiallySelected ? Color.accentColor : Color.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(isFullySelected ? "Deselect \(catReport.category.title)" : "Select \(catReport.category.title)")
 
                 categoryIconView(for: catReport.category)
 
@@ -445,6 +448,7 @@ private struct CategoryCardView: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    .layoutPriority(1)
 
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -457,6 +461,8 @@ private struct CategoryCardView: View {
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
+                .layoutPriority(1)
+                .accessibilityLabel(isExpanded ? "Collapse \(catReport.category.title)" : "Expand \(catReport.category.title)")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -529,6 +535,7 @@ private struct CategoryCardView: View {
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(isSelected ? "Deselect \(item.title)" : "Select \(item.title)")
             .padding(.leading, 8)
 
             VStack(alignment: .leading, spacing: 1) {
@@ -536,13 +543,13 @@ private struct CategoryCardView: View {
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
                 Text(item.subtitle)
-                    .font(.system(size: 9.5))
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let detail = item.detail {
                     Text(detail)
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -563,6 +570,7 @@ private struct CategoryCardView: View {
             }
             .buttonStyle(.plain)
             .help("Reveal in Finder")
+            .accessibilityLabel("Reveal \(item.title) in Finder")
             .padding(.trailing, 8)
         }
         .padding(.vertical, 5)

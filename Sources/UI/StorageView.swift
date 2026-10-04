@@ -254,7 +254,7 @@ struct StorageView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .font(.system(size: 9.5))
-                Text("\(flagged.count) \(flagged.count == 1 ? "app is" : "apps are") outlined in red: their supporting files are at least 5× the .app bundle and over 200 MB. The reason is in each row's caption.")
+                Text("\(flagged.count) \(flagged.count == 1 ? "app is" : "apps are") outlined in red: their supporting files are at least 5× the .app bundle and over 200 MB.  The reason is in each row's caption.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

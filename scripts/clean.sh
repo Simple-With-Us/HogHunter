@@ -368,8 +368,8 @@ def create_apfs_snapshot():
                 if "Created local snapshot with date" in line:
                     return line.strip()
             return "APFS local snapshot created successfully."
-    except Exception as e:
-        return f"Snapshot skipped ({e})"
+    except Exception:
+        return None
     return None
 
 categories = {}
@@ -460,8 +460,10 @@ if action == "clean":
 
     print("\n📸 Creating APFS local snapshot safety rollback...")
     snap_info = create_apfs_snapshot()
-    if snap_info:
-        print(f"   {snap_info}")
+    if not snap_info:
+        print("error: APFS snapshot failed.  Nothing was deleted.", file=sys.stderr)
+        sys.exit(1)
+    print(f"   {snap_info}")
 
     print("\nReclaiming disk space...")
     cleaned_bytes = 0
@@ -482,17 +484,20 @@ if action == "clean":
                     else:
                         shutil.rmtree(p)
                 else:
-                    # Move to Trash via osascript Finder delete (enables Put Back)
-                    res = subprocess.run([
-                        "osascript", "-e",
-                        f'tell application "Finder" to delete POSIX file "{p}"'
-                    ], capture_output=True, text=True, check=False)
+                    # Path is an argv element, never interpolated into the script.
+                    # Finder failure skips the item.  A direct rmtree here is permanent.
+                    script = (
+                        'on run argv\n'
+                        'tell application "Finder" to delete POSIX file (item 1 of argv)\n'
+                        'end run'
+                    )
+                    res = subprocess.run(
+                        ["osascript", "-e", script, p],
+                        capture_output=True, text=True, check=False
+                    )
                     if res.returncode != 0:
-                        # Fallback to direct safe remove if Finder fails
-                        if os.path.isfile(p) or os.path.islink(p):
-                            os.unlink(p)
-                        else:
-                            shutil.rmtree(p)
+                        errors.append(f"Finder did not move {p} to the Trash.  It was left in place.")
+                        continue
 
                 cleaned_bytes += it["bytes"]
                 cleaned_count += 1

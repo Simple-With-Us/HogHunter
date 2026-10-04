@@ -66,7 +66,7 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Cleaner", systemImage: "sparkles")
                 }
-                .tag("cleaner")
+                .tag(SettingsTab.cleaner)
 
             IPhoneSettingsTab()
                 .environmentObject(store)
@@ -98,9 +98,9 @@ struct SettingsView: View {
         .onAppear { WindowActivator.front() }
     }
 
-    /// Wide enough that six tabs fit on one row without the labels truncating,
+    /// Wide enough that eight tabs fit on one row without the labels truncating,
     /// and short enough that the shortest tab has no scroll bar.
-    static let windowWidth: CGFloat = 560
+    static let windowWidth: CGFloat = 720
     static let windowHeight: CGFloat = 430
 
     static var versionString: String {
@@ -113,7 +113,7 @@ struct SettingsView: View {
 /// Selection identity for the Settings tabs.  Explicit rather than raw strings
 /// so the default tab is written once and cannot drift out of sync with a tab.
 enum SettingsTab: Hashable {
-    case general, alerts, startup, theme, iphone, about, advanced
+    case general, alerts, startup, theme, cleaner, iphone, about, advanced
 }
 
 // MARK: - General Tab
@@ -343,7 +343,7 @@ private struct CleanerSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: SettingsView.windowWidth - 80)
         .onAppear {
             exclusions = CleanerExclusions.load()
         }
@@ -359,7 +359,7 @@ private struct IPhoneSettingsTab: View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  Remote process termination requires explicit opt-in below.  Turn this off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  Quitting and taming require the opt-in below.  A standard clean can still run from the phone while sharing is on.  Turn this off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -381,8 +381,8 @@ private struct IPhoneSettingsTab: View {
 
             if store.shareWithIPhone {
                 Section("Remote Process Control") {
-                    Toggle("Allow iPhone to Quit Apps & Processes", isOn: $store.allowRemoteQuit)
-                    Text("When enabled, the paired iPhone companion can request quitting or force-quitting user-owned apps.  System-critical processes and other users' processes are always protected.")
+                    Toggle("Allow iPhone to Quit or Tame Apps & Processes", isOn: $store.allowRemoteQuit)
+                    Text("When enabled, the paired iPhone can quit, force quit, or tame user-owned apps.  System-critical processes and other users' processes are always protected.  Taming is off with this switch.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -514,7 +514,7 @@ private struct AlertsSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Webhook URL (Slack, Discord, Pushover, generic)", text: $webhookURL)
                     .textFieldStyle(.roundedBorder)
-                Text("Sends a JSON alert payload when a sustained hog triggers. Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
+                Text("Sends a JSON alert payload when a sustained hog triggers.  Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
