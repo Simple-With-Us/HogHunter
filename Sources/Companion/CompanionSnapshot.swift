@@ -14,6 +14,14 @@ enum CompanionService {
     static let version = 1
 }
 
+/// A saved Tailscale, IP, or domain host is reached by address.  Bonjour browse results must not mark that Mac offline.
+enum CompanionReach {
+    static func keepsManualHost(_ remoteHost: String?) -> Bool {
+        let host = remoteHost?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !host.isEmpty
+    }
+}
+
 /// Response returned when the iOS companion triggers a safe remote clean on the Mac.
 struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var status: String

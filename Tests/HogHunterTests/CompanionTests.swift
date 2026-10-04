@@ -3,6 +3,14 @@ import XCTest
 @testable import HogHunter
 
 final class CompanionTests: XCTestCase {
+    func testManualHostStaysPutWhenBonjourCannotSeeIt() {
+        XCTAssertTrue(CompanionReach.keepsManualHost("macbook.tailnet.ts.net"))
+        XCTAssertTrue(CompanionReach.keepsManualHost("  100.64.1.2  "))
+        XCTAssertFalse(CompanionReach.keepsManualHost(nil))
+        XCTAssertFalse(CompanionReach.keepsManualHost(""))
+        XCTAssertFalse(CompanionReach.keepsManualHost("   "))
+    }
+
     func testAuthorizedResponseReturnsTheSnapshotBody() {
         let body = Data("{\"secret\":true}".utf8)
         let response = CompanionHTTP.response(
