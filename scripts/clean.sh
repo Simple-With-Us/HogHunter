@@ -229,6 +229,27 @@ def scan_developer():
                 items.append({"title": name, "path": p, "bytes": size, "count": count})
     return items
 
+# Shared vendor folders hold several live products; they are not one uninstalled app.
+# Mirrors DiskCleaner.isSharedVendorContainer.
+SHARED_VENDOR_CONTAINERS = {"google", "mozilla", "microsoft", "mobilesync", "crashreporter"}
+
+def _normalize_name(value):
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+def holds_installed_product(child_names, installed_ids, installed_names):
+    """Mirror of DiskCleaner.holdsInstalledProduct: True when a folder still
+    contains a product that is installed.  Normalized compare so a
+    version-suffixed child ("IntelliJIdea2024.2") matches "IntelliJ IDEA"."""
+    wanted = {_normalize_name(v) for v in installed_ids | installed_names}
+    wanted = {w for w in wanted if len(w) > 2}
+    for child in child_names:
+        c = _normalize_name(child)
+        if not c:
+            continue
+        if any(w == c or c.startswith(w) for w in wanted):
+            return True
+    return False
+
 # 5. Orphans (Extreme tier)
 def scan_orphans():
     import plistlib
@@ -251,7 +272,13 @@ def scan_orphans():
                                 plist = plistlib.load(fp)
                                 bid = plist.get("CFBundleIdentifier")
                                 if bid and isinstance(bid, str):
-                                    installed_ids.add(bid.strip().lower())
+                                    bid = bid.strip().lower()
+                                    installed_ids.add(bid)
+                                    # Mirror DiskCleaner: the bundle-id suffix is
+                                    # also a known name ("com.brave.Browser" -> "browser").
+                                    suffix = bid.rsplit(".", 1)[-1]
+                                    if suffix:
+                                        installed_names.add(suffix)
                         except Exception:
                             pass
         except Exception:
@@ -277,9 +304,17 @@ def scan_orphans():
                 continue
             if "hoghunter" in entry.lower():
                 continue
+            if entry.lower() in SHARED_VENDOR_CONTAINERS:
+                continue
             if entry.lower() in installed_ids or entry.lower() in installed_names:
                 continue
             p = os.path.join(app_supp, entry)
+            try:
+                child_names = os.listdir(p)
+            except Exception:
+                child_names = []
+            if holds_installed_product(child_names, installed_ids, installed_names):
+                continue
             size, count = get_dir_size(p)
             if size > 0:
                 items.append({"title": f"AppSupport: {entry}", "path": p, "bytes": size, "count": count})

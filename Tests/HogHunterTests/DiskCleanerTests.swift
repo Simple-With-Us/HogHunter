@@ -37,6 +37,32 @@ final class DiskCleanerTests: XCTestCase {
         ))
     }
 
+    func testScanOrphanedDataSkipsVendorAndInstalledProductFolders() {
+        // The two `continue` guards in the Application Support scan must be
+        // consulted by the scan itself, not just correct in isolation:
+        // deleting either one reintroduces the data-loss path from issue #67.
+        let fm = FileManager.default
+        func makeAppSupportFolder(_ name: String, child: String) {
+            let dir = tempDirectory
+                .appendingPathComponent("Library/Application Support/\(name)/\(child)", isDirectory: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? "x".write(to: dir.appendingPathComponent("data.bin"), atomically: true, encoding: .utf8)
+        }
+        makeAppSupportFolder("Google", child: "Chrome")
+        makeAppSupportFolder("JetBrains", child: "IntelliJIdea2024.2")
+        makeAppSupportFolder("DefinitelyRemovedApp", child: "OldData")
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let apps = [StorageScanner.InstalledApp(bundleId: "com.jetbrains.intellij",
+                                                name: "IntelliJ IDEA",
+                                                url: nil,
+                                                groupContainers: [])]
+        let titles = Set(cleaner.scanOrphanedData(installedApps: apps).map(\.title))
+        XCTAssertFalse(titles.contains("Google"), "shared vendor folder must not be listed as an orphan")
+        XCTAssertFalse(titles.contains("JetBrains"), "folder holding an installed product must not be listed as an orphan")
+        XCTAssertTrue(titles.contains("DefinitelyRemovedApp"), "genuinely removed app leftovers must still surface")
+    }
+
     // MARK: - Category Metadata Tests
 
     func testCategoryMetadata() {

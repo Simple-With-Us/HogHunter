@@ -500,15 +500,20 @@ final class DiskCleaner: @unchecked Sendable {
     private let listSnapshots: (_ mount: String) -> [String]?
     /// Tests substitute a closure that does not call `URL.resourceValues`.
     private let purgeableProvider: (_ mount: String) -> UInt64
+    /// Tests inject a temp home so scan-level behavior is verifiable without
+    /// touching the real home directory.
+    private let homeDirectory: URL?
 
     init(fileManager: FileManager = .default,
          makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
          listSnapshots: @escaping (String) -> [String]? = { _ in SnapshotSafety.listLocalSnapshots() },
-         purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) }) {
+         purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) },
+         homeDirectory: URL? = nil) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
         self.listSnapshots = listSnapshots
         self.purgeableProvider = purgeableProvider
+        self.homeDirectory = homeDirectory
     }
 
     // MARK: - Full Scan
@@ -1717,7 +1722,7 @@ final class DiskCleaner: @unchecked Sendable {
     // MARK: - Internal Helpers
 
     private var userHomeURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     }
 
     /// True for a folder or bundle-id *name* that belongs to Hog Hunter
@@ -1755,9 +1760,18 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// True when a folder still contains a product that is installed.
     static func holdsInstalledProduct(childNames: [String], knownBundleIds: Set<String>, knownNames: Set<String>) -> Bool {
+        func normalize(_ value: String) -> String {
+            String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+        }
+        // Normalized compare so a version-suffixed child ("IntelliJIdea2024.2")
+        // still matches the installed "IntelliJ IDEA" instead of being listed
+        // as an orphan and deleted.  Tokens of 2 or fewer characters are too
+        // generic to decide on, so they are dropped.
+        let wanted = (knownBundleIds.union(knownNames)).map(normalize).filter { $0.count > 2 }
         for child in childNames {
-            let lower = child.lowercased()
-            if knownBundleIds.contains(lower) || knownNames.contains(lower) { return true }
+            let c = normalize(child)
+            guard !c.isEmpty else { continue }
+            if wanted.contains(where: { $0 == c || c.hasPrefix($0) }) { return true }
         }
         return false
     }
