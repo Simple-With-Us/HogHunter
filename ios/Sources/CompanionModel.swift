@@ -947,6 +947,7 @@ final class CompanionModel {
 
     private func noteDiscovery() {
         if case .code = phase { return }
+        if CompanionReach.keepsManualHost(saved?.remoteHost) { return }
         if phase == .live, saved != nil, discovered.contains(where: { $0.id == saved?.peerID }) {
             return
         }
@@ -961,6 +962,7 @@ final class CompanionModel {
                 : "Pick the Mac you want to watch."
             return
         }
+        if CompanionReach.keepsManualHost(saved?.remoteHost) { return }
         if discovered.contains(where: { $0.id == saved?.peerID }) {
             return
         }

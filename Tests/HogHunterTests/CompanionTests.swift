@@ -7,6 +7,14 @@ final class CompanionTests: XCTestCase {
     static let deviceToken = "hh1_TESTDEVICETOKEN"
     static func isDevice(_ presented: String) -> Bool { presented == deviceToken }
 
+    func testManualHostStaysPutWhenBonjourCannotSeeIt() {
+        XCTAssertTrue(CompanionReach.keepsManualHost("macbook.tailnet.ts.net"))
+        XCTAssertTrue(CompanionReach.keepsManualHost("  100.64.1.2  "))
+        XCTAssertFalse(CompanionReach.keepsManualHost(nil))
+        XCTAssertFalse(CompanionReach.keepsManualHost(""))
+        XCTAssertFalse(CompanionReach.keepsManualHost("   "))
+    }
+
     func testAuthorizedResponseReturnsTheSnapshotBody() {
         let body = Data("{\"secret\":true}".utf8)
         let response = CompanionHTTP.response(
