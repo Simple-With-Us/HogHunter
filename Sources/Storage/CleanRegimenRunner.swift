@@ -160,21 +160,13 @@ final class CleanRegimenRunner: ObservableObject {
         // `CleanScanReport` groups by category rather than exposing a flat
         // item list, so flatten the selected items from each report.
         let scanned = scan.categories.flatMap { $0.items.filter(\.isSelected) }
-        var pending = scanned.filter { item in
-            regimen.enabledRules.isEmpty
-                ? false
-                : regimen.enabledRules.contains(Self.ruleName(for: item))
-        }
-        // If no rule mapping is available, fall back to the whole safe scan
-        // rather than silently doing nothing -- a regimen that appears to run
-        // but never cleans is the failure mode this class exists to prevent.
-        if pending.isEmpty { pending = scanned }
-
-        guard !pending.isEmpty else {
-            result.skippedReason = "Nothing reclaimable was found."
+        let decision = Self.pendingItems(from: scanned, rules: regimen.enabledRules)
+        guard decision.skipReason == nil else {
+            result.skippedReason = decision.skipReason
             finish(result, regimen: regimen)
             return
         }
+        let pending = decision.items
 
         // Pressure decides the burst size, never the burst count.
         let pressure = CleanPressure.current()
@@ -221,12 +213,25 @@ final class CleanRegimenRunner: ObservableObject {
 
     // MARK: - Rule mapping
 
+    /// Items the regimen may delete.  An empty rule set, or a set that matches
+    /// nothing, skips the run.  It must not fall back to every scanned item.
+    nonisolated static func pendingItems(from scanned: [CleanItem], rules: Set<String>) -> (items: [CleanItem], skipReason: String?) {
+        if rules.isEmpty {
+            return ([], "No cleaning rules are enabled.")
+        }
+        let pending = scanned.filter { rules.contains(ruleName(for: $0)) }
+        if pending.isEmpty {
+            let reason = scanned.isEmpty
+                ? "Nothing reclaimable was found."
+                : "Nothing matched the enabled rules."
+            return ([], reason)
+        }
+        return (pending, nil)
+    }
+
     /// Map a scanned item back to the engine's rule vocabulary so the
-    /// regimen's `enabledRules` is meaningful.  Categories are the app's own
-    /// grouping; the mapping is deliberately conservative -- an unmapped item
-    /// still runs, because a rule list that silently excludes work is worse
-    /// than an imprecise one.
-    static func ruleName(for item: CleanItem) -> String {
+    /// regimen's `enabledRules` is meaningful.
+    nonisolated static func ruleName(for item: CleanItem) -> String {
         switch item.category {
         case .userCaches: return "dev-caches"
         case .logsAndDiagnostics: return "logs"

@@ -323,7 +323,7 @@ struct HogHunterPanel: View {
                 out.append(Pill(
                     text: text,
                     severity: severity,
-                    help: isCharging ? "Charging (\(pct)%)." : "Running on battery (\(pct)%). High CPU processes increase discharge rate."
+                    help: isCharging ? "Charging (\(pct)%)." : "Running on battery (\(pct)%).  High CPU processes increase discharge rate."
                 ))
             }
         }

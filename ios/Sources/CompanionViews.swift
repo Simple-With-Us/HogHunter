@@ -145,8 +145,8 @@ private struct StatusPage: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "desktopcomputer")
-                .font(.system(size: 44))
-                .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                .font(.largeTitle)
+                .foregroundStyle(Color.accentColor)
                 .accessibilityHidden(true)
             Text(title)
                 .font(.title2.weight(.semibold))
@@ -314,7 +314,7 @@ struct DashboardView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "sparkles")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                        .foregroundStyle(Color.accentColor)
                     Text("Explore Demo Mode (App Review)")
                         .font(.caption.weight(.semibold))
                     Spacer()
@@ -556,13 +556,13 @@ struct DashboardView: View {
                                     .lineLimit(1)
                                 if row.isSleepBlocker == true {
                                     Image(systemName: "moon.fill")
-                                        .font(.system(size: 10))
+                                        .font(.caption)
                                         .foregroundStyle(.indigo)
                                         .accessibilityLabel("Preventing Sleep")
                                 }
                                 if row.isTamed == true {
                                     Text("TAMED")
-                                        .font(.system(size: 8, weight: .bold))
+                                        .font(.caption2.weight(.bold))
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 4)
                                         .padding(.vertical, 1)
@@ -768,7 +768,7 @@ struct DashboardView: View {
                     ForEach(breakdown) { category in
                         HStack(spacing: 12) {
                             Image(systemName: category.icon)
-                                .font(.system(size: 18))
+                                .font(.title3)
                                 .frame(width: 24)
                                 .foregroundStyle(category.isExcluded ? Color.secondary : Color.accentColor)
 
@@ -779,7 +779,7 @@ struct DashboardView: View {
                                         .foregroundStyle(category.isExcluded ? .secondary : .primary)
                                     if category.isExtremeOnly {
                                         Text("EXTREME ONLY")
-                                            .font(.system(size: 8, weight: .bold))
+                                            .font(.caption2.weight(.bold))
                                             .foregroundStyle(.purple)
                                             .padding(.horizontal, 4)
                                             .padding(.vertical, 1)
@@ -1046,7 +1046,7 @@ enum CompanionColor {
         case "elevated":
             return Color(red: 0.80, green: 0.52, blue: 0.10)
         default:
-            return Color(red: 0.18, green: 0.42, blue: 0.78)
+            return Color.accentColor
         }
     }
 }
