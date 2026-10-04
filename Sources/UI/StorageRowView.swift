@@ -44,6 +44,11 @@ struct StorageRowView: View {
                     Text(usage.name)
                         .font(.system(size: 12.5, weight: .medium))
                         .lineLimit(1)
+                        // middle, not tail: the distinguishing words in a long
+                        // app name ("... 3" / "beta 4") are at the end, and a
+                        // tail truncation was hiding exactly the part that
+                        // told two similar apps apart.
+                        .truncationMode(.middle)
                     if usage.isRunning {
                         Text("running")
                             .font(.system(size: 9, weight: .medium))
@@ -51,21 +56,32 @@ struct StorageRowView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(Capsule().fill(Color.green.opacity(0.18)))
+                            .fixedSize()
                     }
                     if usage.isHiddenHeavy {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.system(size: 10))
-                            .help("Hidden cost is much larger than the .app bundle.")
+                            .fixedSize()
+                            .help(usage.hiddenHeavyReason ?? "Hidden cost is much larger than the .app bundle.")
                     }
                 }
                 Text(splitCaption)
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
+                    // clip at one line so a long caption cannot wrap and push
+                    // the row taller, which knocked the right-hand total out of
+                    // alignment with the row it belongs to
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             Spacer(minLength: 6)
             Text(HogFormat.memory(usage.totalBytes))
                 .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                // the size is the one thing that must never be squeezed or
+                // truncated, so it wins any width contest against the name
+                .layoutPriority(1)
+                .fixedSize()
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -82,6 +98,11 @@ struct StorageRowView: View {
         var caption = pieces.joined(separator: " · ")
         if usage.anyApproximate {
             caption += " · approximate"
+        }
+        // The reason for the flag, in the row rather than behind a hover.
+        // Owner 2026-10-03: a red box with no explanation is not a feature.
+        if let reason = usage.hiddenHeavyReason {
+            caption += " · flagged: \(reason)"
         }
         return caption
     }
@@ -179,7 +200,12 @@ struct StorageRowView: View {
 
     private var accessibilityLabel: String {
         var pieces = [usage.name, HogFormat.memory(usage.totalBytes), "on disk"]
-        if usage.isHiddenHeavy { pieces.append("hidden cost much larger than bundle") }
+        // Spell the reason out, do not just say "flagged": VoiceOver has no
+        // hover tooltip to fall back on, so this is the only place the
+        // explanation reaches a screen-reader user at all.
+        if let reason = usage.hiddenHeavyReason {
+            pieces.append("flagged, \(reason)")
+        }
         if let bundleId = usage.bundleId { pieces.append("bundle id \(bundleId)") }
         return pieces.joined(separator: ", ")
     }

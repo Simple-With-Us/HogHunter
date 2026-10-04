@@ -115,6 +115,22 @@ struct StorageUsage: Identifiable, Equatable, Hashable, Sendable {
         bundleBytes == 0 ? hiddenBytes > 200_000_000 :
         (hiddenBytes >= bundleBytes &* 5) && hiddenBytes > 200_000_000
     }
+
+    /// Why this row is flagged, in words, or `nil` when it is not flagged.
+    ///
+    /// 2026-10-03 (MINIMAX).  The flag used to be explained only by a `.help()`
+    /// tooltip on a 10pt triangle, and the red border around the row carried no
+    /// explanation at all, so the user was shown a red box and told nothing.
+    /// This is the plain-language reason, shown in the row itself.
+    var hiddenHeavyReason: String? {
+        guard isHiddenHeavy else { return nil }
+        if bundleBytes == 0 {
+            return "no .app bundle found — \(HogFormat.memory(hiddenBytes)) of supporting files"
+        }
+        let ratio = Double(hiddenBytes) / Double(bundleBytes)
+        return "supporting files are \(ratio.formatted(.number.precision(.fractionLength(1))))×"
+            + " the \(HogFormat.memory(bundleBytes)) bundle"
+    }
 }
 
 /// A category-level total across all apps.  Useful for UI subtitles ("2.1

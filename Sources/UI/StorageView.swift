@@ -221,6 +221,7 @@ struct StorageView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
+                        flagLegend
                         ForEach(filteredApps) { app in
                             StorageRowView(
                                 usage: app,
@@ -234,6 +235,38 @@ struct StorageView: View {
                     .padding(.vertical, 2)
                 }
             }
+        }
+    }
+
+    // MARK: - Flag legend
+
+    /// Explains the red outline once, at the top of the list, whenever any app
+    /// is flagged.  Owner 2026-10-03: the flags had no explanation anywhere a
+    /// person would actually look — the row said nothing and the only text was
+    /// behind a 10pt hover target.  A legend costs one line and removes the
+    /// guesswork permanently.  Hidden entirely when nothing is flagged, so a
+    /// clean machine does not grow a paragraph of caveats.
+    @ViewBuilder
+    private var flagLegend: some View {
+        let flagged = filteredApps.filter(\.isHiddenHeavy)
+        if !flagged.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.system(size: 9.5))
+                Text("\(flagged.count) \(flagged.count == 1 ? "app is" : "apps are") outlined in red: their supporting files are at least 5× the .app bundle and over 200 MB. The reason is in each row's caption.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.red.opacity(0.07))
+            )
+            .accessibilityElement(children: .combine)
         }
     }
 
