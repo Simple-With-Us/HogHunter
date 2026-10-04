@@ -499,10 +499,14 @@ final class CompanionModel {
     }
 
     private func storeSnapshotForWidgets(_ fetched: CompanionSnapshot) {
-        if let data = try? CompanionJSON.encode(fetched) {
-            UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
-        }
-        WidgetCenter.shared.reloadAllTimelines()
+        // Reloading every poll would burn WidgetKit's reload budget (~20/min)
+        // re-rendering unchanged data, and is pure waste while the App Group
+        // entitlement is missing (the write below is then a silent no-op).
+        guard let defaults = UserDefaults(suiteName: appGroupSuite),
+              let data = try? CompanionJSON.encode(fetched),
+              defaults.data(forKey: "last_snapshot") != data else { return }
+        defaults.set(data, forKey: "last_snapshot")
+        WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 
     private func refresh() async {
