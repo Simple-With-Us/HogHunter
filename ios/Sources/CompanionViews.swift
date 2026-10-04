@@ -72,7 +72,7 @@ struct CompanionRootView: View {
                     if model.saved != nil {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button { model.showForgetConfirm = true } label: {
-                                Image(systemName: "link.badge.minus")
+                                Image(systemName: "link")
                             }
                             .accessibilityLabel("Forget Mac")
                         }
@@ -80,11 +80,11 @@ struct CompanionRootView: View {
                 }
         }
         .onAppear { model.start() }
-        .alert("Forget Mac?", isPresented: $model.showForgetConfirm) {
-            Button("Forget", role: .destructive) { model.forget() }
+        .alert("Forget \(model.saved?.name ?? "This Mac")?", isPresented: $model.showForgetConfirm) {
+            Button("Forget Mac", role: .destructive) { model.forget() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to forget this Mac?")
+            Text("This iPhone will stop showing it until you pair again.")
         }
         .sheet(isPresented: codePresented) {
             CodeEntryView(model: model)
@@ -121,6 +121,7 @@ struct CompanionRootView: View {
             StatusPage(
                 title: "Mac Offline or Not Found",
                 message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.",
+                isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
@@ -133,6 +134,7 @@ struct CompanionRootView: View {
             StatusPage(
                 title: "Looking for Your Mac",
                 message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.",
+                isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
@@ -148,6 +150,7 @@ struct CompanionRootView: View {
 private struct StatusPage: View {
     let title: String
     let message: String
+    var isOnWiFi: Bool = true
     var onRemoteConnect: (() -> Void)? = nil
     var onDemoMode: (() -> Void)? = nil
 
@@ -164,14 +167,28 @@ private struct StatusPage: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
+            if !isOnWiFi, onRemoteConnect != nil {
+                VStack(spacing: 6) {
+                    Label("This iPhone is not on Wi-Fi", systemImage: "wifi.slash")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Do you use Tailscale or another route to your Mac?  Connect by address on port \(CompanionModel.defaultPort).")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemBackground)))
+            }
+
             if onRemoteConnect != nil || onDemoMode != nil {
                 VStack(spacing: 10) {
                     if let onRemoteConnect {
                         Button(action: onRemoteConnect) {
-                            Label("Connect via Tailscale or Domain…", systemImage: "network")
+                            Label("Connect by Tailscale or Address…", systemImage: "network")
                                 .font(.subheadline.weight(.semibold))
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.borderedProminent)
                     }
 
                     if let onDemoMode {
@@ -218,7 +235,7 @@ private struct MacListView: View {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
                 } label: {
-                    Label("Connect via Tailscale or Domain…", systemImage: "network")
+                    Label("Connect by Tailscale or Address…", systemImage: "network")
                 }
             }
         }
@@ -227,6 +244,7 @@ private struct MacListView: View {
                 StatusPage(
                     title: "Looking for Your Mac",
                     message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.",
+                    isOnWiFi: model.isOnWiFi,
                     onRemoteConnect: {
                         model.remoteConnectError = nil
                         model.isRemoteSheetPresented = true
@@ -253,9 +271,23 @@ private struct CodeEntryView: View {
                         .autocorrectionDisabled()
                         .font(.system(.title3, design: .monospaced))
                         .focused($focused)
-                    Text("Type the code shown in Hog Hunter Settings on your Mac.  The iPhone can look at the list.  It cannot quit anything.")
+                    Text("Type the code shown in Hog Hunter Settings > iPhone on your Mac.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+                Section {
+                    Button {
+                        Task { await model.requestApproval() }
+                    } label: {
+                        HStack {
+                            Label(model.isWaitingForApproval ? "Check Your Mac and Click Allow" : "Ask Mac to Approve Instead", systemImage: "desktopcomputer")
+                            Spacer()
+                            if model.isWaitingForApproval { ProgressView() }
+                        }
+                    }
+                    .disabled(model.isWaitingForApproval || model.isSubmittingCode)
+                } footer: {
+                    Text("No code needed.  Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.")
                 }
                 if let codeError = model.codeError {
                     Section {
@@ -292,7 +324,6 @@ struct DashboardView: View {
     @State private var lastQuitResult: CompanionQuitResponse?
     @State private var showQuitResultAlert = false
     @State private var showAddPathAlert = false
-    @State private var showForgetConfirm = false
     @State private var newPathInput = ""
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
@@ -672,12 +703,12 @@ struct DashboardView: View {
         }
 
         Section {
-            if snapshot.rows.contains(where: { $0.canQuit }) {
-                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName). System processes and tasks owned by other users are protected.")
+            if snapshot.remoteQuitAllowed != false, snapshot.rows.contains(where: { $0.canQuit }) {
+                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Remote quit is off.  Turn on 'Allow iPhone to Quit Apps & Processes' in Hog Hunter Settings on your Mac.")
+                Text("Quitting from iPhone is off.  Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -767,7 +798,13 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning)
+                .disabled(model.isCleaning || snapshot.remoteCleanAllowed == false)
+
+                if snapshot.remoteCleanAllowed == false {
+                    Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.vertical, 4)
         }
@@ -983,27 +1020,43 @@ struct RemoteConnectSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Mac Connection Details") {
-                    TextField("Host, Tailscale IP, or Domain", text: $model.remoteHostDraft)
+                Section {
+                    TextField("Tailscale Name, IP, or Domain", text: $model.remoteHostDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                        .textContentType(.URL)
 
-                    TextField("Port", text: $model.remotePortDraft)
-                        .keyboardType(.numberPad)
+                    LabeledContent("Port") {
+                        TextField("\(CompanionModel.defaultPort)", text: $model.remotePortDraft)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .font(.body.monospacedDigit())
+                    }
+                } header: {
+                    Text("Mac Address")
+                } footer: {
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  Using a VPN, port forward, or your own domain instead?  Point it at that port.")
+                }
 
-                    TextField("Pairing Code (from Mac Settings)", text: $model.remoteTokenDraft)
+                Section {
+                    TextField("Leave Blank to Approve on Mac", text: $model.remoteTokenDraft)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
                         .font(.system(.body, design: .monospaced))
 
                     TextField("Mac Name (Optional)", text: $model.remoteNameDraft)
+                } header: {
+                    Text("Pairing Code")
+                } footer: {
+                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.  Or type the code from Hog Hunter Settings > iPhone.")
                 }
 
-                Section {
-                    Text("Connect via Tailscale IP (e.g. 100.x.y.z), MagicDNS name (*.ts.net), or a domain mapped to your Mac.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                if model.isWaitingForApproval {
+                    Section {
+                        Label("Check your Mac and click Allow.", systemImage: "desktopcomputer")
+                            .font(.subheadline.weight(.semibold))
+                    }
                 }
 
                 if let error = model.remoteConnectError {
@@ -1029,7 +1082,7 @@ struct RemoteConnectSheet: View {
                                 ProgressView()
                                     .padding(.trailing, 6)
                             }
-                            Text(model.isConnectingRemote ? "Connecting…" : "Connect to Mac")
+                            Text(model.isWaitingForApproval ? "Waiting for Mac…" : (model.isConnectingRemote ? "Connecting…" : "Connect to Mac"))
                                 .font(.body.weight(.semibold))
                             Spacer()
                         }
@@ -1037,7 +1090,7 @@ struct RemoteConnectSheet: View {
                     .disabled(model.isConnectingRemote || model.remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .navigationTitle("Remote Connection")
+            .navigationTitle("Connect by Address")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

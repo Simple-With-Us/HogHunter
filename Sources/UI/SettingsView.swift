@@ -359,7 +359,7 @@ private struct IPhoneSettingsTab: View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  Quitting and taming require the opt-in below.  A standard clean can still run from the phone while sharing is on.  Turn this off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi, or from anywhere over Tailscale.  Quitting, taming, and cleaning each need the opt-ins below.  Turn this off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -380,9 +380,18 @@ private struct IPhoneSettingsTab: View {
             }
 
             if store.shareWithIPhone {
-                Section("Remote Process Control") {
+                Section("Remote Control") {
                     Toggle("Allow iPhone to Quit or Tame Apps & Processes", isOn: $store.allowRemoteQuit)
-                    Text("When enabled, the paired iPhone can quit, force quit, or tame user-owned apps.  System-critical processes and other users' processes are always protected.  Taming is off with this switch.")
+                    Text("When enabled, the paired iPhone can quit, force quit, or tame user-owned apps.  The phone asks you to confirm each one.  System-critical processes and other users' processes are always protected.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Allow iPhone to Run Disk Cleaner", isOn: $store.allowRemoteClean)
+                    Text("When enabled, the paired iPhone can start a Standard clean.  A local snapshot is taken first and items go to the Trash.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A phone without the code can ask to pair.  This Mac then shows an alert where you can allow it and pick these same two choices.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

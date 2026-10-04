@@ -15,7 +15,9 @@ enum CompanionSnapshotBuilder {
         pulse: MachinePulse,
         rows: [HogRow],
         storage: CompanionStorageSummary? = nil,
-        network: [CompanionNetworkRow]? = nil
+        network: [CompanionNetworkRow]? = nil,
+        remoteQuitAllowed: Bool? = nil,
+        remoteCleanAllowed: Bool? = nil
     ) -> CompanionSnapshot {
         let cores = max(1, pulse.coreCount)
         let pressure = Severity.forPressure(pulse.pressure)
@@ -65,7 +67,9 @@ enum CompanionSnapshotBuilder {
                 )
             },
             storage: storage ?? currentStorageSummary(),
-            network: network
+            network: network,
+            remoteQuitAllowed: remoteQuitAllowed,
+            remoteCleanAllowed: remoteCleanAllowed
         )
     }
 

@@ -3,6 +3,9 @@ import Network
 
 /// One HTTP GET over the Bonjour endpoint the browser already resolved.
 enum CompanionConnection {
+    /// Asks the Mac to approve this phone.  The Mac shows an alert, so the
+    /// reply can take as long as the person takes; the caller sets the limit.
+    /// Returns the pairing code the Mac hands back on Allow.
     static func requestPair(endpoint: NWEndpoint, deviceName: String) async throws -> String {
         let connection = NWConnection(to: endpoint, using: .tcp)
         let reader = PairResponseReader()
@@ -12,26 +15,18 @@ enum CompanionConnection {
                 connection.stateUpdateHandler = { state in
                     switch state {
                     case .ready:
-                        let req = CompanionHTTP.pairRequest(deviceName: deviceName)
-                        connection.send(content: req, completion: .contentProcessed { error in
-                            if let error {
-                                reader.fail(error)
-                                connection.cancel()
-                            } else {
-                                receivePair(connection, reader: reader, buffer: Data())
-                            }
+                        let request = CompanionHTTP.pairRequest(deviceName: deviceName)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error { reader.fail(error) }
                         })
                     case .failed(let error):
                         reader.fail(error)
-                    case .waiting(let error):
-                        reader.fail(error)
-                    case .cancelled:
-                        reader.fail(CompanionClientError.timedOut)
                     default:
                         break
                     }
                 }
-                connection.start(queue: .global())
+                receivePair(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .userInitiated))
             }
         } onCancel: {
             connection.cancel()
@@ -44,15 +39,20 @@ enum CompanionConnection {
             var buffer = buffer
             if let data { buffer.append(data) }
             if let parsed = CompanionHTTP.parseResponse(buffer) {
+                let json = (try? JSONSerialization.jsonObject(with: parsed.body)) as? [String: Any]
                 switch parsed.status {
                 case 200:
-                    if let res = try? JSONSerialization.jsonObject(with: parsed.body) as? [String: String], let token = res["token"] {
+                    if let token = json?["token"] as? String, !token.isEmpty {
                         reader.succeed(token)
                     } else {
                         reader.fail(CompanionClientError.badResponse)
                     }
                 case 403:
-                    reader.fail(CompanionClientError.unauthorized)
+                    reader.fail(CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac did not allow this iPhone."))
+                case 429:
+                    reader.fail(CompanionClientError.busy)
+                case 404:
+                    reader.fail(CompanionClientError.forbidden("This Mac's copy of Hog Hunter is too old to approve phones.  Update it, or type the code from Settings."))
                 default:
                     reader.fail(CompanionClientError.badResponse)
                 }
@@ -291,6 +291,9 @@ enum CompanionConnection {
                     }
                 case 401:
                     reader.fail(CompanionClientError.unauthorized)
+                case 403:
+                    let json = (try? JSONSerialization.jsonObject(with: parsed.body)) as? [String: Any]
+                    reader.fail(CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac does not allow cleaning from iPhone."))
                 default:
                     reader.fail(CompanionClientError.badResponse)
                 }
@@ -560,8 +563,8 @@ private final class PairResponseReader: @unchecked Sendable {
     var continuation: CheckedContinuation<String, Error>?
     private let lock = NSLock()
 
-    func succeed(_ response: String) {
-        resume(.success(response))
+    func succeed(_ token: String) {
+        resume(.success(token))
     }
 
     func fail(_ error: Error) {

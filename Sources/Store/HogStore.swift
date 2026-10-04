@@ -122,6 +122,16 @@ final class HogStore: ObservableObject {
         didSet {
             persist()
             companionServer.allowRemoteQuit = allowRemoteQuit
+            if !loadingSettings { publishCompanion() }
+        }
+    }
+    /// Off until the owner turns it on in Mac Settings, or ticks it when
+    /// approving a phone.  Gates the phone's Run Safe Clean button.
+    @Published var allowRemoteClean = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteClean = allowRemoteClean
+            if !loadingSettings { publishCompanion() }
         }
     }
     @Published private(set) var companionCode = ""
@@ -156,6 +166,7 @@ final class HogStore: ObservableObject {
         static let appearance = "appearance"
         static let shareWithIPhone = "shareWithIPhone"
         static let allowRemoteQuit = "allowRemoteQuit"
+        static let allowRemoteClean = "allowRemoteClean"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
     }
@@ -957,6 +968,7 @@ final class HogStore: ObservableObject {
         }
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
+        allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -1033,6 +1045,7 @@ final class HogStore: ObservableObject {
         defaults.set(appearance.rawValue, forKey: Key.appearance)
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
+        defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
     }
 
     /// Asks for notification permission the moment alerts are switched on, and
@@ -1103,6 +1116,10 @@ final class HogStore: ObservableObject {
             if remoteQuit != self.allowRemoteQuit {
                 self.allowRemoteQuit = remoteQuit
             }
+            let remoteClean = self.defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
+            if remoteClean != self.allowRemoteClean {
+                self.allowRemoteClean = remoteClean
+            }
         }
     }
 
@@ -1110,6 +1127,13 @@ final class HogStore: ObservableObject {
 
     private func setupCompanionHandlers() {
         companionServer.allowRemoteQuit = allowRemoteQuit
+        companionServer.allowRemoteClean = allowRemoteClean
+        companionServer.onRemotePair = { [weak self] deviceName, reply in
+            Task { @MainActor in
+                guard let self else { return reply(false) }
+                reply(self.askToApprovePairing(deviceName: deviceName))
+            }
+        }
         companionServer.onRemoteQuit = { [weak self] pid, force in
             guard let self else {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
@@ -1134,38 +1158,41 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteViewUpdate(req)
         }
-        
-        companionServer.onRemotePair = { [weak self] deviceName in
-            guard let self = self else {
-                return (500, Data())
-            }
-            var approved = false
-            let sema = DispatchSemaphore(value: 0)
-            DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
-                let alert = NSAlert()
-                alert.messageText = "Pair Request"
-                alert.informativeText = "\(deviceName) wants to connect to Hog Hunter. Allow?"
-                alert.addButton(withTitle: "Allow")
-                alert.addButton(withTitle: "Deny")
-                if alert.runModal() == .alertFirstButtonReturn {
-                    approved = true
-                }
-                sema.signal()
-            }
-            // Bound the wait: /v1/pair is unauthenticated, so an unbounded
-            // wait lets any host stall the serial companion queue behind an
-            // open dialog for as long as the owner takes to dismiss it.
-            // `approved` is only read when the wait succeeded, which gives a
-            // happens-before edge from the main-queue write.
-            let answered = sema.wait(timeout: .now() + 120) == .success
-            if answered, approved {
-                let json = "{\"token\":\"\(self.companionCode)\"}"
-                return (200, Data(json.utf8))
-            } else {
-                return (403, Data("{\"error\":\"Denied\"}".utf8))
-            }
+    }
+
+    /// Shows the "an iPhone wants to pair" alert.  The two boxes start at the
+    /// current Settings values, and what the owner leaves ticked is saved
+    /// back to Settings, so approving a phone is also where its powers are
+    /// granted.  Main thread only.
+    @MainActor
+    private func askToApprovePairing(deviceName: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Pair \(deviceName)?"
+        alert.informativeText = "\(deviceName) is asking to see Hog Hunter on this Mac.  Allow only a phone you own.  You can change these choices later in Settings > iPhone."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Don't Allow")
+
+        let quitBox = NSButton(checkboxWithTitle: "Let it quit or tame apps and processes", target: nil, action: nil)
+        quitBox.state = allowRemoteQuit ? .on : .off
+        let cleanBox = NSButton(checkboxWithTitle: "Let it run the disk cleaner", target: nil, action: nil)
+        cleanBox.state = allowRemoteClean ? .on : .off
+        let stack = NSStackView(views: [quitBox, cleanBox])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
+        alert.accessoryView = stack
+
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        let approved = alert.runModal() == .alertFirstButtonReturn
+        if approved {
+            allowRemoteQuit = quitBox.state == .on
+            allowRemoteClean = cleanBox.state == .on
         }
+        AppActivationManager.shared.updatePolicy()
+        return approved
     }
 
     private func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {
@@ -1340,7 +1367,9 @@ final class HogStore: ObservableObject {
             grouping: grouping,
             scale: cpuScale,
             pulse: pulse,
-            rows: rows
+            rows: rows,
+            remoteQuitAllowed: allowRemoteQuit,
+            remoteCleanAllowed: allowRemoteClean
         )
         companionServer.update(snapshot: snapshot)
     }

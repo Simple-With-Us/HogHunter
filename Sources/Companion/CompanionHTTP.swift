@@ -11,8 +11,7 @@ enum CompanionHTTP {
         quitHandler: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil,
         tameHandler: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
-        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
-        pairHandler: ((String) -> (status: Int, body: Data))? = nil
+        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
     ) -> Data {
         let text = String(data: request, encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
@@ -32,32 +31,8 @@ enum CompanionHTTP {
             || path == CompanionService.quitPath
             || path == CompanionService.tamePath
             || path == CompanionService.exclusionsPath
-            || path == CompanionService.viewPath
-            || path == CompanionService.pairPath else {
+            || path == CompanionService.viewPath else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
-        }
-
-        if path == CompanionService.pairPath {
-            guard method == "POST" else {
-                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
-            }
-            if let pairHandler = pairHandler {
-                // Extract device name from body if present.  A request
-                // without a header/body separator must not trap in
-                // suffix(from:); it simply has no device name.
-                let deviceName: String
-                if let range = request.range(of: Data("\r\n\r\n".utf8)) {
-                    let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
-                    let parsed = String(data: bodyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    deviceName = parsed.isEmpty ? "Unknown Device" : String(parsed.prefix(64))
-                } else {
-                    deviceName = "Unknown Device"
-                }
-                let res = pairHandler(deviceName)
-                return message(status: res.status, reason: res.status == 200 ? "OK" : "Forbidden", body: res.body)
-            } else {
-                return message(status: 403, reason: "Forbidden", body: Data("Pairing disabled".utf8))
-            }
         }
 
         let presented = bearerToken(in: lines)
@@ -226,6 +201,73 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
+    // MARK: - Approve-on-Mac pairing
+    //
+    // A phone that has no code asks the Mac to approve it.  This is the only
+    // route without a bearer token, so it carries nothing but a display name
+    // and it never touches the snapshot.  The server answers it on its own
+    // path (see CompanionServer) because the answer waits on a person.
+
+    /// Longest device name the Mac will show in the approval alert.
+    static let maxDeviceNameLength = 40
+
+    static func pairRequest(deviceName: String) -> Data {
+        let lines = [
+            "POST \(CompanionService.pairPath)?device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
+            "Host: hoghunter",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    /// The device name when `request` is a pairing request, otherwise nil.
+    /// Only POST counts; anything else falls through to the normal router.
+    static func pairDeviceName(in request: Data) -> String? {
+        let text = String(data: request, encoding: .isoLatin1) ?? ""
+        guard let requestLine = text.components(separatedBy: "\r\n").first else { return nil }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2, parts[0] == "POST" else { return nil }
+        let pieces = parts[1].split(separator: "?", maxSplits: 1)
+        guard pieces.first.map(String.init) == CompanionService.pairPath else { return nil }
+        var name = ""
+        if pieces.count == 2 {
+            for pair in pieces[1].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                if kv.count == 2, kv[0] == "device" {
+                    name = String(kv[1]).removingPercentEncoding ?? ""
+                }
+            }
+        }
+        let clean = sanitizedDeviceName(name)
+        return clean.isEmpty ? "An iPhone" : clean
+    }
+
+    /// Strips control characters and caps the length, so a hostile name
+    /// cannot stretch or spoof the Mac's alert.
+    static func sanitizedDeviceName(_ raw: String) -> String {
+        let scalars = raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let text = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(text.prefix(maxDeviceNameLength))
+    }
+
+    /// JSON reply for a pairing request.
+    static func pairResponse(approvedToken: String?) -> Data {
+        if let approvedToken {
+            let body = (try? JSONSerialization.data(withJSONObject: ["token": approvedToken])) ?? Data()
+            return message(status: 200, reason: "OK", body: body, type: "application/json; charset=utf-8")
+        }
+        let body = Data(#"{"error":"Pairing was not approved on the Mac."}"#.utf8)
+        return message(status: 403, reason: "Forbidden", body: body, type: "application/json; charset=utf-8")
+    }
+
+    /// Reply when another approval alert is already open on the Mac.
+    static func pairBusyResponse() -> Data {
+        let body = Data(#"{"error":"The Mac is already showing a pairing request."}"#.utf8)
+        return message(status: 429, reason: "Too Many Requests", body: body, type: "application/json; charset=utf-8")
+    }
+
     static func cleanRequest(token: String) -> Data {
         let lines = [
             "POST \(CompanionService.cleanPath) HTTP/1.1",
@@ -262,18 +304,6 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func pairRequest(deviceName: String) -> Data {
-        let body = Data(deviceName.utf8)
-        let lines = [
-            "POST \(CompanionService.pairPath) HTTP/1.1",
-            "Host: hoghunter",
-            "Content-Type: text/plain; charset=utf-8",
-            "Content-Length: \(body.count)",
-            "Connection: close",
-            "",
-        ]
-        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8) + body
-    }
 
     static func queryAllowedValue(_ value: String) -> String {
         var allowed = CharacterSet.urlQueryAllowed
