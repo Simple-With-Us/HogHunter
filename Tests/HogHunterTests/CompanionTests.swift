@@ -15,6 +15,23 @@ final class CompanionTests: XCTestCase {
         XCTAssertEqual(parsed?.body, body)
     }
 
+    func testParseResponseWaitsUntilContentLengthArrives() {
+        let body = Data(repeating: 0x61, count: 4000)
+        let response = CompanionHTTP.response(
+            request: CompanionHTTP.request(token: "ABCD2345"),
+            body: body,
+            token: "ABCD2345"
+        )
+        let marker = Data("\r\n\r\n".utf8)
+        let range = response.range(of: marker)
+        XCTAssertNotNil(range)
+        let split = range!.upperBound + 1
+        XCTAssertNil(CompanionHTTP.parseResponse(response.prefix(split)))
+        let parsed = CompanionHTTP.parseResponse(response)
+        XCTAssertEqual(parsed?.status, 200)
+        XCTAssertEqual(parsed?.body, body)
+    }
+
     func testWrongCodeDoesNotReturnTheSnapshot() {
         let body = Data("top-secret-snapshot".utf8)
         let response = CompanionHTTP.response(

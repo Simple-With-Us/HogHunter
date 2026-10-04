@@ -14,6 +14,31 @@ final class CleanRegimenTests: XCTestCase {
 
     // MARK: - Defaults
 
+    func testEmptyRulesDoNotSelectEveryScannedItem() {
+        let item = CleanItem(
+            category: .userCaches,
+            title: "cache",
+            subtitle: "cache",
+            url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-test"),
+            bytes: 10,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let empty = CleanRegimenRunner.pendingItems(from: [item], rules: [])
+        XCTAssertTrue(empty.items.isEmpty)
+        XCTAssertEqual(empty.skipReason, "No cleaning rules are enabled.")
+
+        let unmatched = CleanRegimenRunner.pendingItems(from: [item], rules: ["logs"])
+        XCTAssertTrue(unmatched.items.isEmpty)
+        XCTAssertEqual(unmatched.skipReason, "Nothing matched the enabled rules.")
+
+        let matched = CleanRegimenRunner.pendingItems(from: [item], rules: ["dev-caches"])
+        XCTAssertEqual(matched.items.map(\.title), ["cache"])
+        XCTAssertNil(matched.skipReason)
+    }
+
     func testRegimenIsOffByDefault() {
         // An unattended delete is a different promise than a button press.
         XCTAssertFalse(CleanRegimen().isEnabled)

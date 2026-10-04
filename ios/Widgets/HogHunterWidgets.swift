@@ -87,11 +87,11 @@ enum WidgetColor {
     static func severityColor(_ severity: String) -> Color {
         switch severity {
         case "hot":
-            return Color(red: 0.75, green: 0.18, blue: 0.16)
+            return Color.red
         case "elevated":
-            return Color(red: 0.80, green: 0.52, blue: 0.10)
+            return Color.orange
         default:
-            return Color(red: 0.18, green: 0.42, blue: 0.78)
+            return Color.accentColor
         }
     }
 }
@@ -104,7 +104,7 @@ struct EmptyWidgetView: View {
         VStack(spacing: 6) {
             Image(systemName: "desktopcomputer")
                 .font(.title2)
-                .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                .foregroundStyle(Color.accentColor)
             Text(title)
                 .font(.subheadline.weight(.semibold))
             Text(message)
@@ -124,7 +124,7 @@ struct HogHunterSmallWidgetView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
                     Image(systemName: "desktopcomputer")
-                        .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                        .foregroundStyle(Color.accentColor)
                         .font(.caption.weight(.semibold))
                     Text(snap.hostName)
                         .font(.caption.weight(.bold))
@@ -136,47 +136,51 @@ struct HogHunterSmallWidgetView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text("CPU")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.caption2.weight(.bold))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text(snap.pulse.cpuText)
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .font(.system(.footnote, design: .monospaced).weight(.semibold))
                             .foregroundStyle(WidgetColor.severityColor(snap.pulse.cpuSeverity))
                     }
                     ProgressView(value: min(max(snap.pulse.cpuPercent / 100, 0), 1))
                         .tint(WidgetColor.severityColor(snap.pulse.cpuSeverity))
-                        .scaleEffect(x: 1, y: 0.6, anchor: .center)
+                        .controlSize(.mini)
+                        
                 }
+                .accessibilityElement(children: .combine)
 
                 // Memory
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text("RAM")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.caption2.weight(.bold))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text(snap.pulse.memoryText)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
                             .foregroundStyle(WidgetColor.severityColor(snap.pulse.pressureSeverity))
                             .lineLimit(1)
                     }
                     ProgressView(value: min(max(snap.pulse.memoryPercent / 100, 0), 1))
                         .tint(WidgetColor.severityColor(snap.pulse.pressureSeverity))
-                        .scaleEffect(x: 1, y: 0.6, anchor: .center)
+                        .controlSize(.mini)
+                        
                 }
+                .accessibilityElement(children: .combine)
 
                 Spacer(minLength: 0)
 
                 // Clean status pill
                 HStack(spacing: 3) {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 8))
+                        .font(.caption2)
                     if let bytes = entry.lastCleanBytes {
                         Text("Clean: \(bytes)")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.caption2.weight(.medium))
                     } else {
                         Text(entry.cleanStatus)
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.caption2.weight(.medium))
                     }
                 }
                 .foregroundStyle(.secondary)
@@ -202,7 +206,7 @@ struct HogHunterMediumWidgetView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 4) {
                         Image(systemName: "desktopcomputer")
-                            .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                            .foregroundStyle(Color.accentColor)
                         Text(snap.hostName)
                             .font(.caption.weight(.bold))
                             .lineLimit(1)
@@ -212,38 +216,42 @@ struct HogHunterMediumWidgetView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         HStack {
                             Text("CPU")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text(snap.pulse.cpuText)
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .font(.system(.footnote, design: .monospaced).weight(.bold))
                                 .foregroundStyle(WidgetColor.severityColor(snap.pulse.cpuSeverity))
                         }
                         ProgressView(value: min(max(snap.pulse.cpuPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.cpuSeverity))
-                            .scaleEffect(x: 1, y: 0.6, anchor: .center)
+                        .controlSize(.mini)
+                            
                     }
+                        .accessibilityElement(children: .combine)
 
                     // Memory
                     VStack(alignment: .leading, spacing: 1) {
                         HStack {
                             Text("RAM")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text(snap.pulse.memoryText)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced).weight(.bold))
                                 .foregroundStyle(WidgetColor.severityColor(snap.pulse.pressureSeverity))
                                 .lineLimit(1)
                         }
                         ProgressView(value: min(max(snap.pulse.memoryPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.pressureSeverity))
-                            .scaleEffect(x: 1, y: 0.6, anchor: .center)
+                        .controlSize(.mini)
+                            
                     }
+                        .accessibilityElement(children: .combine)
 
                     if let swap = snap.pulse.swapText {
                         Text(swap)
-                            .font(.system(size: 9))
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -257,15 +265,15 @@ struct HogHunterMediumWidgetView: View {
                     if let topHog = snap.rows.first {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("TOP HOG")
-                                .font(.system(size: 8, weight: .bold))
+                                .font(.caption2.weight(.bold))
                                 .foregroundStyle(.secondary)
                             HStack {
                                 Text(topHog.name)
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(.footnote.weight(.semibold))
                                     .lineLimit(1)
                                 Spacer()
                                 Text(topHog.cpuText)
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .font(.system(.caption, design: .monospaced).weight(.bold))
                                     .foregroundStyle(WidgetColor.severityColor(topHog.severity))
                             }
                         }
@@ -277,12 +285,12 @@ struct HogHunterMediumWidgetView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         if let bytes = entry.lastCleanBytes {
                             Text("Last: \(bytes) reclaimed")
-                                .font(.system(size: 9))
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         } else {
                             Text("Clean: \(entry.cleanStatus)")
-                                .font(.system(size: 9))
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -290,13 +298,13 @@ struct HogHunterMediumWidgetView: View {
                         Link(destination: URL(string: "hoghunter://clean")!) {
                             HStack(spacing: 4) {
                                 Image(systemName: "sparkles")
-                                    .font(.system(size: 10))
+                                    .font(.caption)
                                 Text("Clean Mac")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(.footnote.weight(.semibold))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 5)
-                            .background(Color(red: 0.18, green: 0.42, blue: 0.78))
+                            .background(Color.accentColor)
                             .foregroundStyle(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
@@ -321,7 +329,7 @@ struct HogHunterLargeWidgetView: View {
                 HStack {
                     Image(systemName: "desktopcomputer")
                         .font(.headline)
-                        .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                        .foregroundStyle(Color.accentColor)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(snap.hostName)
                             .font(.headline)
@@ -347,14 +355,16 @@ struct HogHunterLargeWidgetView: View {
                             .foregroundStyle(WidgetColor.severityColor(snap.pulse.cpuSeverity))
                         ProgressView(value: min(max(snap.pulse.cpuPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.cpuSeverity))
+                        .controlSize(.mini)
                         Text(snap.pulse.cpuCaption)
-                            .font(.system(size: 9))
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .combine)
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Memory")
@@ -366,26 +376,28 @@ struct HogHunterLargeWidgetView: View {
                             .lineLimit(1)
                         ProgressView(value: min(max(snap.pulse.memoryPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.pressureSeverity))
+                        .controlSize(.mini)
                         Text(snap.pulse.swapText ?? snap.pulse.memoryCaption)
-                            .font(.system(size: 9))
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .combine)
                 }
 
                 // Top Hogs Section
                 VStack(alignment: .leading, spacing: 4) {
                     Text("BUSY PROCESSES")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.caption2.weight(.bold))
                         .foregroundStyle(.secondary)
 
                     ForEach(snap.rows.prefix(3)) { row in
                         HStack(spacing: 6) {
                             Image(systemName: row.isApp ? "app.fill" : "gearshape")
-                                .font(.system(size: 11))
+                                .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .frame(width: 14)
                             Text(row.name)
@@ -399,6 +411,7 @@ struct HogHunterLargeWidgetView: View {
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
+                            .accessibilityElement(children: .combine)
                     }
                 }
 
@@ -409,15 +422,15 @@ struct HogHunterLargeWidgetView: View {
                     HStack {
                         Label("Safe Mac Clean", systemImage: "sparkles")
                             .font(.caption.weight(.bold))
-                            .foregroundStyle(Color(red: 0.18, green: 0.42, blue: 0.78))
+                            .foregroundStyle(Color.accentColor)
                         Spacer()
                         if let bytes = entry.lastCleanBytes {
                             Text("Reclaimed \(bytes)")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.green)
                         } else {
                             Text(entry.cleanStatus)
-                                .font(.system(size: 10))
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -431,7 +444,7 @@ struct HogHunterLargeWidgetView: View {
                             Spacer()
                         }
                         .padding(.vertical, 6)
-                        .background(Color(red: 0.18, green: 0.42, blue: 0.78))
+                        .background(Color.accentColor)
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }

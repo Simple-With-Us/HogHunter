@@ -324,9 +324,13 @@ struct CleanResult: Sendable {
 /// Engine responsible for discovering reclaimable files and performing safe cleaning operations.
 final class DiskCleaner: @unchecked Sendable {
     private let fileManager: FileManager
+    /// Tests substitute a closure that does not call `tmutil`.
+    private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default,
+         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() }) {
         self.fileManager = fileManager
+        self.makeSnapshot = makeSnapshot
     }
 
     // MARK: - Full Scan
@@ -1098,7 +1102,8 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
-    /// When `createSnapshot` is true, attempts to take an APFS local snapshot beforehand.
+    /// When `createSnapshot` is true, takes an APFS local snapshot first.
+    /// A failed snapshot stops the clean.  Nothing is deleted.
     func clean(items: [CleanItem],
                tier: CleanTier = .standard,
                createSnapshot: Bool = true,
@@ -1113,9 +1118,20 @@ final class DiskCleaner: @unchecked Sendable {
 
         if createSnapshot && !activeItems.isEmpty {
             progress?(0.0, "Creating APFS safety snapshot…")
-            let (success, name) = SnapshotSafety.createLocalSnapshot()
+            let (success, name) = makeSnapshot()
             if success {
                 snapshotCreatedName = name
+            } else {
+                errors.append("APFS snapshot failed.  Nothing was deleted.")
+                progress?(1.0, "Stopped")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: 0,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
             }
         }
 
