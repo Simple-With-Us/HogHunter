@@ -198,7 +198,33 @@ final class CompanionModel {
 
     func cancelCode() {
         codeError = nil
+        guard case .code = phase else {
+            reconcile()
+            return
+        }
+        // A manual host is not in the Bonjour list, so reconcile would return
+        // without leaving the pairing sheet.
+        if let saved, CompanionReach.keepsManualHost(saved.remoteHost) {
+            if snapshot != nil {
+                phase = .live
+                statusLine = "\(saved.name) (Remote)"
+            } else {
+                phase = .offline
+                statusLine = "The Mac at \(saved.remoteHost ?? "that address") did not answer."
+            }
+            return
+        }
+        if saved == nil {
+            phase = discovered.isEmpty ? .looking : .choose
+            statusLine = discovered.isEmpty
+                ? "Looking for Hog Hunter on this Wi-Fi."
+                : "Pick the Mac you want to watch."
+            return
+        }
         reconcile()
+        if case .code = phase {
+            phase = snapshot == nil ? .offline : .live
+        }
     }
 
     func submitCode() async {
@@ -343,6 +369,10 @@ final class CompanionModel {
         resetCleaner()
         isDemoMode = false
         snapshot = nil
+        phase = .looking
+        statusLine = CompanionReach.keepsManualHost(saved?.remoteHost)
+            ? "Reconnecting to \(saved?.name ?? "your Mac")."
+            : "Looking for Hog Hunter on this Wi-Fi."
         reconcile()
     }
 
