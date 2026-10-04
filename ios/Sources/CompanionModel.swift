@@ -158,6 +158,10 @@ final class CompanionModel {
     private var poll: Task<Void, Never>?
     private var started = false
     private var didBrowse = false
+    // Set when the user cancels the pairing sheet.  The 3s poll must not
+    // re-enter .code on the next 401 after an explicit cancel; it stays
+    // offline until the user starts pairing again.
+    private var pairingDismissed = false
     private let defaultsKey = "hoghunter.companion.saved"
     private let appGroupSuite = "group.com.simplewithus.hoghunter"
 
@@ -193,11 +197,17 @@ final class CompanionModel {
     func select(_ mac: DiscoveredMac) {
         codeDraft = ""
         codeError = nil
+        pairingDismissed = false
         phase = .code(mac.id)
     }
 
     func cancelCode() {
+        // Capture the 401 diagnosis before clearing it: after a pairing-code
+        // rotation the Mac answers (with 401), so "did not answer" would be
+        // the wrong message.
+        let wasUnauthorized = codeError != nil
         codeError = nil
+        pairingDismissed = true
         guard case .code = phase else {
             reconcile()
             return
@@ -205,7 +215,10 @@ final class CompanionModel {
         // A manual host is not in the Bonjour list, so reconcile would return
         // without leaving the pairing sheet.
         if let saved, CompanionReach.keepsManualHost(saved.remoteHost) {
-            if snapshot != nil {
+            if wasUnauthorized {
+                phase = .offline
+                statusLine = "The code for \(saved.name) no longer matches.  Reconnect to pair again."
+            } else if snapshot != nil {
                 phase = .live
                 statusLine = "\(saved.name) (Remote)"
             } else {
@@ -223,7 +236,15 @@ final class CompanionModel {
         }
         reconcile()
         if case .code = phase {
-            phase = snapshot == nil ? .offline : .live
+            if snapshot == nil {
+                phase = .offline
+                statusLine = wasUnauthorized
+                    ? "The code for \(saved?.name ?? "your Mac") no longer matches.  Reconnect to pair again."
+                    : "The Mac did not answer."
+            } else {
+                phase = .live
+                statusLine = saved?.name ?? "Hog Hunter"
+            }
         }
     }
 
@@ -243,6 +264,7 @@ final class CompanionModel {
             persistSaved()
             snapshot = next
             codeError = nil
+            pairingDismissed = false
             phase = .live
         } catch {
             codeError = Self.codeMessage(for: error)
@@ -758,6 +780,7 @@ final class CompanionModel {
             let peerID = "remote-\(host):\(portNum)"
             saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: portNum)
             persistSaved()
+            pairingDismissed = false
             snapshot = fetched
             phase = .live
             statusLine = "\(displayName) (Remote)"
@@ -788,6 +811,7 @@ final class CompanionModel {
         if case .code = phase { return }
         do {
             let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token)
+            pairingDismissed = false
             snapshot = fetched
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
@@ -797,11 +821,18 @@ final class CompanionModel {
             }
             Task { await upgradeToDeviceTokenIfNeeded() }
         } catch CompanionClientError.unauthorized {
-            codeError = CompanionToken.isDeviceToken(saved.token)
-                ? "This iPhone is no longer paired with the Mac.\u{00A0} Enter the code from Hog Hunter Settings to pair it again."
-                : "The code no longer matches.\u{00A0} Enter the code from Hog Hunter Settings on your Mac."
-            phase = .code(saved.peerID)
             snapshot = nil
+            if pairingDismissed {
+                // The user already cancelled this pairing attempt; the next
+                // poll must not re-present the sheet on every 401.
+                phase = .offline
+                statusLine = "The code for \(saved.name) no longer matches.  Reconnect to pair again."
+            } else {
+                codeError = CompanionToken.isDeviceToken(saved.token)
+                    ? "This iPhone is no longer paired with the Mac.\u{00A0} Enter the code from Hog Hunter Settings to pair it again."
+                    : "The code no longer matches.\u{00A0} Enter the code from Hog Hunter Settings on your Mac."
+                phase = .code(saved.peerID)
+            }
         } catch {
             if snapshot == nil {
                 phase = .offline
