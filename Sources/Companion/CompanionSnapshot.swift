@@ -120,7 +120,7 @@ enum CompanionToken {
     }
 }
 
-/// Read-only picture of the Mac panel.  Numbers are already formatted the way
+/// Live telemetry snapshot of the Mac panel.  Numbers are already formatted the way
 /// the menu bar app shows them, so the phone does not keep a second copy of
 /// the scale rules.
 struct CompanionSnapshot: Codable, Equatable {
