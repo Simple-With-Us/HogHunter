@@ -147,6 +147,8 @@ final class HogStore: ObservableObject {
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
     @Published private(set) var activeCleanProgress: CompanionCleanProgress? = nil
+    /// Unique run token identifying the current active clean operation.
+    @Published private(set) var activeCleanRunId: UUID? = nil
 
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
@@ -1237,6 +1239,8 @@ final class HogStore: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, let progress = note.object as? CompanionCleanProgress else { return }
                 self.activeCleanProgress = progress
+                let runId = self.activeCleanRunId ?? UUID()
+                self.activeCleanRunId = runId
                 self.publishCompanion()
 
                 if !progress.isCleaning {
@@ -1244,8 +1248,9 @@ final class HogStore: ObservableObject {
                         try? await Task.sleep(nanoseconds: 10_000_000_000)
                         await MainActor.run { [weak self] in
                             guard let self else { return }
-                            if self.activeCleanProgress == progress {
+                            if self.activeCleanRunId == runId {
                                 self.activeCleanProgress = nil
+                                self.activeCleanRunId = nil
                                 self.publishCompanion()
                             }
                         }
@@ -1431,6 +1436,7 @@ final class HogStore: ObservableObject {
     }
 
     nonisolated private func performRemoteClean() -> (status: Int, body: Data) {
+        let runId = UUID()
         let cleaner = DiskCleaner()
         let exclusions = CleanerExclusions.load()
         let semaphore = DispatchSemaphore(value: 0)
@@ -1438,6 +1444,7 @@ final class HogStore: ObservableObject {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self.activeCleanRunId = runId
             self.activeCleanProgress = CompanionCleanProgress(
                 isCleaning: true,
                 phase: "scanning",
@@ -1462,6 +1469,7 @@ final class HogStore: ObservableObject {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                self.activeCleanRunId = runId
                 self.activeCleanProgress = CompanionCleanProgress(
                     isCleaning: true,
                     phase: "snapshot",
@@ -1496,6 +1504,7 @@ final class HogStore: ObservableObject {
                     let itemsCleaned = Int(fraction * Double(totalItems))
                     Task { @MainActor [weak self] in
                         guard let self else { return }
+                        self.activeCleanRunId = runId
                         self.activeCleanProgress = CompanionCleanProgress(
                             isCleaning: true,
                             phase: fraction >= 1.0 ? "finishing" : "cleaning",
@@ -1542,6 +1551,7 @@ final class HogStore: ObservableObject {
             )
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                self.activeCleanRunId = runId
                 self.activeCleanProgress = completedProgress
                 self.publishCompanion()
             }
@@ -1551,8 +1561,9 @@ final class HogStore: ObservableObject {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     // Only clear the run that scheduled this timer.
-                    if self.activeCleanProgress == completedProgress {
+                    if self.activeCleanRunId == runId {
                         self.activeCleanProgress = nil
+                        self.activeCleanRunId = nil
                         self.publishCompanion()
                     }
                 }
