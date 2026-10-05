@@ -262,8 +262,23 @@ enum SnapshotSafety {
         }
     }
 
+    /// Holds the in-flight `tmutil thinlocalsnapshots` child so a cancelled clean can terminate it.
+    private static let thinProcessLock = NSLock()
+    private static var activeThinProcess: Process?
+
+    /// Terminates any in-flight thin child.  Safe to call from a cancellation handler.
+    static func cancelActiveThin() {
+        thinProcessLock.lock()
+        let process = activeThinProcess
+        activeThinProcess = nil
+        thinProcessLock.unlock()
+        process?.terminate()
+    }
+
     /// Safely thins local Time Machine snapshots to reclaim space pinned by deleted files.
     /// Uses tmutil thinlocalsnapshots with urgency level 4 (most aggressive reclamation).
+    /// Observes cooperative cancellation by registering the child Process so
+    /// `cancelActiveThin()` can terminate it mid-flight.
     static func thinLocalSnapshots(amountInBytes: Int64 = 999_999_999_999, urgency: Int = 4) -> (success: Bool, thinnedCount: Int) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
@@ -272,13 +287,26 @@ enum SnapshotSafety {
         process.standardOutput = pipe
         process.standardError = pipe
         do {
+            thinProcessLock.lock()
+            activeThinProcess = process
+            thinProcessLock.unlock()
+            defer {
+                thinProcessLock.lock()
+                if activeThinProcess === process {
+                    activeThinProcess = nil
+                }
+                thinProcessLock.unlock()
+            }
             try process.run()
+            // Drain before waiting: a child that fills the 64 KB pipe buffer
+            // blocks on write and never exits, deadlocking waitUntilExit().
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             let thinned = output.components(separatedBy: .newlines)
                 .filter { $0.contains("com.apple.TimeMachine.") }
-            return (process.terminationStatus == 0, max(1, thinned.count))
+            // SIGTERM from cancelActiveThin yields a non-zero status; treat as cancelled failure.
+            return (process.terminationStatus == 0, process.terminationStatus == 0 ? max(1, thinned.count) : thinned.count)
         } catch {
             return (false, 0)
         }
@@ -1182,7 +1210,8 @@ final class DiskCleaner: @unchecked Sendable {
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
     /// When `createSnapshot` is true, takes an APFS local snapshot first.
-    /// A failed snapshot stops the clean.  Nothing is deleted.
+    /// A failed snapshot stops further deletes.  APFS local snapshots already
+    /// thinned before the failed safety snapshot are still reported.
     func clean(items: [CleanItem],
                tier: CleanTier = .standard,
                createSnapshot: Bool = true,
@@ -1196,15 +1225,61 @@ final class DiskCleaner: @unchecked Sendable {
         let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
         let hasSnapshotItems = activeItems.contains { $0.category == .apfsSnapshots }
 
+        // Track thinning completed before the safety snapshot so a failed
+        // localsnapshot still reports any irreversible thin accurately.
+        var thinnedCount = 0
+
         if hasSnapshotItems {
+            guard !Task.isCancelled else {
+                errors.append("Cleanup cancelled")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: 0,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
+            }
             progress?(0.0, "Thinning APFS local snapshots…")
-            let (thinned, count) = await Task.detached(priority: .utility) {
-                SnapshotSafety.thinLocalSnapshots()
-            }.value
+            // Offload the blocking tmutil wait to a utility task, but wire
+            // cancellation so cancelAll()/stop() terminate the child instead of
+            // awaiting a multi-minute thinlocalsnapshots run.
+            let (thinned, count) = await withTaskCancellationHandler {
+                await Task.detached(priority: .utility) {
+                    SnapshotSafety.thinLocalSnapshots()
+                }.value
+            } onCancel: {
+                SnapshotSafety.cancelActiveThin()
+            }
             if thinned {
+                thinnedCount = count
                 removedCount += count
+            } else if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                progress?(1.0, "Stopped")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: thinnedCount,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
             } else {
                 errors.append("Failed to thin APFS local snapshots")
+            }
+            if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                progress?(1.0, "Stopped")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: removedCount,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
             }
         }
 
@@ -1214,11 +1289,15 @@ final class DiskCleaner: @unchecked Sendable {
             if success {
                 snapshotCreatedName = name
             } else {
-                errors.append("APFS snapshot failed.  Nothing was deleted.")
+                // Thinning already ran (destructive).  Report it; do not claim
+                // "Nothing was deleted" after local snapshots were thinned.
+                errors.append(thinnedCount > 0
+                    ? "APFS snapshot failed.  APFS local snapshots were already thinned; no other data was deleted."
+                    : "APFS snapshot failed.  Nothing was deleted.")
                 progress?(1.0, "Stopped")
                 return CleanResult(
                     bytesReclaimed: 0,
-                    itemsRemoved: 0,
+                    itemsRemoved: thinnedCount,
                     errors: errors,
                     cleanedAt: Date(),
                     snapshotName: nil,
