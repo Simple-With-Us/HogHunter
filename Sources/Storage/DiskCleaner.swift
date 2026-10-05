@@ -300,6 +300,10 @@ struct CleanItem: Identifiable, Hashable, Sendable {
 
     var path: String { url.path }
 
+    var canRevealInFinder: Bool {
+        category != .apfsSnapshots && FileManager.default.fileExists(atPath: url.path)
+    }
+
     var formattedSize: String {
         HogFormat.memory(bytes)
     }

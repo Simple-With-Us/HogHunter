@@ -340,6 +340,7 @@ final class DiskCleanerStore: ObservableObject {
     // MARK: - Finder Integration
 
     func revealInFinder(url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
