@@ -1,0 +1,5 @@
+{
+  "name": "HogHunter",
+  "install": "bash scripts/cursor-cloud-install.sh",
+  "start": "bash scripts/cursor-cloud-start.sh"
+}
