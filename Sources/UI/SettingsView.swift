@@ -365,9 +365,10 @@ private struct IPhoneSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if store.shareWithIPhone {
                     LabeledContent("Pairing Code") {
-                        Text(spacedCode(store.companionCode))
-                            .font(.system(.title3, design: .monospaced))
-                            .textSelection(.enabled)
+                        PairingCodeField(
+                            code: spacedCode(store.companionCode),
+                            rawCode: store.companionCode
+                        )
                     }
                     Text(store.companionStatus)
                         .font(.system(size: 11))
@@ -437,6 +438,96 @@ private struct IPhoneSettingsTab: View {
     private func copyCompanionCode() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(store.companionCode, forType: .string)
+    }
+}
+
+private struct PairingCodeField: View {
+    let code: String
+    let rawCode: String
+    @State private var isHovering = false
+    @State private var justCopied = false
+    @State private var cursorPushed = false
+
+    var body: some View {
+        Button(action: copyToClipboard) {
+            HStack(spacing: 8) {
+                Text(code)
+                    .font(.system(.title3, design: .monospaced))
+                    .foregroundStyle(.primary)
+
+                if justCopied {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("Copied")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.12), in: Capsule())
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                } else if isHovering {
+                    HStack(spacing: 3) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 10))
+                        Text("Click to copy")
+                            .font(.system(size: 11))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+                    .transition(.opacity)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovering || justCopied ? Color.primary.opacity(0.05) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+            if hovering {
+                if !cursorPushed {
+                    NSCursor.pointingHand.push()
+                    cursorPushed = true
+                }
+            } else {
+                if cursorPushed {
+                    NSCursor.pop()
+                    cursorPushed = false
+                }
+            }
+        }
+        .onDisappear {
+            if cursorPushed {
+                NSCursor.pop()
+                cursorPushed = false
+            }
+        }
+        .help(justCopied ? "Copied" : "Click to copy")
+        .accessibilityLabel("Pairing Code \(code)")
+        .accessibilityHint(justCopied ? "Copied to clipboard" : "Click to copy pairing code to clipboard")
+    }
+
+    private func copyToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rawCode, forType: .string)
+        withAnimation(.easeInOut(duration: 0.15)) {
+            justCopied = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                justCopied = false
+            }
+        }
     }
 }
 

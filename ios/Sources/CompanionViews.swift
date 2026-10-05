@@ -325,6 +325,7 @@ struct DashboardView: View {
     @State private var showQuitResultAlert = false
     @State private var pendingTameRow: CompanionRow?
     @State private var pendingTameAction = "tame"
+    @State private var lastTameAction = "tame"
     @State private var showTameConfirm = false
     @State private var lastTameResult: CompanionTameResponse?
     @State private var showTameResultAlert = false
@@ -445,8 +446,10 @@ struct DashboardView: View {
         ) {
             Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
                 if let row = pendingTameRow, let pid = row.pid {
+                    let action = pendingTameAction
+                    lastTameAction = action
                     Task {
-                        let res = await model.tameProcess(pid: pid, action: pendingTameAction)
+                        let res = await model.tameProcess(pid: pid, action: action)
                         lastTameResult = res
                         showTameResultAlert = true
                     }
@@ -456,10 +459,12 @@ struct DashboardView: View {
         } message: {
             Text(pendingTameAction == "untame"
                 ? "Restores normal CPU scheduling priority for \(pendingTameRow?.name ?? "this app") on \(snapshot.hostName)."
-                : "Lowers CPU priority (renices to +10) for \(pendingTameRow?.name ?? "this app") so it does not starve other apps on \(snapshot.hostName).")
+                : "Lowers CPU priority for this app so it does not starve other apps on the Mac.")
         }
         .alert(
-            lastTameResult?.error != nil ? "Could Not Tame App" : "Priority Updated",
+            lastTameResult?.error != nil
+                ? (lastTameAction == "untame" ? "Could Not Restore Priority" : "Could Not Tame App")
+                : "Priority Updated",
             isPresented: $showTameResultAlert
         ) {
             Button("OK", role: .cancel) {}
@@ -1099,7 +1104,7 @@ struct RemoteConnectSheet: View {
 
                 if model.isWaitingForApproval {
                     Section {
-                        Label("Check your Mac and click allow", systemImage: "desktopcomputer")
+                        Label("Check your Mac and click Allow.", systemImage: "desktopcomputer")
                             .font(.subheadline.weight(.semibold))
                     }
                 }
@@ -1140,8 +1145,15 @@ struct RemoteConnectSheet: View {
                     }
                 }
             }
+            .onChange(of: model.isRemoteSheetPresented) { _, isPresented in
+                if !isPresented {
+                    dismiss()
+                }
+            }
             .onDisappear {
-                model.cancelRemoteConnect()
+                if model.isConnectingRemote {
+                    model.cancelRemoteConnect()
+                }
             }
         }
     }
