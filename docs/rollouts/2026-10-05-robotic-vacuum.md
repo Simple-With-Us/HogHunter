@@ -1,48 +1,73 @@
 # Robotic Vacuum (2026-10-05)
 
-Hog Hunter now owns Jay's scheduled Mac cleaning under **Robotic Vacuum**.
+## Context & Objective
 
-## What moved in
+Hog Hunter becomes the home for scheduled Mac cleaning (**Robotic Vacuum**), replacing loose `com.jay.*` launchd jobs with one agent, durable history, alerts, and a Storage UI tab.
 
-- `scripts/robotic-vacuum.py` and `scripts/vacuum/` — engine, scheduler, alerts, history.
-- `scripts/hoghunter-clean` — still the reclaim core; full vacuum calls it with `--band=cheap|full`.
-- Steps ported from `mac-auto-cleanup.sh`, `janitor.sh`, and `mac-resource-watch.py` with the same safety rules (no Simulator Devices delete, no `simctl shutdown all`, skip package cache prunes during installs, truncate logs in place, refuse tracked git paths, no forced worktree removal, re-entrant housekeeper lock, no RAM optimize).
+## Changes Made
 
-## Scheduling
+- `config/robotic-vacuum.json`
+- `docs/rollouts/2026-10-05-robotic-vacuum.md`
+- `launchd/com.simplewithus.hoghunter.robotic-vacuum.plist`
+- `scripts/hoghunter-mcp.py`
+- `scripts/robotic-vacuum.py`
+- `scripts/robotic-vacuum-migrate.sh`
+- `scripts/robotic-vacuum-rollback.sh`
+- `scripts/shims/janitor.sh`
+- `scripts/shims/mac-auto-cleanup.sh`
+- `scripts/shims/mac-resource-watch.py`
+- `scripts/test-robotic-vacuum.py`
+- `scripts/vacuum/` (engine, scheduler, alerts, janitor helpers)
+- `Sources/Storage/RoboticVacuumModels.swift`
+- `Sources/Storage/RoboticVacuumStore.swift`
+- `Sources/UI/RoboticVacuumView.swift`
+- `Sources/UI/StorageView.swift`
+- `Tests/HogHunterTests/RoboticVacuumTests.swift`
+- `.github/workflows/ci.yml`
+- `README.md`
 
-One launchd agent: `com.simplewithus.hoghunter.robotic-vacuum` every 5 minutes runs `--tick scheduler`, which:
+## Decisions & Trade-offs
 
-- **Watch** (~5 min): sample disk/RAM/CPU; pressure cleanup with cooldown when thresholds hit.
-- **Janitor** (~30 min): worktree retirement and low-disk cache reclaim.
-- **Full** (~4 h): full vacuum cadence (former `mac-auto-cleanup`).
+- **Single 5-minute launchd tick** runs watch (300s), janitor (1800s), and full (14400s) cadences internally instead of three agents.
+- **Janitor parity:** Python port covers retirement, pressure gates, and cheap truncations; full bash `du` bucket probes and prod/dev `.next` CACHE-only sweeps stay deferred to `hoghunter-clean` until production logs show gaps.
+- **Safety:** Preserves legacy rules (no Simulator Devices delete, no `simctl shutdown all`, install-aware cache prunes, in-place log truncation, tracked-git guard, re-entrant housekeeper lock, no RAM optimize).
+- **Migration not automated from CI:** `robotic-vacuum-migrate.sh` is owner-run on Mac after review.
 
-## Migrate (run on Mac after review)
+## Verification State
+
+| Command | Result |
+|---------|--------|
+| `python3 scripts/test-robotic-vacuum.py` | PASS (Linux CI) |
+| `python3 scripts/test-hoghunter-clean.py` | PASS (Linux CI) |
+| `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` | PASS (GitHub Actions `test` job after `UInt64` fix) |
+| Headless UI smoke + `scripts/capture-app-screenshots.sh` | PASS (same `test` job) |
+| `bash scripts/robotic-vacuum-migrate.sh` on owner Mac | NOT RUN (post-merge) |
+
+## Next Steps & Blockers
+
+- Owner runs `bash scripts/robotic-vacuum-migrate.sh` after merge.
+- Confirm launchd logs under the Hog Hunter Logs directory on Mac.
+- Expand `janitor_cache_reclaim` if janitor parity gaps appear in production.
+
+## Zero-Code Findings
+
+- Fleet agents poll `hoghunter_robotic_vacuum_status` / `--cli vacuum`.
+- Shims under `scripts/shims/` optional for legacy script paths.
+
+## Operator notes
+
+**Migrate (Mac):**
 
 ```bash
-cd ~/Code/HogHunter   # or your clone
+cd "$(git rev-parse --show-toplevel)"
 bash scripts/robotic-vacuum-migrate.sh
+# Migration prints MIGRATION_BACKUP_PATH=... — save it for rollback.
 ```
 
-Backups land under `~/Library/Application Support/HogHunter/RoboticVacuum/migration-backup/`.
-
-## Rollback
+**Rollback:**
 
 ```bash
-bash scripts/robotic-vacuum-rollback.sh ~/Library/Application\ Support/HogHunter/RoboticVacuum/migration-backup/<timestamp>
+bash scripts/robotic-vacuum-rollback.sh "${MIGRATION_BACKUP_PATH:?set from migrate output}"
 ```
 
-## Shims
-
-`scripts/shims/` can replace old script paths so external callers keep working.
-
-## Fleet polling
-
-`python3 scripts/hoghunter-mcp.py --cli vacuum` or MCP tool `hoghunter_robotic_vacuum_status`.
-
-## Intentionally lighter than bash janitor
-
-The full 700-line `janitor.sh` includes extensive `du` bucket probes, per-repo watchdogs, and prod/dev `.next` cache clears.  The Python port covers retirement, pressure gates, cheap truncations, and defers bulk reclaim to `hoghunter-clean`.  Expand `janitor_cache_reclaim` if parity gaps show up in production logs.
-
-## Linux / CI
-
-`python3 scripts/test-robotic-vacuum.py` runs on Linux.  Swift UI and launchd were not compiled in the cloud VM.
+**Fleet polling:** `python3 scripts/hoghunter-mcp.py --cli vacuum`
