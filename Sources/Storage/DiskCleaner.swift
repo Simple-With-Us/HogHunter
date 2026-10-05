@@ -111,7 +111,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
 }
 
 /// Degrees of disk cleaning supported by Hog Hunter.
-enum CleanTier: String, CaseIterable, Identifiable, Sendable {
+enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Safe major clutter removal: caches, logs, trash, developer junk, and stale temp files.
     /// Preserves full recoverability via APFS snapshot & Trash Put-Back.
     case standard
