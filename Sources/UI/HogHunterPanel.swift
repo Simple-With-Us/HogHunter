@@ -194,7 +194,8 @@ struct HogHunterPanel: View {
             Image(nsImage: HogActions.activityMonitorIcon)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 24, height: 24)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
         .fixedSize()

@@ -18,6 +18,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case localAIModels
     /// Large files (>100 MB) or old files (>6 months) in user working folders (Downloads, Documents, Desktop).
     case largeAndOldFiles
+    /// APFS local Time Machine snapshots pinning deleted storage blocks.
+    case apfsSnapshots
 
     var id: String { rawValue }
 
@@ -31,6 +33,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts: return "AI & Agent Junk"
         case .localAIModels: return "Local AI & LLM Models"
         case .largeAndOldFiles: return "Large & Old Files"
+        case .apfsSnapshots: return "APFS Local Snapshots"
         }
     }
 
@@ -52,6 +55,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Downloaded LLM and model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper."
         case .largeAndOldFiles:
             return "Files over 100 MB, or over 20 MB untouched for 6+ months."
+        case .apfsSnapshots:
+            return "Local Time Machine backup snapshots pinning deleted disk blocks on APFS containers."
         }
     }
 
@@ -65,6 +70,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts: return "sparkles"
         case .localAIModels: return "brain.head.profile"
         case .largeAndOldFiles: return "clock.arrow.circlepath"
+        case .apfsSnapshots: return "camera.metering.matrix"
         }
     }
 
@@ -78,13 +84,14 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts: return 5
         case .localAIModels: return 6
         case .largeAndOldFiles: return 7
+        case .apfsSnapshots: return 8
         }
     }
 
     /// Whether this category is restricted to the Extreme Clean tier.
     var isExtremeOnly: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots:
             return false
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return true
@@ -96,8 +103,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
             return true
-        case .aiArtifacts, .localAIModels, .largeAndOldFiles:
-            // Large/old files and AI agent artifacts require explicit user review to prevent accidental deletion
+        case .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots:
+            // Large/old files, AI agent artifacts, and local snapshots require explicit user review to prevent accidental deletion
             return false
         }
     }
@@ -218,8 +225,8 @@ enum SnapshotSafety {
         process.standardError = pipe
         do {
             try process.run()
-            process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             if process.terminationStatus == 0 {
                 if let line = output.components(separatedBy: .newlines).first(where: { $0.contains("Created local snapshot with date:") }) {
@@ -231,6 +238,77 @@ enum SnapshotSafety {
             return (false, nil)
         } catch {
             return (false, nil)
+        }
+    }
+
+    /// Lists active APFS local Time Machine snapshots on the system.
+    static func listLocalSnapshots() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
+        process.arguments = ["listlocalsnapshots", "/"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return output.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.hasPrefix("com.apple.TimeMachine.") }
+        } catch {
+            return []
+        }
+    }
+
+    /// Holds the in-flight `tmutil thinlocalsnapshots` child so a cancelled clean can terminate it.
+    private static let thinProcessLock = NSLock()
+    private static var activeThinProcess: Process?
+
+    /// Terminates any in-flight thin child.  Safe to call from a cancellation handler.
+    static func cancelActiveThin() {
+        thinProcessLock.lock()
+        let process = activeThinProcess
+        activeThinProcess = nil
+        thinProcessLock.unlock()
+        process?.terminate()
+    }
+
+    /// Safely thins local Time Machine snapshots to reclaim space pinned by deleted files.
+    /// Uses tmutil thinlocalsnapshots with urgency level 4 (most aggressive reclamation).
+    /// Observes cooperative cancellation by registering the child Process so
+    /// `cancelActiveThin()` can terminate it mid-flight.
+    static func thinLocalSnapshots(amountInBytes: Int64 = 999_999_999_999, urgency: Int = 4) -> (success: Bool, thinnedCount: Int) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
+        process.arguments = ["thinlocalsnapshots", "/", String(amountInBytes), String(urgency)]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            thinProcessLock.lock()
+            activeThinProcess = process
+            thinProcessLock.unlock()
+            defer {
+                thinProcessLock.lock()
+                if activeThinProcess === process {
+                    activeThinProcess = nil
+                }
+                thinProcessLock.unlock()
+            }
+            try process.run()
+            // Drain before waiting: a child that fills the 64 KB pipe buffer
+            // blocks on write and never exits, deadlocking waitUntilExit().
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            let thinned = output.components(separatedBy: .newlines)
+                .filter { $0.contains("com.apple.TimeMachine.") }
+            // SIGTERM from cancelActiveThin yields a non-zero status; treat as cancelled failure.
+            return (process.terminationStatus == 0, process.terminationStatus == 0 ? max(1, thinned.count) : thinned.count)
+        } catch {
+            return (false, 0)
         }
     }
 }
@@ -249,6 +327,10 @@ struct CleanItem: Identifiable, Hashable, Sendable {
     var detail: String?
 
     var path: String { url.path }
+
+    var canRevealInFinder: Bool {
+        category != .apfsSnapshots && FileManager.default.fileExists(atPath: url.path)
+    }
 
     var formattedSize: String {
         HogFormat.memory(bytes)
@@ -396,6 +478,26 @@ final class DiskCleaner: @unchecked Sendable {
             return scanLocalAIModels()
         case .largeAndOldFiles:
             return scanLargeAndOldFiles()
+        case .apfsSnapshots:
+            return scanAPFSSnapshots()
+        }
+    }
+
+    /// Scans for active APFS Time Machine local snapshots pinning deleted storage blocks.
+    func scanAPFSSnapshots() -> [CleanItem] {
+        let snapshots = SnapshotSafety.listLocalSnapshots()
+        return snapshots.map { snap in
+            CleanItem(
+                category: .apfsSnapshots,
+                title: snap,
+                subtitle: "Time Machine Local Snapshot",
+                url: URL(fileURLWithPath: "/.snapshots/\(snap)"),
+                bytes: 0,
+                fileCount: 1,
+                lastModified: nil,
+                isSelected: CleanCategory.apfsSnapshots.defaultSelected,
+                detail: "Pins deleted data blocks on APFS container. Pruning releases purgeable storage."
+            )
         }
     }
 
@@ -1108,7 +1210,8 @@ final class DiskCleaner: @unchecked Sendable {
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
     /// When `createSnapshot` is true, takes an APFS local snapshot first.
-    /// A failed snapshot stops the clean.  Nothing is deleted.
+    /// A failed snapshot stops further deletes.  APFS local snapshots already
+    /// thinned before the failed safety snapshot are still reported.
     func clean(items: [CleanItem],
                tier: CleanTier = .standard,
                createSnapshot: Bool = true,
@@ -1120,6 +1223,65 @@ final class DiskCleaner: @unchecked Sendable {
         var snapshotCreatedName: String?
 
         let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
+        let hasSnapshotItems = activeItems.contains { $0.category == .apfsSnapshots }
+
+        // Track thinning completed before the safety snapshot so a failed
+        // localsnapshot still reports any irreversible thin accurately.
+        var thinnedCount = 0
+
+        if hasSnapshotItems {
+            guard !Task.isCancelled else {
+                errors.append("Cleanup cancelled")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: 0,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
+            }
+            progress?(0.0, "Thinning APFS local snapshots…")
+            // Offload the blocking tmutil wait to a utility task, but wire
+            // cancellation so cancelAll()/stop() terminate the child instead of
+            // awaiting a multi-minute thinlocalsnapshots run.
+            let (thinned, count) = await withTaskCancellationHandler {
+                await Task.detached(priority: .utility) {
+                    SnapshotSafety.thinLocalSnapshots()
+                }.value
+            } onCancel: {
+                SnapshotSafety.cancelActiveThin()
+            }
+            if thinned {
+                thinnedCount = count
+                removedCount += count
+            } else if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                progress?(1.0, "Stopped")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: thinnedCount,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
+            } else {
+                errors.append("Failed to thin APFS local snapshots")
+            }
+            if Task.isCancelled {
+                errors.append("Cleanup cancelled")
+                progress?(1.0, "Stopped")
+                return CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: removedCount,
+                    errors: errors,
+                    cleanedAt: Date(),
+                    snapshotName: nil,
+                    tier: tier
+                )
+            }
+        }
 
         if createSnapshot && !activeItems.isEmpty {
             progress?(0.0, "Creating APFS safety snapshot…")
@@ -1127,11 +1289,15 @@ final class DiskCleaner: @unchecked Sendable {
             if success {
                 snapshotCreatedName = name
             } else {
-                errors.append("APFS snapshot failed.  Nothing was deleted.")
+                // Thinning already ran (destructive).  Report it; do not claim
+                // "Nothing was deleted" after local snapshots were thinned.
+                errors.append(thinnedCount > 0
+                    ? "APFS snapshot failed.  APFS local snapshots were already thinned; no other data was deleted."
+                    : "APFS snapshot failed.  Nothing was deleted.")
                 progress?(1.0, "Stopped")
                 return CleanResult(
                     bytesReclaimed: 0,
-                    itemsRemoved: 0,
+                    itemsRemoved: thinnedCount,
                     errors: errors,
                     cleanedAt: Date(),
                     snapshotName: nil,
@@ -1161,16 +1327,21 @@ final class DiskCleaner: @unchecked Sendable {
             }
 
             do {
-                if item.category == .trash {
+                if item.category == .apfsSnapshots {
+                    // Handled upfront before safety snapshot creation to preserve reversibility.
+                    continue
+                } else if item.category == .trash {
                     // Item is already in the trash, so remove it permanently
                     try fileManager.removeItem(at: item.url)
+                    reclaimed &+= item.bytes
+                    removedCount += 1
                 } else {
                     // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
                     try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
+                    reclaimed &+= item.bytes
+                    removedCount += 1
                 }
-                reclaimed &+= item.bytes
-                removedCount += 1
             } catch {
                 errors.append("Failed to clean \(item.title): \(error.localizedDescription)")
             }
@@ -1307,6 +1478,9 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Desktop/"
             ]
             return allowedUserPrefixes.contains { path.hasPrefix($0) && path != $0 }
+
+        case .apfsSnapshots:
+            return path.hasPrefix("/.snapshots/com.apple.TimeMachine.")
         }
     }
 
