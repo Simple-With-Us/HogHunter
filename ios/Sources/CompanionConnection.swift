@@ -24,6 +24,7 @@ enum CompanionConnection {
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -82,10 +83,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.request(token: token)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -110,10 +115,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.cleanRequest(token: token)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -138,10 +147,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.quitRequest(token: token, pid: pid, force: force)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -166,10 +179,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.tameRequest(token: token, pid: pid, action: action)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -200,10 +217,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.exclusionsRequest(token: token, toggleCategory: toggleCategory, addPath: addPath, removePath: removePath)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -234,10 +255,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.viewRequest(token: token, window: window, grouping: grouping, cpuScale: cpuScale)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }

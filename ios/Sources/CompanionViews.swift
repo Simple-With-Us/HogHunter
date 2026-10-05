@@ -325,9 +325,11 @@ struct DashboardView: View {
     @State private var showQuitResultAlert = false
     @State private var pendingTameRow: CompanionRow?
     @State private var pendingTameAction = "tame"
-    @State private var lastTameAction = "tame"
+    /// Action and result land as ONE value.  Holding them in separate `@State`
+    /// let two in-flight tasks interleave, so a stale response could label a tame
+    /// failure "Could Not Restore Priority" (or the reverse).
+    @State private var lastTameOutcome: (action: String, result: CompanionTameResponse)?
     @State private var showTameConfirm = false
-    @State private var lastTameResult: CompanionTameResponse?
     @State private var showTameResultAlert = false
     @State private var showAddPathAlert = false
     @State private var newPathInput = ""
@@ -447,10 +449,9 @@ struct DashboardView: View {
             Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
                 if let row = pendingTameRow, let pid = row.pid {
                     let action = pendingTameAction
-                    lastTameAction = action
                     Task {
                         let res = await model.tameProcess(pid: pid, action: action)
-                        lastTameResult = res
+                        lastTameOutcome = (action, res)
                         showTameResultAlert = true
                     }
                 }
@@ -462,16 +463,16 @@ struct DashboardView: View {
                 : "Lowers CPU priority (renices to +10) for \(pendingTameRow?.name ?? "this app") so it does not starve other apps on \(snapshot.hostName).")
         }
         .alert(
-            lastTameResult?.error != nil
-                ? (lastTameAction == "untame" ? "Could Not Restore Priority" : "Could Not Tame App")
+            lastTameOutcome?.result.error != nil
+                ? (lastTameOutcome?.action == "untame" ? "Could Not Restore Priority" : "Could Not Tame App")
                 : "Priority Updated",
             isPresented: $showTameResultAlert
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            if let error = lastTameResult?.error {
+            if let error = lastTameOutcome?.result.error {
                 Text(error)
-            } else if let message = lastTameResult?.message {
+            } else if let message = lastTameOutcome?.result.message {
                 Text(message)
             } else {
                 Text("Command delivered to \(snapshot.hostName).")

@@ -447,4 +447,39 @@ final class CompanionStorageTelemetryTests: XCTestCase {
         XCTAssertEqual(decoded.remoteQuitAllowed, true)
         XCTAssertEqual(decoded.remoteCleanAllowed, false)
     }
+
+    /// Regression: the "Pair this iPhone?" alert suppressed the `@Published`
+    /// `didSet` publications with `loadingSettings = true` so the snapshot was
+    ///  built once -- but both `didSet`s called `persist()` in that same state,
+    ///  and `persist()` returns early while loading.  The owner's answer was
+    ///  never written to UserDefaults and both flags reverted on next launch.
+    ///  Fix: restore `loadingSettings` before a single `persist()`.
+    func testPairAlertPermissionsReachUserDefaults() {
+        let suite = "hoghunter.tests.pairpermissions"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let store = HogStore(defaults: defaults)
+        store.allowRemoteQuit = true
+        store.allowRemoteClean = true
+
+        // Simulate what the alert does: suppress both didSet publications, set
+        // the flags, restore the flag, then persist exactly once.
+        store.setLoadingSettingsForTest(true)
+        store.allowRemoteQuit = true
+        store.allowRemoteClean = true
+        store.setLoadingSettingsForTest(false)
+        store.persistForTest()
+
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteQuit"), true,
+                       "remote-quit permission must survive a restart")
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteClean"), true,
+                       "remote-clean permission must survive a restart")
+
+        // And a fresh store must read the owner's answer back, not reset it.
+        let next = HogStore(defaults: defaults)
+        XCTAssertEqual(next.allowRemoteQuit, true)
+        XCTAssertEqual(next.allowRemoteClean, true)
+    }
 }

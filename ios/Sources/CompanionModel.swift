@@ -455,9 +455,13 @@ final class CompanionModel {
 
         isConnectingRemote = true
         remoteConnectError = nil
+        let previous = remoteConnectTask
         defer {
             isConnectingRemote = false
-            remoteConnectTask = nil
+            //  Only clear the handle if it is still the one this run installed.
+            //  A cancelled run that unwinds late must not nil out the live task
+            //  a later attempt is holding.
+            if remoteConnectTask == previous { remoteConnectTask = nil }
         }
 
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)

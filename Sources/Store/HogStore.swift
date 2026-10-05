@@ -1048,6 +1048,13 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
     }
 
+    // MARK: - Test hooks
+    //  Internal, not private, so `CompanionTests` can drive the exact sequence
+    //  the "Pair this iPhone?" alert uses without a modal in the test process.
+
+    func setLoadingSettingsForTest(_ value: Bool) { loadingSettings = value }
+    func persistForTest() { persist() }
+
     /// Asks for notification permission the moment alerts are switched on, and
     /// never before.  The Settings path goes through `defaultsChanged`.
     private func alertsSwitched() {
@@ -1193,6 +1200,13 @@ final class HogStore: ObservableObject {
             allowRemoteQuit = quitBox.state == .on
             allowRemoteClean = cleanBox.state == .on
             loadingSettings = wasLoading
+            //  Both didSets above called `persist()` while `loadingSettings` was
+            //  still true, and `persist()` returns early in that state -- so the
+            //  owner's answer never reached UserDefaults and both flags reverted
+            //  at the next launch.  Persist now that the flag is restored.  The
+            //  single `publishCompanion()` below replaces the one each didSet
+            //  would have fired, so the snapshot is still rebuilt exactly once.
+            persist()
             publishCompanion()
         }
         AppActivationManager.shared.updatePolicy()

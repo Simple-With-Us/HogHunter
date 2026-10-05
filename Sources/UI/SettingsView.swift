@@ -446,6 +446,9 @@ private struct PairingCodeField: View {
     let rawCode: String
     @State private var isHovering = false
     @State private var justCopied = false
+    /// Pending "Copied" reset, cancelled on a re-click so only the newest click
+    /// controls the badge.
+    @State private var copyResetTask: Task<Void, Never>?
     @State private var cursorPushed = false
 
     var body: some View {
@@ -518,12 +521,17 @@ private struct PairingCodeField: View {
     }
 
     private func copyToClipboard() {
+        //  A second click inside the window must own the whole window: cancel the
+        //  pending reset first, or the first click's timer clears "Copied" early.
+        copyResetTask?.cancel()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(rawCode, forType: .string)
         withAnimation(.easeInOut(duration: 0.15)) {
             justCopied = true
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        copyResetTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.2)) {
                 justCopied = false
             }
