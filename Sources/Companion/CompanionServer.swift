@@ -2,8 +2,8 @@ import Darwin
 import Foundation
 import Network
 
-/// Advertises Hog Hunter on the local network and answers one read-only
-/// snapshot route.  The pairing code stays in the request header.
+/// Advertises Hog Hunter on the local network and serves companion telemetry
+/// and remote control routes.  The pairing code stays in the request header.
 final class CompanionServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "hoghunter.companion")
     private var listener: NWListener?

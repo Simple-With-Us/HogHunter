@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Hog Hunter looks for your Mac on this Wi-Fi so it can show which apps are using CPU and memory.  It does not quit anything.</string>
+	<string>Hog Hunter looks for your Mac on this Wi-Fi to monitor activity, tame or quit busy apps, and safely clean disk clutter when enabled.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_hoghunter._tcp</string>

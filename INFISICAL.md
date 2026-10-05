@@ -8,7 +8,7 @@ Everything Hog Hunter's behavior depends on that is not code lives in the app's 
 
 ## Who owns the Infisical read
 
-Hog Hunter has no backend.  The Mac app is the whole product (the iPhone companion is a read-only viewer of the Mac's snapshot over Bonjour), and the local user IS the admin -- the canonical pattern's single-user case.  So the Mac app owns the Infisical read.
+Hog Hunter has no backend.  The Mac app is the whole product (the iPhone companion connects directly to the Mac app over Bonjour or Tailscale), and the local user IS the admin -- the canonical pattern's single-user case.  So the Mac app owns the Infisical read.
 
 A universal-auth client secret is never embedded in the binary.  The admin enters it once in Settings > Advanced and it is stored in the Keychain (`com.simplewithus.hoghunter.infisical` / `universal-auth`).  Until a credential is saved, the app behaves exactly as it did before this change: built-in defaults and UserDefaults stand.
 

@@ -10,8 +10,9 @@
 
 iPhone:
 
-- New Hog Hunter iPhone app.  It finds the Mac on the same Wi-Fi and shows the same Now, Past Hour, or Past 24 Hours list the menu bar app is showing.  It is read only.  Quit stays on the Mac.
+- Hog Hunter iPhone companion.  It finds the Mac on the same Wi-Fi or connects remotely over Tailscale to monitor activity, storage, and network connections.  When enabled in Mac Settings, you can safely tame runaway CPU hogs, quit apps, and trigger a safe disk clean.
 - On the Mac, Settings has Share With iPhone.  It is off until you turn it on.  The pairing code is shown there.  New Code replaces it.  The code is not advertised on the network.
+- Remote control capabilities (quitting/taming apps and running the safe disk cleaner) require individual opt-in in Mac Settings or the pairing approval dialog.
 - The phone asks for Local Network access so it can see the Mac.  Allow it on both devices if macOS or iOS asks.
 
 Icon:

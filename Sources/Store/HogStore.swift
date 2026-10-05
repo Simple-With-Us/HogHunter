@@ -119,7 +119,7 @@ final class HogStore: ObservableObject {
     /// is that first paint follows the OS.  A stored Light or Dark still wins --
     /// only the no-preference fallback changes.
     @Published var appearance: AppearanceChoice = .system { didSet { persist() } }
-    /// Off until the owner turns it on.  The iPhone can read the list.  It cannot quit.
+    /// Off until the owner turns it on.  Shares activity telemetry with the paired iPhone.
     @Published var shareWithIPhone = false {
         didSet {
             persist()

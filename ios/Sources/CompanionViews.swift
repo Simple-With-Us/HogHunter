@@ -783,10 +783,20 @@ struct DashboardView: View {
         }
 
         Section {
-            if snapshot.remoteQuitAllowed != false, snapshot.rows.contains(where: { $0.canQuit }) {
-                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            if snapshot.remoteQuitAllowed == true {
+                if snapshot.rows.contains(where: { $0.canQuit }) {
+                    Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if sortedRows.isEmpty {
+                    Text("Remote control is enabled on \(snapshot.hostName).  Waiting for active process telemetry.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Remote control is enabled on \(snapshot.hostName).  All visible processes are protected system tasks and cannot be quit or tamed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 Text("Quitting from iPhone is off.  Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
                     .font(.footnote)

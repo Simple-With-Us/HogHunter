@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Hog Hunter shares a read-only list of busy apps with the Hog Hunter iPhone app on this Wi-Fi.</string>
+	<string>Hog Hunter connects to the Hog Hunter iPhone companion on this Wi-Fi to share activity telemetry and support remote controls when enabled.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_hoghunter._tcp</string>
