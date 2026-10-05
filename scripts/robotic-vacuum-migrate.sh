@@ -15,6 +15,7 @@ OLD_LABELS=(
 )
 
 mkdir -p "${BACKUP_DIR}"
+mkdir -p "${HOME_DIR}/Library/LaunchAgents"
 mkdir -p "${HOME_DIR}/Library/Logs/HogHunter"
 
 echo "Backing up old launchd jobs to ${BACKUP_DIR}"
@@ -26,6 +27,10 @@ for old in "${OLD_LABELS[@]}"; do
   done
   if launchctl print "${DOMAIN}/${old}" &>/dev/null; then
     launchctl bootout "${DOMAIN}/${old}" 2>/dev/null || true
+  fi
+  user_plist="${HOME_DIR}/Library/LaunchAgents/${old}.plist"
+  if [[ -f "${user_plist}" ]]; then
+    rm -f "${user_plist}"
   fi
 done
 

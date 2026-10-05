@@ -95,9 +95,10 @@ def evaluate_hits(sample: dict[str, Any], prev_free: Optional[float], rw_cfg: di
     swap_pct = float(sample.get("swap_used_pct", 0))
     swap_used_gb = float(sample.get("swap_used_gb", 0))
     if swap_pct >= swap_pct_thr and swap_used_gb >= swap_gb_thr:
+        critical_swap = swap_pct >= max(swap_pct_thr + 5.0, 95.0)
         hits.append({
             "metric": "swap",
-            "severity": "critical" if swap_pct >= 90 else "warn",
+            "severity": "critical" if critical_swap else "warn",
             "threshold": swap_pct_thr,
             "value": swap_pct,
         })

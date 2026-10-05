@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -37,7 +38,7 @@ class VacuumEngine:
         dry_run: bool = False,
     ) -> RunRecord:
         record = RunRecord(
-            run_id=f"manual-{int(time.time())}",
+            run_id=uuid.uuid4().hex[:12],
             trigger=trigger,
             started_at=time.time(),
             band=band,
@@ -73,7 +74,7 @@ class VacuumEngine:
         hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
         rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
         record = RunRecord(
-            run_id=f"watch-{int(time.time())}",
+            run_id=uuid.uuid4().hex[:12],
             trigger=TriggerKind.WATCH,
             started_at=time.time(),
         )
@@ -210,7 +211,7 @@ class VacuumEngine:
     def _simctl_delete_unavailable(self) -> tuple[int, str, StepStatus]:
         if not shutil.which("xcrun"):
             return 0, "xcrun not found", StepStatus.SKIPPED
-        # Never simctl shutdown all — see mac-auto-cleanup comments.
+        # Never simctl shutdown all — fleet recall + legacy mac-auto-cleanup comments.
         res = subprocess.run(["xcrun", "simctl", "delete", "unavailable"], capture_output=True, text=True, timeout=120)
         if res.returncode != 0:
             return 0, (res.stderr or res.stdout or "simctl failed")[:120], StepStatus.FAILED

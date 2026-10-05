@@ -52,8 +52,8 @@ final class RoboticVacuumStore: ObservableObject {
         guard !isRunningNow else { return }
         isRunningNow = true
         lastError = nil
-        Task {
-            let script = repoRoot.appendingPathComponent("scripts/robotic-vacuum.py")
+        let script = repoRoot.appendingPathComponent("scripts/robotic-vacuum.py")
+        Task.detached(priority: .utility) { [weak self] in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
             proc.arguments = [script.path, "--run-now", kind]
@@ -62,26 +62,35 @@ final class RoboticVacuumStore: ObservableObject {
             do {
                 try proc.run()
                 proc.waitUntilExit()
-                if proc.terminationStatus != 0 {
-                    lastError = "Cleaning did not finish cleanly.  Check Logs for details."
+                let failed = proc.terminationStatus != 0
+                await MainActor.run {
+                    if failed {
+                        self?.lastError = "Cleaning did not finish cleanly.  Check Logs for details."
+                    }
+                    self?.isRunningNow = false
+                    self?.refresh()
                 }
             } catch {
-                lastError = error.localizedDescription
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isRunningNow = false
+                    self?.refresh()
+                }
             }
-            isRunningNow = false
-            refresh()
         }
     }
 
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
         let script = repoRoot.appendingPathComponent("scripts/robotic-vacuum.py")
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = [script.path, "--set-step", stepId, enabled ? "on" : "off"]
-        try? proc.run()
-        proc.waitUntilExit()
-        refresh()
+        Task.detached(priority: .utility) { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.arguments = [script.path, "--set-step", stepId, enabled ? "on" : "off"]
+            try? proc.run()
+            proc.waitUntilExit()
+            await MainActor.run { self?.refresh() }
+        }
     }
 
     static let catalog: [RoboticVacuumStepCatalogEntry] = [

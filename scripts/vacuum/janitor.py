@@ -42,6 +42,25 @@ def is_retired_kimi_or_scratch(worktree: str, branch: str) -> bool:
     return False
 
 
+def main_repo_root(worktree: Path, git: Callable[..., subprocess.CompletedProcess]) -> Path:
+    """Git worktree remove must run from the main repository, not a linked worktree's parent dir."""
+    try:
+        res = git(
+            ["-C", str(worktree), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return worktree
+    if res.returncode != 0:
+        return worktree
+    common = Path(res.stdout.strip())
+    if not common.is_absolute():
+        common = (worktree / common).resolve()
+    return common.parent
+
+
 def github_repo(worktree: Path, git: Callable[..., subprocess.CompletedProcess]) -> Optional[str]:
     try:
         res = git(["-C", str(worktree), "remote", "get-url", "origin"], capture_output=True, text=True, timeout=5)
@@ -192,7 +211,8 @@ def _maybe_retire(
         detail_parts.append(f"would-retire {wt_path}")
         return
     try:
-        res = git(["-C", str(wt.parent if (wt / ".git").is_file() else wt), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)
+        repo_root = main_repo_root(wt, git)
+        res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)
         if res.returncode == 0:
             on_retire()
             detail_parts.append(f"retired {wt_path}")

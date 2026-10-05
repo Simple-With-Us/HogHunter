@@ -44,6 +44,8 @@ class HousekeeperLock:
             except OSError:
                 pass
             self._owned = False
+            if os.environ.get("HOUSEKEEPER_LOCK_OWNER") == "1":
+                del os.environ["HOUSEKEEPER_LOCK_OWNER"]
 
     def _is_stale(self) -> bool:
         try:

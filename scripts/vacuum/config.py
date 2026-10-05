@@ -154,6 +154,13 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
             base["hoghunter_clean"] = str(candidate)
         else:
             base["hoghunter_clean"] = str(home / "Code" / "HogHunter" / "scripts" / "hoghunter-clean")
+    janitor = base.setdefault("janitor", {})
+    env_max_load = os.environ.get("JANITOR_MAX_LOAD")
+    if env_max_load:
+        try:
+            janitor["max_load_hard"] = float(env_max_load)
+        except ValueError:
+            pass
     steps = base.setdefault("steps", {})
     for step_id in STEP_CATALOG:
         steps.setdefault(step_id, {"enabled": True})

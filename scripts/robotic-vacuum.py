@@ -60,12 +60,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.run_now:
         engine = VacuumEngine(store.cfg, store.home)
-        trigger = TriggerKind(args.run_now if args.run_now != "pressure" else "pressure")
-        pressure = args.run_now == "pressure"
-        band = "full" if pressure else "cheap"
-        record = engine.run(trigger, pressure=pressure, band=band)
-        store.append_run(record)
-        store.touch_scheduler(f"last_{args.run_now if args.run_now != 'pressure' else 'full'}")
+        if args.run_now == "watch":
+            state = store.scheduler_state()
+            prev = state.get("prev_disk_free_gb")
+            prev_f = float(prev) if prev is not None else None
+            watch_scratch: dict[str, object] = {}
+            record, _hits, _cleaned = engine.run_watch_tick(watch_scratch, prev_f)
+            store.append_run(record)
+            patch = {k: watch_scratch[k] for k in ("prev_disk_free_gb", "last_clean_at") if k in watch_scratch}
+            store.merge_scheduler_state(patch)
+            store.touch_scheduler("last_watch")
+        else:
+            trigger = TriggerKind(args.run_now if args.run_now != "pressure" else "pressure")
+            pressure = args.run_now == "pressure"
+            band = "full" if pressure else "cheap"
+            record = engine.run(trigger, pressure=pressure, band=band)
+            store.append_run(record)
+            store.touch_scheduler(f"last_{args.run_now if args.run_now != 'pressure' else 'full'}")
         status = build_status(store, store.cfg)
         store.publish_status(status)
         if args.as_json:

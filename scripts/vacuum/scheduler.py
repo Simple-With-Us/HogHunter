@@ -27,12 +27,13 @@ def run_scheduler_tick(store: VacuumStore | None = None, now: float | None = Non
     now = now or time.time()
     results: list[dict[str, Any]] = []
 
-    rw_state = store.scheduler_state()
-    prev_free = rw_state.get("prev_disk_free_gb")
+    state = store.scheduler_state()
+    watch_scratch: dict[str, Any] = {}
+    prev_free = state.get("prev_disk_free_gb")
     prev_free_f = float(prev_free) if prev_free is not None else None
 
     if should_run(store, cfg, "watch", now):
-        record, hits, cleaned = engine.run_watch_tick(rw_state, prev_free_f)
+        record, hits, cleaned = engine.run_watch_tick(watch_scratch, prev_free_f)
         store.append_run(record)
         store.touch_scheduler("last_watch", now)
         results.append({"trigger": "watch", "run_id": record.run_id, "hits": len(hits), "cleaned": cleaned})
@@ -49,8 +50,9 @@ def run_scheduler_tick(store: VacuumStore | None = None, now: float | None = Non
         store.touch_scheduler("last_full", now)
         results.append({"trigger": "full", "run_id": record.run_id})
 
-    merged = {**store.scheduler_state(), **rw_state}
-    VacuumStore._atomic_write(store.state_path, merged)
+    if watch_scratch:
+        patch = {k: watch_scratch[k] for k in ("prev_disk_free_gb", "last_clean_at") if k in watch_scratch}
+        store.merge_scheduler_state(patch)
 
     from .alerts import evaluate_alerts, notify_macos
 

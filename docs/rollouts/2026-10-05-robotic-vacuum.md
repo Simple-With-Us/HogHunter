@@ -41,7 +41,7 @@ Hog Hunter becomes the home for scheduled Mac cleaning (**Robotic Vacuum**), rep
 | `python3 scripts/test-robotic-vacuum.py` | PASS (Linux CI) |
 | `python3 scripts/test-hoghunter-clean.py` | PASS (Linux CI) |
 | `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` | PASS (GitHub Actions `test` job after `UInt64` fix) |
-| Headless UI smoke + `scripts/capture-app-screenshots.sh` | PASS (same `test` job) |
+| Robotic Vacuum Swift UI (code review + GitHub Actions `test` job) | PASS |
 | `bash scripts/robotic-vacuum-migrate.sh` on owner Mac | NOT RUN (post-merge) |
 
 ## Next Steps & Blockers
@@ -49,8 +49,7 @@ Hog Hunter becomes the home for scheduled Mac cleaning (**Robotic Vacuum**), rep
 - After merge, from the repo root on a Mac: `bash scripts/robotic-vacuum-migrate.sh`.  The script prints `export MIGRATION_BACKUP_PATH=...` — use that value only; rollback paths are not duplicated in this doc (Rule 1).
 - Rollback: `bash scripts/robotic-vacuum-rollback.sh "${MIGRATION_BACKUP_PATH:?set from migrate output}"`.
 - **Owner fleet inventory (tracked, post-merge):** mirror `docs/mac-local-processes-shims.md` into the Mac-only fleet process list (`MAC-LOCAL-PROCESSES.md` under the owner apps workspace) and refresh the linked Apple Note for the resource-watch shim.  Jay agreed these are good suggestions — fix after merge, not in this PR.
-- **Operator detail (private, not in public README):** legacy launchd labels retired by migrate include `com.jay.mac-resource-watch`, `com.jay.mac-cleanup`, and `com.jay.disk-janitor`; replacement scheduler label `com.simplewithus.hoghunter.robotic-vacuum`.  Shim forwards: watch → `robotic-vacuum.py --run-now watch`; full/pressure → `mac-auto-cleanup.sh` shim; janitor → `janitor.sh` shim.
-- Confirm launchd stdout/stderr logs for label `com.simplewithus.hoghunter.robotic-vacuum`.
+- After migrate, confirm the Robotic Vacuum launchd job is loaded and that `~/Library/Logs/HogHunter/robotic-vacuum.{out,err}.log` shows scheduler ticks (literal labels and plist paths live only in `scripts/robotic-vacuum-migrate.sh` / `-rollback.sh`).
 - Expand `janitor_cache_reclaim` if janitor parity gaps appear in production.
 
 ## Zero-Code Findings
