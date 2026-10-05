@@ -44,6 +44,12 @@ extension Notification.Name {
     static let diskCleanerProgressChanged = Notification.Name("hoghunter.diskCleanerProgressChanged")
 }
 
+/// Update payload carrying clean progress and its unique execution run ID.
+struct DiskCleanerProgressUpdate: Sendable {
+    var runId: UUID
+    var progress: CompanionCleanProgress
+}
+
 /// Response returned when the iOS companion asks to quit a process on the Mac.
 struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var status: String

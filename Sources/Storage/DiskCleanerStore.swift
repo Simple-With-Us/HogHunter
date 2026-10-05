@@ -276,7 +276,8 @@ final class DiskCleanerStore: ObservableObject {
             snapshotName: nil,
             error: nil
         )
-        NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: initialProgress)
+        let initialUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: initialProgress)
+        NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: initialUpdate)
 
         cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
             var lastReportedTime = Date.distantPast
@@ -303,7 +304,8 @@ final class DiskCleanerStore: ObservableObject {
                             snapshotName: nil,
                             error: nil
                         )
-                        NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: activeProg)
+                        let activeUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: activeProg)
+                        NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: activeUpdate)
                     }
                 }
             }
@@ -329,7 +331,8 @@ final class DiskCleanerStore: ObservableObject {
                     snapshotName: result.snapshotName,
                     error: result.errors.isEmpty ? nil : result.errors.joined(separator: ", ")
                 )
-                NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedProg)
+                let completedUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: completedProg)
+                NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedUpdate)
             }
         }
     }

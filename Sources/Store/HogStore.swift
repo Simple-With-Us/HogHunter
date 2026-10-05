@@ -1237,9 +1237,19 @@ final class HogStore: ObservableObject {
             queue: .main
         ) { [weak self] note in
             Task { @MainActor [weak self] in
-                guard let self, let progress = note.object as? CompanionCleanProgress else { return }
+                guard let self else { return }
+                let runId: UUID
+                let progress: CompanionCleanProgress
+                if let update = note.object as? DiskCleanerProgressUpdate {
+                    runId = update.runId
+                    progress = update.progress
+                } else if let legacyProgress = note.object as? CompanionCleanProgress {
+                    runId = self.activeCleanRunId ?? UUID()
+                    progress = legacyProgress
+                } else {
+                    return
+                }
                 self.activeCleanProgress = progress
-                let runId = self.activeCleanRunId ?? UUID()
                 self.activeCleanRunId = runId
                 self.publishCompanion()
 
@@ -1248,6 +1258,7 @@ final class HogStore: ObservableObject {
                         try? await Task.sleep(nanoseconds: 10_000_000_000)
                         await MainActor.run { [weak self] in
                             guard let self else { return }
+                            // Only clear the run that scheduled this timer.
                             if self.activeCleanRunId == runId {
                                 self.activeCleanProgress = nil
                                 self.activeCleanRunId = nil
