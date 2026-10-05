@@ -6,7 +6,7 @@ Effort row: `grok-build/hh-log-truncate`, issue #66, pull request #70.  State st
 
 ## Why
 
-`hoghunter-clean --clean` tail-truncated any log over 64 MB under `~/Code` and `~/apps`.  Those trees are source checkouts.  The same scan split `find` output on newlines, so a path that contained a newline could be truncated or deleted as two different paths.
+`hoghunter-clean --clean` tail-truncated any log over 64 MB under local source-checkout trees.  Those trees are source checkouts.  The same scan split `find` output on newlines, so a path that contained a newline could be truncated or deleted as two different paths.
 
 ## What changed
 
@@ -15,7 +15,7 @@ Effort row: `grok-build/hh-log-truncate`, issue #66, pull request #70.  State st
 - `docs/EFFORT-LOG.md` — the in-progress row for this branch.
 - `docs/rollouts/2026-10-04-log-truncate-scope.md` — this note.
 
-Log scans now cover `~/Library/Logs` and `~/.botfleet` only.  Path listings use `find -print0`.  Temp-scratch and SQLite WAL scans use the same splitter.  Deletes still use `find -depth -delete` and do not parse a path list.  A non-zero `find` is logged and the paths it did print are kept.  The human report escapes newlines so one candidate stays one line.  The path passed to truncate or delete is unchanged.
+Log scans now cover user log directories and the BotFleet home logs only.  Path listings use `find -print0`.  Temp-scratch and SQLite WAL scans use the same splitter.  Deletes still use `find -depth -delete` and do not parse a path list.  A non-zero `find` is logged and the paths it did print are kept.  The human report escapes newlines so one candidate stays one line.  The path passed to truncate or delete is unchanged.
 
 ## Decisions & Trade-offs
 
