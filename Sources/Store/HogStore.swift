@@ -1510,27 +1510,29 @@ final class HogStore: ObservableObject {
                 resultData = encoded
             }
 
+            let completedProgress = CompanionCleanProgress(
+                isCleaning: false,
+                phase: "completed",
+                progress: 1.0,
+                statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
+                currentItem: nil,
+                itemsCleaned: cleanResult.itemsRemoved,
+                totalItems: totalItems,
+                bytesReclaimed: cleanResult.bytesReclaimed,
+                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+                snapshotName: cleanResult.snapshotName,
+                error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
+            )
             await MainActor.run {
-                self.activeCleanProgress = CompanionCleanProgress(
-                    isCleaning: false,
-                    phase: "completed",
-                    progress: 1.0,
-                    statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
-                    currentItem: nil,
-                    itemsCleaned: cleanResult.itemsRemoved,
-                    totalItems: totalItems,
-                    bytesReclaimed: cleanResult.bytesReclaimed,
-                    formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
-                    snapshotName: cleanResult.snapshotName,
-                    error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
-                )
+                self.activeCleanProgress = completedProgress
                 self.publishCompanion()
             }
 
             Task {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
                 await MainActor.run {
-                    if self.activeCleanProgress?.isCleaning == false {
+                    // Only clear the run that scheduled this timer.
+                    if self.activeCleanProgress == completedProgress {
                         self.activeCleanProgress = nil
                         self.publishCompanion()
                     }
