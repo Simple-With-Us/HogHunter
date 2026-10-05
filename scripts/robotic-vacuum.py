@@ -62,9 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         engine = VacuumEngine(store.cfg, store.home)
         if args.run_now == "watch":
             state = store.scheduler_state()
+            watch_scratch: dict[str, object] = {}
+            if "last_clean_at" in state:
+                watch_scratch["last_clean_at"] = state["last_clean_at"]
             prev = state.get("prev_disk_free_gb")
             prev_f = float(prev) if prev is not None else None
-            watch_scratch: dict[str, object] = {}
             record, _hits, _cleaned = engine.run_watch_tick(watch_scratch, prev_f)
             store.append_run(record)
             patch = {k: watch_scratch[k] for k in ("prev_disk_free_gb", "last_clean_at") if k in watch_scratch}

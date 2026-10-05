@@ -29,6 +29,8 @@ def run_scheduler_tick(store: VacuumStore | None = None, now: float | None = Non
 
     state = store.scheduler_state()
     watch_scratch: dict[str, Any] = {}
+    if "last_clean_at" in state:
+        watch_scratch["last_clean_at"] = state["last_clean_at"]
     prev_free = state.get("prev_disk_free_gb")
     prev_free_f = float(prev_free) if prev_free is not None else None
 
