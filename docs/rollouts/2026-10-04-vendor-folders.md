@@ -6,7 +6,7 @@ Effort row: `grok-build/hh-vendor-folders`, issue #67.  State stays In Progress 
 
 ## Why
 
-Extreme Clean treated `~/Library/Application Support/Google`, `Mozilla`, `Microsoft`, `MobileSync`, and `CrashReporter` as leftovers from an uninstalled app.  Those folders hold live products.  Orphaned data is selected by default, so one Extreme clean could remove them.
+Extreme Clean treated shared vendor Application Support containers (Google, Mozilla, Microsoft, MobileSync, CrashReporter) as leftovers from an uninstalled app.  Those folders hold live products.  Orphaned data is selected by default, so one Extreme clean could remove them.
 
 ## What changed
 
