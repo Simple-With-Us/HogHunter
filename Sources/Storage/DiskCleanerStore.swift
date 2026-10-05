@@ -367,7 +367,7 @@ final class DiskCleanerStore: ObservableObject {
     private func lastRemovedCategoryIds(_ items: [CleanItem]) -> [String] {
         var seen: Set<String> = []
         var ordered: [String] = []
-        for item in items where item.category != .trash {
+        for item in items {
             let id = item.category.rawValue
             if seen.insert(id).inserted {
                 ordered.append(id)
@@ -378,9 +378,10 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Titles of the items that were cleaned, in scan order.  Capped so a
     /// 5,000-item clean does not put 5,000 strings into a history file the
-    /// user never looks at.
+    /// user never looks at.  Includes Trash rows so a trash-only clean still
+    /// leaves an audit trail.
     private func lastRemovedItemTitles(_ items: [CleanItem]) -> [String] {
-        let titles = items.filter { $0.category != .trash }.map(\.title)
+        let titles = items.map(\.title)
         return Array(titles.prefix(50))
     }
 

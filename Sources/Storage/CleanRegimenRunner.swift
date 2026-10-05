@@ -238,11 +238,9 @@ final class CleanRegimenRunner: ObservableObject {
         case .developer: return "xcode-artifacts"
         case .trash: return "temp-scratch"
         case .apfsSnapshots:
-            // APFS / Time Machine local snapshots live outside the regimen's
-            // dev/lifecycle rules.  Mapping to "logs" keeps the existing rule
-            // gating honest -- a regimen with only "logs" off still lets
-            // snapshots through.
-            return "logs"
+            // Own rule: an unattended regimen must not thin snapshots just
+            // because the user opted into log cleanup.
+            return "snapshots"
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return "xcode-artifacts"
         }

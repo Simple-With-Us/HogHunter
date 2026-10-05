@@ -55,6 +55,9 @@ final class CleanupHistoryStore: @unchecked Sendable {
     /// The file Hog Hunter reads on disk.  Always explicit so tests and
     /// command-line checks never touch the installed app's log.
     let url: URL
+    /// Serializes create-vs-append so two concurrent first writes cannot
+    /// each take the atomic-create branch and clobber each other.
+    private let lock = NSLock()
 
     init(url: URL) {
         self.url = url
@@ -92,6 +95,9 @@ final class CleanupHistoryStore: @unchecked Sendable {
 
         let line = data + Data("\n".utf8)
 
+        lock.lock()
+        defer { lock.unlock() }
+
         if !FileManager.default.fileExists(atPath: url.path) {
             try? line.write(to: url, options: [.atomic])
             return
@@ -99,9 +105,9 @@ final class CleanupHistoryStore: @unchecked Sendable {
 
         do {
             let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
             try? handle.seekToEnd()
             try? handle.write(contentsOf: line)
-            try? handle.close()
         } catch {
             // A failed append cannot be allowed to retry blindly — the file may
             // have been replaced underneath us.  Best we can do is drop the
@@ -133,8 +139,25 @@ final class CleanupHistoryStore: @unchecked Sendable {
     }
 
     /// The most recent successful record, or nil when the log is empty.
+    /// Reads only a bounded tail of the append-only log instead of decoding
+    /// every historical row on each Storage panel open.
     func latestRecord() -> CleanupHistoryRecord? {
-        allRecords().first
+        guard FileManager.default.fileExists(atPath: url.path),
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(), size > 0 else { return nil }
+        let window: UInt64 = 64 * 1024
+        try? handle.seek(toOffset: size > window ? size - window : 0)
+        let tail = (try? handle.readToEnd()) ?? Data()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for line in tail.split(separator: 0x0A).reversed() {
+            guard !line.isEmpty else { continue }
+            if let record = try? decoder.decode(CleanupHistoryRecord.self, from: Data(line)) {
+                return record
+            }
+        }
+        return nil
     }
 
     // MARK: - Display helpers

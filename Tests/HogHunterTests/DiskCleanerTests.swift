@@ -423,7 +423,7 @@ final class DiskCleanerTests: XCTestCase {
     func testSimulatorAndCoreDeviceItemsAreUnselectedByDefault() {
         // Opt-in only: other users may actively develop for iOS.  An auto-clean
         // would force a full re-download of every simulator runtime next launch.
-        XCTAssertFalse(CleanCategory.developer.defaultSelected, "Developer category default must be inherited per-item, not flipped here")
+        XCTAssertTrue(CleanCategory.developer.defaultSelected, "Developer category stays default-selected; only Simulator/CoreDevice rows are opt-in")
         let developer = cleaner.scanDeveloper()
         for item in developer where item.title == "iOS Simulator Devices" || item.title == "Xcode Connected-Device Support" {
             XCTAssertFalse(item.isSelected, "Simulator/CoreDevice items must require explicit opt-in")
