@@ -18,6 +18,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case localAIModels
     /// Large files (>100 MB) or old files (>6 months) in user working folders (Downloads, Documents, Desktop).
     case largeAndOldFiles
+    /// Local Time Machine snapshots stored on the startup disk.  Thinning reclaims purgeable space and is reversible; Time Machine recreates snapshots as needed.
+    case timeMachineSnapshots
 
     var id: String { rawValue }
 
@@ -31,6 +33,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts: return "AI & Agent Junk"
         case .localAIModels: return "Local AI & LLM Models"
         case .largeAndOldFiles: return "Large & Old Files"
+        case .timeMachineSnapshots: return "Time Machine Snapshots"
         }
     }
 
@@ -52,6 +55,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Downloaded LLM and model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper."
         case .largeAndOldFiles:
             return "Files over 100 MB, or over 20 MB untouched for 6+ months."
+        case .timeMachineSnapshots:
+            return "Local Time Machine snapshots holding purgeable space on the startup disk.  Thinning is safe — Time Machine recreates snapshots as needed."
         }
     }
 
@@ -65,6 +70,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts: return "sparkles"
         case .localAIModels: return "brain.head.profile"
         case .largeAndOldFiles: return "clock.arrow.circlepath"
+        case .timeMachineSnapshots: return "arrow.counterclockwise.circle"
         }
     }
 
@@ -78,13 +84,14 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .aiArtifacts: return 5
         case .localAIModels: return 6
         case .largeAndOldFiles: return 7
+        case .timeMachineSnapshots: return 8
         }
     }
 
     /// Whether this category is restricted to the Extreme Clean tier.
     var isExtremeOnly: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .timeMachineSnapshots:
             return false
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return true
@@ -94,7 +101,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     /// Whether this category is checked by default for one-click clean.
     var defaultSelected: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData, .timeMachineSnapshots:
             return true
         case .aiArtifacts, .localAIModels, .largeAndOldFiles:
             // Large/old files and AI agent artifacts require explicit user review to prevent accidental deletion
@@ -233,6 +240,92 @@ enum SnapshotSafety {
             return (false, nil)
         }
     }
+
+    /// Lists local Time Machine snapshots on the given mount (defaults to "/") via
+    /// `/usr/bin/tmutil listlocalsnapshots <mount>`.  Returns one snapshot per line,
+    /// stripped of any whitespace.  An empty array means there are no snapshots,
+    /// not that the call failed; a nil return means the process could not run.
+    static func listLocalSnapshots(mount: String = "/") -> [String]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
+        process.arguments = ["listlocalsnapshots", mount]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            if process.terminationStatus == 0 {
+                let lines = output.components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                // The first line of `listlocalsnapshots` is the literal "Snapshots for disk ..." header
+                // — strip it so the remaining lines are all snapshot names.
+                return Array(lines.dropFirst()).filter { !$0.hasPrefix("Snapshots for") }
+            }
+            return []
+        } catch {
+            return nil
+        }
+    }
+
+    /// Asks `tmutil` to thin the local snapshots on `mount` by `purgeableBytes`,
+    /// using the `urgent` hint so the volume can hand purgeable space back when
+    /// it is needed for a future clean.  True means the call returned 0; false
+    /// means it could not start or exited non-zero.
+    static func thinLocalSnapshots(mount: String = "/", purgeableBytes: UInt64) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
+        process.arguments = ["thinlocalsnapshots", mount, String(purgeableBytes), "urgent"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Parse the `tmutil listlocalsnapshots` line format.
+    ///
+    /// Real output looks like:
+    ///     com.apple.TimeMachine.2026-10-05-062128.local
+    /// Older snapshots and test fixtures sometimes drop the trailing `.local`.
+    /// The header line `Snapshots for disk /` is filtered by the call site, but
+    /// we still defend against it here so tests can hand us raw output.
+    static func parseSnapshotNames(_ output: String) -> [String] {
+        output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("Snapshots for") }
+    }
+
+    /// The bytes that APFS counts as purgeable on the startup disk.
+    ///
+    /// `volumeAvailableCapacity` is what the Finder shows as free and *does not*
+    /// include purgeable space; `volumeAvailableCapacityForImportantUsage`
+    /// counts purgeable as available, which is the same number the panel's
+    /// Storage card uses (`DiskSpace.current()` in `Models.swift`).  The
+    /// difference is the high-water figure we can show next to a list of
+    /// snapshots — we never thin more than the volume can reclaim, and we
+    /// never claim a snapshot holds more bytes than the volume has free.
+    static func purgeableBytes(at mount: String = "/") -> UInt64 {
+        let url = URL(fileURLWithPath: mount)
+        guard let values = try? url.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey
+        ]) else { return 0 }
+        let free = UInt64(max(0, values.volumeAvailableCapacity ?? 0))
+        let important = UInt64(max(0, values.volumeAvailableCapacityForImportantUsage ?? 0))
+        // purgeable >= 0 is the only constraint here: APFS never reports the
+        // "important" number as smaller than the literal free number, but if
+        // something exotic ever makes it so, clamp rather than wrap.
+        return important >= free ? important - free : 0
+    }
 }
 
 /// A single reclaimable item discovered during a scan.
@@ -326,11 +419,23 @@ final class DiskCleaner: @unchecked Sendable {
     private let fileManager: FileManager
     /// Tests substitute a closure that does not call `tmutil`.
     private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
+    /// Tests substitute a closure that does not call `tmutil`.
+    private let listSnapshots: (_ mount: String) -> [String]?
+    /// Tests substitute a closure that does not call `tmutil`.
+    private let thinSnapshots: (_ mount: String, _ bytes: UInt64) -> Bool
+    /// Tests substitute a closure that does not call `URL.resourceValues`.
+    private let purgeableProvider: (_ mount: String) -> UInt64
 
     init(fileManager: FileManager = .default,
-         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() }) {
+         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
+         listSnapshots: @escaping (String) -> [String]? = { SnapshotSafety.listLocalSnapshots(mount: $0) },
+         thinSnapshots: @escaping (String, UInt64) -> Bool = { SnapshotSafety.thinLocalSnapshots(mount: $0, purgeableBytes: $1) },
+         purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) }) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
+        self.listSnapshots = listSnapshots
+        self.thinSnapshots = thinSnapshots
+        self.purgeableProvider = purgeableProvider
     }
 
     // MARK: - Full Scan
@@ -396,6 +501,8 @@ final class DiskCleaner: @unchecked Sendable {
             return scanLocalAIModels()
         case .largeAndOldFiles:
             return scanLargeAndOldFiles()
+        case .timeMachineSnapshots:
+            return scanTimeMachineSnapshots()
         }
     }
 
@@ -610,6 +717,55 @@ final class DiskCleaner: @unchecked Sendable {
                 isSelected: CleanCategory.developer.defaultSelected,
                 detail: target.detail
             ))
+        }
+
+        if !Task.isCancelled {
+            // iOS Simulator Devices — every installed simulator + runtime.  Opt-in
+            // only: other users may actively develop for iOS, and an auto-clean
+            // would force a full re-download of every runtime on next boot.
+            let simDevicesURL = userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: simDevicesURL.path, isDirectory: &isDir) {
+                let stats = directoryStats(at: simDevicesURL)
+                if stats.bytes > 0 {
+                    items.append(CleanItem(
+                        category: .developer,
+                        title: "iOS Simulator Devices",
+                        subtitle: "~/Library/Developer/CoreSimulator/Devices",
+                        url: simDevicesURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
+                    ))
+                }
+            }
+        }
+
+        if !Task.isCancelled {
+            // Xcode Connected-Device Support — symbols pulled down when an iOS
+            // device is plugged in.  Opt-in: re-downloads when a device is next
+            // connected, which is a no-op for anyone who isn't actively
+            // developing on physical hardware.
+            let coreDeviceURL = userHomeURL.appendingPathComponent("Library/Developer/CoreDevice", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: coreDeviceURL.path, isDirectory: &isDir) {
+                let stats = directoryStats(at: coreDeviceURL)
+                if stats.bytes > 0 {
+                    items.append(CleanItem(
+                        category: .developer,
+                        title: "Xcode Connected-Device Support",
+                        subtitle: "~/Library/Developer/CoreDevice",
+                        url: coreDeviceURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Symbols and support files from connected iOS devices.  Re-downloads when a device is connected."
+                    ))
+                }
+            }
         }
 
         return items.sorted { $0.bytes > $1.bytes }
@@ -1103,6 +1259,52 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+    /// Scans local Time Machine snapshots via `listSnapshots` (a closure that, in
+    /// production, shells out to `tmutil listlocalsnapshots /`).  Per-snapshot
+    /// sizes are not exposed by `tmutil`, so the bytes for each row come from
+    /// the volume's purgeable high-water mark divided by the snapshot count.
+    /// When `listSnapshots` returns nil (the process could not start) or empty,
+    /// a single placeholder row is emitted carrying the full purgeable figure
+    /// so the panel still has something to show and the clean can still thin.
+    func scanTimeMachineSnapshots() -> [CleanItem] {
+        let snapshotNames = listSnapshots("/") ?? []
+        let purgeable = purgeableProvider("/")
+
+        if snapshotNames.isEmpty {
+            // No snapshots, or the runner could not start — only emit a row when
+            // APFS says there is at least some purgeable space worth thinning.
+            guard purgeable > 0 else { return [] }
+            return [CleanItem(
+                category: .timeMachineSnapshots,
+                title: "Local Time Machine Snapshots",
+                subtitle: "Thin purgeable space on /",
+                url: URL(fileURLWithPath: "/"),
+                bytes: purgeable,
+                fileCount: 0,
+                lastModified: nil,
+                isSelected: CleanCategory.timeMachineSnapshots.defaultSelected,
+                detail: "Purgeable space held by local snapshots"
+            )]
+        }
+
+        // Equal split keeps every snapshot row honest about the same ceiling —
+        // the user sees what APFS would hand back, not what `tmutil` claims.
+        let bytesPer = purgeable / UInt64(snapshotNames.count)
+        return snapshotNames.map { name in
+            CleanItem(
+                category: .timeMachineSnapshots,
+                title: name,
+                subtitle: "Local snapshot on /",
+                url: URL(fileURLWithPath: "/"),
+                bytes: bytesPer,
+                fileCount: 1,
+                lastModified: nil,
+                isSelected: CleanCategory.timeMachineSnapshots.defaultSelected,
+                detail: "Local Time Machine snapshot — thinning is safe"
+            )
+        }
+    }
+
     // MARK: - Cleaning Execution
 
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
@@ -1164,6 +1366,16 @@ final class DiskCleaner: @unchecked Sendable {
                 if item.category == .trash {
                     // Item is already in the trash, so remove it permanently
                     try fileManager.removeItem(at: item.url)
+                } else if item.category == .timeMachineSnapshots {
+                    // Snapshot bytes are not a file path.  `tmutil` thins by
+                    // bytes; we ask for the row's own figure so the UI claim
+                    // and the cleanup ask match exactly.  `isSafeToDelete`
+                    // already pinned `item.url` to "/" so this is bounded.
+                    let ok = thinSnapshots("/", item.bytes)
+                    if !ok {
+                        errors.append("tmutil thinlocalsnapshots failed for \(item.title)")
+                        continue
+                    }
                 } else {
                     // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
@@ -1245,6 +1457,8 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Library/Developer/Xcode/Archives",
                 home + "/Library/Developer/Xcode/iOS DeviceSupport",
                 home + "/Library/Developer/CoreSimulator/Caches",
+                home + "/Library/Developer/CoreSimulator/Devices",
+                home + "/Library/Developer/CoreDevice",
                 home + "/Library/Caches/Homebrew",
                 home + "/.npm/_cacache",
                 home + "/Library/Caches/Yarn",
@@ -1307,6 +1521,15 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Desktop/"
             ]
             return allowedUserPrefixes.contains { path.hasPrefix($0) && path != $0 }
+
+        case .timeMachineSnapshots:
+            // Time Machine snapshots are not files in the user filesystem: they
+            // live in APFS metadata and are thinned via `tmutil`, not `trashItem`.
+            // The safety gate here only has to prove that the URL the UI emitted
+            // is the startup mount, so a buggy scan path cannot redirect a thin
+            // to a non-root volume.
+            let standardized = (url.path as NSString).standardizingPath
+            return standardized == "/" || standardized.isEmpty
         }
     }
 

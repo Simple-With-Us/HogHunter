@@ -280,4 +280,202 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: cacheFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
+
+    // MARK: - Time Machine Snapshot Category Tests
+
+    func testTimeMachineSnapshotsCategoryMetadata() {
+        let cat = CleanCategory.timeMachineSnapshots
+        XCTAssertEqual(cat.id, "timeMachineSnapshots")
+        XCTAssertEqual(cat.title, "Time Machine Snapshots")
+        XCTAssertFalse(cat.description.isEmpty)
+        XCTAssertFalse(cat.icon.isEmpty)
+        XCTAssertEqual(cat.sortOrder, 8, "Must sort after Large & Old Files")
+        XCTAssertFalse(cat.isExtremeOnly, "Snapshot thinning is standard-tier safe")
+        XCTAssertTrue(cat.defaultSelected, "Thinning is the 47 GB win from the incident and must be on by default")
+    }
+
+    func testStandardTierIncludesTimeMachineSnapshots() {
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.timeMachineSnapshots))
+        XCTAssertTrue(CleanTier.extreme.isCategoryIncluded(.timeMachineSnapshots))
+    }
+
+    func testParseSnapshotNamesStripsHeaderAndWhitespace() {
+        let output = """
+        Snapshots for disk /:
+        com.apple.TimeMachine.2026-10-05-062128.local
+        com.apple.TimeMachine.2026-10-04-180002.local
+
+        \t  com.apple.TimeMachine.2026-10-03-221044.local
+
+        """
+        let names = SnapshotSafety.parseSnapshotNames(output)
+        XCTAssertEqual(names, [
+            "com.apple.TimeMachine.2026-10-05-062128.local",
+            "com.apple.TimeMachine.2026-10-04-180002.local",
+            "com.apple.TimeMachine.2026-10-03-221044.local"
+        ])
+    }
+
+    func testParseSnapshotNamesToleratesBareInput() {
+        XCTAssertEqual(SnapshotSafety.parseSnapshotNames(""), [])
+        XCTAssertEqual(SnapshotSafety.parseSnapshotNames("only.one.local"), ["only.one.local"])
+    }
+
+    func testScanTimeMachineSnapshotsSplitsPurgeableEvenly() {
+        // 3 snapshots, 60 GB purgeable → 20 GB per row.  Equal split keeps every
+        // row honest about the same ceiling -- the UI never claims more bytes
+        // than APFS would hand back.
+        let cleaner = DiskCleaner(
+            listSnapshots: { _ in [
+                "com.apple.TimeMachine.2026-10-05-062128.local",
+                "com.apple.TimeMachine.2026-10-04-180002.local",
+                "com.apple.TimeMachine.2026-10-03-221044.local"
+            ] },
+            purgeableProvider: { _ in 60 * 1024 * 1024 * 1024 }
+        )
+        let items = cleaner.scanTimeMachineSnapshots()
+        XCTAssertEqual(items.count, 3)
+        XCTAssertTrue(items.allSatisfy { $0.category == .timeMachineSnapshots })
+        XCTAssertTrue(items.allSatisfy { $0.isSelected }, "Snapshots must be selected by default so the Standard Clean finds the 47 GB")
+        XCTAssertEqual(items.map(\.bytes), Array(repeating: 20 * 1024 * 1024 * 1024 as UInt64, count: 3))
+        XCTAssertEqual(items.first?.title, "com.apple.TimeMachine.2026-10-05-062128.local")
+        XCTAssertEqual(items.first?.subtitle, "Local snapshot on /")
+    }
+
+    func testScanTimeMachineSnapshotsFallsBackToAggregateWhenListFails() {
+        // nil return means the tmutil call could not start (or the runner is a
+        // stub that could not, captured in tests).  A single placeholder row
+        // carrying the full purgeable figure keeps the clean actionable.
+        let cleaner = DiskCleaner(
+            listSnapshots: { _ in nil },
+            purgeableProvider: { _ in 47 * 1024 * 1024 * 1024 }
+        )
+        let items = cleaner.scanTimeMachineSnapshots()
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.bytes, 47 * 1024 * 1024 * 1024)
+        XCTAssertEqual(items.first?.title, "Local Time Machine Snapshots")
+        XCTAssertTrue(items.first?.isSelected ?? false)
+    }
+
+    func testScanTimeMachineSnapshotsReturnsEmptyWhenNoSnapshotsAndNoPurgeable() {
+        let cleaner = DiskCleaner(
+            listSnapshots: { _ in [] },
+            purgeableProvider: { _ in 0 }
+        )
+        XCTAssertTrue(cleaner.scanTimeMachineSnapshots().isEmpty)
+    }
+
+    func testCleanTimeMachineSnapshotsThinsByItemBytes() async {
+        // The clean must ask tmutil to thin by exactly the bytes the item
+        // claims, not by the sum of all items (which would over-thin) and not
+        // by a constant (which would lie about what was reclaimed).
+        let calls = ThinCalls()
+        let cleaner = DiskCleaner(
+            makeSnapshot: { (true, "snap-1") },
+            thinSnapshots: { _, bytes in calls.record(bytes: bytes); return true }
+        )
+        let item = CleanItem(
+            category: .timeMachineSnapshots,
+            title: "com.apple.TimeMachine.2026-10-05-062128.local",
+            subtitle: "Local snapshot on /",
+            url: URL(fileURLWithPath: "/"),
+            bytes: 20_000_000_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let result = await cleaner.clean(items: [item], createSnapshot: true)
+        XCTAssertEqual(result.itemsRemoved, 1)
+        XCTAssertEqual(result.bytesReclaimed, 20_000_000_000)
+        XCTAssertEqual(calls.byteArgs, [20_000_000_000])
+        XCTAssertTrue(result.errors.isEmpty)
+    }
+
+    func testCleanTimeMachineSnapshotsReportsThinFailure() async {
+        // A failed thin must surface as an error -- silently claiming bytes
+        // were reclaimed when tmutil returned non-zero would be a lie.
+        let cleaner = DiskCleaner(
+            makeSnapshot: { (true, "snap-1") },
+            thinSnapshots: { _, _ in false }
+        )
+        let item = CleanItem(
+            category: .timeMachineSnapshots,
+            title: "com.apple.TimeMachine.2026-10-05-062128.local",
+            subtitle: "Local snapshot on /",
+            url: URL(fileURLWithPath: "/"),
+            bytes: 20_000_000_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let result = await cleaner.clean(items: [item], createSnapshot: true)
+        XCTAssertEqual(result.itemsRemoved, 0)
+        XCTAssertEqual(result.bytesReclaimed, 0)
+        XCTAssertTrue(result.errors.contains { $0.contains("thinlocalsnapshots failed") })
+    }
+
+    func testIsSafeToDeleteAcceptsRootForTimeMachineSnapshots() {
+        let cleaner = DiskCleaner()
+        XCTAssertTrue(cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/"), category: .timeMachineSnapshots))
+    }
+
+    func testIsSafeToDeleteRejectsOtherMountsForTimeMachineSnapshots() {
+        let cleaner = DiskCleaner()
+        XCTAssertFalse(cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/Volumes/External"), category: .timeMachineSnapshots))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: URL(fileURLWithPath: NSHomeDirectory()), category: .timeMachineSnapshots))
+    }
+
+    // MARK: - Developer Target Tests
+
+    func testSimulatorDevicesAndCoreDeviceAreAllowedDevelopers() {
+        let home = NSHomeDirectory()
+        let validPaths = [
+            "\(home)/Library/Developer/CoreSimulator/Devices/ABCD1234-DEAD-BEEF-0000-000000000000",
+            "\(home)/Library/Developer/CoreDevice/iOS 17.0"
+        ]
+        for path in validPaths {
+            XCTAssertTrue(
+                cleaner.isSafeToDelete(url: URL(fileURLWithPath: path), category: .developer),
+                "Developer path \(path) must be permitted now that CoreSimulator/Devices and CoreDevice are inventoried"
+            )
+        }
+    }
+
+    func testSimulatorAndCoreDeviceItemsAreUnselectedByDefault() {
+        // Opt-in only: other users may actively develop for iOS.  An auto-clean
+        // would force a full re-download of every simulator runtime next launch.
+        XCTAssertFalse(CleanCategory.developer.defaultSelected, "Developer category default must be inherited per-item, not flipped here")
+        let developer = cleaner.scanDeveloper()
+        for item in developer where item.title == "iOS Simulator Devices" || item.title == "Xcode Connected-Device Support" {
+            XCTAssertFalse(item.isSelected, "Simulator/CoreDevice items must require explicit opt-in")
+            XCTAssertEqual(item.category, .developer)
+            XCTAssertGreaterThan(item.bytes, 0)
+        }
+        // Existing selected-by-default developer targets must stay selected.
+        for item in developer where item.title == "Xcode DerivedData" {
+            XCTAssertTrue(item.isSelected)
+        }
+    }
+}
+
+/// Captures each call to the `thinSnapshots` runner so tests can assert the
+/// exact bytes the clean asked `tmutil` to reclaim.  Lives in the test file
+/// so it is never linked into the app.
+private final class ThinCalls: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: [UInt64] = []
+
+    func record(bytes: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.bytes.append(bytes)
+    }
+
+    var byteArgs: [UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return bytes
+    }
 }

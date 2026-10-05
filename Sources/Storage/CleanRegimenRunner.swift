@@ -237,6 +237,11 @@ final class CleanRegimenRunner: ObservableObject {
         case .logsAndDiagnostics: return "logs"
         case .developer: return "xcode-artifacts"
         case .trash: return "temp-scratch"
+        case .timeMachineSnapshots:
+            // Time Machine snapshots live outside the regimen's dev/lifecycle
+            // rules.  Mapping to "logs" keeps the existing rule gating honest --
+            // a regimen with only "logs" off still lets snapshots through.
+            return "logs"
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return "xcode-artifacts"
         }
