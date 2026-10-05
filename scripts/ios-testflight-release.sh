@@ -111,7 +111,10 @@ if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
   # plist keys altool emits for upload failures.  Bare "ITMS-" and
   # "Error Domain" appear in informational warnings (e.g. ITMS-90717 icon
   # alpha notice, NSOSStatusErrorDomain) and would false-positive.
-  if grep -qiE '<key>(product-errors|error-message|user-facing-error)</key>|UPLOAD FAILED|Authentication Failure' "$work_dir/upload-result.txt"; then
+  # <key>error-message</key> is intentionally excluded: it is not an
+  # altool key and appears in nested transporter/JVM contexts that are
+  # not upload failures.
+  if grep -qiE '<key>(product-errors|user-facing-error)</key>|UPLOAD FAILED|Authentication Failure' "$work_dir/upload-result.txt"; then
     echo 'error: altool output reports upload failure' >&2
     exit 1
   fi
