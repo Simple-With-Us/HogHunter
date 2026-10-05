@@ -1194,6 +1194,19 @@ final class DiskCleaner: @unchecked Sendable {
         var snapshotCreatedName: String?
 
         let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
+        let hasSnapshotItems = activeItems.contains { $0.category == .apfsSnapshots }
+
+        if hasSnapshotItems {
+            progress?(0.0, "Thinning APFS local snapshots…")
+            let (thinned, count) = await Task.detached(priority: .utility) {
+                SnapshotSafety.thinLocalSnapshots()
+            }.value
+            if thinned {
+                removedCount += count
+            } else {
+                errors.append("Failed to thin APFS local snapshots")
+            }
+        }
 
         if createSnapshot && !activeItems.isEmpty {
             progress?(0.0, "Creating APFS safety snapshot…")
@@ -1215,7 +1228,6 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         let totalItems = max(1, activeItems.count)
-        var hasThinnedSnapshots = false
 
         for (index, item) in activeItems.enumerated() {
             if Task.isCancelled {
@@ -1237,15 +1249,8 @@ final class DiskCleaner: @unchecked Sendable {
 
             do {
                 if item.category == .apfsSnapshots {
-                    if !hasThinnedSnapshots {
-                        hasThinnedSnapshots = true
-                        let (thinned, count) = SnapshotSafety.thinLocalSnapshots()
-                        if thinned {
-                            removedCount += count
-                        } else {
-                            errors.append("Failed to thin APFS local snapshots")
-                        }
-                    }
+                    // Handled upfront before safety snapshot creation to preserve reversibility.
+                    continue
                 } else if item.category == .trash {
                     // Item is already in the trash, so remove it permanently
                     try fileManager.removeItem(at: item.url)
