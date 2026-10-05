@@ -1430,13 +1430,14 @@ final class HogStore: ObservableObject {
         return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
     }
 
-    private func performRemoteClean() -> (status: Int, body: Data) {
+    nonisolated private func performRemoteClean() -> (status: Int, body: Data) {
         let cleaner = DiskCleaner()
         let exclusions = CleanerExclusions.load()
         let semaphore = DispatchSemaphore(value: 0)
         var resultData: Data = Data("{}".utf8)
 
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             self.activeCleanProgress = CompanionCleanProgress(
                 isCleaning: true,
                 phase: "scanning",
@@ -1454,11 +1455,13 @@ final class HogStore: ObservableObject {
         }
 
         Task {
+            defer { semaphore.signal() }
             let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
             let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
             let totalItems = max(1, itemsToClean.count)
 
-            await MainActor.run {
+            await MainActor.run { [weak self] in
+                guard let self else { return }
                 self.activeCleanProgress = CompanionCleanProgress(
                     isCleaning: true,
                     phase: "snapshot",
@@ -1491,7 +1494,8 @@ final class HogStore: ObservableObject {
                     lastReportedTime = now
                     let scaled = 0.15 + (fraction * 0.8)
                     let itemsCleaned = Int(fraction * Double(totalItems))
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
                         self.activeCleanProgress = CompanionCleanProgress(
                             isCleaning: true,
                             phase: fraction >= 1.0 ? "finishing" : "cleaning",
@@ -1536,14 +1540,16 @@ final class HogStore: ObservableObject {
                 snapshotName: cleanResult.snapshotName,
                 error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
             )
-            await MainActor.run {
+            await MainActor.run { [weak self] in
+                guard let self else { return }
                 self.activeCleanProgress = completedProgress
                 self.publishCompanion()
             }
 
             Task {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     // Only clear the run that scheduled this timer.
                     if self.activeCleanProgress == completedProgress {
                         self.activeCleanProgress = nil
@@ -1551,10 +1557,11 @@ final class HogStore: ObservableObject {
                     }
                 }
             }
-
-            semaphore.signal()
         }
-        semaphore.wait()
+        let waitResult = semaphore.wait(timeout: .now() + 180)
+        if waitResult == .timedOut {
+            return (504, Data("{\"error\": \"Clean operation timed out\"}".utf8))
+        }
         return (status: 200, body: resultData)
     }
 
