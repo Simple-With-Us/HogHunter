@@ -91,11 +91,25 @@ if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
   chmod 600 "$staged_asc_key"
   export API_PRIVATE_KEYS_DIR="$asc_keys_dir"
 
+  # Single source: pull the marketing version and bundle id from the
+  # validator the build is checked against, so the altool upload flags
+  # cannot drift from the archived identity.
+  read -r BUNDLE_ID MARKETING_VERSION < <(python3 -c '
+import importlib.util
+spec = importlib.util.spec_from_file_location("v", "scripts/validate-ios-release.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.BUNDLE_ID, m.MARKETING_VERSION)
+')
+
   set +e
   xcrun altool --upload-package "${ipas[0]}" \
     --type ios \
     --apiKey "$ASC_KEY_ID" \
     --apiIssuer "$ASC_ISSUER_ID" \
+    --apple-id 6816633156 \
+    --bundle-version "$HH_BUILD_NUMBER" \
+    --bundle-short-version-string "$MARKETING_VERSION" \
+    --bundle-id "$BUNDLE_ID" \
     --output-format xml \
     > "$work_dir/upload-result.txt" 2>&1
   altool_rc=$?

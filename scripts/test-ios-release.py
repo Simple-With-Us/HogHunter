@@ -111,6 +111,10 @@ elif name == 'xcrun':
     assert '--p8-file-path' not in args
     assert option('--type') == 'ios'
     assert option('--output-format') == 'xml'
+    assert option('--apple-id') == '6816633156'
+    assert option('--bundle-version') == os.environ['HH_BUILD_NUMBER']
+    assert option('--bundle-short-version-string') == '1.0.4'
+    assert option('--bundle-id') == 'com.simplewithus.hoghunter.ios'
     staged = pathlib.Path.home() / '.appstoreconnect/private_keys' / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
     assert staged.is_file(), f'missing staged key at {staged}'
     (root / 'upload-invoked').write_text('yes')
