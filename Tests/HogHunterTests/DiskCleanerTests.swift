@@ -63,6 +63,32 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(titles.contains("DefinitelyRemovedApp"), "genuinely removed app leftovers must still surface")
     }
 
+    func testIsSafeToDeleteUsesInjectedHome() {
+        // Without routing isSafeToDelete through userHomeURL, scan-and-clean
+        // under an injected temp home rejects every orphan (allowlist is the
+        // real home) and verification for issue #67 can pass vacuously.
+        let fm = FileManager.default
+        let orphan = tempDirectory
+            .appendingPathComponent("Library/Application Support/DefinitelyRemovedApp", isDirectory: true)
+        try? fm.createDirectory(at: orphan, withIntermediateDirectories: true)
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertTrue(
+            cleaner.isSafeToDelete(url: orphan, category: .orphanedData),
+            "orphan under injected home must pass the orphan allowlist"
+        )
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: tempDirectory, category: .orphanedData),
+            "injected home itself must stay prohibited"
+        )
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(
+                url: tempDirectory.appendingPathComponent("Library", isDirectory: true),
+                category: .orphanedData
+            ),
+            "injected Library itself must stay prohibited"
+        )
+    }
+
     // MARK: - Category Metadata Tests
 
     func testCategoryMetadata() {

@@ -304,7 +304,8 @@ def scan_orphans():
                 continue
             if "hoghunter" in entry.lower():
                 continue
-            if entry.lower() in SHARED_VENDOR_CONTAINERS:
+            # strip() so shell matches Swift isSharedVendorContainer trim.
+            if entry.strip().lower() in SHARED_VENDOR_CONTAINERS:
                 continue
             if entry.lower() in installed_ids or entry.lower() in installed_names:
                 continue
