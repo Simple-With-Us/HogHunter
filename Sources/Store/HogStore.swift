@@ -145,6 +145,8 @@ final class HogStore: ObservableObject {
     }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
+    /// Current or recently completed disk clean progress, streamed to the iOS companion.
+    @Published private(set) var activeCleanProgress: CompanionCleanProgress? = nil
 
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
@@ -1209,6 +1211,12 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteTame(pid: pid, action: action)
         }
+        companionServer.onRemoteClean = { [weak self] in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteClean()
+        }
         companionServer.onRemoteExclusionsUpdate = { [weak self] req in
             guard let self else {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
@@ -1220,6 +1228,17 @@ final class HogStore: ObservableObject {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
             }
             return self.performRemoteViewUpdate(req)
+        }
+        NotificationCenter.default.addObserver(
+            forName: .diskCleanerProgressChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self, let progress = note.object as? CompanionCleanProgress else { return }
+                self.activeCleanProgress = progress
+                self.publishCompanion()
+            }
         }
     }
 
@@ -1398,6 +1417,132 @@ final class HogStore: ObservableObject {
         return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
     }
 
+    private func performRemoteClean() -> (status: Int, body: Data) {
+        let cleaner = DiskCleaner()
+        let exclusions = CleanerExclusions.load()
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultData: Data = Data("{}".utf8)
+
+        Task { @MainActor in
+            self.activeCleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "scanning",
+                progress: 0.05,
+                statusText: "Scanning Mac clutter…",
+                currentItem: nil,
+                itemsCleaned: 0,
+                totalItems: 0,
+                bytesReclaimed: 0,
+                formattedBytesReclaimed: "0 B",
+                snapshotName: nil,
+                error: nil
+            )
+            self.publishCompanion()
+        }
+
+        Task {
+            let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
+            let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
+            let totalItems = max(1, itemsToClean.count)
+
+            await MainActor.run {
+                self.activeCleanProgress = CompanionCleanProgress(
+                    isCleaning: true,
+                    phase: "snapshot",
+                    progress: 0.15,
+                    statusText: "Creating APFS safety snapshot…",
+                    currentItem: nil,
+                    itemsCleaned: 0,
+                    totalItems: totalItems,
+                    bytesReclaimed: 0,
+                    formattedBytesReclaimed: "0 B",
+                    snapshotName: nil,
+                    error: nil
+                )
+                self.publishCompanion()
+            }
+
+            var lastReportedTime = Date.distantPast
+            var lastReportedFraction: Double = -1.0
+
+            let cleanResult = await cleaner.clean(
+                items: itemsToClean,
+                tier: .standard,
+                createSnapshot: true,
+                exclusions: exclusions
+            ) { fraction, itemTitle in
+                let now = Date()
+                let isMilestone = itemTitle.contains("snapshot") || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
+                if isMilestone {
+                    lastReportedFraction = fraction
+                    lastReportedTime = now
+                    let scaled = 0.15 + (fraction * 0.8)
+                    let itemsCleaned = Int(fraction * Double(totalItems))
+                    Task { @MainActor in
+                        self.activeCleanProgress = CompanionCleanProgress(
+                            isCleaning: true,
+                            phase: fraction >= 1.0 ? "finishing" : "cleaning",
+                            progress: scaled,
+                            statusText: itemTitle.contains("snapshot") ? itemTitle : "Cleaning \(itemTitle)…",
+                            currentItem: itemTitle,
+                            itemsCleaned: itemsCleaned,
+                            totalItems: totalItems,
+                            bytesReclaimed: 0,
+                            formattedBytesReclaimed: "…",
+                            snapshotName: nil,
+                            error: nil
+                        )
+                        self.publishCompanion()
+                    }
+                }
+            }
+
+            let responseObj = CompanionCleanResponse(
+                status: "completed",
+                bytesReclaimed: cleanResult.bytesReclaimed,
+                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+                itemsRemoved: cleanResult.itemsRemoved,
+                snapshotCreated: cleanResult.snapshotName != nil,
+                snapshotName: cleanResult.snapshotName,
+                tier: cleanResult.tier.title
+            )
+            if let encoded = try? JSONEncoder().encode(responseObj) {
+                resultData = encoded
+            }
+
+            await MainActor.run {
+                self.activeCleanProgress = CompanionCleanProgress(
+                    isCleaning: false,
+                    phase: "completed",
+                    progress: 1.0,
+                    statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
+                    currentItem: nil,
+                    itemsCleaned: cleanResult.itemsRemoved,
+                    totalItems: totalItems,
+                    bytesReclaimed: cleanResult.bytesReclaimed,
+                    formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+                    snapshotName: cleanResult.snapshotName,
+                    error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
+                )
+                self.publishCompanion()
+            }
+
+            Task {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                await MainActor.run {
+                    if self.activeCleanProgress?.isCleaning == false {
+                        self.activeCleanProgress = nil
+                        self.publishCompanion()
+                    }
+                }
+            }
+
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return (status: 200, body: resultData)
+    }
+
     // MARK: - iPhone companion
 
     func regenerateCompanionCode() {
@@ -1442,6 +1587,7 @@ final class HogStore: ObservableObject {
             scale: cpuScale,
             pulse: pulse,
             rows: rows,
+            cleanProgress: activeCleanProgress,
             remoteQuitAllowed: allowRemoteQuit,
             remoteCleanAllowed: allowRemoteClean
         )

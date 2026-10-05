@@ -536,8 +536,34 @@ final class CompanionModel {
         if isDemoMode {
             isCleaning = true
             cleanError = nil
-            try? await Task.sleep(for: .seconds(1))
-            isCleaning = false
+            snapshot?.cleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "snapshot",
+                progress: 0.15,
+                statusText: "Creating APFS safety snapshot…",
+                currentItem: nil,
+                itemsCleaned: 0,
+                totalItems: 28,
+                bytesReclaimed: 0,
+                formattedBytesReclaimed: "0 B",
+                snapshotName: nil,
+                error: nil
+            )
+            try? await Task.sleep(for: .milliseconds(800))
+            snapshot?.cleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "cleaning",
+                progress: 0.55,
+                statusText: "Cleaning User Caches…",
+                currentItem: "com.apple.Safari",
+                itemsCleaned: 15,
+                totalItems: 28,
+                bytesReclaimed: 2_100_000_000,
+                formattedBytesReclaimed: "2.1 GB",
+                snapshotName: nil,
+                error: nil
+            )
+            try? await Task.sleep(for: .milliseconds(800))
             let demoRes = CompanionCleanResponse(
                 status: "success",
                 bytesReclaimed: 4_200_000_000,
@@ -547,7 +573,21 @@ final class CompanionModel {
                 snapshotName: "com.apple.TimeMachine.2026-10-01-DemoSnapshot.local",
                 tier: "standard"
             )
+            snapshot?.cleanProgress = CompanionCleanProgress(
+                isCleaning: false,
+                phase: "completed",
+                progress: 1.0,
+                statusText: "Clean complete: Reclaimed 4.2 GB",
+                currentItem: nil,
+                itemsCleaned: 28,
+                totalItems: 28,
+                bytesReclaimed: 4_200_000_000,
+                formattedBytesReclaimed: "4.2 GB",
+                snapshotName: "com.apple.TimeMachine.2026-10-01-DemoSnapshot.local",
+                error: nil
+            )
             lastCleanResult = demoRes
+            isCleaning = false
             return
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
@@ -555,14 +595,27 @@ final class CompanionModel {
         cleanError = nil
         let defaults = UserDefaults(suiteName: appGroupSuite)
         defaults?.set("Cleaning…", forKey: "clean_status")
-        defer { isCleaning = false }
+
+        // Start high-frequency polling during clean execution so progress updates are relayed smoothly
+        let pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                await self?.refresh()
+            }
+        }
+
+        defer {
+            pollingTask.cancel()
+            isCleaning = false
+        }
+
         do {
             let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token)
             lastCleanResult = res
             defaults?.set("Cleaned", forKey: "clean_status")
             defaults?.set(Date().timeIntervalSince1970, forKey: "last_clean_date")
             defaults?.set(res.formattedBytesReclaimed, forKey: "last_clean_bytes")
-            // Refresh snapshot to reflect reclaimed memory/disk immediately
+            // Final refresh to ensure completed clean state is captured
             await refresh()
         } catch CompanionClientError.forbidden(let reason) {
             cleanError = reason

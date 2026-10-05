@@ -483,4 +483,84 @@ final class CompanionStorageTelemetryTests: XCTestCase {
         XCTAssertEqual(next.allowRemoteQuit, true)
         XCTAssertEqual(next.allowRemoteClean, true)
     }
+
+    func testSnapshotCarriesCleanProgressRoundTrip() throws {
+        let progress = CompanionCleanProgress(
+            isCleaning: true,
+            phase: "Cleaning",
+            progress: 0.55,
+            statusText: "Removing Xcode DerivedData (5/10)...",
+            currentItem: "Xcode DerivedData",
+            itemsCleaned: 5,
+            totalItems: 10,
+            bytesReclaimed: 104_857_600,
+            formattedBytesReclaimed: "100 MB",
+            snapshotName: "hoghunter-clean-1234",
+            error: nil
+        )
+        let snapshot = CompanionSnapshotBuilder.make(
+            hostName: "test",
+            sampledAt: Date(),
+            hasBaseline: true,
+            window: .now,
+            grouping: .apps,
+            scale: .perCore,
+            pulse: MachinePulse.empty,
+            rows: [],
+            cleanProgress: progress,
+            remoteQuitAllowed: true,
+            remoteCleanAllowed: true
+        )
+        let data = try CompanionJSON.encode(snapshot)
+        let decoded = try CompanionJSON.decode(data)
+        XCTAssertEqual(decoded.cleanProgress, progress)
+        XCTAssertEqual(decoded.cleanProgress?.isCleaning, true)
+        XCTAssertEqual(decoded.cleanProgress?.phase, "Cleaning")
+        XCTAssertEqual(decoded.cleanProgress?.progress, 0.55)
+        XCTAssertEqual(decoded.cleanProgress?.statusText, "Removing Xcode DerivedData (5/10)...")
+        XCTAssertEqual(decoded.cleanProgress?.currentItem, "Xcode DerivedData")
+        XCTAssertEqual(decoded.cleanProgress?.itemsCleaned, 5)
+        XCTAssertEqual(decoded.cleanProgress?.totalItems, 10)
+        XCTAssertEqual(decoded.cleanProgress?.bytesReclaimed, 104_857_600)
+        XCTAssertEqual(decoded.cleanProgress?.formattedBytesReclaimed, "100 MB")
+        XCTAssertEqual(decoded.cleanProgress?.snapshotName, "hoghunter-clean-1234")
+        XCTAssertNil(decoded.cleanProgress?.error)
+    }
+
+    func testCompanionCleanRequestAndResponse() {
+        var cleanCalled = false
+        let handler: (String) -> (status: Int, body: Data) = { _ in
+            cleanCalled = true
+            let res = CompanionCleanResponse(
+                status: "completed",
+                bytesReclaimed: 2_048_000,
+                formattedBytesReclaimed: "2 MB",
+                itemsRemoved: 3,
+                snapshotCreated: true,
+                snapshotName: "hoghunter-clean-1234",
+                tier: "Standard"
+            )
+            return (200, (try? JSONEncoder().encode(res)) ?? Data())
+        }
+
+        let request = CompanionHTTP.cleanRequest(token: "ABCD2345")
+        let response = CompanionHTTP.response(
+            request: request,
+            body: Data(),
+            token: "ABCD2345",
+            cleanHandler: handler
+        )
+        let parsed = CompanionHTTP.parseResponse(response)
+        XCTAssertEqual(parsed?.status, 200)
+        XCTAssertTrue(cleanCalled)
+
+        let decoded = try? JSONDecoder().decode(CompanionCleanResponse.self, from: parsed?.body ?? Data())
+        XCTAssertEqual(decoded?.status, "completed")
+        XCTAssertEqual(decoded?.bytesReclaimed, 2_048_000)
+        XCTAssertEqual(decoded?.formattedBytesReclaimed, "2 MB")
+        XCTAssertEqual(decoded?.itemsRemoved, 3)
+        XCTAssertEqual(decoded?.snapshotCreated, true)
+        XCTAssertEqual(decoded?.snapshotName, "hoghunter-clean-1234")
+        XCTAssertEqual(decoded?.tier, "Standard")
+    }
 }

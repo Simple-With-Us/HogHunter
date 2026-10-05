@@ -261,7 +261,22 @@ final class DiskCleanerStore: ObservableObject {
 
         let currentTier = selectedTier
         let activeExclusions = exclusions
+        let totalItems = max(1, itemsToClean.count)
         state = .cleaning(progress: 0, currentItem: "Preparing…")
+        let initialProgress = CompanionCleanProgress(
+            isCleaning: true,
+            phase: "preparing",
+            progress: 0.0,
+            statusText: "Preparing…",
+            currentItem: nil,
+            itemsCleaned: 0,
+            totalItems: totalItems,
+            bytesReclaimed: 0,
+            formattedBytesReclaimed: "0 B",
+            snapshotName: nil,
+            error: nil
+        )
+        NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: initialProgress)
 
         cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
             var lastReportedTime = Date.distantPast
@@ -275,6 +290,20 @@ final class DiskCleanerStore: ObservableObject {
                     Task { @MainActor [weak self] in
                         guard let self, self.currentCleanId == cleanId else { return }
                         self.state = .cleaning(progress: progress, currentItem: currentItem)
+                        let activeProg = CompanionCleanProgress(
+                            isCleaning: true,
+                            phase: currentItem.contains("snapshot") ? "snapshot" : (progress >= 1.0 ? "finishing" : "cleaning"),
+                            progress: progress,
+                            statusText: currentItem.contains("snapshot") ? currentItem : "Cleaning \(currentItem)…",
+                            currentItem: currentItem,
+                            itemsCleaned: Int(progress * Double(totalItems)),
+                            totalItems: totalItems,
+                            bytesReclaimed: 0,
+                            formattedBytesReclaimed: "…",
+                            snapshotName: nil,
+                            error: nil
+                        )
+                        NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: activeProg)
                     }
                 }
             }
@@ -287,6 +316,20 @@ final class DiskCleanerStore: ObservableObject {
                 self.state = .cleaned(result)
                 self.cleanTask = nil
                 self.currentCleanId = nil
+                let completedProg = CompanionCleanProgress(
+                    isCleaning: false,
+                    phase: "completed",
+                    progress: 1.0,
+                    statusText: "Clean complete: Reclaimed \(result.formattedBytesReclaimed)",
+                    currentItem: nil,
+                    itemsCleaned: result.itemsRemoved,
+                    totalItems: totalItems,
+                    bytesReclaimed: result.bytesReclaimed,
+                    formattedBytesReclaimed: result.formattedBytesReclaimed,
+                    snapshotName: result.snapshotName,
+                    error: result.errors.isEmpty ? nil : result.errors.joined(separator: ", ")
+                )
+                NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedProg)
             }
         }
     }

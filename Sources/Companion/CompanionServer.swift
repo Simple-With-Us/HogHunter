@@ -99,6 +99,7 @@ final class CompanionServer: @unchecked Sendable {
     var allowRemoteClean = false
     var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil
     var onRemoteTame: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil
+    var onRemoteClean: (() -> (status: Int, body: Data))? = nil
     var onRemoteExclusionsUpdate: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil
     var onRemoteViewUpdate: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
     /// Asks the person at the Mac whether `deviceName` may pair.  Called on
@@ -165,6 +166,9 @@ final class CompanionServer: @unchecked Sendable {
                         guard self.allowRemoteClean else {
                             let res = ["status": "forbidden", "error": "Running the disk cleaner from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings on the Mac."]
                             return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+                        }
+                        if let handler = self.onRemoteClean {
+                            return handler()
                         }
                         return self.handleRemoteClean()
                     },
