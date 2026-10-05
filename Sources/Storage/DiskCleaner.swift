@@ -1372,7 +1372,9 @@ final class DiskCleaner: @unchecked Sendable {
     /// Validates whether a file or directory is safe to clean.
     func isSafeToDelete(url: URL, category: CleanCategory) -> Bool {
         let path = (url.path as NSString).standardizingPath
-        let home = (NSHomeDirectory() as NSString).standardizingPath
+        // Same resolved home as userHomeURL so injected-home tests (and any
+        // future alternate home) keep scan + safety on one path.
+        let home = (userHomeURL.path as NSString).standardizingPath
 
         // Disallow root or critical system directories
         let prohibitedPrefixes = [
