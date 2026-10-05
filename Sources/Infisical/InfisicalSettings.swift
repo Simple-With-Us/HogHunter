@@ -467,7 +467,6 @@ final class InfisicalSettings: ObservableObject {
     /// UserDefaults, never in a file.
     func saveCredential(clientId: String, clientSecret: String) throws {
         let credential = InfisicalCredential(clientId: clientId, clientSecret: clientSecret)
-        inMemoryCredential = credential
         let data = try JSONEncoder().encode(credential)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -486,6 +485,7 @@ final class InfisicalSettings: ObservableObject {
         guard status == errSecSuccess else {
             throw InfisicalError.decoding("Keychain save failed (OSStatus \(status))")
         }
+        inMemoryCredential = credential
         isConfigured = true
     }
 

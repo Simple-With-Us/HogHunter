@@ -225,8 +225,8 @@ enum SnapshotSafety {
         process.standardError = pipe
         do {
             try process.run()
-            process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             if process.terminationStatus == 0 {
                 if let line = output.components(separatedBy: .newlines).first(where: { $0.contains("Created local snapshot with date:") }) {
@@ -251,8 +251,8 @@ enum SnapshotSafety {
         process.standardError = pipe
         do {
             try process.run()
-            process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             return output.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -273,8 +273,8 @@ enum SnapshotSafety {
         process.standardError = pipe
         do {
             try process.run()
-            process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             let thinned = output.components(separatedBy: .newlines)
                 .filter { $0.contains("com.apple.TimeMachine.") }
@@ -1211,6 +1211,7 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         let totalItems = max(1, activeItems.count)
+        var hasThinnedSnapshots = false
 
         for (index, item) in activeItems.enumerated() {
             if Task.isCancelled {
@@ -1232,11 +1233,14 @@ final class DiskCleaner: @unchecked Sendable {
 
             do {
                 if item.category == .apfsSnapshots {
-                    let (thinned, count) = SnapshotSafety.thinLocalSnapshots()
-                    if thinned {
-                        removedCount += count
-                    } else {
-                        errors.append("Failed to thin APFS snapshot \(item.title)")
+                    if !hasThinnedSnapshots {
+                        hasThinnedSnapshots = true
+                        let (thinned, count) = SnapshotSafety.thinLocalSnapshots()
+                        if thinned {
+                            removedCount += count
+                        } else {
+                            errors.append("Failed to thin APFS local snapshots")
+                        }
                     }
                 } else if item.category == .trash {
                     // Item is already in the trash, so remove it permanently
