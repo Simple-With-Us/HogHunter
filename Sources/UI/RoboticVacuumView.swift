@@ -102,7 +102,7 @@ struct RoboticVacuumView: View {
                             Text(run.trigger.capitalized)
                                 .font(.system(size: 11, weight: .medium))
                             Spacer()
-                            Text(HogFormat.memory(Int64(run.bytesFreed)))
+                            Text(HogFormat.memory(UInt64(max(0, run.bytesFreed))))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                             Text(formatDate(run.endedAt))
