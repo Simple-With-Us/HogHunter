@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "intervals_seconds": {
+    "watch": 300,
+    "janitor": 1800,
+    "full": 14400
+  },
+  "overdue_multiplier": 1.5,
+  "history_max_runs": 200,
+  "state_dir": "~/.claude-disk-janitor",
+  "housekeeper_lock": "~/.claude-disk-janitor/.housekeeper.lock",
+  "data_dir": "~/Library/Application Support/HogHunter/RoboticVacuum",
+  "hoghunter_clean": "",
+  "repos": [],
+  "apps_glob": "~/apps/*",
+  "keep_worktree_regex": "",
+  "coolify_ssh_host": "coolify",
+  "grok_session_days": 7,
+  "grok_session_days_pressure": 3,
+  "janitor": {
+    "low_free_gib": 80,
+    "pressure_free_gib": 65,
+    "crit_free_gib": 30,
+    "stale_days": 7,
+    "idle_hours": 4,
+    "reap_worktrees": true,
+    "max_load_hard": 250,
+    "max_swap_pct_hard": 98,
+    "soft_load": 150,
+    "soft_swap_pct": 90
+  },
+  "resource_watch": {
+    "disk_free_warn_gb": 25,
+    "disk_free_crit_gb": 15,
+    "disk_drop_alert_gb": 15,
+    "swap_used_pct": 90,
+    "swap_used_gb": 32,
+    "load1_threshold": 65,
+    "clean_cooldown_sec": 7200,
+    "clean_cooldown_crit_sec": 1800
+  },
+  "steps": {}
+}

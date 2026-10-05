@@ -21,6 +21,7 @@ History only covers time the menu bar app has been running.  Turn on **Launch at
 - A per-app category breakdown so you can see where the bytes actually live.
 - **All installed** / **Running now** filters, and **Total** / **Hidden** / **Bundle** sort orders.
 - A disk cleaner for caches, logs, Trash, developer junk, orphaned app leftovers, stale AI agent transcripts and models, and large or old files.  A standard clean preserves recoverability through an APFS snapshot; a deep clean goes further.
+- **Robotic Vacuum** — scheduled background cleaning (pressure check every 5 minutes, worktree janitor every 30 minutes, full vacuum every 4 hours) with run history, step toggles, and alerts when a schedule is missed or the background job is unloaded.  See `docs/rollouts/2026-10-05-robotic-vacuum.md`.
 - Per-directory walks are capped, and a capped row is flagged as approximate in the UI rather than reported as exact.
 
 ## iPhone
@@ -54,6 +55,13 @@ xcodebuild -scheme HogHunter -destination 'platform=macOS' test
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the same test suite on every push to `main` and on every pull request, unsigned (`CODE_SIGNING_ALLOWED=NO`).
+
+Python reclaim and Robotic Vacuum scheduler tests (Linux-safe):
+
+```bash
+python3 scripts/test-hoghunter-clean.py
+python3 scripts/test-robotic-vacuum.py
+```
 
 ## License
 

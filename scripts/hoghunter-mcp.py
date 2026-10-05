@@ -970,9 +970,26 @@ def tame_process(pid: int, untame: bool = False) -> Dict[str, Any]:
         return {"success": False, "error": str(exc), "pid": pid, "name": base_name}
 
 
+def robotic_vacuum_status() -> Dict[str, Any]:
+    """Poll Robotic Vacuum health for fleet agents (Housekeeper).  No secrets."""
+    status_path = HOME / "Library" / "Application Support" / "HogHunter" / "RoboticVacuum" / "status.json"
+    if not status_path.is_file():
+        return {"available": False, "health": "unknown", "reason": "status file missing"}
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"available": False, "health": "unknown", "reason": str(exc)[:120]}
+    return {"available": True, **data}
+
+
 # MARK: - MCP Server Protocol Handling
 
 TOOLS = [
+    {
+        "name": "hoghunter_robotic_vacuum_status",
+        "description": "Read Hog Hunter Robotic Vacuum scheduled cleaning health: last runs, next runs, per-step results, and whether launchd is loaded.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     {
         "name": "hoghunter_tame_process",
         "description": "Tame a runaway process by lowering its CPU priority to nice level 20 and Darwin background I/O policy, or restore normal priority (untame). Keeps the process running without killing it.",
@@ -1112,6 +1129,10 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         pid = arguments.get("pid")
         untame = arguments.get("untame", False)
         data = tame_process(pid, untame=untame)
+        return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
+
+    elif name == "hoghunter_robotic_vacuum_status":
+        data = robotic_vacuum_status()
         return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
 
     else:
@@ -1255,14 +1276,17 @@ def run_cli(args: argparse.Namespace) -> None:
         data = tame_process(pid, untame=args.untame)
         print(json.dumps(data, indent=2))
 
+    elif cmd == "vacuum":
+        print(json.dumps(robotic_vacuum_status(), indent=2))
+
     else:
-        print("Specify a command: top, network, scan, audit, clean, quit, or tame")
+        print("Specify a command: top, network, scan, audit, clean, quit, tame, or vacuum")
         sys.exit(1)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="HogHunter MCP Server & Agent Backend")
-    parser.add_argument("--cli", dest="command", choices=["top", "network", "scan", "audit", "clean", "quit", "tame"],
+    parser.add_argument("--cli", dest="command", choices=["top", "network", "scan", "audit", "clean", "quit", "tame", "vacuum"],
                         help="Run in CLI mode")
     parser.add_argument("--window", default="now", choices=["now", "1h", "24h"])
     parser.add_argument("--sort-by", default="cpu", choices=["cpu", "memory"])
