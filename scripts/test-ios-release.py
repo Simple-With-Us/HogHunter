@@ -115,10 +115,16 @@ elif name == 'xcrun':
     assert option('--bundle-version') == os.environ['HH_BUILD_NUMBER']
     assert option('--bundle-short-version-string') == '1.0.4'
     assert option('--bundle-id') == 'com.simplewithus.hoghunter.ios'
-    staged = pathlib.Path.home() / '.appstoreconnect/private_keys' / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
+    # Assert the export the release script claims is altool's key-discovery channel.
+    keys_dir = pathlib.Path(os.environ['API_PRIVATE_KEYS_DIR'])
+    staged = keys_dir / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
     assert staged.is_file(), f'missing staged key at {staged}'
+    assert staged == pathlib.Path.home() / '.appstoreconnect/private_keys' / staged.name
     (root / 'upload-invoked').write_text('yes')
-    if os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
+    if os.environ.get('HH_TEST_UPLOAD_NO_MARKER') == 'true':
+        # Zero exit, no failure token, no success-message — must be rejected.
+        print('No errors uploading package')
+    elif os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
         print('UPLOAD FAILED with 1 error')
         if os.environ.get('HH_TEST_UPLOAD_ZERO_EXIT') != 'true':
             print('ExitFailure (31)')
@@ -132,7 +138,8 @@ else:
 
 
 class ReleaseFlowTests(unittest.TestCase):
-    def run_release(self, *, upload=False, bad_export=False, upload_error=False, upload_zero_exit=False, event="workflow_dispatch"):
+    def run_release(self, *, upload=False, bad_export=False, upload_error=False, upload_zero_exit=False,
+                     upload_no_marker=False, event="workflow_dispatch"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tools = root / "bin"
@@ -152,6 +159,7 @@ class ReleaseFlowTests(unittest.TestCase):
                        HH_BUILD_NUMBER="42", HH_TESTFLIGHT_UPLOAD=str(upload).lower(),
                        HH_TEST_BAD_EXPORT=str(bad_export).lower(), HH_TEST_UPLOAD_ERROR=str(upload_error).lower(),
                        HH_TEST_UPLOAD_ZERO_EXIT=str(upload_zero_exit).lower(),
+                       HH_TEST_UPLOAD_NO_MARKER=str(upload_no_marker).lower(),
                        HH_TEST_FIXTURES=str(root),
                        RUNNER_TEMP=str(root), GITHUB_STEP_SUMMARY=str(root / "summary"))
             result = subprocess.run(["/bin/bash", str(ROOT / "scripts/ios-testflight-release.sh")],
@@ -192,12 +200,20 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertIn("altool output reports upload failure", result.stderr)
 
     def test_success_requires_positive_success_marker(self):
-        # A zero exit with no failure tokens is not success proof; the fake's
-        # success branch prints success-message, so this path still passes.
+        # Happy path still prints success-message and must report success.
         result, uploaded = self.run_release(upload=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(uploaded)
         self.assertIn("Upload command succeeded", result.stdout)
+
+    def test_zero_exit_without_success_marker_is_rejected(self):
+        # Neutral zero-exit capture (no failure token, no success-message) must
+        # not be reported as a successful upload.
+        result, uploaded = self.run_release(upload=True, upload_no_marker=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(uploaded)
+        self.assertNotIn("Upload command succeeded", result.stdout)
+        self.assertIn("did not report an unambiguous success", result.stderr)
 
     def test_invalid_export_stops_before_upload(self):
         result, uploaded = self.run_release(upload=True, bad_export=True)
