@@ -311,6 +311,42 @@ enum SnapshotSafety {
             return (false, 0)
         }
     }
+
+    /// Parse the `tmutil listlocalsnapshots` line format.
+    ///
+    /// Real output looks like:
+    ///     com.apple.TimeMachine.2026-10-05-062128.local
+    /// Older snapshots and test fixtures sometimes drop the trailing `.local`.
+    /// The header line `Snapshots for disk /` is filtered by the call site, but
+    /// we still defend against it here so tests can hand us raw output.
+    static func parseSnapshotNames(_ output: String) -> [String] {
+        output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("Snapshots for") }
+    }
+
+    /// The bytes that APFS counts as purgeable on the startup disk.
+    ///
+    /// `volumeAvailableCapacity` is what the Finder shows as free and *does not*
+    /// include purgeable space; `volumeAvailableCapacityForImportantUsage`
+    /// counts purgeable as available, which is the same number the panel's
+    /// Storage card uses (`DiskSpace.current()` in `Models.swift`).  The
+    /// difference is the high-water figure we can show next to a list of
+    /// snapshots — we never thin more than the volume can reclaim, and we
+    /// never claim a snapshot holds more bytes than the volume has free.
+    static func purgeableBytes(at mount: String = "/") -> UInt64 {
+        let url = URL(fileURLWithPath: mount)
+        guard let values = try? url.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey
+        ]) else { return 0 }
+        let free = UInt64(max(0, values.volumeAvailableCapacity ?? 0))
+        let important = UInt64(max(0, values.volumeAvailableCapacityForImportantUsage ?? 0))
+        // purgeable >= 0 is the only constraint here: APFS never reports the
+        // "important" number as smaller than the literal free number, but if
+        // something exotic ever makes it so, clamp rather than wrap.
+        return important >= free ? important - free : 0
+    }
 }
 
 /// A single reclaimable item discovered during a scan.
@@ -408,11 +444,19 @@ final class DiskCleaner: @unchecked Sendable {
     private let fileManager: FileManager
     /// Tests substitute a closure that does not call `tmutil`.
     private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
+    /// Tests substitute a closure that does not call `tmutil`.
+    private let listSnapshots: (_ mount: String) -> [String]?
+    /// Tests substitute a closure that does not call `URL.resourceValues`.
+    private let purgeableProvider: (_ mount: String) -> UInt64
 
     init(fileManager: FileManager = .default,
-         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() }) {
+         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
+         listSnapshots: @escaping (String) -> [String]? = { _ in SnapshotSafety.listLocalSnapshots() },
+         purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) }) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
+        self.listSnapshots = listSnapshots
+        self.purgeableProvider = purgeableProvider
     }
 
     // MARK: - Full Scan
@@ -484,19 +528,42 @@ final class DiskCleaner: @unchecked Sendable {
     }
 
     /// Scans for active APFS Time Machine local snapshots pinning deleted storage blocks.
+    /// Per-snapshot sizes are not exposed by `tmutil`, so the bytes for each row
+    /// come from the volume's purgeable high-water mark divided by the snapshot
+    /// count.  When listing fails or returns empty, a single placeholder row is
+    /// emitted carrying the full purgeable figure so the panel still has
+    /// something to show and the clean can still thin.
     func scanAPFSSnapshots() -> [CleanItem] {
-        let snapshots = SnapshotSafety.listLocalSnapshots()
-        return snapshots.map { snap in
+        let snapshotNames = listSnapshots("/") ?? SnapshotSafety.listLocalSnapshots()
+        let purgeable = purgeableProvider("/")
+
+        if snapshotNames.isEmpty {
+            guard purgeable > 0 else { return [] }
+            return [CleanItem(
+                category: .apfsSnapshots,
+                title: "Local Time Machine Snapshots",
+                subtitle: "Thin purgeable space on /",
+                url: URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.aggregate"),
+                bytes: purgeable,
+                fileCount: 0,
+                lastModified: nil,
+                isSelected: CleanCategory.apfsSnapshots.defaultSelected,
+                detail: "Purgeable space held by local snapshots"
+            )]
+        }
+
+        let bytesPer = purgeable / UInt64(snapshotNames.count)
+        return snapshotNames.map { name in
             CleanItem(
                 category: .apfsSnapshots,
-                title: snap,
+                title: name,
                 subtitle: "Time Machine Local Snapshot",
-                url: URL(fileURLWithPath: "/.snapshots/\(snap)"),
-                bytes: 0,
+                url: URL(fileURLWithPath: "/.snapshots/\(name)"),
+                bytes: bytesPer,
                 fileCount: 1,
                 lastModified: nil,
                 isSelected: CleanCategory.apfsSnapshots.defaultSelected,
-                detail: "Pins deleted data blocks on APFS container. Pruning releases purgeable storage."
+                detail: "Local Time Machine snapshot — thinning is safe"
             )
         }
     }
@@ -712,6 +779,55 @@ final class DiskCleaner: @unchecked Sendable {
                 isSelected: CleanCategory.developer.defaultSelected,
                 detail: target.detail
             ))
+        }
+
+        if !Task.isCancelled {
+            // iOS Simulator Devices — every installed simulator + runtime.  Opt-in
+            // only: other users may actively develop for iOS, and an auto-clean
+            // would force a full re-download of every runtime on next boot.
+            let simDevicesURL = userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: simDevicesURL.path, isDirectory: &isDir) {
+                let stats = directoryStats(at: simDevicesURL)
+                if stats.bytes > 0 {
+                    items.append(CleanItem(
+                        category: .developer,
+                        title: "iOS Simulator Devices",
+                        subtitle: "~/Library/Developer/CoreSimulator/Devices",
+                        url: simDevicesURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
+                    ))
+                }
+            }
+        }
+
+        if !Task.isCancelled {
+            // Xcode Connected-Device Support — symbols pulled down when an iOS
+            // device is plugged in.  Opt-in: re-downloads when a device is next
+            // connected, which is a no-op for anyone who isn't actively
+            // developing on physical hardware.
+            let coreDeviceURL = userHomeURL.appendingPathComponent("Library/Developer/CoreDevice", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: coreDeviceURL.path, isDirectory: &isDir) {
+                let stats = directoryStats(at: coreDeviceURL)
+                if stats.bytes > 0 {
+                    items.append(CleanItem(
+                        category: .developer,
+                        title: "Xcode Connected-Device Support",
+                        subtitle: "~/Library/Developer/CoreDevice",
+                        url: coreDeviceURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Symbols and support files from connected iOS devices.  Re-downloads when a device is connected."
+                    ))
+                }
+            }
         }
 
         return items.sorted { $0.bytes > $1.bytes }
@@ -1205,6 +1321,7 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+
     // MARK: - Cleaning Execution
 
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
@@ -1416,6 +1533,8 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Library/Developer/Xcode/Archives",
                 home + "/Library/Developer/Xcode/iOS DeviceSupport",
                 home + "/Library/Developer/CoreSimulator/Caches",
+                home + "/Library/Developer/CoreSimulator/Devices",
+                home + "/Library/Developer/CoreDevice",
                 home + "/Library/Caches/Homebrew",
                 home + "/.npm/_cacache",
                 home + "/Library/Caches/Yarn",

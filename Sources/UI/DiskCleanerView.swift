@@ -23,11 +23,13 @@ struct DiskCleanerView: View {
             if isTabActive, case .idle = store.state {
                 store.scan()
             }
+            store.refreshLastCleanup()
         }
         .onChange(of: isTabActive) { active in
             if active, case .idle = store.state {
                 store.scan()
             }
+            store.refreshLastCleanup()
         }
         .onDisappear {
             store.cancelScan()
@@ -146,38 +148,47 @@ struct DiskCleanerView: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
 
         case .scanned(let report):
-            HStack(spacing: 16) {
-                ZStack {
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.12))
-                        .frame(width: 52, height: 52)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 24))
-                        .foregroundStyle(Color.accentColor)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(HogFormat.memory(store.totalSelectedBytes()))
-                            .font(.system(size: 22, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.primary)
-                        Text("ready to reclaim")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 16) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.12))
+                            .frame(width: 52, height: 52)
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 24))
+                            .foregroundStyle(Color.accentColor)
                     }
 
-                    Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
-                        .font(.system(size: 11))
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(HogFormat.memory(store.totalSelectedBytes()))
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                                .foregroundStyle(Color.primary)
+                            Text("ready to reclaim")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    // The number a person actually weighs the decision against is
+                    // not "13 GB is reclaimable" but "13 GB against how much room
+                    // is left".  Without the volume side of that ratio the button
+                    // is a leap of faith.
+                    volumeGauge
+                        .frame(width: 152)
+                }
+
+                if let last = store.lastCleanup {
+                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)) — freed \(last.formattedBytesReclaimed)")
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                // The number a person actually weighs the decision against is
-                // not "13 GB is reclaimable" but "13 GB against how much room
-                // is left".  Without the volume side of that ratio the button
-                // is a leap of faith.
-                volumeGauge
-                    .frame(width: 152)
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
