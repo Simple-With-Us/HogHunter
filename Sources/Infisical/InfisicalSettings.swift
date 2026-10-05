@@ -449,9 +449,14 @@ final class InfisicalSettings: ObservableObject {
 
     // MARK: - Credential (Keychain)
 
+    private var inMemoryCredential: InfisicalCredential?
+
     private func credential() -> InfisicalCredential? {
         if let provider = credentialProvider { return provider() }
-        return Self.readCredentialFromKeychain()
+        if let cached = inMemoryCredential { return cached }
+        let loaded = Self.readCredentialFromKeychain()
+        inMemoryCredential = loaded
+        return loaded
     }
 
     private static let keychainService = "com.simplewithus.hoghunter.infisical"
@@ -462,6 +467,7 @@ final class InfisicalSettings: ObservableObject {
     /// UserDefaults, never in a file.
     func saveCredential(clientId: String, clientSecret: String) throws {
         let credential = InfisicalCredential(clientId: clientId, clientSecret: clientSecret)
+        inMemoryCredential = credential
         let data = try JSONEncoder().encode(credential)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -484,6 +490,7 @@ final class InfisicalSettings: ObservableObject {
     }
 
     func clearCredential() {
+        inMemoryCredential = nil
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,

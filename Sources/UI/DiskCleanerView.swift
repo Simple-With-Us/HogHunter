@@ -587,6 +587,7 @@ private struct CategoryCardView: View {
         case .aiArtifacts: color = .green
         case .localAIModels: color = .mint
         case .largeAndOldFiles: color = .teal
+        case .apfsSnapshots: color = .cyan
         }
 
         return ZStack {

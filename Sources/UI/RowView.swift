@@ -172,6 +172,9 @@ enum HogActions {
     /// force unwrap here would take the whole panel down over a decorative
     /// image.
     static let activityMonitorIcon: NSImage = {
+        if let bundleImage = NSImage(named: "ActivityMonitorIcon") {
+            return bundleImage
+        }
         let icon = NSWorkspace.shared.icon(forFile: activityMonitorURL.path)
         guard icon.isValid else {
             return NSImage(systemSymbolName: "gauge.with.dots.needle.50percent", accessibilityDescription: "Activity Monitor")

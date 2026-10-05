@@ -39,6 +39,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertFalse(CleanCategory.aiArtifacts.defaultSelected, "AI agent artifacts must require explicit user review")
         XCTAssertFalse(CleanCategory.localAIModels.defaultSelected, "Local AI models must require explicit user review")
         XCTAssertFalse(CleanCategory.largeAndOldFiles.defaultSelected, "Large & old user files must never be selected by default")
+        XCTAssertFalse(CleanCategory.apfsSnapshots.defaultSelected, "APFS local snapshots must require explicit user review")
     }
 
     func testCleanTiers() {
@@ -47,6 +48,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.logsAndDiagnostics))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.trash))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.developer))
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.apfsSnapshots))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.orphanedData))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.localAIModels))
