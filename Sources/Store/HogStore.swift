@@ -1238,6 +1238,19 @@ final class HogStore: ObservableObject {
                 guard let self, let progress = note.object as? CompanionCleanProgress else { return }
                 self.activeCleanProgress = progress
                 self.publishCompanion()
+
+                if !progress.isCleaning {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 10_000_000_000)
+                        await MainActor.run { [weak self] in
+                            guard let self else { return }
+                            if self.activeCleanProgress == progress {
+                                self.activeCleanProgress = nil
+                                self.publishCompanion()
+                            }
+                        }
+                    }
+                }
             }
         }
     }
