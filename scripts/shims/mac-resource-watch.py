@@ -7,8 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Fleet registry: docs/mac-local-processes-shims.md (mirror to ~/apps/MAC-LOCAL-PROCESSES.md on Mac).
-REPO = Path(os.environ.get("HOGHUNTER_REPO", Path.home() / "Code" / "HogHunter"))
+# Fleet registry (high level): docs/mac-local-processes-shims.md
+def _repo_root() -> Path:
+    env = os.environ.get("HOGHUNTER_REPO", "").strip()
+    if env:
+        return Path(env)
+    here = Path(__file__).resolve()
+    return here.parents[2]
+
+
+REPO = _repo_root()
 cmd = [sys.executable, str(REPO / "scripts" / "robotic-vacuum.py"), "--run-now", "watch"]
 if "--once" in sys.argv:
     pass

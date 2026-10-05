@@ -21,7 +21,7 @@ History only covers time the menu bar app has been running.  Turn on **Launch at
 - A per-app category breakdown so you can see where the bytes actually live.
 - **All installed** / **Running now** filters, and **Total** / **Hidden** / **Bundle** sort orders.
 - A disk cleaner for caches, logs, Trash, developer junk, orphaned app leftovers, stale AI agent transcripts and models, and large or old files.  A standard clean preserves recoverability through an APFS snapshot; a deep clean goes further.
-- **Robotic Vacuum** — scheduled background cleaning (pressure check every 5 minutes, worktree janitor every 30 minutes, full vacuum every 4 hours) with run history, step toggles, and alerts when a schedule is missed or the background job is unloaded.  See `docs/rollouts/2026-10-05-robotic-vacuum.md`.
+- **Robotic Vacuum** — scheduled background cleaning (pressure check every 5 minutes, worktree janitor every 30 minutes, full vacuum every 4 hours) with run history, step toggles, and alerts when a schedule is missed or the background job is unloaded.
 - Per-directory walks are capped, and a capped row is flagged as approximate in the UI rather than reported as exact.
 
 ## iPhone
@@ -43,7 +43,9 @@ open build/Build/Products/Release/HogHunter.app
 
 To build, sign, and install to `/Applications/Hog Hunter.app` in one step, use `scripts/install.sh` instead.  It signs Release builds with the "Developer ID Application" identity when one is in the keychain, falling back to an adhoc signature otherwise, then quits any running copy and relaunches the new one.  It installs to `/Applications` by default when a copy already lives there, otherwise to `~/Applications`; pass `--dest PATH` to pick a destination explicitly (for example `--dest ~/Applications`).  Pass `--dry-run` to see what it would do without touching anything, or `--no-launch` to install without opening the app.
 
-No LaunchAgent.  The app is the sampler.  Quitting it stops history.
+No LaunchAgent for CPU and memory sampling.  The menu bar app is the sampler; quitting it stops history.
+
+**Robotic Vacuum** (scheduled disk cleaning) is separate: a dedicated launchd background job installed with `scripts/robotic-vacuum-migrate.sh` on the owner Mac after merge.  That job does not replace Launch at Login for the menu bar app.
 
 ## Tests and CI
 
