@@ -836,7 +836,7 @@ struct DashboardView: View {
                     Label("Safe Mac Clean", systemImage: "sparkles")
                         .font(.headline)
                     Spacer()
-                    if model.isCleaning {
+                    if model.isCleaning || snapshot.cleanProgress?.isCleaning == true {
                         ProgressView()
                             .controlSize(.small)
                     }
@@ -845,7 +845,64 @@ struct DashboardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if let result = model.lastCleanResult {
+                if let progress = snapshot.cleanProgress, progress.isCleaning || model.isCleaning {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(progress.statusText.isEmpty ? "Cleaning in progress…" : progress.statusText)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text("\(Int(progress.progress * 100))%")
+                                .font(.caption.monospacedDigit().weight(.bold))
+                                .foregroundStyle(Color.accentColor)
+                        }
+
+                        ProgressView(value: max(0.05, progress.progress), total: 1.0)
+                            .tint(.accentColor)
+
+                        if let item = progress.currentItem, !item.isEmpty, item != progress.statusText {
+                            Text(item)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        if progress.totalItems > 0 {
+                            HStack {
+                                Text("\(progress.itemsCleaned) of \(progress.totalItems) items cleaned")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if progress.bytesReclaimed > 0 {
+                                    Text("Reclaimed \(progress.formattedBytesReclaimed)")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                if let progress = snapshot.cleanProgress, progress.phase == "completed" {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reclaimed \(progress.formattedBytesReclaimed) (\(progress.itemsCleaned) items)")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.green)
+                            if let snap = progress.snapshotName {
+                                Text("APFS Snapshot: \(snap)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                } else if let result = model.lastCleanResult {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
@@ -856,7 +913,7 @@ struct DashboardView: View {
                     .padding(.vertical, 2)
                 }
 
-                if let error = model.cleanError {
+                if let error = model.cleanError ?? snapshot.cleanProgress?.error {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -871,14 +928,22 @@ struct DashboardView: View {
                 } label: {
                     HStack {
                         Spacer()
-                        Text(model.isCleaning ? "Cleaning Mac…" : "Clean Mac Clutter (Safe)")
-                            .font(.subheadline.weight(.semibold))
+                        if let progress = snapshot.cleanProgress, progress.isCleaning {
+                            Text("Cleaning Mac… (\(Int(progress.progress * 100))%)")
+                                .font(.subheadline.weight(.semibold))
+                        } else if model.isCleaning {
+                            Text("Cleaning Mac…")
+                                .font(.subheadline.weight(.semibold))
+                        } else {
+                            Text("Clean Mac Clutter (Safe)")
+                                .font(.subheadline.weight(.semibold))
+                        }
                         Spacer()
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning || snapshot.remoteCleanAllowed != true)
+                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
 
                 if snapshot.remoteCleanAllowed != true {
                     Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")

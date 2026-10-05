@@ -16,6 +16,7 @@ enum CompanionSnapshotBuilder {
         rows: [HogRow],
         storage: CompanionStorageSummary? = nil,
         network: [CompanionNetworkRow]? = nil,
+        cleanProgress: CompanionCleanProgress? = nil,
         remoteQuitAllowed: Bool? = nil,
         remoteCleanAllowed: Bool? = nil
     ) -> CompanionSnapshot {
@@ -69,7 +70,8 @@ enum CompanionSnapshotBuilder {
             storage: storage ?? currentStorageSummary(),
             network: network,
             remoteQuitAllowed: remoteQuitAllowed,
-            remoteCleanAllowed: remoteCleanAllowed
+            remoteCleanAllowed: remoteCleanAllowed,
+            cleanProgress: cleanProgress
         )
     }
 

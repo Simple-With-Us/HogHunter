@@ -25,6 +25,31 @@ struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var tier: String
 }
 
+/// Live progress and status of an active or recently completed safe disk cleaning run.
+struct CompanionCleanProgress: Codable, Equatable, Sendable {
+    var isCleaning: Bool
+    var phase: String
+    var progress: Double
+    var statusText: String
+    var currentItem: String?
+    var itemsCleaned: Int
+    var totalItems: Int
+    var bytesReclaimed: UInt64
+    var formattedBytesReclaimed: String
+    var snapshotName: String?
+    var error: String?
+}
+
+extension Notification.Name {
+    static let diskCleanerProgressChanged = Notification.Name("hoghunter.diskCleanerProgressChanged")
+}
+
+/// Update payload carrying clean progress and its unique execution run ID.
+struct DiskCleanerProgressUpdate: Sendable {
+    var runId: UUID
+    var progress: CompanionCleanProgress
+}
+
 /// Response returned when the iOS companion asks to quit a process on the Mac.
 struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var status: String
@@ -114,6 +139,7 @@ struct CompanionSnapshot: Codable, Equatable {
     /// Mac that does not send them decodes as "unknown" rather than failing.
     var remoteQuitAllowed: Bool? = nil
     var remoteCleanAllowed: Bool? = nil
+    var cleanProgress: CompanionCleanProgress? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
