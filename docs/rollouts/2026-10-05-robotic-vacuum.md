@@ -25,6 +25,7 @@ Hog Hunter becomes the home for scheduled Mac cleaning (**Robotic Vacuum**), rep
 - `Tests/HogHunterTests/RoboticVacuumTests.swift`
 - `.github/workflows/ci.yml`
 - `README.md`
+- `docs/mac-local-processes-shims.md`
 
 ## Decisions & Trade-offs
 
@@ -45,29 +46,13 @@ Hog Hunter becomes the home for scheduled Mac cleaning (**Robotic Vacuum**), rep
 
 ## Next Steps & Blockers
 
-- Owner runs `bash scripts/robotic-vacuum-migrate.sh` after merge.
-- Confirm launchd logs under the Hog Hunter Logs directory on Mac.
+- After merge, from the repo root on a Mac: `bash scripts/robotic-vacuum-migrate.sh`.  The script prints `export MIGRATION_BACKUP_PATH=...` — use that value only; rollback paths are not duplicated in this doc (Rule 1).
+- Rollback: `bash scripts/robotic-vacuum-rollback.sh "${MIGRATION_BACKUP_PATH:?set from migrate output}"`.
+- Mirror shim rows from `docs/mac-local-processes-shims.md` into owner `~/apps/MAC-LOCAL-PROCESSES.md` (Mac-only fleet file, outside this repo).
+- Confirm launchd stdout/stderr logs for label `com.simplewithus.hoghunter.robotic-vacuum`.
 - Expand `janitor_cache_reclaim` if janitor parity gaps appear in production.
 
 ## Zero-Code Findings
 
-- Fleet agents poll `hoghunter_robotic_vacuum_status` / `--cli vacuum`.
-- Shims under `scripts/shims/` optional for legacy script paths.
-
-## Operator notes
-
-**Migrate (Mac):**
-
-```bash
-cd "$(git rev-parse --show-toplevel)"
-bash scripts/robotic-vacuum-migrate.sh
-# Migration prints MIGRATION_BACKUP_PATH=... — save it for rollback.
-```
-
-**Rollback:**
-
-```bash
-bash scripts/robotic-vacuum-rollback.sh "${MIGRATION_BACKUP_PATH:?set from migrate output}"
-```
-
-**Fleet polling:** `python3 scripts/hoghunter-mcp.py --cli vacuum`
+- Fleet agents poll `hoghunter_robotic_vacuum_status` / `python3 scripts/hoghunter-mcp.py --cli vacuum`.
+- Shim inventory for fleet docs: `docs/mac-local-processes-shims.md`.

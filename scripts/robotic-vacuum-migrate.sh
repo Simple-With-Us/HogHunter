@@ -42,5 +42,7 @@ To rollback:
   bash "${REPO}/scripts/robotic-vacuum-rollback.sh" "${BACKUP_DIR}"
 EOF
 
-echo "Installed ${LABEL}.  Old plists backed up under ${BACKUP_DIR}"
+echo "Installed ${LABEL}.  Old plists backed up."
+echo "export MIGRATION_BACKUP_PATH='${BACKUP_DIR}'"
+echo "Rollback: bash \"${REPO}/scripts/robotic-vacuum-rollback.sh\" \"\${MIGRATION_BACKUP_PATH}\""
 echo "Thin shims (optional): copy scripts/shims/* to your old script paths if something still calls them."
