@@ -184,6 +184,14 @@ enum HogActions {
         return icon
     }()
 
+    static let settingsIcon: NSImage = {
+        if let bundleImage = NSImage(named: "SettingsIcon") {
+            return bundleImage
+        }
+        return NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
+            ?? NSImage(size: NSSize(width: 22, height: 22))
+    }()
+
     static func openActivityMonitor() {
         NSWorkspace.shared.open(activityMonitorURL)
     }

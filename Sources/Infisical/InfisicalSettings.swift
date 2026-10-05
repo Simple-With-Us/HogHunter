@@ -435,14 +435,14 @@ final class InfisicalSettings: ObservableObject {
     }
 
     private func refreshIfDue() async {
-        guard isConfigured else { return }
+        guard isConfigured, inMemoryCredential != nil else { return }
         let minutes = store.double(for: InfisicalKey.settingsRefreshMinutes) ?? 5
         let interval = max(60, minutes * 60)
         await refreshIfStale(minimumGap: interval)
     }
 
     private func refreshIfStale(minimumGap: TimeInterval) async {
-        guard isConfigured, !isRefreshing else { return }
+        guard isConfigured, inMemoryCredential != nil, !isRefreshing else { return }
         if let last = lastRefresh, Date().timeIntervalSince(last) < minimumGap { return }
         await refresh()
     }
@@ -450,10 +450,13 @@ final class InfisicalSettings: ObservableObject {
     // MARK: - Credential (Keychain)
 
     private var inMemoryCredential: InfisicalCredential?
+    private var keychainReadAttempted = false
 
     private func credential() -> InfisicalCredential? {
         if let provider = credentialProvider { return provider() }
         if let cached = inMemoryCredential { return cached }
+        guard !keychainReadAttempted else { return nil }
+        keychainReadAttempted = true
         let loaded = Self.readCredentialFromKeychain()
         inMemoryCredential = loaded
         return loaded
@@ -486,11 +489,13 @@ final class InfisicalSettings: ObservableObject {
             throw InfisicalError.decoding("Keychain save failed (OSStatus \(status))")
         }
         inMemoryCredential = credential
+        keychainReadAttempted = false
         isConfigured = true
     }
 
     func clearCredential() {
         inMemoryCredential = nil
+        keychainReadAttempted = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
@@ -507,6 +512,7 @@ final class InfisicalSettings: ObservableObject {
             kSecAttrAccount as String: Self.keychainAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
