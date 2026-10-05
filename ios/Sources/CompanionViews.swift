@@ -459,7 +459,7 @@ struct DashboardView: View {
         } message: {
             Text(pendingTameAction == "untame"
                 ? "Restores normal CPU scheduling priority for \(pendingTameRow?.name ?? "this app") on \(snapshot.hostName)."
-                : "Lowers CPU priority for this app so it does not starve other apps on the Mac.")
+                : "Lowers CPU priority (renices to +10) for \(pendingTameRow?.name ?? "this app") so it does not starve other apps on \(snapshot.hostName).")
         }
         .alert(
             lastTameResult?.error != nil
@@ -1151,9 +1151,9 @@ struct RemoteConnectSheet: View {
                 }
             }
             .onDisappear {
-                if model.isConnectingRemote {
-                    model.cancelRemoteConnect()
-                }
+                // cancelRemoteConnect() must also run for a connect that was just
+                // scheduled: isConnectingRemote is not set until the task body runs.
+                model.cancelRemoteConnect()
             }
         }
     }
