@@ -10,6 +10,7 @@ enum CompanionService {
     static let tamePath = "/v1/tame"
     static let exclusionsPath = "/v1/exclusions"
     static let viewPath = "/v1/view"
+    static let pairPath = "/v1/pair"
     static let version = 1
 }
 
@@ -109,6 +110,10 @@ struct CompanionSnapshot: Codable, Equatable {
     var rows: [CompanionRow]
     var storage: CompanionStorageSummary? = nil
     var network: [CompanionNetworkRow]? = nil
+    /// What the Mac owner has allowed the phone to do.  Optional so an older
+    /// Mac that does not send them decodes as "unknown" rather than failing.
+    var remoteQuitAllowed: Bool? = nil
+    var remoteCleanAllowed: Bool? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {

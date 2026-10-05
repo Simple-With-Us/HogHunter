@@ -109,6 +109,12 @@ final class HistoryStoreTests: XCTestCase {
 
         let byMemory = store.aggregates(lookback: 3600, groupByApp: false, sort: .memory)
         XCTAssertEqual(byMemory.first?.key, "41-1")
+
+        let byCpuAsc = store.aggregates(lookback: 3600, groupByApp: false, sort: .cpu, ascending: true)
+        XCTAssertEqual(byCpuAsc.first?.key, "41-1")
+
+        let byMemoryAsc = store.aggregates(lookback: 3600, groupByApp: false, sort: .memory, ascending: true)
+        XCTAssertEqual(byMemoryAsc.first?.key, "40-1")
     }
 
     func testAppsGroupingSumsHelpersWithTheSameGroupKeyWithinATick() {

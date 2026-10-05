@@ -71,12 +71,21 @@ struct CompanionRootView: View {
                     }
                     if model.saved != nil {
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button("Forget Mac") { model.forget() }
+                            Button { model.showForgetConfirm = true } label: {
+                                Image(systemName: "link")
+                            }
+                            .accessibilityLabel("Forget Mac")
                         }
                     }
                 }
         }
         .onAppear { model.start() }
+        .alert("Forget \(model.saved?.name ?? "This Mac")?", isPresented: $model.showForgetConfirm) {
+            Button("Forget Mac", role: .destructive) { model.forget() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This iPhone will stop showing it until you pair again.")
+        }
         .sheet(isPresented: codePresented) {
             CodeEntryView(model: model)
                 .presentationDetents([.medium])
@@ -112,6 +121,7 @@ struct CompanionRootView: View {
             StatusPage(
                 title: "Mac Offline or Not Found",
                 message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.",
+                isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
@@ -124,6 +134,7 @@ struct CompanionRootView: View {
             StatusPage(
                 title: "Looking for Your Mac",
                 message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.",
+                isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
@@ -139,6 +150,7 @@ struct CompanionRootView: View {
 private struct StatusPage: View {
     let title: String
     let message: String
+    var isOnWiFi: Bool = true
     var onRemoteConnect: (() -> Void)? = nil
     var onDemoMode: (() -> Void)? = nil
 
@@ -155,14 +167,28 @@ private struct StatusPage: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
+            if !isOnWiFi, onRemoteConnect != nil {
+                VStack(spacing: 6) {
+                    Label("This iPhone is not on Wi-Fi", systemImage: "wifi.slash")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Do you use Tailscale or another route to your Mac?  Connect by address on port \(CompanionModel.defaultPort).")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemBackground)))
+            }
+
             if onRemoteConnect != nil || onDemoMode != nil {
                 VStack(spacing: 10) {
                     if let onRemoteConnect {
                         Button(action: onRemoteConnect) {
-                            Label("Connect via Tailscale or Domain…", systemImage: "network")
+                            Label("Connect by Tailscale or Address…", systemImage: "network")
                                 .font(.subheadline.weight(.semibold))
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.borderedProminent)
                     }
 
                     if let onDemoMode {
@@ -209,7 +235,7 @@ private struct MacListView: View {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
                 } label: {
-                    Label("Connect via Tailscale or Domain…", systemImage: "network")
+                    Label("Connect by Tailscale or Address…", systemImage: "network")
                 }
             }
         }
@@ -218,6 +244,7 @@ private struct MacListView: View {
                 StatusPage(
                     title: "Looking for Your Mac",
                     message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.",
+                    isOnWiFi: model.isOnWiFi,
                     onRemoteConnect: {
                         model.remoteConnectError = nil
                         model.isRemoteSheetPresented = true
@@ -244,9 +271,23 @@ private struct CodeEntryView: View {
                         .autocorrectionDisabled()
                         .font(.system(.title3, design: .monospaced))
                         .focused($focused)
-                    Text("Type the code shown in Hog Hunter Settings on your Mac.  The iPhone can look at the list.  It cannot quit anything.")
+                    Text("Type the code shown in Hog Hunter Settings > iPhone on your Mac.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+                Section {
+                    Button {
+                        Task { await model.requestApproval() }
+                    } label: {
+                        HStack {
+                            Label(model.isWaitingForApproval ? "Check Your Mac and Click Allow" : "Ask Mac to Approve Instead", systemImage: "desktopcomputer")
+                            Spacer()
+                            if model.isWaitingForApproval { ProgressView() }
+                        }
+                    }
+                    .disabled(model.isWaitingForApproval || model.isSubmittingCode)
+                } footer: {
+                    Text("No code needed.  Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.")
                 }
                 if let codeError = model.codeError {
                     Section {
@@ -276,12 +317,21 @@ struct DashboardView: View {
     @Bindable var model: CompanionModel
     @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
+    @State private var sortAscending: Bool = false
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
     @State private var isForceQuit = false
     @State private var showQuitConfirm = false
     @State private var lastQuitResult: CompanionQuitResponse?
     @State private var showQuitResultAlert = false
+    @State private var pendingTameRow: CompanionRow?
+    @State private var pendingTameAction = "tame"
+    /// Action and result land as ONE value.  Holding them in separate `@State`
+    /// let two in-flight tasks interleave, so a stale response could label a tame
+    /// failure "Could Not Restore Priority" (or the reverse).
+    @State private var lastTameOutcome: (action: String, result: CompanionTameResponse)?
+    @State private var showTameConfirm = false
+    @State private var showTameResultAlert = false
     @State private var showAddPathAlert = false
     @State private var newPathInput = ""
 
@@ -291,21 +341,41 @@ struct DashboardView: View {
         showQuitConfirm = true
     }
 
+    private func confirmTame(row: CompanionRow, action: String) {
+        pendingTameRow = row
+        pendingTameAction = action
+        showTameConfirm = true
+    }
+
     private var sortedRows: [CompanionRow] {
-        snapshot.rows.sorted { a, b in
+        let sorted = snapshot.rows.sorted(by: { a, b in
             switch sortOrder {
             case .cpu:
-                if a.sortCPU != b.sortCPU {
-                    return a.sortCPU > b.sortCPU
+                let aCpu = a.sortCPU
+                let bCpu = b.sortCPU
+                if abs(aCpu - bCpu) < 0.05 {
+                    if a.sortMemory != b.sortMemory {
+                        return a.sortMemory > b.sortMemory
+                    }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
                 }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return aCpu > bCpu
             case .memory:
-                if a.sortMemory != b.sortMemory {
-                    return a.sortMemory > b.sortMemory
+                let aMemStr = a.memoryText
+                let bMemStr = b.memoryText
+                if aMemStr == bMemStr {
+                    if abs(a.sortCPU - b.sortCPU) >= 0.05 {
+                        return a.sortCPU > b.sortCPU
+                    }
+                    if a.sortMemory != b.sortMemory {
+                        return a.sortMemory > b.sortMemory
+                    }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
                 }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return a.sortMemory > b.sortMemory
             }
-        }
+        })
+        return sortAscending ? sorted.reversed() : sorted
     }
 
     var body: some View {
@@ -385,6 +455,43 @@ struct DashboardView: View {
             Text(isForceQuit
                 ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).  Any unsaved work will be lost."
                 : "Quitting \(pendingQuitRow?.name ?? "this app") will ask it to close gracefully on \(snapshot.hostName).")
+        }
+        .confirmationDialog(
+            "\(pendingTameAction == "untame" ? "Restore Priority for" : "Tame") \(pendingTameRow?.name ?? "App")?",
+            isPresented: $showTameConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
+                if let row = pendingTameRow, let pid = row.pid {
+                    let action = pendingTameAction
+                    Task {
+                        let res = await model.tameProcess(pid: pid, action: action)
+                        lastTameOutcome = (action, res)
+                        showTameResultAlert = true
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(pendingTameAction == "untame"
+                ? "Restores normal CPU scheduling priority for \(pendingTameRow?.name ?? "this app") on \(snapshot.hostName)."
+                : "Lowers CPU priority (renices to +10) for \(pendingTameRow?.name ?? "this app") so it does not starve other apps on \(snapshot.hostName).")
+        }
+        .alert(
+            lastTameOutcome?.result.error != nil
+                ? (lastTameOutcome?.action == "untame" ? "Could Not Restore Priority" : "Could Not Tame App")
+                : "Priority Updated",
+            isPresented: $showTameResultAlert
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            if let error = lastTameOutcome?.result.error {
+                Text(error)
+            } else if let message = lastTameOutcome?.result.message {
+                Text(message)
+            } else {
+                Text("Command delivered to \(snapshot.hostName).")
+            }
         }
         .alert(
             lastQuitResult?.error != nil ? "Could Not Quit" : "Quit Request Delivered",
@@ -544,7 +651,7 @@ struct DashboardView: View {
                             .foregroundStyle(rank <= 3 ? Color.orange : Color.secondary)
                             .frame(width: 26, alignment: .leading)
 
-                        Image(systemName: row.isApp ? "app.fill" : "gearshape")
+                        Image(systemName: row.isApp ? "app.fill" : "cpu")
                             .frame(width: 20)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
@@ -595,17 +702,17 @@ struct DashboardView: View {
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        if row.canTame != false, let pid = row.pid {
+                        if row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                    confirmTame(row: row, action: "untame")
                                 } label: {
                                     Label("Restore", systemImage: "hare")
                                 }
                                 .tint(.blue)
                             } else {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                    confirmTame(row: row, action: "tame")
                                 } label: {
                                     Label("Tame", systemImage: "tortoise")
                                 }
@@ -614,18 +721,18 @@ struct DashboardView: View {
                         }
                     }
                     .contextMenu {
-                        if row.canTame != false, let pid = row.pid {
+                        if row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                    confirmTame(row: row, action: "untame")
                                 } label: {
                                     Label("Restore Normal Priority", systemImage: "hare")
                                 }
                             } else {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                    confirmTame(row: row, action: "tame")
                                 } label: {
-                                    Label("Tame Hog (Lower Priority)", systemImage: "tortoise")
+                                    Label("Tame App (Lower Priority)", systemImage: "tortoise")
                                 }
                             }
                         }
@@ -648,7 +755,7 @@ struct DashboardView: View {
                 }
             }
         } header: {
-            HStack {
+            HStack(spacing: 8) {
                 Text(snapshot.grouping == "Processes" ? "Busy Processes" : "Busy Apps")
                 Spacer()
                 Picker("Sort", selection: $sortOrder) {
@@ -657,17 +764,31 @@ struct DashboardView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 160)
+                .frame(maxWidth: 150)
+                .onChange(of: sortOrder) {
+                    sortAscending = false
+                }
+
+                Button {
+                    sortAscending.toggle()
+                } label: {
+                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(5)
+                        .background(Color(.secondarySystemBackground), in: Circle())
+                }
+                .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
         }
 
         Section {
-            if snapshot.rows.contains(where: { $0.canQuit }) {
-                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName). System processes and tasks owned by other users are protected.")
+            if snapshot.remoteQuitAllowed != false, snapshot.rows.contains(where: { $0.canQuit }) {
+                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Remote quit is off.  Turn on 'Allow iPhone to Quit Apps & Processes' in Hog Hunter Settings on your Mac.")
+                Text("Quitting from iPhone is off.  Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -757,7 +878,13 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning)
+                .disabled(model.isCleaning || snapshot.remoteCleanAllowed != true)
+
+                if snapshot.remoteCleanAllowed != true {
+                    Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.vertical, 4)
         }
@@ -871,7 +998,7 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var networkContent: some View {
-        Section("Active Connection Hogs") {
+        Section("Active Network Connections") {
             if let networkRows = snapshot.network, !networkRows.isEmpty {
                 ForEach(networkRows) { row in
                     VStack(alignment: .leading, spacing: 6) {
@@ -904,7 +1031,7 @@ struct DashboardView: View {
                     Image(systemName: "network.slash")
                         .font(.title2)
                         .foregroundStyle(.secondary)
-                    Text("No active connection hogs detected on \(snapshot.hostName).")
+                    Text("No high-bandwidth connections detected on \(snapshot.hostName).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -973,27 +1100,43 @@ struct RemoteConnectSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Mac Connection Details") {
-                    TextField("Host, Tailscale IP, or Domain", text: $model.remoteHostDraft)
+                Section {
+                    TextField("Tailscale Name, IP, or Domain", text: $model.remoteHostDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                        .textContentType(.URL)
 
-                    TextField("Port", text: $model.remotePortDraft)
-                        .keyboardType(.numberPad)
+                    LabeledContent("Port") {
+                        TextField("\(CompanionModel.defaultPort)", text: $model.remotePortDraft)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .font(.body.monospacedDigit())
+                    }
+                } header: {
+                    Text("Mac Address")
+                } footer: {
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  Using a VPN, port forward, or your own domain instead?  Point it at that port.")
+                }
 
-                    TextField("Pairing Code (from Mac Settings)", text: $model.remoteTokenDraft)
+                Section {
+                    TextField("Leave Blank to Approve on Mac", text: $model.remoteTokenDraft)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
                         .font(.system(.body, design: .monospaced))
 
                     TextField("Mac Name (Optional)", text: $model.remoteNameDraft)
+                } header: {
+                    Text("Pairing Code")
+                } footer: {
+                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.  Or type the code from Hog Hunter Settings > iPhone.")
                 }
 
-                Section {
-                    Text("Connect via Tailscale IP (e.g. 100.x.y.z), MagicDNS name (*.ts.net), or a domain mapped to your Mac.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                if model.isWaitingForApproval {
+                    Section {
+                        Label("Check your Mac and click Allow.", systemImage: "desktopcomputer")
+                            .font(.subheadline.weight(.semibold))
+                    }
                 }
 
                 if let error = model.remoteConnectError {
@@ -1006,12 +1149,7 @@ struct RemoteConnectSheet: View {
 
                 Section {
                     Button {
-                        Task {
-                            await model.connectRemote()
-                            if model.remoteConnectError == nil {
-                                dismiss()
-                            }
-                        }
+                        model.startRemoteConnect()
                     } label: {
                         HStack {
                             Spacer()
@@ -1019,7 +1157,7 @@ struct RemoteConnectSheet: View {
                                 ProgressView()
                                     .padding(.trailing, 6)
                             }
-                            Text(model.isConnectingRemote ? "Connecting…" : "Connect to Mac")
+                            Text(model.isWaitingForApproval ? "Waiting for Mac…" : (model.isConnectingRemote ? "Connecting…" : "Connect to Mac"))
                                 .font(.body.weight(.semibold))
                             Spacer()
                         }
@@ -1027,12 +1165,25 @@ struct RemoteConnectSheet: View {
                     .disabled(model.isConnectingRemote || model.remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .navigationTitle("Remote Connection")
+            .navigationTitle("Connect by Address")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        model.cancelRemoteConnect()
+                        dismiss()
+                    }
                 }
+            }
+            .onChange(of: model.isRemoteSheetPresented) { _, isPresented in
+                if !isPresented {
+                    dismiss()
+                }
+            }
+            .onDisappear {
+                // cancelRemoteConnect() must also run for a connect that was just
+                // scheduled: isConnectingRemote is not set until the task body runs.
+                model.cancelRemoteConnect()
             }
         }
     }

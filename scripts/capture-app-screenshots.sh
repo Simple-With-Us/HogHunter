@@ -299,7 +299,8 @@ try:
     windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
     for w in windows:
         owner = w.get("kCGWindowOwnerName", "")
-        if owner in ("Hog Hunter", "HogHunter") and w.get("kCGWindowLayer", -1) == 0:
+        # The window may be at normal level (layer 0) or elevated above the menu bar panel (layer 102).
+        if owner in ("Hog Hunter", "HogHunter") and 0 <= w.get("kCGWindowLayer", -1) <= 200:
             b = w.get("kCGWindowBounds", {})
             # The Settings window is presented at 560x480 content (plus title bar).
             # A menu-bar-width strip (the 440x38 title-bar-only window from run
