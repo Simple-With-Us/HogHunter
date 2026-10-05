@@ -72,6 +72,52 @@ final class AppActivationManager {
             }
         }
     }
+
+    private var settingsObservers: [NSObjectProtocol] = []
+
+    /// Keeps the Settings window on top of the menu bar panel while focused,
+    /// and dismisses the menu bar panel when focus leaves Settings.
+    func attachSettingsFocusObservers(for window: NSWindow) {
+        detachSettingsFocusObservers()
+        let resignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak window] _ in
+            MainActor.assumeIsolated {
+                window?.level = .normal
+                HogActions.hidePanels()
+            }
+        }
+        let resignActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak window] _ in
+            MainActor.assumeIsolated {
+                window?.level = .normal
+                HogActions.hidePanels()
+            }
+        }
+        let willCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.detachSettingsFocusObservers()
+                HogActions.hidePanels()
+            }
+        }
+        settingsObservers = [resignKeyObserver, resignActiveObserver, willCloseObserver]
+    }
+
+    func detachSettingsFocusObservers() {
+        for obs in settingsObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        settingsObservers.removeAll()
+    }
 }
 
 /// NSViewRepresentable that attaches to any SwiftUI window view to register it
@@ -102,6 +148,10 @@ struct WindowActivator: NSViewRepresentable {
             guard let window else { return }
             AppActivationManager.shared.registerWindow(window, role: role)
             DispatchQueue.main.async {
+                if self.role == .settings {
+                    window.level = NSWindow.Level(Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+                    AppActivationManager.shared.attachSettingsFocusObservers(for: window)
+                }
                 if window.isMiniaturized {
                     window.deminiaturize(nil)
                 }

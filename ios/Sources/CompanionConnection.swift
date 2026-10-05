@@ -17,7 +17,10 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.pairRequest(deviceName: deviceName)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)

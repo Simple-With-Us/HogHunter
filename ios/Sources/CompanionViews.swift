@@ -323,6 +323,11 @@ struct DashboardView: View {
     @State private var showQuitConfirm = false
     @State private var lastQuitResult: CompanionQuitResponse?
     @State private var showQuitResultAlert = false
+    @State private var pendingTameRow: CompanionRow?
+    @State private var pendingTameAction = "tame"
+    @State private var showTameConfirm = false
+    @State private var lastTameResult: CompanionTameResponse?
+    @State private var showTameResultAlert = false
     @State private var showAddPathAlert = false
     @State private var newPathInput = ""
 
@@ -330,6 +335,12 @@ struct DashboardView: View {
         pendingQuitRow = row
         isForceQuit = force
         showQuitConfirm = true
+    }
+
+    private func confirmTame(row: CompanionRow, action: String) {
+        pendingTameRow = row
+        pendingTameAction = action
+        showTameConfirm = true
     }
 
     private var sortedRows: [CompanionRow] {
@@ -426,6 +437,40 @@ struct DashboardView: View {
             Text(isForceQuit
                 ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).  Any unsaved work will be lost."
                 : "Quitting \(pendingQuitRow?.name ?? "this app") will ask it to close gracefully on \(snapshot.hostName).")
+        }
+        .confirmationDialog(
+            "\(pendingTameAction == "untame" ? "Restore Priority for" : "Tame") \(pendingTameRow?.name ?? "App")?",
+            isPresented: $showTameConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
+                if let row = pendingTameRow, let pid = row.pid {
+                    Task {
+                        let res = await model.tameProcess(pid: pid, action: pendingTameAction)
+                        lastTameResult = res
+                        showTameResultAlert = true
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(pendingTameAction == "untame"
+                ? "Restores normal CPU scheduling priority for \(pendingTameRow?.name ?? "this app") on \(snapshot.hostName)."
+                : "Lowers CPU priority (renices to +10) for \(pendingTameRow?.name ?? "this app") so it does not starve other apps on \(snapshot.hostName).")
+        }
+        .alert(
+            lastTameResult?.error != nil ? "Could Not Tame App" : "Priority Updated",
+            isPresented: $showTameResultAlert
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            if let error = lastTameResult?.error {
+                Text(error)
+            } else if let message = lastTameResult?.message {
+                Text(message)
+            } else {
+                Text("Command delivered to \(snapshot.hostName).")
+            }
         }
         .alert(
             lastQuitResult?.error != nil ? "Could Not Quit" : "Quit Request Delivered",
@@ -636,17 +681,17 @@ struct DashboardView: View {
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        if row.canTame != false, let pid = row.pid {
+                        if row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                    confirmTame(row: row, action: "untame")
                                 } label: {
                                     Label("Restore", systemImage: "hare")
                                 }
                                 .tint(.blue)
                             } else {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                    confirmTame(row: row, action: "tame")
                                 } label: {
                                     Label("Tame", systemImage: "tortoise")
                                 }
@@ -655,18 +700,18 @@ struct DashboardView: View {
                         }
                     }
                     .contextMenu {
-                        if row.canTame != false, let pid = row.pid {
+                        if row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                    confirmTame(row: row, action: "untame")
                                 } label: {
                                     Label("Restore Normal Priority", systemImage: "hare")
                                 }
                             } else {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                    confirmTame(row: row, action: "tame")
                                 } label: {
-                                    Label("Tame Hog (Lower Priority)", systemImage: "tortoise")
+                                    Label("Tame App (Lower Priority)", systemImage: "tortoise")
                                 }
                             }
                         }
@@ -798,9 +843,9 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning || snapshot.remoteCleanAllowed == false)
+                .disabled(model.isCleaning || snapshot.remoteCleanAllowed != true)
 
-                if snapshot.remoteCleanAllowed == false {
+                if snapshot.remoteCleanAllowed != true {
                     Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -918,7 +963,7 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var networkContent: some View {
-        Section("Active Connection Hogs") {
+        Section("Active Network Connections") {
             if let networkRows = snapshot.network, !networkRows.isEmpty {
                 ForEach(networkRows) { row in
                     VStack(alignment: .leading, spacing: 6) {
@@ -951,7 +996,7 @@ struct DashboardView: View {
                     Image(systemName: "network.slash")
                         .font(.title2)
                         .foregroundStyle(.secondary)
-                    Text("No active connection hogs detected on \(snapshot.hostName).")
+                    Text("No high-bandwidth connections detected on \(snapshot.hostName).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -1054,7 +1099,7 @@ struct RemoteConnectSheet: View {
 
                 if model.isWaitingForApproval {
                     Section {
-                        Label("Check your Mac and click Allow.", systemImage: "desktopcomputer")
+                        Label("Check your Mac and click allow", systemImage: "desktopcomputer")
                             .font(.subheadline.weight(.semibold))
                     }
                 }
@@ -1069,12 +1114,7 @@ struct RemoteConnectSheet: View {
 
                 Section {
                     Button {
-                        Task {
-                            await model.connectRemote()
-                            if model.remoteConnectError == nil {
-                                dismiss()
-                            }
-                        }
+                        model.startRemoteConnect()
                     } label: {
                         HStack {
                             Spacer()
@@ -1094,8 +1134,14 @@ struct RemoteConnectSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        model.cancelRemoteConnect()
+                        dismiss()
+                    }
                 }
+            }
+            .onDisappear {
+                model.cancelRemoteConnect()
             }
         }
     }

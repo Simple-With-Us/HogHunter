@@ -1188,8 +1188,12 @@ final class HogStore: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         let approved = alert.runModal() == .alertFirstButtonReturn
         if approved {
+            let wasLoading = loadingSettings
+            loadingSettings = true
             allowRemoteQuit = quitBox.state == .on
             allowRemoteClean = cleanBox.state == .on
+            loadingSettings = wasLoading
+            publishCompanion()
         }
         AppActivationManager.shared.updatePolicy()
         return approved

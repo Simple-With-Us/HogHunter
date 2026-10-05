@@ -142,7 +142,14 @@ final class CompanionModel {
     /// Asks the Mac on this Wi-Fi to approve the phone instead of typing the
     /// code.  The Mac shows an alert; on Allow it hands the code back.
     func requestApproval() async {
-        guard case let .code(peerID) = phase, let mac = discovered.first(where: { $0.id == peerID }) else { return }
+        guard case let .code(peerID) = phase else {
+            codeError = "Pick a Mac first."
+            return
+        }
+        guard let mac = discovered.first(where: { $0.id == peerID }) else {
+            codeError = "That Mac is no longer on this Wi-Fi.  Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
+            return
+        }
         codeError = nil
         isWaitingForApproval = true
         defer { isWaitingForApproval = false }
@@ -413,6 +420,22 @@ final class CompanionModel {
         return nil
     }
 
+    private var remoteConnectTask: Task<Void, Never>?
+
+    func startRemoteConnect() {
+        remoteConnectTask?.cancel()
+        remoteConnectTask = Task { [weak self] in
+            await self?.connectRemote()
+        }
+    }
+
+    func cancelRemoteConnect() {
+        remoteConnectTask?.cancel()
+        remoteConnectTask = nil
+        isConnectingRemote = false
+        isWaitingForApproval = false
+    }
+
     func connectRemote() async {
         let host = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
@@ -422,7 +445,7 @@ final class CompanionModel {
         let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Self.defaultPort
         let typed = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
         guard typed.isEmpty || typed.count >= 8 else {
-            remoteConnectError = "The pairing code is 8 characters.  Leave it blank to approve on the Mac instead."
+            remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
             return
         }
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(portNum)) else {
@@ -432,7 +455,10 @@ final class CompanionModel {
 
         isConnectingRemote = true
         remoteConnectError = nil
-        defer { isConnectingRemote = false }
+        defer {
+            isConnectingRemote = false
+            remoteConnectTask = nil
+        }
 
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
         do {
@@ -444,7 +470,9 @@ final class CompanionModel {
             } else {
                 token = typed
             }
+            guard !Task.isCancelled else { return }
             let fetched = try await Self.fetch(endpoint: endpoint, token: token)
+            guard !Task.isCancelled else { return }
             let trimmedName = remoteNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayName = trimmedName.isEmpty ? fetched.hostName : trimmedName
             let peerID = "remote-\(host):\(portNum)"
@@ -458,10 +486,11 @@ final class CompanionModel {
                 UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
             }
         } catch CompanionClientError.unauthorized {
-            remoteConnectError = "Pairing code does not match this Mac."
+            remoteConnectError = "Pairing Code does not match this Mac."
         } catch let error as CompanionClientError where error != .badResponse {
             remoteConnectError = Self.approvalMessage(for: error)
         } catch {
+            guard !Task.isCancelled else { return }
             remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
         }
     }

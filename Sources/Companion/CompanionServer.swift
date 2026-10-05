@@ -107,6 +107,7 @@ final class CompanionServer: @unchecked Sendable {
     /// One approval alert at a time, so a flood of requests cannot stack
     /// alerts on the Mac.  Touched only on `queue`.
     private var pairPending = false
+    private var lastPairPromptAt: Date = .distantPast
 
     /// Pairing waits on a person, so it is answered off the synchronous
     /// router and never holds the queue that serves snapshots.
@@ -118,15 +119,17 @@ final class CompanionServer: @unchecked Sendable {
             send(CompanionHTTP.pairResponse(approvedToken: nil))
             return
         }
-        guard !pairPending else {
+        guard !pairPending, Date().timeIntervalSince(lastPairPromptAt) >= 5.0 else {
             send(CompanionHTTP.pairBusyResponse())
             return
         }
         pairPending = true
+        lastPairPromptAt = Date()
         ask(deviceName) { [weak self] approved in
             guard let self else { return }
             self.queue.async {
                 self.pairPending = false
+                self.lastPairPromptAt = Date()
                 send(CompanionHTTP.pairResponse(approvedToken: approved ? self.token : nil))
             }
         }
