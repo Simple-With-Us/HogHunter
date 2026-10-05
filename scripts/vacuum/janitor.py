@@ -26,22 +26,6 @@ def wt_blocking_dirt(worktree: Path, git: Callable[..., subprocess.CompletedProc
     return False
 
 
-def is_retired_kimi_or_scratch(worktree: str, branch: str) -> bool:
-    br = branch.removeprefix("refs/heads/")
-    if br.startswith("kimi/") or br.startswith("KIMI/"):
-        return True
-    if "/.claude/worktrees/" in worktree or "/.grok/worktrees/" in worktree:
-        return True
-    if worktree.startswith("/private/tmp/") or worktree.startswith("/tmp/"):
-        return True
-    base = worktree.rstrip("/").split("/")[-1]
-    if re.search(r"-kimi($|-)", base):
-        if re.search(r"-(claude|codex|live|antigravity|cursor|monet|grok|grok-build|deepseek|minimax|mm)-", base):
-            return False
-        return True
-    return False
-
-
 def main_repo_root(worktree: Path, git: Callable[..., subprocess.CompletedProcess]) -> Path:
     """Git worktree remove must run from the main repository, not a linked worktree's parent dir."""
     try:
@@ -199,7 +183,7 @@ def _maybe_retire(
         return
     if not worktree_idle_hours(wt, idle_hours):
         return
-    if not is_retired_kimi_or_scratch(wt_path, branch) and not pr_merged(wt, branch, git, gh):
+    if not pr_merged(wt, branch, git, gh):
         return
     try:
         mtime = wt.stat().st_mtime

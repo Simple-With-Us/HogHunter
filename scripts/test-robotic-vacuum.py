@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import tempfile
 import time
@@ -14,7 +16,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from vacuum.alerts import evaluate_alerts  # noqa: E402
 from vacuum.config import load_config, step_enabled, steps_for_trigger  # noqa: E402
-from vacuum.janitor import wt_blocking_dirt  # noqa: E402
+from vacuum.janitor import _maybe_retire, wt_blocking_dirt  # noqa: E402
 from vacuum.models import RunRecord, StepResult, StepStatus, TriggerKind  # noqa: E402
 from vacuum.pressure import evaluate_hits, janitor_pressure_mode, sample_mac  # noqa: E402
 from vacuum.scheduler import build_status, should_run  # noqa: E402
@@ -88,6 +90,53 @@ class TestJanitorHelpers(unittest.TestCase):
             return Res()
 
         self.assertTrue(wt_blocking_dirt(Path("/tmp/wt"), git))
+
+    def test_unmerged_scratch_worktree_not_removed(self):
+        removed: list[str] = []
+        retired = 0
+
+        def on_retire() -> None:
+            nonlocal retired
+            retired += 1
+
+        def git(cmd, **kwargs):
+            class R:
+                returncode = 0
+                stdout = ""
+
+            cmd_s = " ".join(cmd)
+            if "worktree remove" in cmd_s:
+                removed.append(cmd[-1])
+            return R()
+
+        def gh(cmd, **kwargs):
+            class R:
+                returncode = 0
+                stdout = "0"
+
+            return R()
+
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td) / ".grok/worktrees/agent"
+            wt.mkdir(parents=True)
+            old = time.time() - 8 * 86400
+            os.utime(wt, (old, old))
+            detail: list[str] = []
+            keep_re = re.compile(r"^never-match$")
+            _maybe_retire(
+                str(wt),
+                "refs/heads/kimi/test",
+                keep_re,
+                7,
+                4,
+                git,
+                gh,
+                False,
+                on_retire,
+                detail,
+            )
+        self.assertEqual(removed, [])
+        self.assertEqual(retired, 0)
 
 
 class TestSteps(unittest.TestCase):
