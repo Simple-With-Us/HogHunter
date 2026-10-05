@@ -454,6 +454,7 @@ final class CompanionStorageTelemetryTests: XCTestCase {
     ///  and `persist()` returns early while loading.  The owner's answer was
     ///  never written to UserDefaults and both flags reverted on next launch.
     ///  Fix: restore `loadingSettings` before a single `persist()`.
+    @MainActor
     func testPairAlertPermissionsReachUserDefaults() {
         let suite = "hoghunter.tests.pairpermissions"
         let defaults = UserDefaults(suiteName: suite)!

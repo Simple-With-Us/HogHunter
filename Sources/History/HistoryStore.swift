@@ -63,6 +63,7 @@ final class HistoryStore: @unchecked Sendable {
         var lookback: TimeInterval
         var groupByApp: Bool
         var sort: HogSort
+        var ascending: Bool
         var lastTs: Int64
     }
 
@@ -440,33 +441,40 @@ final class HistoryStore: @unchecked Sendable {
 
     /// Per-timestamp sums first, then an average over the window's tick count.
     /// Memoized on `lastRecordedTs`, so the panel may ask on every tick.
-    func aggregates(lookback: TimeInterval, groupByApp: Bool, sort: HogSort) -> [Aggregate] {
+    func aggregates(lookback: TimeInterval, groupByApp: Bool, sort: HogSort, ascending: Bool = false) -> [Aggregate] {
         lock.lock()
         defer { lock.unlock() }
         openLocked()
         guard let db else { return [] }
         if !openFailed { lastError = nil }
 
-        let memoKey = MemoKey(lookback: lookback, groupByApp: groupByApp, sort: sort, lastTs: lastRecordedTs)
+        let memoKey = MemoKey(lookback: lookback, groupByApp: groupByApp, sort: sort, ascending: ascending, lastTs: lastRecordedTs)
         if let cached = memo[memoKey] { return cached }
 
         let cutoff = Int64(Date().timeIntervalSince1970 - lookback)
         let column = groupByApp ? "group_key" : "key"
-        let order = sort == .cpu ? 4 : 5
+        let primaryOrder = sort == .cpu ? "avg_cpu DESC, avg_mem DESC" : "avg_mem DESC, avg_cpu DESC"
+        let finalDir = ascending ? "ASC" : "DESC"
+        let finalOrder = sort == .cpu ? "avg_cpu \(finalDir), avg_mem \(finalDir)" : "avg_mem \(finalDir), avg_cpu \(finalDir)"
         let sql = """
         WITH win AS (SELECT COUNT(*) AS n FROM ticks WHERE ts >= ?1),
         per_ts AS (
           SELECT ts, \(column) AS k, SUM(cpu) AS cpu, SUM(mem) AS mem,
                  MIN(name) AS name, MIN(bundle) AS bundle
           FROM samples WHERE ts >= ?1 GROUP BY ts, k
+        ),
+        top_hogs AS (
+          SELECT k, MIN(name) AS name, MIN(bundle) AS bundle,
+                 SUM(cpu) * 1.0 / win.n AS avg_cpu, SUM(mem) * 1.0 / win.n AS avg_mem,
+                 MAX(mem) AS max_mem, MAX(cpu) AS max_cpu, COUNT(*) AS count, win.n AS win_n
+          FROM per_ts, win
+          GROUP BY k
+          ORDER BY \(primaryOrder)
+          LIMIT 40
         )
-        SELECT k, MIN(name), MIN(bundle),
-               SUM(cpu) * 1.0 / win.n, SUM(mem) * 1.0 / win.n,
-               MAX(mem), MAX(cpu), COUNT(*), win.n
-        FROM per_ts, win
-        GROUP BY k
-        ORDER BY \(order) DESC
-        LIMIT 40
+        SELECT k, name, bundle, avg_cpu, avg_mem, max_mem, max_cpu, count, win_n
+        FROM top_hogs
+        ORDER BY \(finalOrder)
         """
 
         var statement: OpaquePointer?

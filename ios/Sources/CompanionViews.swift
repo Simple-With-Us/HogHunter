@@ -317,6 +317,7 @@ struct DashboardView: View {
     @Bindable var model: CompanionModel
     @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
+    @State private var sortAscending: Bool = false
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
     @State private var isForceQuit = false
@@ -347,20 +348,34 @@ struct DashboardView: View {
     }
 
     private var sortedRows: [CompanionRow] {
-        snapshot.rows.sorted { a, b in
+        let sorted = snapshot.rows.sorted(by: { a, b in
             switch sortOrder {
             case .cpu:
-                if a.sortCPU != b.sortCPU {
-                    return a.sortCPU > b.sortCPU
+                let aCpu = a.sortCPU
+                let bCpu = b.sortCPU
+                if abs(aCpu - bCpu) < 0.05 {
+                    if a.sortMemory != b.sortMemory {
+                        return a.sortMemory > b.sortMemory
+                    }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
                 }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return aCpu > bCpu
             case .memory:
-                if a.sortMemory != b.sortMemory {
-                    return a.sortMemory > b.sortMemory
+                let aMemStr = a.memoryText
+                let bMemStr = b.memoryText
+                if aMemStr == bMemStr {
+                    if abs(a.sortCPU - b.sortCPU) >= 0.05 {
+                        return a.sortCPU > b.sortCPU
+                    }
+                    if a.sortMemory != b.sortMemory {
+                        return a.sortMemory > b.sortMemory
+                    }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
                 }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return a.sortMemory > b.sortMemory
             }
-        }
+        })
+        return sortAscending ? sorted.reversed() : sorted
     }
 
     var body: some View {
@@ -740,7 +755,7 @@ struct DashboardView: View {
                 }
             }
         } header: {
-            HStack {
+            HStack(spacing: 8) {
                 Text(snapshot.grouping == "Processes" ? "Busy Processes" : "Busy Apps")
                 Spacer()
                 Picker("Sort", selection: $sortOrder) {
@@ -749,7 +764,21 @@ struct DashboardView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 160)
+                .frame(maxWidth: 150)
+                .onChange(of: sortOrder) {
+                    sortAscending = false
+                }
+
+                Button {
+                    sortAscending.toggle()
+                } label: {
+                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(5)
+                        .background(Color(.secondarySystemBackground), in: Circle())
+                }
+                .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
         }
 

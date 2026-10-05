@@ -208,4 +208,11 @@ final class GroupingTests: XCTestCase {
 
         XCTAssertEqual(try! XCTUnwrap(groups.first).members.count, 3)
     }
+
+    func testMemoryFormattingAgreementTiebreaksWithCpu() {
+        let memA: UInt64 = 1_720_000_000
+        let memB: UInt64 = 1_680_000_000
+        XCTAssertEqual(HogFormat.memory(memA), "1.6 GB")
+        XCTAssertEqual(HogFormat.memory(memB), "1.6 GB")
+    }
 }

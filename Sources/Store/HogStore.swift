@@ -64,7 +64,16 @@ final class HogStore: ObservableObject {
 
     @Published var window: TimeWindow = .now { didSet { persist(); scheduleChoiceChanged() } }
     @Published var grouping: HogGrouping = .apps { didSet { persist(); scheduleChoiceChanged() } }
-    @Published var sort: HogSort = .cpu { didSet { persist(); scheduleChoiceChanged() } }
+    @Published var sort: HogSort = .cpu {
+        didSet {
+            if sort != oldValue {
+                sortAscending = false
+            }
+            persist()
+            scheduleChoiceChanged()
+        }
+    }
+    @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 3 {
@@ -156,6 +165,7 @@ final class HogStore: ObservableObject {
         static let window = "window"
         static let grouping = "grouping"
         static let sort = "sort"
+        static let sortAscending = "sortAscending"
         static let cpuScale = "cpuScale"
         static let menuBarLabelMode = "menuBarLabelMode"
         static let refreshInterval = "refreshInterval"
@@ -523,7 +533,8 @@ final class HogStore: ObservableObject {
     private func buildLiveRows(_ processes: [ProcessSample], groups: [Grouping.Group]) -> [HogRow] {
         if grouping == .processes {
             // Sorted before truncation, so the top 25 really are the top 25.
-            let ranked = processes.sorted(by: processOrder).prefix(Self.rowLimit)
+            let top = processes.sorted(by: processOrderDescending).prefix(Self.rowLimit)
+            let ranked = sortAscending ? Array(top.reversed()) : Array(top)
             let metadata = resolver.resolve(ranked.map(\.key), samples: samples)
             return ranked.map { process in
                 let reason = ProcessControl.blockReason(for: process)
@@ -549,7 +560,8 @@ final class HogStore: ObservableObject {
             }
         }
 
-        let ranked = groups.sorted(by: groupOrder).prefix(Self.rowLimit)
+        let top = groups.sorted(by: groupOrderDescending).prefix(Self.rowLimit)
+        let ranked = sortAscending ? Array(top.reversed()) : Array(top)
         let anchors = ranked.map(Self.anchorKey)
         let metadata = resolver.resolve(anchors, samples: samples)
 
@@ -588,24 +600,58 @@ final class HogStore: ObservableObject {
         return "pid \(group.members[0].key.pid)" + suffix
     }
 
-    private func processOrder(_ a: ProcessSample, _ b: ProcessSample) -> Bool {
+    private func processOrderDescending(_ a: ProcessSample, _ b: ProcessSample) -> Bool {
         switch sort {
         case .cpu:
-            if a.cpuPercent == b.cpuPercent { return a.footprintBytes > b.footprintBytes }
-            return a.cpuPercent > b.cpuPercent
+            let aCpu = a.cpuPercent
+            let bCpu = b.cpuPercent
+            if abs(aCpu - bCpu) < 0.05 {
+                if a.footprintBytes != b.footprintBytes {
+                    return a.footprintBytes > b.footprintBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
+            return aCpu > bCpu
         case .memory:
-            if a.footprintBytes == b.footprintBytes { return a.cpuPercent > b.cpuPercent }
+            let aMemStr = HogFormat.memory(a.footprintBytes)
+            let bMemStr = HogFormat.memory(b.footprintBytes)
+            if aMemStr == bMemStr {
+                if abs(a.cpuPercent - b.cpuPercent) >= 0.05 {
+                    return a.cpuPercent > b.cpuPercent
+                }
+                if a.footprintBytes != b.footprintBytes {
+                    return a.footprintBytes > b.footprintBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
             return a.footprintBytes > b.footprintBytes
         }
     }
 
-    private func groupOrder(_ a: Grouping.Group, _ b: Grouping.Group) -> Bool {
+    private func groupOrderDescending(_ a: Grouping.Group, _ b: Grouping.Group) -> Bool {
         switch sort {
         case .cpu:
-            if a.cpuPercent == b.cpuPercent { return a.memoryBytes > b.memoryBytes }
-            return a.cpuPercent > b.cpuPercent
+            let aCpu = a.cpuPercent
+            let bCpu = b.cpuPercent
+            if abs(aCpu - bCpu) < 0.05 {
+                if a.memoryBytes != b.memoryBytes {
+                    return a.memoryBytes > b.memoryBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
+            return aCpu > bCpu
         case .memory:
-            if a.memoryBytes == b.memoryBytes { return a.cpuPercent > b.cpuPercent }
+            let aMemStr = HogFormat.memory(a.memoryBytes)
+            let bMemStr = HogFormat.memory(b.memoryBytes)
+            if aMemStr == bMemStr {
+                if abs(a.cpuPercent - b.cpuPercent) >= 0.05 {
+                    return a.cpuPercent > b.cpuPercent
+                }
+                if a.memoryBytes != b.memoryBytes {
+                    return a.memoryBytes > b.memoryBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
             return a.memoryBytes > b.memoryBytes
         }
     }
@@ -628,6 +674,9 @@ final class HogStore: ObservableObject {
             // A history error from Past Hour must not linger once the user is
             // back looking at live rows.
             historyError = nil
+            if !lastProcesses.isEmpty {
+                liveRows = buildLiveRows(lastProcesses, groups: lastGroups)
+            }
             rows = liveRows
             publishCompanion()
         } else {
@@ -642,9 +691,10 @@ final class HogStore: ObservableObject {
         let history = self.history
         let groupByApp = grouping == .apps
         let sort = self.sort
+        let ascending = self.sortAscending
         let secondsPerTick = refreshInterval * Double(Self.recordEvery)
         queue.async {
-            let aggregates = history.aggregates(lookback: lookback, groupByApp: groupByApp, sort: sort)
+            let aggregates = history.aggregates(lookback: lookback, groupByApp: groupByApp, sort: sort, ascending: ascending)
             let coverage = history.coverage(lookback: lookback, secondsPerTick: secondsPerTick)
             let error = history.lastError
             DispatchQueue.main.async { [weak self] in
@@ -948,6 +998,7 @@ final class HogStore: ObservableObject {
         if let raw = defaults.string(forKey: Key.window), let value = TimeWindow(rawValue: raw) { window = value }
         if let raw = defaults.string(forKey: Key.grouping), let value = HogGrouping(rawValue: raw) { grouping = value }
         if let raw = defaults.string(forKey: Key.sort), let value = HogSort(rawValue: raw) { sort = value }
+        sortAscending = defaults.bool(forKey: Key.sortAscending)
         if let raw = defaults.string(forKey: Key.cpuScale), let value = CpuScale(rawValue: raw) { cpuScale = value }
         if let raw = defaults.string(forKey: Key.menuBarLabelMode), let value = MenuBarLabelMode(rawValue: raw) {
             menuBarLabelMode = value
@@ -1035,6 +1086,7 @@ final class HogStore: ObservableObject {
         defaults.set(window.rawValue, forKey: Key.window)
         defaults.set(grouping.rawValue, forKey: Key.grouping)
         defaults.set(sort.rawValue, forKey: Key.sort)
+        defaults.set(sortAscending, forKey: Key.sortAscending)
         defaults.set(cpuScale.rawValue, forKey: Key.cpuScale)
         defaults.set(menuBarLabelMode.rawValue, forKey: Key.menuBarLabelMode)
         defaults.set(refreshInterval, forKey: Key.refreshInterval)
@@ -1081,6 +1133,10 @@ final class HogStore: ObservableObject {
             if let raw = self.defaults.string(forKey: Key.sort),
                let value = HogSort(rawValue: raw), value != self.sort {
                 self.sort = value
+            }
+            let ascending = self.defaults.bool(forKey: Key.sortAscending)
+            if ascending != self.sortAscending {
+                self.sortAscending = ascending
             }
             if let raw = self.defaults.string(forKey: Key.cpuScale),
                let value = CpuScale(rawValue: raw), value != self.cpuScale {

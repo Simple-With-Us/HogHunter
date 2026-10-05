@@ -123,8 +123,8 @@ struct HogHunterPanel: View {
     /// What is left of the panel once the inset is taken off both sides.
     static var contentWidth: CGFloat { panelWidth - inset * 2 }
     /// Fixed so the control row cannot resize itself when a segment changes.
-    static let windowPickerWidth: CGFloat = 300
-    static let groupPickerWidth: CGFloat = 130
+    static let windowPickerWidth: CGFloat = 260
+    static let groupPickerWidth: CGFloat = 125
     static let sortPickerWidth: CGFloat = 110
 
     private var quitMessage: String {        guard let row = pendingQuit else { return "" }
@@ -413,38 +413,74 @@ struct HogHunterPanel: View {
     /// gets the remainder.  That keeps "CPU" and "Memory" from each claiming a
     /// third of the window surrounded by empty track, and it is why the panel
     /// is 620 rather than 560 wide.
+    /// Three distinct, labeled control groups: Time window, App grouping, and Sort with direction toggle.
     private var controls: some View {
-        // Every picker gets a fixed width AND its selection's animation turned
-        // off.  A segmented control re-measures when its selection changes --
-        // the selected segment is drawn with different insets -- and a flexible
-        // width let that re-measure reach the HStack, which animated the whole
-        // row growing and recentring before snapping back.  A fixed width means
-        // there is nothing to re-measure, and `.animation(nil, ...)` means even
-        // if something did, it moves instantly instead of travelling.
-        HStack(spacing: 8) {
-            Picker("Window", selection: $store.window) {
-                ForEach(TimeWindow.allCases) { Text($0.rawValue).tag($0) }
+        HStack(alignment: .bottom, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("TIME")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Picker("Window", selection: $store.window) {
+                    ForEach(TimeWindow.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: Self.windowPickerWidth)
+                .animation(nil, value: store.window)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: Self.windowPickerWidth)
-            .animation(nil, value: store.window)
 
-            Picker("Show", selection: $store.grouping) {
-                ForEach(HogGrouping.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: Self.groupPickerWidth)
-            .animation(nil, value: store.grouping)
+            Divider()
+                .frame(height: 20)
+                .padding(.bottom, 2)
 
-            Picker("Sort", selection: $store.sort) {
-                ForEach(HogSort.allCases) { Text($0.rawValue).tag($0) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("SHOW")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Picker("Show", selection: $store.grouping) {
+                    ForEach(HogGrouping.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: Self.groupPickerWidth)
+                .animation(nil, value: store.grouping)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: Self.sortPickerWidth)
-            .animation(nil, value: store.sort)
+
+            Divider()
+                .frame(height: 20)
+                .padding(.bottom, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("SORT")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Picker("Sort", selection: $store.sort) {
+                        ForEach(HogSort.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: Self.sortPickerWidth)
+                    .animation(nil, value: store.sort)
+
+                    Button {
+                        store.sortAscending.toggle()
+                    } label: {
+                        Image(systemName: store.sortAscending ? "arrow.up" : "arrow.down")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 22, height: 21)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(store.sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
+                    .accessibilityLabel(store.sortAscending ? "Sort lowest first" : "Sort highest first")
+                }
+            }
 
             Spacer(minLength: 0)
         }

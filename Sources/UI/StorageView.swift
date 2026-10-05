@@ -20,6 +20,7 @@ struct StorageView: View {
     @StateObject private var cleanerStore = DiskCleanerStore()
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
+    @State private var sortAscending: Bool = false
     @State private var filter: StorageFilter = .all
     @State private var expandedUsageId: String?
 
@@ -141,9 +142,24 @@ struct StorageView: View {
                     Text("Bundle").tag(StorageSort.bundle)
                 }
                 .pickerStyle(.menu)
-                // 90 pt truncated every option to "T…".  A menu style picker
-                // only needs room for the widest label plus the chevron.
-                .frame(width: 132)
+                .frame(width: 115)
+
+                Button {
+                    sortAscending.toggle()
+                } label: {
+                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 20, height: 18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
+                .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
         }
     }
@@ -199,11 +215,25 @@ struct StorageView: View {
 
     private var filteredApps: [StorageUsage] {
         let base = filter == .running ? store.apps.filter(\.isRunning) : store.apps
+        let sorted: [StorageUsage]
         switch sortOrder {
-        case .total: return base.sorted { $0.totalBytes > $1.totalBytes }
-        case .hidden: return base.sorted { $0.hiddenBytes > $1.hiddenBytes }
-        case .bundle: return base.sorted { $0.bundleBytes > $1.bundleBytes }
+        case .total:
+            sorted = base.sorted(by: { a, b in
+                if a.totalBytes != b.totalBytes { return a.totalBytes > b.totalBytes }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
+        case .hidden:
+            sorted = base.sorted(by: { a, b in
+                if a.hiddenBytes != b.hiddenBytes { return a.hiddenBytes > b.hiddenBytes }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
+        case .bundle:
+            sorted = base.sorted(by: { a, b in
+                if a.bundleBytes != b.bundleBytes { return a.bundleBytes > b.bundleBytes }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
         }
+        return sortAscending ? sorted.reversed() : sorted
     }
 
     private var list: some View {

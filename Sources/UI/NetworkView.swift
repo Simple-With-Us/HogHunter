@@ -7,6 +7,7 @@ struct NetworkView: View {
     @StateObject private var store: NetworkStore
     @ObservedObject private var bandwidth: BandwidthStore
     @State private var sortOrder: NetworkSort = .established
+    @State private var sortAscending: Bool = false
     @State private var refreshTask: Task<Void, Never>?
 
     private let embeddedInPanel: Bool
@@ -123,13 +124,32 @@ struct NetworkView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Picker("Sort", selection: $sortOrder) {
-                Text("Established").tag(NetworkSort.established)
-                Text("Remote Hosts").tag(NetworkSort.remoteHosts)
-                Text("Open Sockets").tag(NetworkSort.open)
+            HStack(spacing: 6) {
+                Picker("Sort", selection: $sortOrder) {
+                    Text("Established").tag(NetworkSort.established)
+                    Text("Remote Hosts").tag(NetworkSort.remoteHosts)
+                    Text("Open Sockets").tag(NetworkSort.open)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 140)
+
+                Button {
+                    sortAscending.toggle()
+                } label: {
+                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 20, height: 18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
+                .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
-            .pickerStyle(.menu)
-            .frame(width: 160)
         }
     }
 
@@ -168,14 +188,40 @@ struct NetworkView: View {
     }
 
     private var sortedUsages: [NetworkUsage] {
+        let sorted: [NetworkUsage]
         switch sortOrder {
         case .established:
-            return store.usages.sorted { $0.establishedSockets > $1.establishedSockets }
+            sorted = store.usages.sorted(by: { a, b in
+                if a.establishedSockets != b.establishedSockets {
+                    return a.establishedSockets > b.establishedSockets
+                }
+                if a.openSockets != b.openSockets {
+                    return a.openSockets > b.openSockets
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
         case .remoteHosts:
-            return store.usages.sorted { $0.remoteHostCount > $1.remoteHostCount }
+            sorted = store.usages.sorted(by: { a, b in
+                if a.remoteHostCount != b.remoteHostCount {
+                    return a.remoteHostCount > b.remoteHostCount
+                }
+                if a.establishedSockets != b.establishedSockets {
+                    return a.establishedSockets > b.establishedSockets
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
         case .open:
-            return store.usages.sorted { $0.openSockets > $1.openSockets }
+            sorted = store.usages.sorted(by: { a, b in
+                if a.openSockets != b.openSockets {
+                    return a.openSockets > b.openSockets
+                }
+                if a.establishedSockets != b.establishedSockets {
+                    return a.establishedSockets > b.establishedSockets
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
         }
+        return sortAscending ? sorted.reversed() : sorted
     }
 
     private var list: some View {
