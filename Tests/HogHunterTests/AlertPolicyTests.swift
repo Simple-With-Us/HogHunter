@@ -19,6 +19,16 @@ final class AlertPolicyTests: XCTestCase {
         t0.addingTimeInterval(seconds)
     }
 
+    func testProjectWithoutCooldownCannotRetainPreviousProjectValue() {
+        var policy = makePolicy()
+        for missingOrInvalid in [nil, 0, -1, Double.nan, Double.infinity] as [Double?] {
+            policy.applyCooldown(minutes: 90)
+            XCTAssertEqual(policy.cooldown, 90 * 60)
+            policy.applyCooldown(minutes: missingOrInvalid)
+            XCTAssertEqual(policy.cooldown, 30 * 60)
+        }
+    }
+
     // MARK: - Sustained duration
 
     func testDoesNotFireBeforeTheSustainedDurationHasElapsed() {
