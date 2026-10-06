@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.5 — Mon, Oct 5, 2026
+
+Mac Activity panel:
+
+- The TIME / SHOW / SORT controls now use a custom `SegmentedToggleGroup` instead of a stock segmented `Picker`.  Every segment gets the same 8 pt L/R internal padding so the spacing feels even and short labels (like "Now") are visibly narrower than long ones (like "Past 24 Hours"), instead of every segment being padded to the longest label.
+- The sort-direction arrow has moved from sitting next to the SORT picker to being pinned to the far right of the controls row.  The three toggle groups now sit evenly across the row with the arrow as a clear right-anchored control.
+
+iOS companion:
+
+- The Activity / Storage / Network tab picker is now visible at the top of every dashboard render with a "Tap a tab to switch view." caption above it.  Previously the picker existed but defaulted to Activity, so users missed the Storage and Network views entirely on first launch.
+- The Storage tab now includes an "iPhone Storage" section above the existing "Mac Disk Usage" section, showing the iPhone's own used / free / total storage with the same colour thresholds (red above 90 %, orange above 80 %).  Implementation reads `URL.resourceValues(forKeys:)` against the iOS sandbox root `/`; no extra entitlement needed.
+- The offline / looking status page now explicitly nudges first-time users on cellular toward Tailscale, with the recommended port (`\(CompanionModel.defaultPort)`) and a worked example of what to type (`my-mac.tailnet.ts.net`).  The Connect by Tailscale or Address button was already there; the copy now makes the path obvious instead of hidden behind "Open Hog Hunter on your Mac".
+
+Tests: 196 tests, 0 failures (no new tests — the change is layout polish plus a 30-line storage helper that's exercised through the iOS app at runtime).
+
 ## 1.0.4 — Wed, Sep 30, 2026
 
 - Fleet-wide version alignment: aligned macOS and iOS companion marketing versions to `1.0.4` with UTC timestamp build numbers (`YYYYMMDDHHMM`), conforming to fleet-wide release numbering standards across all platforms and retiring legacy `1.4.0 (6)`.

@@ -13,6 +13,62 @@ enum CompanionSort: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Live read of the iPhone's own storage volume, used by the iOS Storage
+/// tab alongside the existing Mac-disk section.  Pulls once via
+/// `URL.resourceValues(forKeys:)`, which works inside the iOS sandbox without
+/// any extra entitlement because `/` is the app's own sandbox root.
+struct iPhoneStorageSummary: Equatable {
+    var name: String
+    var totalBytes: UInt64
+    var freeBytes: UInt64
+    var usedPercent: Double
+    var usedText: String
+    var freeText: String
+}
+
+enum iPhoneStorage {
+    /// Reads the current iPhone storage summary, or nil if the kernel
+    /// cannot answer (very rare on iOS, but the sim can return nil values).
+    static func summary() -> iPhoneStorageSummary? {
+        let url = URL(fileURLWithPath: "/")
+        let keys: Set<URLResourceKey> = [
+            .volumeAvailableCapacityKey,
+            .volumeTotalCapacityKey,
+            .volumeLocalizedNameKey
+        ]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        // iOS gives back Int64 for capacity values; promote to UInt64 here
+        // so the call site can do math without overflow concerns.
+        guard let totalInt = values.volumeTotalCapacity else { return nil }
+        guard let freeInt = values.volumeAvailableCapacity else { return nil }
+        let totalBytes = UInt64(max(0, totalInt))
+        let freeBytes = UInt64(max(0, freeInt))
+        guard freeBytes <= totalBytes, totalBytes > 0 else { return nil }
+        let used = totalBytes - freeBytes
+        let usedPercent = totalBytes > 0 ? (Double(used) / Double(totalBytes)) * 100 : 0
+        return iPhoneStorageSummary(
+            name: values.volumeLocalizedName ?? "iPhone Storage",
+            totalBytes: totalBytes,
+            freeBytes: freeBytes,
+            usedPercent: usedPercent,
+            usedText: iPhoneStorage.format(bytes: used),
+            freeText: iPhoneStorage.format(bytes: freeBytes)
+        )
+    }
+
+    /// Locale-pinned binary units, matching the Mac pane's HogFormat.memory so
+    /// "1.5 GB" reads the same on both sides regardless of region.
+    static func format(bytes: UInt64) -> String {
+        let gb = Double(bytes) / 1_073_741_824
+        let mb = Double(bytes) / 1_048_576
+        let kb = Double(bytes) / 1024
+        let posix = Locale(identifier: "en_US_POSIX")
+        if mb >= 1023.5 { return String(format: "%.1f GB", locale: posix, gb) }
+        if kb >= 1023.5 { return String(format: "%.0f MB", locale: posix, mb) }
+        return String(format: "%.0f KB", locale: posix, kb)
+    }
+}
+
 enum UsageParser {
     static func parseCPU(_ text: String) -> Double {
         let digits = text.filter { $0.isNumber || $0 == "." }
@@ -120,7 +176,7 @@ struct CompanionRootView: View {
         case .offline:
             StatusPage(
                 title: "Mac Offline or Not Found",
-                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.",
+                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.  Off Wi-Fi or remote?  Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -133,7 +189,7 @@ struct CompanionRootView: View {
         case .looking, .code:
             StatusPage(
                 title: "Looking for Your Mac",
-                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.",
+                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.  Off Wi-Fi?  Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -400,15 +456,21 @@ struct DashboardView: View {
                 .background(Color.blue.opacity(0.12))
             }
 
-            Picker("Tab", selection: $selectedTab) {
-                ForEach(CompanionTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Tap a tab to switch view.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                Picker("Tab", selection: $selectedTab) {
+                    ForEach(CompanionTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.bottom, 6)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
 
             List {
                 hostHeaderSection
@@ -807,6 +869,39 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var storageContent: some View {
+        Section("iPhone Storage") {
+            if let phoneStorage = iPhoneStorage.summary() {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label(phoneStorage.name, systemImage: "iphone")
+                            .font(.headline)
+                        Spacer()
+                        Text(String(format: "%.0f%% Used", phoneStorage.usedPercent))
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.primary))
+                    }
+
+                    ProgressView(value: min(max(phoneStorage.usedPercent / 100.0, 0), 1.0))
+                        .tint(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.accentColor))
+
+                    HStack {
+                        Text(phoneStorage.usedText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(phoneStorage.freeText)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                Text("Reading iPhone storage.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
         Section("Mac Disk Usage") {
             if let storage = snapshot.storage {
                 VStack(alignment: .leading, spacing: 10) {

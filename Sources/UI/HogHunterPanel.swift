@@ -123,11 +123,9 @@ struct HogHunterPanel: View {
     /// What is left of the panel once the inset is taken off both sides.
     static var contentWidth: CGFloat { panelWidth - inset * 2 }
     /// Fixed so the control row cannot resize itself when a segment changes.
-    static let windowPickerWidth: CGFloat = 260
-    static let groupPickerWidth: CGFloat = 125
-    static let sortPickerWidth: CGFloat = 110
 
-    private var quitMessage: String {        guard let row = pendingQuit else { return "" }
+    private var quitMessage: String {
+        guard let row = pendingQuit else { return "" }
         let count = max(1, row.keys.count)
         let included = count == 1
             ? "1 process is included."
@@ -138,6 +136,8 @@ struct HogHunterPanel: View {
         return "Asks \(row.name) to quit.  It may show a save prompt or refuse.  \(included)"
             + "\n\n" + forced
     }
+
+    // MARK: - Controls
 
     // MARK: - Header
 
@@ -405,86 +405,80 @@ struct HogHunterPanel: View {
 
     // MARK: - Controls
 
-    /// All three pickers on one row.
+    /// The control row: three labeled groups (TIME / SHOW / SORT) distributed
+    /// evenly across the row, with the sort-direction arrow pinned to the
+    /// far right.
     ///
-    /// A segmented picker given no width takes its ideal width -- which for
-    /// "Past 24 Hours" is far wider than the words need, because every segment
-    /// is padded to the longest label.  So the two short ones take exactly
-    /// their ideal width and the time window, whose labels genuinely are long,
-    /// gets the remainder.  That keeps "CPU" and "Memory" from each claiming a
-    /// third of the window surrounded by empty track, and it is why the panel
-    /// is 620 rather than 560 wide.
-    /// Three distinct, labeled control groups: Time window, App grouping, and Sort with direction toggle.
+    /// Each group uses `SegmentedToggleGroup` instead of a stock segmented
+    /// `Picker`.  A stock segmented picker pads every segment to the widest
+    /// one, which makes short labels like "Now" feel hollow inside the row
+    /// and wastes the room "Past 24 Hours" needs.  The custom group gives
+    /// every segment the same L/R internal padding (8 pt) so the spacing
+    /// feels even, lets "Now" stay narrower than its neighbours, and lets
+    /// the three groups sit on equal ground across the row.
     private var controls: some View {
-        HStack(alignment: .bottom, spacing: 10) {
+        HStack(alignment: .bottom, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("TIME")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
-                Picker("Window", selection: $store.window) {
-                    ForEach(TimeWindow.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: Self.windowPickerWidth)
-                .animation(nil, value: store.window)
+                SegmentedToggleGroup(
+                    options: TimeWindow.allCases,
+                    label: { Text($0.rawValue) },
+                    selection: $store.window
+                )
             }
-
-            Divider()
-                .frame(height: 20)
-                .padding(.bottom, 2)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("SHOW")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
-                Picker("Show", selection: $store.grouping) {
-                    ForEach(HogGrouping.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: Self.groupPickerWidth)
-                .animation(nil, value: store.grouping)
+                SegmentedToggleGroup(
+                    options: HogGrouping.allCases,
+                    label: { Text($0.rawValue) },
+                    selection: $store.grouping
+                )
             }
-
-            Divider()
-                .frame(height: 20)
-                .padding(.bottom, 2)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("SORT")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
-                HStack(spacing: 4) {
-                    Picker("Sort", selection: $store.sort) {
-                        ForEach(HogSort.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: Self.sortPickerWidth)
-                    .animation(nil, value: store.sort)
-
-                    Button {
-                        store.sortAscending.toggle()
-                    } label: {
-                        Image(systemName: store.sortAscending ? "arrow.up" : "arrow.down")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .foregroundStyle(.primary)
-                            .frame(width: 22, height: 21)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help(store.sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
-                    .accessibilityLabel(store.sortAscending ? "Sort lowest first" : "Sort highest first")
-                }
+                SegmentedToggleGroup(
+                    options: HogSort.allCases,
+                    label: { Text($0.rawValue) },
+                    selection: $store.sort
+                )
             }
 
+            // Even stretch across the row, then anchor the sort-direction
+            // arrow on the far right.
             Spacer(minLength: 0)
+            sortDirectionButton
+                .padding(.bottom, 4)
         }
+    }
+
+    /// Sort-direction toggle, pinned to the right edge of the controls row.
+    /// Lives at the same baseline as the toggle groups so the row reads as
+    /// one tidy band.
+    private var sortDirectionButton: some View {
+        Button {
+            store.sortAscending.toggle()
+        } label: {
+            Image(systemName: store.sortAscending ? "arrow.up" : "arrow.down")
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(.primary)
+                .frame(width: 22, height: 21)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(store.sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
+        .accessibilityLabel(store.sortAscending ? "Sort lowest first" : "Sort highest first")
     }
 
     // MARK: - Rows
