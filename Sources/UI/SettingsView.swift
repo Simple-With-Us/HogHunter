@@ -670,6 +670,7 @@ private struct AdvancedSettingsTab: View {
 
     @State private var clientId = ""
     @State private var clientSecret = ""
+    @State private var projectId = InfisicalSettings.shared.projectId
     @State private var notice: String?
     @State private var isWorking = false
 
@@ -711,15 +712,22 @@ private struct AdvancedSettingsTab: View {
 
             Section("Credential") {
                 TextField("Client ID", text: $clientId)
+                    .disabled(isWorking || infisical.isSaving)
                 SecureField("Client Secret", text: $clientSecret)
+                    .disabled(isWorking || infisical.isSaving)
+                TextField("Project ID", text: $projectId)
+                    .disabled(isWorking || infisical.isSaving)
+                Text("Uses the dev environment.  The connection is checked before replacing your saved setup.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
                 HStack {
                     Button("Save to Keychain") { saveCredential() }
-                        .disabled(clientId.isEmpty || clientSecret.isEmpty || isWorking)
+                        .disabled(clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || UUID(uuidString: projectId.trimmingCharacters(in: .whitespacesAndNewlines)) == nil || isWorking || infisical.isSaving)
                     Button("Clear") { clearCredential() }
                         .disabled(!infisical.isConfigured || isWorking)
                     Spacer()
                     Button("Sync Now") { syncNow() }
-                        .disabled(!infisical.isConfigured || infisical.isRefreshing)
+                        .disabled(!infisical.isConfigured || infisical.isRefreshing || infisical.isSaving || isWorking)
                 }
             }
 
@@ -734,6 +742,11 @@ private struct AdvancedSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(width: SettingsView.windowWidth - 80)
+        .onChange(of: infisical.projectId) { previous, current in
+            // Bootstrap may finish after this tab first appears.  Update only
+            // an untouched field; never replace a project the admin is typing.
+            if projectId == previous { projectId = current }
+        }
     }
 
     private func saveCredential() {
@@ -742,18 +755,23 @@ private struct AdvancedSettingsTab: View {
         Task { @MainActor in
             defer { isWorking = false }
             do {
-                try infisical.saveCredential(clientId: clientId, clientSecret: clientSecret)
+                try await infisical.saveCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
                 clientSecret = ""
-                await infisical.refresh()
-                notice = "Credential saved to the Keychain."
+                notice = "Connection verified and saved to the Keychain."
             } catch {
-                notice = "Save failed: \(error)"
+                notice = "Save failed: \(InfisicalSettings.safeMessage(for: error))"
             }
         }
     }
 
     private func clearCredential() {
-        infisical.clearCredential()
+        do {
+            try infisical.clearCredential()
+        } catch {
+            notice = "Clear failed: \(InfisicalSettings.safeMessage(for: error))"
+            return
+        }
+        projectId = infisical.projectId
         clientId = ""
         clientSecret = ""
         notice = "Credential removed.  Local defaults stand until a credential is saved again."
@@ -768,6 +786,7 @@ private struct AdvancedSettingsTab: View {
     private func pushCurrent() {
         notice = nil
         isWorking = true
+        let expectedGeneration = infisical.connectionGeneration
         Task { @MainActor in
             defer { isWorking = false }
             do {
@@ -779,12 +798,13 @@ private struct AdvancedSettingsTab: View {
                 values[InfisicalKey.alertThresholdPercent] = String(store.alertThresholdPercent)
                 values[InfisicalKey.alertSustainedMinutes] = String(store.alertSustainedMinutes)
                 for (key, value) in values {
-                    try await infisical.set(value, forKey: key)
+                    try await infisical.set(value, forKey: key, expectedGeneration: expectedGeneration)
                 }
                 await infisical.refresh()
+                guard infisical.connectionGeneration == expectedGeneration else { throw InfisicalError.configurationChanged }
                 notice = "Pushed \(values.count) settings to Infisical."
             } catch {
-                notice = "Push failed: \(error)"
+                notice = "Push failed: \(InfisicalSettings.safeMessage(for: error))"
             }
         }
     }
