@@ -105,25 +105,41 @@ elif name == 'security':
 elif name == 'codesign':
     if '-d' in args: sys.stdout.buffer.write((root / 'entitlements.plist').read_bytes())
 elif name == 'xcrun':
-    assert args[:2] == ['altool', '--upload-app']
-    assert option('--api-key') == os.environ['ASC_KEY_ID']
-    assert option('--api-issuer') == os.environ['ASC_ISSUER_ID']
+    assert args[:2] == ['altool', '--upload-package']
+    assert option('--apiKey') == os.environ['ASC_KEY_ID']
+    assert option('--apiIssuer') == os.environ['ASC_ISSUER_ID']
+    assert '--p8-file-path' not in args
     assert option('--type') == 'ios'
-    assert option('--output-format') == 'json'
-    assert os.environ.get('API_PRIVATE_KEYS_DIR')
-    assert (pathlib.Path(os.environ['API_PRIVATE_KEYS_DIR']) / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8").is_file()
+    assert option('--output-format') == 'xml'
+    assert option('--apple-id') == '6816633156'
+    assert option('--bundle-version') == os.environ['HH_BUILD_NUMBER']
+    assert option('--bundle-short-version-string') == '1.0.4'
+    assert option('--bundle-id') == 'com.simplewithus.hoghunter.ios'
+    # Assert the export the release script claims is altool's key-discovery channel.
+    keys_dir = pathlib.Path(os.environ['API_PRIVATE_KEYS_DIR'])
+    staged = keys_dir / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
+    assert staged.is_file(), f'missing staged key at {staged}'
+    assert staged == pathlib.Path.home() / '.appstoreconnect/private_keys' / staged.name
     (root / 'upload-invoked').write_text('yes')
-    if os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
-        print('{"product-errors": [{"message": "synthetic upload failure"}]}')
+    if os.environ.get('HH_TEST_UPLOAD_NO_MARKER') == 'true':
+        # Zero exit, no failure token, no success-message — must be rejected.
+        print('No errors uploading package')
+    elif os.environ.get('HH_TEST_UPLOAD_ERROR') == 'true':
+        print('UPLOAD FAILED with 1 error')
+        if os.environ.get('HH_TEST_UPLOAD_ZERO_EXIT') != 'true':
+            print('ExitFailure (31)')
+            raise SystemExit(1)
     else:
-        print('{"success-message": "synthetic upload accepted"}')
+        print('success-message: Delivery of HogHunter.ipa completed successfully.')
+        print('No errors uploading package')
 else:
     raise SystemExit('unknown synthetic tool')
 '''
 
 
 class ReleaseFlowTests(unittest.TestCase):
-    def run_release(self, *, upload=False, bad_export=False, upload_error=False, event="workflow_dispatch"):
+    def run_release(self, *, upload=False, bad_export=False, upload_error=False, upload_zero_exit=False,
+                     upload_no_marker=False, event="workflow_dispatch"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tools = root / "bin"
@@ -142,6 +158,8 @@ class ReleaseFlowTests(unittest.TestCase):
                        ASC_KEY_ID="synthetic-id", ASC_ISSUER_ID="synthetic-issuer", ASC_KEY_PATH=str(key),
                        HH_BUILD_NUMBER="42", HH_TESTFLIGHT_UPLOAD=str(upload).lower(),
                        HH_TEST_BAD_EXPORT=str(bad_export).lower(), HH_TEST_UPLOAD_ERROR=str(upload_error).lower(),
+                       HH_TEST_UPLOAD_ZERO_EXIT=str(upload_zero_exit).lower(),
+                       HH_TEST_UPLOAD_NO_MARKER=str(upload_no_marker).lower(),
                        HH_TEST_FIXTURES=str(root),
                        RUNNER_TEMP=str(root), GITHUB_STEP_SUMMARY=str(root / "summary"))
             result = subprocess.run(["/bin/bash", str(ROOT / "scripts/ios-testflight-release.sh")],
@@ -167,7 +185,35 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(uploaded)
         self.assertNotIn("Upload command succeeded", result.stdout)
-        self.assertIn("upload not confirmed", result.stderr)
+        self.assertTrue(
+            ("altool upload failed" in result.stderr) or ("upload failure" in result.stderr),
+            result.stderr,
+        )
+
+    def test_zero_exit_code_with_upload_error_text_is_rejected(self):
+        # altool can print a failure while exiting 0; the failure grep must
+        # catch it before the success-message check assigns success.
+        result, uploaded = self.run_release(upload=True, upload_error=True, upload_zero_exit=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(uploaded)
+        self.assertNotIn("Upload command succeeded", result.stdout)
+        self.assertIn("altool output reports upload failure", result.stderr)
+
+    def test_success_requires_positive_success_marker(self):
+        # Happy path still prints success-message and must report success.
+        result, uploaded = self.run_release(upload=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(uploaded)
+        self.assertIn("Upload command succeeded", result.stdout)
+
+    def test_zero_exit_without_success_marker_is_rejected(self):
+        # Neutral zero-exit capture (no failure token, no success-message) must
+        # not be reported as a successful upload.
+        result, uploaded = self.run_release(upload=True, upload_no_marker=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(uploaded)
+        self.assertNotIn("Upload command succeeded", result.stdout)
+        self.assertIn("did not report an unambiguous success", result.stderr)
 
     def test_invalid_export_stops_before_upload(self):
         result, uploaded = self.run_release(upload=True, bad_export=True)

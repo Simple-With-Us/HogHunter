@@ -26,7 +26,7 @@ work_dir="$(mktemp -d "$RUNNER_TEMP/hoghunter-release.XXXXXX")"
 staged_asc_key=""
 cleanup() {
   rm -rf "$work_dir"
-  if [[ -n "$staged_asc_key" && -f "$staged_asc_key" ]]; then
+  if [[ -n "${staged_asc_key:-}" && -e "$staged_asc_key" ]]; then
     rm -f "$staged_asc_key"
   fi
 }
@@ -77,6 +77,12 @@ apps=("$work_dir/ipa/Payload/"*.app)
 validate_app "${apps[0]}" true
 
 if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
+  # Classic altool JWT auth looks for AuthKey_<KEY_ID>.p8 under
+  # ~/.appstoreconnect/private_keys (or API_PRIVATE_KEYS_DIR).  --p8-file-path
+  # is documented for --generate-jwt and is not a reliable substitute for
+  # --upload-package when the staged file is named AuthKey.p8 in a temp dir.
+  # Match the fleet ship-testflight.sh path: stage the correctly named key,
+  # then call --upload-package with --apiKey/--apiIssuer only.
   asc_keys_dir="${HOME}/.appstoreconnect/private_keys"
   mkdir -p "$asc_keys_dir"
   chmod 700 "$asc_keys_dir"
@@ -85,28 +91,54 @@ if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
   chmod 600 "$staged_asc_key"
   export API_PRIVATE_KEYS_DIR="$asc_keys_dir"
 
+  # Single source: pull the marketing version and bundle id from the
+  # validator the build is checked against, so the altool upload flags
+  # cannot drift from the archived identity.
+  read -r BUNDLE_ID MARKETING_VERSION < <(python3 -c '
+import importlib.util
+spec = importlib.util.spec_from_file_location("v", "scripts/validate-ios-release.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.BUNDLE_ID, m.MARKETING_VERSION)
+')
+
   set +e
-  xcrun altool --upload-app -f "${ipas[0]}" --type ios --output-format json \
-    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" > "$work_dir/upload-result.json" 2>&1
+  xcrun altool --upload-package "${ipas[0]}" \
+    --type ios \
+    --apiKey "$ASC_KEY_ID" \
+    --apiIssuer "$ASC_ISSUER_ID" \
+    --apple-id 6816633156 \
+    --bundle-version "$HH_BUILD_NUMBER" \
+    --bundle-short-version-string "$MARKETING_VERSION" \
+    --bundle-id "$BUNDLE_ID" \
+    --output-format xml \
+    > "$work_dir/upload-result.txt" 2>&1
   altool_rc=$?
   set -e
 
-  cat "$work_dir/upload-result.json"
+  # Surface transporter/ITMS detail in the job log (never prints key material).
+  cat "$work_dir/upload-result.txt"
   if [[ $altool_rc -ne 0 ]]; then
     echo "error: altool upload failed with exit code $altool_rc" >&2
-    exit $altool_rc
+    exit "$altool_rc"
   fi
-
-  python3 - "$work_dir/upload-result.json" <<'PYUPLOAD'
-import json, sys
-try:
-    with open(sys.argv[1], encoding='utf-8') as response:
-        result = json.load(response)
-    if not isinstance(result, dict) or result.get('product-errors') or not result.get('success-message'):
-        raise ValueError('altool did not report an unambiguous success')
-except (OSError, ValueError) as error:
-    raise SystemExit(f'error: App Store Connect upload not confirmed: {error}')
-PYUPLOAD
+  # Failure markers are limited to altool's own fatal indicators and the
+  # plist keys altool emits for upload failures.  Bare "ITMS-" and
+  # "Error Domain" appear in informational warnings (e.g. ITMS-90717 icon
+  # alpha notice, NSOSStatusErrorDomain) and would false-positive.
+  # <key>error-message</key> is intentionally excluded: it is not an
+  # altool key and appears in nested transporter/JVM contexts that are
+  # not upload failures.
+  if grep -qiE '<key>(product-errors|user-facing-error)</key>|UPLOAD FAILED|Authentication Failure' "$work_dir/upload-result.txt"; then
+    echo 'error: altool output reports upload failure' >&2
+    exit 1
+  fi
+  # A zero altool exit with no failure tokens is not proof of delivery
+  # (unrecognized transporter errors, truncated/empty capture, or benign
+  # ITMS- warnings would all pass).  Require the positive success marker.
+  if ! grep -q 'success-message' "$work_dir/upload-result.txt"; then
+    echo 'error: altool did not report an unambiguous success' >&2
+    exit 1
+  fi
   result='Upload command succeeded.  Confirm Apple processing, the build identity, and beta review separately before sharing an install link.'
 else
   result='Archive and export validated.  Upload was disabled for this manual run.'
