@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""
+hoghunter-watch — Hog Hunter's sampler, gatekeeper and notifier.
+
+Replaces mac-resource-watch.py.  That script was the 5-minute LaunchAgent
+that sampled disk/swap/load, decided whether a threshold had been crossed,
+ran cleanup under a cooldown, and POSTed a webhook to BotFleet.  Its three
+job descriptions live in it.  This is the same job inside Hog Hunter, so
+that one repo owns sampling, policy, and reclaim.
+
+The split, and why it is a split
+  hoghunter-watch   SAMPLE  read the machine, judge it, decide whether to act
+  hoghunter-clean   RECLAIM scan and apply the rules in reclaim-policy.json
+  cleanmymac clean  (third party, runs alongside, not instead)
+
+A sample is a STALE SNAPSHOT by the time anything reads it.  Every threshold
+decision here is taken on a reading taken in THIS process, never on a payload
+supplied by a caller, and never on a webhook body.  See the 2026-10-03
+incident: a webhook sample read 5.88 GiB free / 99% full while live was 39
+GiB / 25% — a 33 GiB divergence that at face value reads as an emergency.
+
+Usage
+  hoghunter-watch                 sample, evaluate, act if warranted
+  hoghunter-watch --dry-run       sample + evaluate + log, change nothing
+  hoghunter-watch --json          machine-readable result on stdout
+  hoghunter-watch --force         bypass the cleanup cooldown (manual only)
+
+Never prints webhook secrets.  Webhook credentials are read from
+~/.secrets/*.env by explicit key name and only a length is ever logged.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+VERSION = "1.0.0"
+HOME = Path.home()
+STATE_DIR = HOME / ".claude-disk-janitor"
+STATE_PATH = STATE_DIR / "resource-watch-state.json"
+LOCK_PATH = STATE_DIR / "hoghunter-watch.lock"
+LOG_PATH = HOME / "Library/Logs/hoghunter-watch.log"
+LOG_KEEP_LINES = 800
+
+HERE = Path(__file__).resolve().parent
+CLEAN = HERE / "hoghunter-clean"
+
+# --------------------------------------------------------------------------
+# Thresholds — every one env-overridable, because a threshold baked into
+# code is a threshold that cannot be tuned at 3am without a redeploy.
+# --------------------------------------------------------------------------
+DISK_FREE_WARN_GB = float(os.environ.get("RESOURCE_DISK_WARN_GB", "25"))
+DISK_FREE_CRIT_GB = float(os.environ.get("RESOURCE_DISK_CRIT_GB", "15"))
+DISK_DROP_ALERT_GB = float(os.environ.get("RESOURCE_DISK_DROP_GB", "15"))
+SWAP_USED_PCT = float(os.environ.get("RESOURCE_SWAP_USED_PCT", "90"))
+SWAP_USED_GB = float(os.environ.get("RESOURCE_SWAP_GB", "32"))
+LOAD1_THRESHOLD = float(os.environ.get("RESOURCE_LOAD1", "65"))
+CPU_ENABLED = int(os.environ.get("RESOURCE_CPU_ENABLED", "1"))
+
+WEBHOOK_COOLDOWN_SEC = int(os.environ.get("RESOURCE_COOLDOWN_SEC", "14400"))
+CLEAN_COOLDOWN_SEC = int(os.environ.get("RESOURCE_CLEAN_COOLDOWN_SEC", "7200"))
+CLEAN_COOLDOWN_CRIT_SEC = int(os.environ.get("RESOURCE_CLEAN_COOLDOWN_CRIT_SEC", "1800"))
+LOCK_STALE_SEC = int(os.environ.get("RESOURCE_LOCK_STALE_SEC", "1800"))
+CLEAN_TIMEOUT_SEC = int(os.environ.get("RESOURCE_CLEAN_TIMEOUT_SEC", "1800"))
+
+# Secrets are read by KEY NAME.  Never cat, never grep, never echo a value.
+SECRET_FILES = (
+    (HOME / ".secrets/botfleet-housekeeper-webhook.env", "BOTFLEET_HOUSEKEEPER"),
+    (HOME / ".secrets/grok-bot-housekeeper-webhook.env", "GROK_BOT_HOUSEKEEPER"),
+)
+
+
+def log(msg: str) -> None:
+    line = "%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    print(line, flush=True)
+
+
+def _trim_log() -> None:
+    """Keep the log bounded.  A cleanup log that grows forever is its own bug."""
+    try:
+        lines = LOG_PATH.read_text(errors="replace").splitlines()
+        if len(lines) > LOG_KEEP_LINES:
+            LOG_PATH.write_text("\n".join(lines[-LOG_KEEP_LINES:]) + "\n")
+    except OSError:
+        pass
+
+
+def _run(cmd: list[str], timeout: int = 20) -> str:
+    """Run a command with a hard timeout.  macOS has no `timeout` binary."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+# --------------------------------------------------------------------------
+# Sample
+# --------------------------------------------------------------------------
+
+def sample() -> dict:
+    """Read the machine.  Every number here comes from a live read."""
+    df = _run(["/bin/df", "-k", "/System/Volumes/Data"]) or _run(["/bin/df", "-k", "/"])
+    disk_free_gb = disk_used_pct = 0.0
+    for line in df.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 5:
+            try:
+                disk_free_gb = float(parts[3]) / 1024 / 1024
+            except ValueError:
+                pass
+            try:
+                disk_used_pct = float(parts[4].rstrip("%"))
+            except ValueError:
+                pass
+            break
+
+    # sysctl is NOT on PATH in a non-login shell — use the absolute path.
+    vm = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"])
+    swap_total_gb = swap_used_gb = 0.0
+    m = re.search(r"total\s*=\s*([\d.]+)M.*?used\s*=\s*([\d.]+)M", vm)
+    if m:
+        swap_total_gb = float(m.group(1)) / 1024
+        swap_used_gb = float(m.group(2)) / 1024
+    swap_used_pct = (swap_used_gb / swap_total_gb * 100.0) if swap_total_gb else 0.0
+
+    up = _run(["/usr/bin/uptime"])
+    load1 = load5 = load15 = 0.0
+    lm = re.search(r"load averages?:\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)", up)
+    if lm:
+        load1, load5, load15 = (float(lm.group(i)) for i in (1, 2, 3))
+
+    return {
+        "at": int(time.time()),
+        "disk_free_gb": round(disk_free_gb, 2),
+        "disk_used_pct": round(disk_used_pct, 1),
+        "swap_total_gb": round(swap_total_gb, 2),
+        "swap_used_gb": round(swap_used_gb, 2),
+        "swap_used_pct": round(swap_used_pct, 1),
+        "load1": round(load1, 2),
+        "load5": round(load5, 2),
+        "load15": round(load15, 2),
+    }
+
+
+def evaluate(s: dict, prev_free: float | None) -> list[dict]:
+    """Judge a LIVE sample against the thresholds."""
+    hits: list[dict] = []
+    free = s["disk_free_gb"]
+    if free <= DISK_FREE_CRIT_GB:
+        hits.append({"metric": "disk_free_gb", "severity": "critical",
+                     "threshold": DISK_FREE_CRIT_GB, "cmp": "below", "value": free})
+    elif free <= DISK_FREE_WARN_GB:
+        hits.append({"metric": "disk_free_gb", "severity": "warn",
+                     "threshold": DISK_FREE_WARN_GB, "cmp": "below", "value": free})
+    elif prev_free is not None:
+        drop = prev_free - free
+        # Only a LARGE drop alerts.  macOS moves free space around constantly;
+        # a 1-2G slide between two 5-minute samples is noise, not an event.
+        if drop >= DISK_DROP_ALERT_GB:
+            hits.append({"metric": "disk_drop_gb", "severity": "warn",
+                         "threshold": DISK_DROP_ALERT_GB, "cmp": "above",
+                         "value": round(drop, 2)})
+
+    # BOTH conditions, not either.  macOS grows the swap store on demand, so a
+    # `swap_total >= 8G` disjunct becomes permanently true after one busy
+    # afternoon and then every tick reports a hit forever.
+    if s["swap_used_pct"] >= SWAP_USED_PCT and s["swap_used_gb"] >= SWAP_USED_GB:
+        hits.append({"metric": "swap_used_pct", "severity": "warn",
+                     "threshold": SWAP_USED_PCT, "cmp": "above",
+                     "value": s["swap_used_pct"]})
+
+    if CPU_ENABLED and s["load1"] >= LOAD1_THRESHOLD:
+        hits.append({"metric": "load_1m", "severity": "warn",
+                     "threshold": LOAD1_THRESHOLD, "cmp": "above",
+                     "value": s["load1"]})
+    return hits
+
+
+# --------------------------------------------------------------------------
+# State
+# --------------------------------------------------------------------------
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, STATE_PATH)   # atomic: a half-written state file is a
+    except OSError:                   # lost cooldown, i.e. a double cleanup
+        pass
+
+
+# --------------------------------------------------------------------------
+# Lock — ONE lock for the whole fleet of cleanup scripts
+# --------------------------------------------------------------------------
+
+def acquire_lock() -> bool:
+    """Single-flight.  Returns False if a live holder owns it.
+
+    The old arrangement had THREE locks with different staleness rules and
+    different log formats, which is how two invokers could each believe they
+    were alone.  There is one lock now, and it is this one.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            os.mkdir(LOCK_PATH)
+            (LOCK_PATH / "pid").write_text(str(os.getpid()))
+            (LOCK_PATH / "heartbeat").write_text(str(int(time.time())))
+            return True
+        except FileExistsError:
+            pass
+        hb = 0
+        try:
+            hb = int((LOCK_PATH / "heartbeat").read_text().strip())
+        except (OSError, ValueError):
+            pass
+        age = time.time() - hb if hb else LOCK_STALE_SEC + 1
+        if age <= LOCK_STALE_SEC:
+            log("lock held by a live run (heartbeat %ds old) — skipping" % int(age))
+            return False
+        log("LOCK self-heal: heartbeat %ds stale (>%ds) — reclaiming"
+            % (int(age), LOCK_STALE_SEC))
+        release_lock()
+    return False
+
+
+def release_lock() -> None:
+    try:
+        (LOCK_PATH / "pid").unlink(missing_ok=True)
+        (LOCK_PATH / "heartbeat").unlink(missing_ok=True)
+        LOCK_PATH.rmdir()
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# Webhook
+# --------------------------------------------------------------------------
+
+def load_webhooks() -> list[tuple[str, str, str]]:
+    """(name, url, secret) for each configured hook.  Values never logged."""
+    out = []
+    for path, prefix in SECRET_FILES:
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        url = secret = ""
+        for line in text.splitlines():
+            if line.startswith(prefix + "_WEBHOOK_URL="):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+            elif line.startswith(prefix + "_WEBHOOK_SECRET="):
+                secret = line.split("=", 1)[1].strip().strip('"').strip("'")
+        if url and secret:
+            out.append((prefix, url, secret))
+    return out
+
+
+def _webhook_started(raw: str, status: int) -> tuple[bool, str]:
+    """A 202 does NOT mean a bot started.
+
+    The receiver returns 202 for accepted, ignored, captured and duplicate
+    alike.  Treating any 2xx as "delivered" suppressed the next real alert,
+    so we require a payload carrying a runId.
+    """
+    if not (200 <= status < 300):
+        return False, "http=%d" % status
+    m = re.search(r'"runId"\s*:\s*"([^"]+)"', raw or "")
+    if m:
+        return True, "runId=%s" % m.group(1)
+    for k in ("ignored", "captured", "duplicate"):
+        if '"%s"' % k in (raw or ""):
+            return False, "no runId (%s)" % k
+    return False, "no runId in response"
+
+
+def fire_webhook(hits: list[dict], sample_data: dict, cleaned: bool) -> bool:
+    hooks = load_webhooks()
+    if not hooks:
+        log("webhooks skipped: no valid urls/secrets found")
+        return False
+    event = _event_name(hits)
+    body = json.dumps({
+        "event": event,
+        "seat": "BF-HOUSEKEEPER",
+        "hits": hits,
+        "sample": sample_data,
+        "cleaned": cleaned,
+        "engine": "hoghunter-watch/%s" % VERSION,
+        "reclaim": "hoghunter-clean",
+        # Structural bans, sent with every payload so the receiving bot
+        # inherits them rather than re-deriving them.
+        "never": [
+            "never optimize ram (converts RAM pressure into disk usage)",
+            "never empty ~/.Trash without asking",
+            "never rm -rf (mavis-trash frees nothing; use find -depth -delete)",
+            "never bare ps / pgrep -fl (argv carries live API keys)",
+            "never delete ask-first items without Jay's explicit OK",
+        ],
+    }).encode()
+    fired = False
+    for name, url, secret in hooks:
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + secret)
+        # BOTH headers: the launchd receiver on :8800 runs older code that
+        # reads only X-Webhook-Event.
+        req.add_header("X-BotFleet-Event", event)
+        req.add_header("X-Webhook-Event", event)
+        req.add_header("Idempotency-Key", "%s-%s" % (event, sample_data["at"]))
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                started, detail = _webhook_started(
+                    resp.read().decode("utf-8", "replace"), resp.status)
+            log("webhook %s %s started=%s %s" % (name, event, started, detail))
+            fired = fired or started
+        except urllib.error.HTTPError as exc:
+            # NEVER the secret — only its length.
+            log("webhook %s http=%s (secret_len=%d)"
+                % (name, exc.code, len(secret)))
+        except (OSError, urllib.error.URLError) as exc:
+            log("webhook %s error: %s" % (name, type(exc).__name__))
+    return fired
+
+
+def _event_name(hits: list[dict]) -> str:
+    metrics = {h["metric"] for h in hits}
+    if "disk_free_gb" in metrics:
+        crit = any(h["severity"] == "critical" for h in hits)
+        return "resource.disk.critical" if crit else "resource.disk"
+    if "disk_drop_gb" in metrics:
+        return "resource.disk"
+    if "swap_used_pct" in metrics:
+        return "resource.ram"
+    return "resource.cpu"
+
+
+# --------------------------------------------------------------------------
+# Reclaim
+# --------------------------------------------------------------------------
+
+def run_reclaim(critical: bool) -> int:
+    """Hand off to the reclaim engine.  One process, one band, one policy."""
+    if not CLEAN.is_file():
+        log("reclaim skipped: engine missing at %s" % CLEAN)
+        return 127
+    cmd = [sys.executable, str(CLEAN), "--clean",
+           "--band=full" if critical else "--band=cheap"]
+    log("reclaim: %s" % " ".join(cmd[1:]))
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=CLEAN_TIMEOUT_SEC)
+        out = (r.stdout or "") + (r.stderr or "")
+        for ln in out.splitlines()[-25:]:
+            log("  reclaim| %s" % ln)
+        return r.returncode
+    except subprocess.TimeoutExpired:
+        log("reclaim: TIMED OUT after %ds" % CLEAN_TIMEOUT_SEC)
+        return 124
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("reclaim failed: %s: %s" % (type(exc).__name__, exc))
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="hoghunter-watch",
+                                description="Hog Hunter sampler and gatekeeper")
+    p.add_argument("--dry-run", action="store_true",
+                   help="sample, evaluate, log; change nothing")
+    p.add_argument("--force", action="store_true",
+                   help="bypass the cleanup cooldown (manual use only)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--version", action="store_true")
+    args = p.parse_args(argv)
+
+    if args.version:
+        print("hoghunter-watch %s" % VERSION)
+        return 0
+
+    s = sample()
+    state = load_state()
+    prev_free = state.get("last_free_gb")
+    hits = evaluate(s, prev_free)
+    critical = any(h["severity"] == "critical" for h in hits)
+    names = ",".join(h["metric"] for h in hits) or "none"
+    log("free=%.1fG disk=%.0f%% swap=%.1fG/%.1fG(%.0f%%) load1=%.1f hits=%s"
+        % (s["disk_free_gb"], s["disk_used_pct"], s["swap_used_gb"],
+           s["swap_total_gb"], s["swap_used_pct"], s["load1"], names))
+
+    if args.dry_run:
+        if args.json:
+            print(json.dumps({"sample": s, "hits": hits, "acted": False}, indent=2))
+        return 0
+
+    held = not acquire_lock()
+    try:
+        rc = 0
+        cleaned = False
+        # A swap/load hit must NOT trigger cache reclaim.  Deleting caches
+        # cannot reduce swap — that is a fact about swap, not a reason to
+        # delete more.  Only a DISK hit is a reclaim trigger.
+        disk_hit = any(h["metric"].startswith("disk") for h in hits)
+        if held:
+            log("another run owns the lock; sampling only")
+        elif not disk_hit:
+            if hits:
+                log("pressure is swap/load only — reclaim cannot fix it, not acting")
+        else:
+            now = int(time.time())
+            last_clean = int(state.get("last_cleanup_at") or 0)
+            cd = CLEAN_COOLDOWN_CRIT_SEC if critical else CLEAN_COOLDOWN_SEC
+            if args.force:
+                log("--force: ignoring cleanup cooldown")
+            elif now - last_clean < cd:
+                log("cleanup cooldown %ds remaining" % (cd - (now - last_clean)))
+            else:
+                rc = run_reclaim(critical)
+                cleaned = rc == 0
+                if cleaned:
+                    after = sample()
+                    delta = round(after["disk_free_gb"] - s["disk_free_gb"], 2)
+                    log("after clean free=%.1fG (delta %+0.1fG) swap %0.1fG"
+                        % (after["disk_free_gb"], delta,
+                           after["swap_used_gb"]))
+                    s = after
+                    if delta <= 0:
+                        # Freed nothing.  Back off hard rather than retrying
+                        # every 5 minutes for hours.
+                        state["last_cleanup_at"] = now + max(0, 3 * cd - cd)
+                        log("cleanup FREED NOTHING — extending cooldown 3x")
+
+        last_fire = int(state.get("last_webhook_at") or 0)
+        if hits and not args.force and int(time.time()) - last_fire < WEBHOOK_COOLDOWN_SEC:
+            log("webhook cooldown, %ds remaining"
+                % (WEBHOOK_COOLDOWN_SEC - (int(time.time()) - last_fire)))
+        elif hits:
+            if fire_webhook(hits, s, cleaned):
+                state["last_webhook_at"] = int(time.time())
+
+        state["last_free_gb"] = s["disk_free_gb"]
+        state["last_sample_at"] = s["at"]
+        if cleaned:
+            state["last_cleanup_at"] = int(time.time())
+        save_state(state)
+        return rc
+    finally:
+        if not held:
+            release_lock()
+        _trim_log()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

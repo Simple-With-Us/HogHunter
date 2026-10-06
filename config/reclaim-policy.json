@@ -125,6 +125,37 @@
       "$rationale": "brew cleanup --prune=all keeps the current version and symlinks. Skipped while any brew or node-gyp process is alive. 67 MB typical, so it is never worth acting on alone."
     },
     {
+      "name": "worktrees",
+      "tier": "semi-safe",
+      "op": "worktree-retire",
+      "title": "Stale merged git worktrees",
+      "$rationale": "Historically the single largest reclaim on this Mac (48 GB measured 2026-09-29). Retiring a worktree removes the checkout DIRECTORY ONLY -- branch and commits survive untouched, so the action is reversible with `git worktree add` and is not a loss of work. Never forced: `git worktree remove` is used, not a manual delete, so git's own admin records stay consistent.",
+      "staleDays": 7,
+      "$gates": "ALL of: age >= 7d, `git merge-base --is-ancestor <sha> refs/remotes/origin/main` == 0, `git status --porcelain` empty, no live process holding the path or cwd'd inside it, not the primary checkout, no .janitor-keep sentinel, not under a ~/Code/.* dot-dir. A repo with no origin/main or a failed fetch is SKIPPED, never assumed merged.",
+      "neverForce": "If `git worktree remove` refuses because the tree is dirty or locked, log the refusal and mark the candidate errored. Never pass --force. Never run `git branch -D`.",
+      "overridable": ["HOGHUNTER_REPOS (colon-separated repo list)", "HOGHUNTER_WORKTREE_STALE_DAYS", "HOGHUNTER_WORKTREE_DRYRUN=1"]
+    },
+    {
+      "name": "pm2-logs",
+      "tier": "safe",
+      "op": "truncate",
+      "title": "pm2 process logs (tail-truncated in place)",
+      "$rationale": "The engine's general `logs` rule scans ~/Library/Logs, ~/.botfleet, ~/apps and ~/Code -- it does NOT reach ~/.pm2, so pm2 needed its own rule. 56 files and 54 MiB there as of 2026-10-05. Truncated IN PLACE keeping the last 16 MiB, never deleted: pm2 holds these fds open, and deleting a live log leaves the daemon writing to an unlinked inode, so the space is not freed until pm2 restarts. Same failure mode as the 2026-09-12 bug that unlinked botfleet's server.log out from under launchd.",
+      "capMiB": 50,
+      "keepMiB": 16,
+      "overridable": ["HOGHUNTER_PM2_LOG_CAP_MIB"]
+    },
+    {
+      "name": "vitest-temp",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Orphaned vitest temp databases and caches",
+      "$rationale": "Test runs leave `agentic-*` temp dirs in the per-user temp dir. Fresh churn is LIVE work and is left alone; anything untouched for over 6 hours with no process holding it is an orphan. The temp dir is resolved via `getconf DARWIN_USER_TEMP_DIR` -- /tmp is a symlink into /private/var, so `du /tmp` reads 0 and finds nothing.",
+      "minAgeMinutes": 360,
+      "overridable": ["HOGHUNTER_VITEST_MIN_AGE_MIN"],
+      "deleteMethod": "find <path> -depth -delete -- never rm -rf, which mavis-trash intercepts (frees nothing)"
+    },
+    {
       "name": "ask-first",
       "tier": "ask-first",
       "op": "report",
