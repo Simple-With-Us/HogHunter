@@ -52,10 +52,6 @@ class VacuumEngine:
         )
         step_ids = steps_for_trigger(self.cfg, trigger.value, pressure=pressure)
         self._planned_retire_candidates = None
-        if "janitor_worktree_retire" in step_ids:
-            self._planned_retire_candidates = plan_retire_worktrees(
-                self.cfg, self.home, _subprocess_run, _subprocess_run
-            )
         try:
             with HousekeeperLock(self.lock_path):
                 sample = sample_mac()
@@ -70,6 +66,17 @@ class VacuumEngine:
                             StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
                         )
                         continue
+                    self._planned_retire_candidates = None
+                    if step_id == "janitor_worktree_retire":
+                        try:
+                            self._planned_retire_candidates = plan_retire_worktrees(
+                                self.cfg, self.home, _subprocess_run, _subprocess_run
+                            )
+                        except Exception as exc:  # noqa: BLE001 — bad operator config must not kill the tick
+                            record.steps.append(
+                                StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200])
+                            )
+                            continue
                     result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
                     record.steps.append(result)
                 record.finish(0 if all(s.status != StepStatus.FAILED for s in record.steps) else 1)

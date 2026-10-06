@@ -194,6 +194,47 @@ class TestLockSkip(unittest.TestCase):
             self.assertNotIn("last_watch", state)
 
 
+    def test_apply_retire_skips_dirty_since_planning(self):
+        from vacuum.janitor import apply_retire_worktrees
+
+        removed: list[str] = []
+
+        def git(cmd, **kwargs):
+            class R:
+                returncode = 0
+                stdout = ""
+
+            cmd_s = " ".join(cmd)
+            if "status" in cmd_s:
+                R.stdout = " M tracked.txt\n"
+            if "worktree remove" in cmd_s:
+                removed.append(cmd[-1])
+            return R()
+
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td) / "wt"
+            wt.mkdir()
+            count, _est, detail = apply_retire_worktrees([(str(wt), "refs/heads/x")], git, dry_run=False)
+        self.assertEqual(count, 0)
+        self.assertEqual(removed, [])
+        self.assertIn("dirty since planning", detail)
+
+    def test_invalid_keep_regex_fails_janitor_step_not_tick(self):
+        from unittest.mock import patch
+
+        from vacuum.engine import VacuumEngine
+        from vacuum.models import StepStatus, TriggerKind
+
+        cfg = load_config()
+        cfg["keep_worktree_regex"] = "[invalid"
+        cfg["repos"] = []
+        engine = VacuumEngine(cfg, Path("/tmp"))
+        with patch.object(sys, "platform", "darwin"):
+            record = engine.run(TriggerKind.JANITOR)
+        step = next(s for s in record.steps if s.step_id == "janitor_worktree_retire")
+        self.assertEqual(step.status, StepStatus.FAILED)
+
+
 class TestDryRun(unittest.TestCase):
     def test_destructive_step_skipped_in_dry_run(self):
         from unittest.mock import patch

@@ -189,6 +189,9 @@ def apply_retire_worktrees(
             continue
         wt = Path(wt_path)
         try:
+            if wt_blocking_dirt(wt, git):
+                detail_parts.append(f"skipped {wt_path}: dirty since planning")
+                continue
             repo_root = main_repo_root(wt, git)
             res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)
             if res.returncode == 0:
@@ -235,6 +238,9 @@ def _maybe_retire(
         detail_parts.append(f"would-retire {wt_path}")
         return
     wt = Path(wt_path)
+    if wt_blocking_dirt(wt, git):
+        detail_parts.append(f"skipped {wt_path}: dirty since planning")
+        return
     try:
         repo_root = main_repo_root(wt, git)
         res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)

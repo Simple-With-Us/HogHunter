@@ -92,7 +92,15 @@ final class RoboticVacuumStore: ObservableObject {
             do {
                 try proc.run()
                 proc.waitUntilExit()
-                await MainActor.run { self?.refresh() }
+                let failed = proc.terminationStatus != 0
+                await MainActor.run {
+                    if failed {
+                        self?.lastError = "Could not save that step setting."
+                    } else {
+                        self?.lastError = nil
+                    }
+                    self?.refresh()
+                }
             } catch {
                 await MainActor.run {
                     self?.lastError = error.localizedDescription
