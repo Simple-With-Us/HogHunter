@@ -1063,9 +1063,8 @@ final class HogStore: ObservableObject {
     private func applyInfisicalOverrides() {
         let snapshot = infisical.snapshot
         guard let projectId = snapshot.projectId else { return }
-        // Records written before Project ID selection belonged to the legacy project.
-        let previous = defaults.string(forKey: Key.infisicalProjectId)
-            ?? (projectId == InfisicalStore.localProjectId ? projectId : InfisicalClient.projectId)
+        // Unscoped settings are local; never infer a remote project for them.
+        let previous = defaults.string(forKey: Key.infisicalProjectId) ?? InfisicalStore.localProjectId
         applyingInfisical = true
         if previous != projectId {
             refreshInterval = 3
