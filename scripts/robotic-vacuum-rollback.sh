@@ -21,10 +21,22 @@ for plist in "${BACKUP_DIR}"/*.plist; do
   [[ -f "${plist}" ]] || continue
   base="$(basename "${plist}")"
   [[ "${base}" == "${LABEL}.plist" ]] && continue
-  dest="${HOME_DIR}/Library/LaunchAgents/${base}"
+  if [[ "${base}" == *.system.plist ]]; then
+    label="${base%.system.plist}"
+    echo "System-scope backup ${base} is in ${BACKUP_DIR}; restore with:"
+    echo "  sudo cp -a \"${plist}\" \"/Library/LaunchAgents/${label}.plist\""
+    echo "  sudo launchctl bootstrap system \"/Library/LaunchAgents/${label}.plist\""
+    continue
+  fi
+  if [[ "${base}" == *.user.plist ]]; then
+    label="${base%.user.plist}"
+    dest="${HOME_DIR}/Library/LaunchAgents/${label}.plist"
+  else
+    dest="${HOME_DIR}/Library/LaunchAgents/${base}"
+  fi
   cp -a "${plist}" "${dest}"
   launchctl bootstrap "${DOMAIN}" "${dest}" 2>/dev/null || launchctl load "${dest}"
-  echo "Restored ${base}"
+  echo "Restored $(basename "${dest}")"
 done
 
 echo "Rollback complete."

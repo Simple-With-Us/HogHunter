@@ -14,7 +14,7 @@
   "repos": [],
   "apps_glob": "~/apps/*",
   "keep_worktree_regex": "",
-  "coolify_ssh_host": "coolify",
+  "coolify_ssh_host": "",
   "grok_session_days": 7,
   "grok_session_days_pressure": 3,
   "janitor": {

@@ -95,44 +95,36 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
+DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
+DEFAULT_HOUSEKEEPER_LOCK = "~/.claude-disk-janitor/.housekeeper.lock"
+
+
 def expand_path(value: str, home: Path | None = None) -> Path:
     home = home or Path.home()
-    if not value:
-        return home
+    if not value or not str(value).strip():
+        raise ValueError("path value is empty; refusing to alias it to the home directory")
     return Path(value.replace("~", str(home))).expanduser()
 
 
 def default_keep_worktree_regex(home: Path) -> str:
-    apps = str(home / "apps")
-    code = str(home / "Code")
+    """Generic fleet layout; owner-specific keep list lives in Application Support config.json."""
+    code = re.escape(str(home / "Code"))
+    apps = re.escape(str(home / "apps"))
     return (
-        rf"^({code}/Socratic\.Trade|{code}/Congress\.Trade|{code}/Usage-Monitor|"
-        rf"{code}/congress-trading-shared|{code}/DealDex|{code}/Personal-Site|"
-        rf"{code}/Autorotate|{code}/ContactLogo|{code}/AI-Fleet-Coordinator|"
-        rf"{code}/BotFleet|{code}/fleet-ops|{code}/botfleet-site|"
-        rf"{apps}/[a-z0-9]+-(claude|codex|live|antigravity|cursor|monet|grok|grok-build|deepseek|minimax|mm)|"
-        rf"{apps}/(grok-acp-runtime|agy-acp-runtime|shellular-runtime|mac-collab|seat-mcp|"
-        rf"KIMI-SALVAGE-2026-08-22|botfleet-server|agent-sync|agent-sync-push|clutch-runtime|xcode-health))$"
+        rf"^({code}/[^/]+|"
+        rf"{apps}/[a-z0-9]+-(claude|codex|live|antigravity|cursor|monet|grok|grok-build|deepseek|minimax|mm))$"
     )
 
 
 def default_repos(home: Path) -> list[str]:
     code = home / "Code"
-    names = [
-        "Socratic.Trade",
-        "Congress.Trade",
-        "Usage-Monitor",
-        "congress-trading-shared",
-        "DealDex",
-        "Personal-Site",
-        "Autorotate",
-        "ContactLogo",
-        "AI-Fleet-Coordinator",
-        "BotFleet",
-        "fleet-ops",
-        "botfleet-site",
-    ]
-    return [str(code / n) for n in names]
+    if not code.is_dir():
+        return []
+    repos: list[str] = []
+    for child in sorted(code.iterdir()):
+        if child.is_dir() and ((child / ".git").is_dir() or (child / ".git").is_file()):
+            repos.append(str(child))
+    return repos
 
 
 def load_config(path: Path | None = None, home: Path | None = None) -> dict[str, Any]:
@@ -144,6 +136,10 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
     if path.is_file():
         user = json.loads(path.read_text(encoding="utf-8"))
         base = _deep_merge(base, user)
+    if not str(base.get("data_dir") or "").strip():
+        base["data_dir"] = DEFAULT_DATA_DIR
+    if not str(base.get("housekeeper_lock") or "").strip():
+        base["housekeeper_lock"] = DEFAULT_HOUSEKEEPER_LOCK
     if not base.get("repos"):
         base["repos"] = default_repos(home)
     if not base.get("keep_worktree_regex"):

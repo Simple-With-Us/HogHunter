@@ -89,6 +89,7 @@ class VacuumEngine:
                         reason=f"{len(hits)} threshold hit(s)" if hits else "within limits",
                     )
                 )
+                escalation_failed = False
                 if hits:
                     now = time.time()
                     last_clean = float(rw_state.get("last_clean_at", 0))
@@ -103,7 +104,8 @@ class VacuumEngine:
                         pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full")
                         record.steps.extend(pressure_record.steps)
                         rw_state["last_clean_at"] = now
-                record.finish(0, summary="watch tick")
+                        escalation_failed = any(s.status == StepStatus.FAILED for s in pressure_record.steps)
+                record.finish(1 if escalation_failed else 0, summary="watch tick")
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
@@ -394,12 +396,33 @@ class VacuumEngine:
                     continue
                 if self._git_tracks_path(wt, sub):
                     continue
-                freed += self._dir_size_before_clear(Path(target))
+                freed += self._du_bytes(Path(target))
                 shutil.rmtree(target, ignore_errors=True)
         return freed, "pressure deps reap", StepStatus.RAN
 
+    def _du_bytes(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        if sys.platform == "darwin" and shutil.which("du"):
+            try:
+                res = subprocess.run(
+                    ["du", "-sk", str(path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    kib = int(res.stdout.split()[0])
+                    return kib * 1024
+            except (subprocess.TimeoutExpired, ValueError, IndexError, OSError):
+                pass
+        return self._dir_size_before_clear(path)
+
     def _coolify_remote(self) -> tuple[int, str, StepStatus]:
-        host = str(self.cfg.get("coolify_ssh_host", "coolify"))
+        host_value = self.cfg.get("coolify_ssh_host")
+        if not isinstance(host_value, str) or not host_value.strip():
+            return 0, "coolify_ssh_host not configured", StepStatus.SKIPPED
+        host = host_value.strip()
         check = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", host, "exit 0"],
             capture_output=True,

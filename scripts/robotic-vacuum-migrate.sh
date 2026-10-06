@@ -22,7 +22,9 @@ echo "Backing up old launchd jobs to ${BACKUP_DIR}"
 for old in "${OLD_LABELS[@]}"; do
   for base in "${HOME_DIR}/Library/LaunchAgents/${old}.plist" "/Library/LaunchAgents/${old}.plist"; do
     if [[ -f "${base}" ]]; then
-      cp -a "${base}" "${BACKUP_DIR}/"
+      scope="user"
+      [[ "${base}" == /Library/* ]] && scope="system"
+      cp -a "${base}" "${BACKUP_DIR}/${old}.${scope}.plist"
     fi
   done
   if launchctl print "${DOMAIN}/${old}" &>/dev/null; then
