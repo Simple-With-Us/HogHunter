@@ -13,6 +13,62 @@ enum CompanionSort: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Live read of the iPhone's own storage volume, used by the iOS Storage
+/// tab alongside the existing Mac-disk section.  Pulls once via
+/// `URL.resourceValues(forKeys:)`, which works inside the iOS sandbox without
+/// any extra entitlement because `/` is the app's own sandbox root.
+struct iPhoneStorageSummary: Equatable {
+    var name: String
+    var totalBytes: UInt64
+    var freeBytes: UInt64
+    var usedPercent: Double
+    var usedText: String
+    var freeText: String
+}
+
+enum iPhoneStorage {
+    /// Reads the current iPhone storage summary, or nil if the kernel
+    /// cannot answer (very rare on iOS, but the sim can return nil values).
+    static func summary() -> iPhoneStorageSummary? {
+        let url = URL(fileURLWithPath: "/")
+        let keys: Set<URLResourceKey> = [
+            .volumeAvailableCapacityKey,
+            .volumeTotalCapacityKey,
+            .volumeLocalizedNameKey
+        ]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        // iOS gives back Int64 for capacity values; promote to UInt64 here
+        // so the call site can do math without overflow concerns.
+        guard let totalInt = values.volumeTotalCapacity else { return nil }
+        guard let freeInt = values.volumeAvailableCapacity else { return nil }
+        let totalBytes = UInt64(max(0, totalInt))
+        let freeBytes = UInt64(max(0, freeInt))
+        guard freeBytes <= totalBytes, totalBytes > 0 else { return nil }
+        let used = totalBytes - freeBytes
+        let usedPercent = totalBytes > 0 ? (Double(used) / Double(totalBytes)) * 100 : 0
+        return iPhoneStorageSummary(
+            name: values.volumeLocalizedName ?? "iPhone Storage",
+            totalBytes: totalBytes,
+            freeBytes: freeBytes,
+            usedPercent: usedPercent,
+            usedText: iPhoneStorage.format(bytes: used),
+            freeText: iPhoneStorage.format(bytes: freeBytes)
+        )
+    }
+
+    /// Locale-pinned binary units, matching the Mac pane's HogFormat.memory so
+    /// "1.5 GB" reads the same on both sides regardless of region.
+    static func format(bytes: UInt64) -> String {
+        let gb = Double(bytes) / 1_073_741_824
+        let mb = Double(bytes) / 1_048_576
+        let kb = Double(bytes) / 1024
+        let posix = Locale(identifier: "en_US_POSIX")
+        if mb >= 1023.5 { return String(format: "%.1f GB", locale: posix, gb) }
+        if kb >= 1023.5 { return String(format: "%.0f MB", locale: posix, mb) }
+        return String(format: "%.0f KB", locale: posix, kb)
+    }
+}
+
 enum UsageParser {
     static func parseCPU(_ text: String) -> Double {
         let digits = text.filter { $0.isNumber || $0 == "." }
@@ -120,7 +176,7 @@ struct CompanionRootView: View {
         case .offline:
             StatusPage(
                 title: "Mac Offline or Not Found",
-                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.",
+                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.  Off Wi-Fi or remote?  Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -133,7 +189,7 @@ struct CompanionRootView: View {
         case .looking, .code:
             StatusPage(
                 title: "Looking for Your Mac",
-                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.",
+                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.  Off Wi-Fi?  Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -400,15 +456,21 @@ struct DashboardView: View {
                 .background(Color.blue.opacity(0.12))
             }
 
-            Picker("Tab", selection: $selectedTab) {
-                ForEach(CompanionTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Tap a tab to switch view.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                Picker("Tab", selection: $selectedTab) {
+                    ForEach(CompanionTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.bottom, 6)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
 
             List {
                 hostHeaderSection
@@ -807,6 +869,12 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var storageContent: some View {
+        // Mac storage is intentionally FIRST.  Prior to 1.0.6 the iPhone-storage
+        // section sat on top and several users assumed it WAS the Mac storage
+        // (the phone is showing its own storage, not the Mac's).  Putting the
+        // Mac disk usage and the per-app breakdown up top is the principle that
+        // answers "why does the iPhone show CPU and memory for the Mac but no
+        // disk?" without burying the answer under a section titled differently.
         Section("Mac Disk Usage") {
             if let storage = snapshot.storage {
                 VStack(alignment: .leading, spacing: 10) {
@@ -835,6 +903,81 @@ struct DashboardView: View {
                 .padding(.vertical, 4)
             } else {
                 Text("Disk telemetry will update with next sample.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if let apps = snapshot.storage?.topApps, !apps.isEmpty {
+            Section {
+                ForEach(apps) { app in
+                    macAppStorageRow(app)
+                }
+                if let scanned = snapshot.storage?.topAppsScannedAt {
+                    HStack {
+                        Spacer()
+                        Text("Scanned \(Self.relativeTimeFormatter.localizedString(for: scanned, relativeTo: Date())) on \(snapshot.hostName).")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Mac Storage by App")
+                    if let top = snapshot.storage?.topApps, top.contains(where: { $0.isHiddenHeavy }) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption2)
+                    }
+                    Spacer()
+                }
+            } footer: {
+                Text("Top apps on \(snapshot.hostName), sorted by total on-disk size.  Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).  Open the Storage pane on the Mac for the full list and cleanup.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } else if snapshot.storage != nil {
+            // Storage summary landed but the per-app walk has not yet returned;
+            // show a single "Scanning" hint instead of nothing so the section
+            // does not silently disappear on first render.
+            Section("Mac Storage by App") {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning installed apps on \(snapshot.hostName).")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        Section("iPhone Storage") {
+            if let phoneStorage = iPhoneStorage.summary() {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label(phoneStorage.name, systemImage: "iphone")
+                            .font(.headline)
+                        Spacer()
+                        Text(String(format: "%.0f%% Used", phoneStorage.usedPercent))
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.primary))
+                    }
+
+                    ProgressView(value: min(max(phoneStorage.usedPercent / 100.0, 0), 1.0))
+                        .tint(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.accentColor))
+
+                    HStack {
+                        Text(phoneStorage.usedText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(phoneStorage.freeText)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                Text("Reading iPhone storage.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -1119,6 +1262,70 @@ struct DashboardView: View {
     private func rowColor(_ severity: String) -> Color {
         severity == "calm" ? Color.primary : CompanionColor.color(severity)
     }
+
+    /// One row of the new "Mac Storage by App" section.  Mirrors the Mac
+    /// pane's `StorageRowView` at a glance level: app name + total bytes on
+    /// the top line, bundle vs hidden split on the bottom, and a red outline
+    /// when the app owns way more outside the .app than inside it.
+    @ViewBuilder
+    private func macAppStorageRow(_ app: CompanionAppStorageRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if app.isHiddenHeavy {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.caption2)
+                        .accessibilityLabel("Hidden bytes flag")
+                }
+                Text(app.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(app.totalText)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+
+            HStack(spacing: 6) {
+                Text("Bundle")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(app.bundleText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text("·")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text("Hidden")
+                    .font(.caption2)
+                    .foregroundStyle(app.isHiddenHeavy ? Color.red : Color.secondary)
+                Text(app.hiddenText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(app.isHiddenHeavy ? .red : .secondary)
+                if app.anyApproximate {
+                    Text("approx")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+            }
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(app.isHiddenHeavy ? Color.red.opacity(0.06) : Color.clear)
+                .padding(.vertical, 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(app.name), total \(app.totalText), bundle \(app.bundleText), hidden \(app.hiddenText)\(app.isHiddenHeavy ? ", flagged: hidden exceeds five times bundle and over two hundred megabytes" : "")")
+    }
+
+    static let relativeTimeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
 }
 
 private struct MeterCard: View {

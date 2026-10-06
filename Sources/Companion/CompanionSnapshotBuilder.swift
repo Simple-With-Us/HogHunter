@@ -109,7 +109,9 @@ enum CompanionSnapshotBuilder {
             excludedCategories: Array(exclusions.excludedCategories),
             excludedPathsCount: exclusions.excludedPaths.count,
             categoryBreakdown: breakdown,
-            excludedPaths: Array(exclusions.excludedPaths).sorted()
+            excludedPaths: Array(exclusions.excludedPaths).sorted(),
+            topApps: Self.cachedTopApps(),
+            topAppsScannedAt: Self.topAppsCache?.at
         )
     }
 
@@ -172,5 +174,79 @@ enum CompanionSnapshotBuilder {
             return String(format: "%.0f", locale: posix, value)
         }
         return String(format: "%.1f", locale: posix, value)
+    }
+
+    // MARK: - Top apps storage cache
+    //
+    // The Mac pane refreshes its App Storage list every five minutes via
+    // `StorageStore`.  The phone wants the same top-N snapshot.  Rather than
+    // running the scanner on every phone poll), we cache it here with the same
+    // 5-minute cadence.  The cache is read on the main actor (the snapshot
+    // builder is called from `HogStore.publishCompanion`, which is `@MainActor`)
+    // and written from the scanner's background queue.
+
+    private struct TopAppsCacheEntry {
+        var at: Date
+        var rows: [CompanionAppStorageRow]
+    }
+
+    nonisolated(unsafe) private static var topAppsCache: TopAppsCacheEntry?
+    private static let topAppsLockInterval: TimeInterval = 5 * 60
+    private static let topAppsLimit = 8
+    private static let topAppsQueue = DispatchQueue(label: "hoghunter.companion.topapps", qos: .utility)
+    private static var topAppsScanInFlight = false
+
+    /// Returns the cached top-app rows without scanning.  The phone poll
+    /// reads this on every request, so it has to be free.
+    static func cachedTopApps() -> [CompanionAppStorageRow] {
+        topAppsCache?.rows ?? []
+    }
+
+    /// Kicks off a `StorageScanner` walk on a utility queue if the cache is
+    /// stale or empty.  Subsequent calls return the cached rows immediately
+    /// and re-schedule a refresh in the background.  Safe to call on the
+    /// main actor; the heavy work happens off-thread.
+    static func refreshTopApps(runningBundleIds: @escaping () -> Set<String>) {
+        let now = Date()
+        if let cache = topAppsCache, now.timeIntervalSince(cache.at) < topAppsLockInterval {
+            return
+        }
+        if topAppsScanInFlight { return }
+        topAppsScanInFlight = true
+        let limit = topAppsLimit
+        topAppsQueue.async {
+            let scanner = StorageScanner()
+            let apps = scanner.installedApps(runningBundleIds: runningBundleIds())
+            let top = apps
+                .sorted { $0.totalBytes > $1.totalBytes }
+                .prefix(limit)
+                .map { usage -> CompanionAppStorageRow in
+                    CompanionAppStorageRow(
+                        id: usage.id,
+                        name: usage.name,
+                        bundleId: usage.bundleId,
+                        totalBytes: usage.totalBytes,
+                        bundleBytes: usage.bundleBytes,
+                        hiddenBytes: usage.hiddenBytes,
+                        totalText: HogFormat.memory(usage.totalBytes),
+                        bundleText: HogFormat.memory(usage.bundleBytes),
+                        hiddenText: HogFormat.memory(usage.hiddenBytes),
+                        anyApproximate: usage.anyApproximate,
+                        isHiddenHeavy: usage.isHiddenHeavy
+                    )
+                }
+            DispatchQueue.main.async {
+                topAppsCache = TopAppsCacheEntry(at: Date(), rows: Array(top))
+                topAppsScanInFlight = false
+            }
+        }
+    }
+
+    /// Drops the in-memory top-app cache.  The next call to
+    /// `refreshTopApps(runningBundleIds:)` will rescan from scratch.
+    /// Exposed for tests and for the host's manual "Refresh" gesture so a
+    /// user-initiated pull is not gated by the 5-minute cooldown.
+    static func invalidateTopAppsCache() {
+        topAppsCache = nil
     }
 }

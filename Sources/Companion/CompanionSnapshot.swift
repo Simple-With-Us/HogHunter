@@ -209,6 +209,33 @@ struct CompanionStorageSummary: Codable, Equatable {
     var excludedPathsCount: Int? = nil
     var categoryBreakdown: [CompanionStorageCategorySummary]? = nil
     var excludedPaths: [String]? = nil
+    /// Top storage-heavy apps on the host.  Mirrors the Mac pane's "App Storage"
+    /// tab so the phone can show "Mac Storage by App" without owning a separate
+    /// scanner.  Optional because the scanner is cached on the host and the first
+    /// snapshot after pairing may not have run yet.
+    var topApps: [CompanionAppStorageRow]? = nil
+    /// When `topApps` was last refreshed on the host.  The phone uses this for
+    /// a "Scanned 2 min ago" caption.
+    var topAppsScannedAt: Date? = nil
+}
+
+/// One row of the Mac pane's App Storage list, packaged for the phone.  All
+/// values are pre-formatted on the host so the phone can render without
+/// re-doing the scale rules.
+struct CompanionAppStorageRow: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var bundleId: String?
+    var totalBytes: UInt64
+    var bundleBytes: UInt64
+    var hiddenBytes: UInt64
+    var totalText: String
+    var bundleText: String
+    var hiddenText: String
+    /// True when one or more walks had to be capped (time or file-count budget).
+    var anyApproximate: Bool
+    /// True when hidden bytes are at least 5x the bundle and over 200 MB.
+    var isHiddenHeavy: Bool
 }
 
 struct CompanionNetworkRow: Codable, Equatable, Identifiable {
