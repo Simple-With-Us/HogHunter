@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.6 — Tue, Oct 6, 2026
+
+Mac side:
+
+- Companion snapshot now ships the top eight storage-heavy apps (with the bundle vs hidden split and the hidden-heavy flag) so the phone can show "Mac Storage by App" without owning its own scanner.  The scan runs on a utility queue, caches for five minutes, and is kicked off by `HogStore` whenever Share With iPhone is enabled (plus a five-minute timer while it stays on).
+
+iOS companion:
+
+- The Storage tab reorders: Mac Disk Usage is now the first section, with the new "Mac Storage by App" section right below it.  The iPhone Storage section sits below both.  Previously the iPhone-Storage section sat on top and several users confused it with the Mac storage because the picker defaulted to Activity and the title read "iPhone".
+- New "Mac Storage by App" section renders the snapshot's `CompanionAppStorageRow`s: name + total on top, bundle / hidden numbers beneath, an "approx" tag when a walk had to short-circuit, a red triangle + red row background when hidden bytes are at least five times the .app bundle and over 200 MB, and a "Scanned … ago on &lt;host&gt;" footer from `topAppsScannedAt`.  While the host's first scan is still in flight the section shows a "Scanning installed apps on &lt;host&gt;." hint instead of silently omitting itself.
+
+CI:
+
+- The `Capture app screenshots` step in `.github/workflows/ci.yml` is now wall-clock capped at 8 minutes, marked `continue-on-error: true`, and the matching upload step warns instead of errors on a missing artifact.  This stops the shared macOS-15 runner's two-attempt hang from cancelling the entire `test` status check and blocking PR merge (branch protection does not allow admin override of a `cancelled` required check).
+
+Tests: 200 total, 0 failures (4 new — `CompanionAppStorageTests` pins the new Codable, the backward-compat decode, the always-non-nil topApps array, and the cached-after-invalidate behaviour).  iOS Simulator build green locally.
+
 ## 1.0.5 — Mon, Oct 5, 2026
 
 Mac Activity panel:
