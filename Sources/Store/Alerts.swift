@@ -25,6 +25,16 @@ struct AlertPolicy {
         self.cooldown = cooldown
     }
 
+    /// Recompute from the current project on every pass; missing keys must not
+    /// retain a previous project's policy value.
+    mutating func applyCooldown(minutes: Double?) {
+        if let minutes, minutes.isFinite, minutes > 0 {
+            cooldown = minutes * 60
+        } else {
+            cooldown = 30 * 60
+        }
+    }
+
     /// True exactly on the tick where `id` earns a notification.
     mutating func step(id: String, above: Bool, now: Date) -> Bool {
         guard above else {
@@ -163,10 +173,7 @@ final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate
         policy.sustained = max(1, sustained)
         // Infisical-overridable cooldown (minutes); the 30-minute built-in
         // stands when Infisical is not configured.
-        if let minutes = InfisicalStore.shared.double(for: InfisicalKey.alertCooldownMinutes),
-           minutes > 0 {
-            policy.cooldown = minutes * 60
-        }
+        policy.applyCooldown(minutes: InfisicalStore.shared.double(for: InfisicalKey.alertCooldownMinutes))
         var live: Set<String> = []
         live.reserveCapacity(candidates.count)
         for candidate in candidates {

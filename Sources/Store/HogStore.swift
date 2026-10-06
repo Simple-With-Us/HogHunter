@@ -172,6 +172,7 @@ final class HogStore: ObservableObject {
         static let sortAscending = "sortAscending"
         static let cpuScale = "cpuScale"
         static let menuBarLabelMode = "menuBarLabelMode"
+        static let infisicalProjectId = "infisicalProjectId"
         static let refreshInterval = "refreshInterval"
         static let alertsEnabled = "alertsEnabled"
         static let alertThresholdPercent = "alertThresholdPercent"
@@ -195,6 +196,9 @@ final class HogStore: ObservableObject {
     private let history: HistoryStore
     private let resolver = MetadataResolver()
     private let defaults: UserDefaults
+    private let infisical: InfisicalSettings
+    private var appliedInfisicalProjectId: String?
+    private var migratedSettingsReady = false
 
     private var timer: Timer?
     private var pressureSource: DispatchSourceMemoryPressure?
@@ -225,8 +229,14 @@ final class HogStore: ObservableObject {
     private static let diskRefreshEvery = 20
     private static let rowLimit = 25
 
-    init(historyURL: URL? = nil, defaults: UserDefaults = .standard) {
+    init(
+        historyURL: URL? = nil,
+        defaults: UserDefaults = .standard,
+        infisical: InfisicalSettings = .shared,
+        startImmediately: Bool = true
+    ) {
         self.defaults = defaults
+        self.infisical = infisical
         let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
         self.history = history
         self.bandwidth = BandwidthStore(history: history)
@@ -242,9 +252,10 @@ final class HogStore: ObservableObject {
             self,
             selector: #selector(infisicalDidRefresh),
             name: .infisicalSettingsDidRefresh,
-            object: nil
+            object: infisical
         )
-        start()
+        applyInfisicalOverrides()
+        if startImmediately { start() }
     }
 
     deinit {
@@ -1010,17 +1021,14 @@ final class HogStore: ObservableObject {
         if let raw = defaults.string(forKey: Key.appearance), let value = AppearanceChoice(rawValue: raw) {
             appearance = value
         }
-        let interval = defaults.double(forKey: Key.refreshInterval)
-        if interval >= 1 { refreshInterval = interval }
-        alertsEnabled = defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
-        let threshold = defaults.double(forKey: Key.alertThresholdPercent)
-        if threshold >= 100 { alertThresholdPercent = threshold }
-        let sustained = defaults.integer(forKey: Key.alertSustainedMinutes)
-        if sustained >= 1 { alertSustainedMinutes = sustained }
-        if let webhook = defaults.string(forKey: Key.alertWebhookURL) {
-            alertWebhookURL = webhook
-            alerts.webhookURL = webhook
+        // Previously persisted effective values may belong to a different project.
+        // Hold scoped values until bootstrap confirms their target, including offline launches.
+        let savedProject = defaults.string(forKey: Key.infisicalProjectId)
+        if savedProject == nil || savedProject == InfisicalStore.localProjectId || savedProject == infisical.snapshot.projectId {
+            migratedSettingsReady = true
+            loadMigratedSettings()
         }
+        alertsEnabled = defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
         allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
@@ -1040,35 +1048,59 @@ final class HogStore: ObservableObject {
 
     // MARK: - Infisical SOT
 
-    /// Applies Infisical values over the local settings for the migrated
-    /// knobs.  Infisical is the source of truth: a present value wins over
-    /// UserDefaults.  Runs at launch (no-op until the first refresh lands)
-    /// and after every successful background refresh.  See INFISICAL.md.
+    private func loadMigratedSettings() {
+        let interval = defaults.double(forKey: Key.refreshInterval)
+        if interval >= 1 { refreshInterval = interval }
+        let threshold = defaults.double(forKey: Key.alertThresholdPercent)
+        if threshold >= 100 { alertThresholdPercent = threshold }
+        let sustained = defaults.integer(forKey: Key.alertSustainedMinutes)
+        if sustained >= 1 { alertSustainedMinutes = sustained }
+        if let webhook = defaults.string(forKey: Key.alertWebhookURL) { alertWebhookURL = webhook }
+    }
+
+    /// Replace project-derived effective values on target changes.  Same-target
+    /// refreshes retain local fallback and last-known-good values for absent keys.
     private func applyInfisicalOverrides() {
-        let cache = InfisicalStore.shared
+        let snapshot = infisical.snapshot
+        guard let projectId = snapshot.projectId else { return }
+        // Unscoped settings are local; never infer a remote project for them.
+        let previous = defaults.string(forKey: Key.infisicalProjectId) ?? InfisicalStore.localProjectId
         applyingInfisical = true
-        defer { applyingInfisical = false }
-        if let interval = cache.double(for: InfisicalKey.refreshInterval), interval >= 1 {
+        if previous != projectId {
+            refreshInterval = 3
+            alertThresholdPercent = 300
+            alertSustainedMinutes = 5
+            alertWebhookURL = ""
+            alerts.resetPolicy()
+        } else if appliedInfisicalProjectId == nil {
+            loadMigratedSettings()
+        }
+        let values = snapshot.values
+        if let raw = values[InfisicalKey.refreshInterval], let interval = Double(raw), interval >= 1 {
             refreshInterval = interval
         }
-        if let threshold = cache.double(for: InfisicalKey.alertThresholdPercent), threshold >= 100 {
+        if let raw = values[InfisicalKey.alertThresholdPercent], let threshold = Double(raw), threshold >= 100 {
             alertThresholdPercent = threshold
         }
-        if let sustained = cache.int(for: InfisicalKey.alertSustainedMinutes), sustained >= 1 {
+        if let raw = values[InfisicalKey.alertSustainedMinutes], let sustained = Int(raw), sustained >= 1 {
             alertSustainedMinutes = sustained
         }
-        // An empty webhook in Infisical means "not filled by admin yet" -- it
-        // must never wipe a locally configured URL.
-        if let webhook = cache.string(for: InfisicalKey.alertWebhookURL),
-           !webhook.isEmpty, webhook != alertWebhookURL {
+        // Empty/absent webhooks preserve same-target fallback only.  A project
+        // switch has already discarded the previous target's webhook above.
+        if let webhook = values[InfisicalKey.alertWebhookURL], !webhook.isEmpty {
             alertWebhookURL = webhook
         }
+        appliedInfisicalProjectId = projectId
+        migratedSettingsReady = true
+        applyingInfisical = false
+        persist()
+        defaults.set(projectId, forKey: Key.infisicalProjectId)
     }
 
     @objc private func infisicalDidRefresh() {
-        Task { @MainActor [weak self] in
-            self?.applyInfisicalOverrides()
-        }
+        // InfisicalSettings posts on MainActor.  Apply synchronously before a
+        // successful save returns, so no sampler tick can see the previous target.
+        applyInfisicalOverrides()
     }
 
     /// Write-through for a migrated knob the admin just changed.  The PATCH
@@ -1079,25 +1111,29 @@ final class HogStore: ObservableObject {
     /// and the next successful refresh re-asserts the Infisical value.
     private func writeThroughInfisical(key: String, value: String) {
         guard !loadingSettings, !applyingInfisical else { return }
+        let expectedGeneration = infisical.connectionGeneration
+        let infisical = infisical
         Task { @MainActor [weak self] in
             guard self != nil else { return }
-            try? await InfisicalSettings.shared.set(value, forKey: key)
+            try? await infisical.set(value, forKey: key, expectedGeneration: expectedGeneration)
         }
     }
 
     private func persist() {
-        guard !loadingSettings else { return }
+        guard !loadingSettings, !applyingInfisical else { return }
         defaults.set(window.rawValue, forKey: Key.window)
         defaults.set(grouping.rawValue, forKey: Key.grouping)
         defaults.set(sort.rawValue, forKey: Key.sort)
         defaults.set(sortAscending, forKey: Key.sortAscending)
         defaults.set(cpuScale.rawValue, forKey: Key.cpuScale)
         defaults.set(menuBarLabelMode.rawValue, forKey: Key.menuBarLabelMode)
-        defaults.set(refreshInterval, forKey: Key.refreshInterval)
+        if migratedSettingsReady {
+            defaults.set(refreshInterval, forKey: Key.refreshInterval)
+            defaults.set(alertThresholdPercent, forKey: Key.alertThresholdPercent)
+            defaults.set(alertSustainedMinutes, forKey: Key.alertSustainedMinutes)
+            defaults.set(alertWebhookURL, forKey: Key.alertWebhookURL)
+        }
         defaults.set(alertsEnabled, forKey: Key.alertsEnabled)
-        defaults.set(alertThresholdPercent, forKey: Key.alertThresholdPercent)
-        defaults.set(alertSustainedMinutes, forKey: Key.alertSustainedMinutes)
-        defaults.set(alertWebhookURL, forKey: Key.alertWebhookURL)
         defaults.set(appearance.rawValue, forKey: Key.appearance)
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
@@ -1155,7 +1191,7 @@ final class HogStore: ObservableObject {
                 self.appearance = value
             }
             let interval = self.defaults.double(forKey: Key.refreshInterval)
-            if interval >= 1, interval != self.refreshInterval {
+            if self.migratedSettingsReady, interval >= 1, interval != self.refreshInterval {
                 self.refreshInterval = interval
             }
             let enabled = self.defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
@@ -1164,14 +1200,14 @@ final class HogStore: ObservableObject {
                 if enabled { self.alerts.requestAuthorization() }
             }
             let threshold = self.defaults.double(forKey: Key.alertThresholdPercent)
-            if threshold >= 100, threshold != self.alertThresholdPercent {
+            if self.migratedSettingsReady, threshold >= 100, threshold != self.alertThresholdPercent {
                 self.alertThresholdPercent = threshold
             }
             let sustained = self.defaults.integer(forKey: Key.alertSustainedMinutes)
-            if sustained >= 1, sustained != self.alertSustainedMinutes {
+            if self.migratedSettingsReady, sustained >= 1, sustained != self.alertSustainedMinutes {
                 self.alertSustainedMinutes = sustained
             }
-            if let webhook = self.defaults.string(forKey: Key.alertWebhookURL), webhook != self.alertWebhookURL {
+            if self.migratedSettingsReady, let webhook = self.defaults.string(forKey: Key.alertWebhookURL), webhook != self.alertWebhookURL {
                 self.alertWebhookURL = webhook
                 self.alerts.webhookURL = webhook
             }
