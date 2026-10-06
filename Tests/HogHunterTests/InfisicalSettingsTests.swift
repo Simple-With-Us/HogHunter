@@ -19,6 +19,7 @@ private final class StubURLProtocol: URLProtocol {
         var method: String?
         var path: String?
         var body: [String: Any]?
+        var query: [String: String]
     }
 
     private static let lock = NSLock()
@@ -85,7 +86,8 @@ private final class StubURLProtocol: URLProtocol {
         Self.record(Recorded(
             method: request.httpMethod,
             path: request.url?.path,
-            body: body
+            body: body,
+            query: Dictionary(uniqueKeysWithValues: (URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         ))
         let (status, data) = Self.handler?(request) ?? (500, Data())
         let response = HTTPURLResponse(
@@ -326,4 +328,38 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertNil(settings.lastError)
         XCTAssertNil(StubURLProtocol.takeNotes()["network-used"])
     }
+    @MainActor
+    func testSelectedProjectRoutesReadAndWriteRequests() async throws {
+        let selectedProject = "11111111-2222-3333-4444-555555555555"
+        StubURLProtocol.handler = { [weak self] request in
+            guard let self else { return (500, Data()) }
+            if request.url?.path == "/api/v1/auth/universal-auth/login" {
+                return (200, self.json(["accessToken": "synthetic-token"]))
+            }
+            if request.httpMethod == "PATCH" { return (200, self.json([:])) }
+            return (200, self.json(["secrets": []]))
+        }
+        let settings = InfisicalSettings(
+            client: InfisicalClient(session: makeSession()), store: InfisicalStore(),
+            credentialProvider: { nil }, credentialWriter: { _ in }, credentialRemover: {}
+        )
+        try await settings.saveCredential(clientId: "synthetic-id", clientSecret: "synthetic-secret", projectId: selectedProject)
+        try await settings.set("9", forKey: InfisicalKey.refreshInterval)
+        let calls = StubURLProtocol.takeRecorded()
+        let fetch = try XCTUnwrap(calls.first { $0.path == "/api/v3/secrets/raw" })
+        XCTAssertEqual(fetch.query["workspaceId"], selectedProject)
+        XCTAssertEqual(fetch.query["environment"], "dev")
+        let patch = try XCTUnwrap(calls.first { $0.method == "PATCH" })
+        XCTAssertEqual(patch.body?["workspaceId"] as? String, selectedProject)
+        XCTAssertEqual(patch.body?["environment"] as? String, "dev")
+    }
+
+    @MainActor
+    func testHTTPResponseBodyIsNotExposedInStatus() async {
+        StubURLProtocol.handler = { _ in (403, Data("synthetic-private-response".utf8)) }
+        let settings = makeSettings()
+        await settings.bootstrap()
+        XCTAssertEqual(settings.lastError, "Infisical request failed (HTTP 403)")
+    }
+
 }
