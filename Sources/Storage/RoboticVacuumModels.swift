@@ -6,6 +6,7 @@ struct RoboticVacuumStatus: Codable, Equatable {
     var launchdLoaded: Bool
     var nextRunAt: [String: Double]
     var intervalsSeconds: [String: Double]
+    var lastRunAt: [String: Double]?
     var lastRun: RoboticVacuumRun?
     var stepLastResults: [String: RoboticVacuumStepResult]
     var historyCount: Int
@@ -16,6 +17,7 @@ struct RoboticVacuumStatus: Codable, Equatable {
         case launchdLoaded = "launchd_loaded"
         case nextRunAt = "next_run_at"
         case intervalsSeconds = "intervals_seconds"
+        case lastRunAt = "last_runs"
         case lastRun = "last_run"
         case stepLastResults = "step_last_results"
         case historyCount = "history_count"

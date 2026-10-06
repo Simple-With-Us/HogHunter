@@ -4,6 +4,7 @@ Optional thin forwards so callers that still point at older cleanup entry points
 
 | Repo shim | Purpose |
 |-----------|---------|
+| `scripts/shims/_resolve-repo.sh` | Shared helper for bash shims to find the Hog Hunter clone (`HOGHUNTER_REPO`, then common install paths). |
 | `scripts/shims/mac-resource-watch.py` | One scheduled **watch** tick (disk, memory, pressure). |
 | `scripts/shims/mac-auto-cleanup.sh` | One **full** or **pressure** vacuum run. |
 | `scripts/shims/janitor.sh` | One **janitor** tick (worktrees and low-disk reclaim). |

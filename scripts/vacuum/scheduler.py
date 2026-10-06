@@ -105,7 +105,11 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
 
     return {
         "health": health,
-        "last_runs": {k: (v.get("ended_at") if v else None) for k, v in last_runs.items()},
+        "last_runs": {
+            k: float(v["ended_at"])
+            for k, v in last_runs.items()
+            if v and v.get("ended_at") is not None
+        },
         "next_run_at": next_runs,
         "intervals_seconds": intervals,
         "last_run": last_record,

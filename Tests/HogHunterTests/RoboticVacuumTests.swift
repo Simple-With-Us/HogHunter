@@ -8,6 +8,7 @@ final class RoboticVacuumTests: XCTestCase {
           "health": "healthy",
           "launchd_loaded": true,
           "next_run_at": { "full": 2000.0 },
+          "last_runs": { "full": 1100.0, "watch": 1050.0 },
           "intervals_seconds": { "full": 14400 },
           "last_run": {
             "run_id": "abc",
@@ -26,5 +27,6 @@ final class RoboticVacuumTests: XCTestCase {
         XCTAssertEqual(status.health, "healthy")
         XCTAssertEqual(status.displayHealth, "On schedule")
         XCTAssertTrue(status.launchdLoaded)
+        XCTAssertEqual(status.lastRunAt?["full"], 1100.0)
     }
 }

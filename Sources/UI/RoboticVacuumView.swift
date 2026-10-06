@@ -45,7 +45,7 @@ struct RoboticVacuumView: View {
                     }
                 }
                 if let status = store.status {
-                    gridRow("Last full clean", formatDate(status.lastRun?.endedAt))
+                    gridRow("Last full clean", formatDate(status.lastRunAt?["full"]))
                     gridRow("Next full clean", formatNext(status.nextRunAt["full"]))
                     gridRow("Background job", status.launchdLoaded ? "Loaded" : "Not loaded")
                 }

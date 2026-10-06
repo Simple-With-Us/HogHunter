@@ -45,7 +45,7 @@ To build, sign, and install to `/Applications/Hog Hunter.app` in one step, use `
 
 No LaunchAgent for CPU and memory sampling.  The menu bar app is the sampler; quitting it stops history.
 
-**Robotic Vacuum** (scheduled disk cleaning) is separate: a dedicated launchd background job installed with `scripts/robotic-vacuum-migrate.sh` on the owner Mac after merge.  That job does not replace Launch at Login for the menu bar app.
+**Robotic Vacuum** (scheduled disk cleaning) is separate from CPU and memory sampling.  It does not replace Launch at Login for the menu bar app.
 
 ## Tests and CI
 

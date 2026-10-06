@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin shim — forwards to Hog Hunter Robotic Vacuum watch tick."""
+"""Thin shim - forwards to Hog Hunter Robotic Vacuum watch tick."""
 from __future__ import annotations
 
 import os
@@ -8,16 +8,32 @@ import sys
 from pathlib import Path
 
 # Fleet registry (high level): docs/mac-local-processes-shims.md
-def _repo_root() -> Path:
+
+
+def _resolve_repo() -> Path:
     env = os.environ.get("HOGHUNTER_REPO", "").strip()
     if env:
         return Path(env)
     here = Path(__file__).resolve()
-    return here.parents[2]
+    bundled = here.parents[2]
+    if (bundled / "scripts" / "robotic-vacuum.py").is_file():
+        return bundled
+    home = Path.home()
+    for candidate in (home / "Code" / "HogHunter", home / "apps" / "HogHunter"):
+        if (candidate / "scripts" / "robotic-vacuum.py").is_file():
+            return candidate
+    return bundled
 
 
-REPO = _repo_root()
-cmd = [sys.executable, str(REPO / "scripts" / "robotic-vacuum.py"), "--run-now", "watch"]
-if "--once" in sys.argv:
-    pass
-raise SystemExit(subprocess.call(cmd))
+def main() -> int:
+    repo = _resolve_repo()
+    script = repo / "scripts" / "robotic-vacuum.py"
+    if not script.is_file():
+        print("set HOGHUNTER_REPO to the Hog Hunter clone", file=sys.stderr)
+        return 2
+    cmd = [sys.executable, str(script), "--run-now", "watch"]
+    return subprocess.call(cmd)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
