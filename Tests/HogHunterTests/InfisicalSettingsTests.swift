@@ -122,7 +122,7 @@ final class InfisicalSettingsTests: XCTestCase {
         return InfisicalSettings(
             client: client,
             store: store,
-            credentialProvider: { InfisicalCredential(clientId: "id", clientSecret: "secret") }
+            credentialProvider: { InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444") }
         )
     }
 
@@ -242,7 +242,7 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(patches[0].body?["environment"] as? String, "dev")
         XCTAssertEqual(
             patches[0].body?["workspaceId"] as? String,
-            "c1df65f2-adb5-4d64-93c0-f47f969feea1"
+            "00000000-1111-2222-3333-444444444444"
         )
         XCTAssertEqual(store.string(for: "hoghunter.refreshInterval"), "9")
         XCTAssertNil(settings.lastError)
