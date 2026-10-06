@@ -237,7 +237,10 @@ class TestLockSkip(unittest.TestCase):
                     cfg.setdefault("steps", {})[step_id] = {"enabled": False}
             cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
             engine = VacuumEngine(cfg, home=home)
-            with patch("vacuum.pressure.janitor_pressure_mode", return_value="normal"):
+            with patch(
+                "vacuum.engine.sample_mac",
+                return_value={"disk_free_gb": 100.0, "swap_used_pct": 0.0, "swap_used_gb": 0.0, "load1": 0.0},
+            ), patch("vacuum.engine.janitor_pressure_mode", return_value="normal"):
                 record = engine.run(TriggerKind.JANITOR)
         step = next(s for s in record.steps if s.step_id == "janitor_worktree_retire")
         self.assertEqual(step.status, StepStatus.FAILED)
