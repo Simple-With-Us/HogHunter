@@ -49,7 +49,7 @@ private final class ProjectGate<Value> {
 
 @MainActor
 private final class ProjectFixture {
-    static let a = InfisicalClient.projectId
+    static let a = "00000000-1111-2222-3333-444444444444"
     static let b = "11111111-2222-3333-4444-555555555555"
     static let c = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     static let oldValues = [
@@ -61,7 +61,7 @@ private final class ProjectFixture {
 
     let client = ProjectClient()
     let cache = InfisicalStore()
-    var persisted: InfisicalCredential? = InfisicalCredential(clientId: "synthetic-id", clientSecret: "synthetic-secret")
+    var persisted: InfisicalCredential? = InfisicalCredential(clientId: "synthetic-id", clientSecret: "synthetic-secret", projectId: ProjectFixture.a)
     var writes = 0
     var writeError: Error?
     var removeError: Error?
@@ -89,14 +89,30 @@ private final class ProjectFixture {
 }
 
 final class InfisicalProjectSelectionTests: XCTestCase {
-    func testLegacyCredentialDecodesWithOriginalProject() throws {
+    func testLegacyCredentialDecodesWithoutInferringProject() throws {
         let legacy = Data(#"{"clientId":"synthetic-id","clientSecret":"synthetic-secret"}"#.utf8)
         let credential = try JSONDecoder().decode(InfisicalCredential.self, from: legacy)
         XCTAssertNil(credential.projectId)
-        XCTAssertEqual(credential.effectiveProjectId, InfisicalClient.projectId)
+        XCTAssertEqual(credential.effectiveProjectId, "")
+        XCTAssertFalse(credential.isComplete)
         let selected = InfisicalCredential(clientId: "synthetic-id", clientSecret: "synthetic-secret", projectId: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
         let roundTrip = try JSONDecoder().decode(InfisicalCredential.self, from: JSONEncoder().encode(selected))
         XCTAssertEqual(roundTrip.effectiveProjectId, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    }
+
+    @MainActor
+    func testMissingBlankOrInvalidStoredProjectCannotAuthenticate() async {
+        for project in [nil, "", "  ", "not-a-project"] as [String?] {
+            let f = ProjectFixture()
+            f.persisted?.projectId = project
+            await f.settings.bootstrap()
+            await f.settings.refresh()
+            XCTAssertFalse(f.settings.isConfigured)
+            XCTAssertEqual(f.settings.projectId, "")
+            XCTAssertEqual(f.client.loginCount, 0)
+            XCTAssertEqual(f.writes, 0)
+            XCTAssertEqual(f.cache.snapshot.projectId, InfisicalStore.localProjectId)
+        }
     }
 
     @MainActor
