@@ -23,6 +23,11 @@ jobs:
           bash scripts/test-ios-stage-asc-key.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
 
+      - name: Robotic Vacuum Python tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-hoghunter-clean.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py
+
   test:
     runs-on: macos-15
     timeout-minutes: 30

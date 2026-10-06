@@ -4,6 +4,7 @@ import AppKit
 enum StorageTab: String, CaseIterable, Identifiable {
     case appStorage = "App Storage"
     case diskCleaner = "Disk Cleaner"
+    case roboticVacuum = "Robotic Vacuum"
 
     var id: String { rawValue }
 }
@@ -18,6 +19,7 @@ enum StorageTab: String, CaseIterable, Identifiable {
 struct StorageView: View {
     @StateObject private var store: StorageStore
     @StateObject private var cleanerStore = DiskCleanerStore()
+    @StateObject private var vacuumStore = RoboticVacuumStore()
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
     @State private var sortAscending: Bool = false
@@ -46,6 +48,8 @@ struct StorageView: View {
                 footer
             case .diskCleaner:
                 DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
+            case .roboticVacuum:
+                RoboticVacuumView(store: vacuumStore)
             }
         }
         .padding(embeddedInPanel ? 0 : 16)
@@ -90,13 +94,13 @@ struct StorageView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : "internaldrive")
+            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : (selectedTab == .roboticVacuum ? "fanblades.fill" : "internaldrive"))
                 .font(.system(size: 20))
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
-                Text(selectedTab == .diskCleaner ? "Disk Cleaner" : "Storage")
+                Text(headerTitle)
                     .font(.system(size: 17, weight: .semibold))
-                Text(selectedTab == .diskCleaner ? "Reclaim space from caches, leftovers, and clutter" : subtitle)
+                Text(headerSubtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -105,11 +109,12 @@ struct StorageView: View {
             Spacer()
 
             Picker("Mode", selection: $selectedTab) {
-                Text("Disk Cleaner").tag(StorageTab.diskCleaner)
-                Text("App Storage").tag(StorageTab.appStorage)
+                Text("Cleaner").tag(StorageTab.diskCleaner)
+                Text("Vacuum").tag(StorageTab.roboticVacuum)
+                Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
-            .frame(width: 200)
+            .frame(width: 260)
             .disabled(cleanerStore.isCleaning)
         }
     }
@@ -161,6 +166,22 @@ struct StorageView: View {
                 .help(sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
                 .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
+        }
+    }
+
+    private var headerTitle: String {
+        switch selectedTab {
+        case .diskCleaner: return "Disk Cleaner"
+        case .roboticVacuum: return "Robotic Vacuum"
+        case .appStorage: return "Storage"
+        }
+    }
+
+    private var headerSubtitle: String {
+        switch selectedTab {
+        case .diskCleaner: return "Reclaim space from caches, leftovers, and clutter"
+        case .roboticVacuum: return "Scheduled cleaning with a clear status when something is late"
+        case .appStorage: return subtitle
         }
     }
 
