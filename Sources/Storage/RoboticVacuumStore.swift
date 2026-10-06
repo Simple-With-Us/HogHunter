@@ -87,9 +87,18 @@ final class RoboticVacuumStore: ObservableObject {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
             proc.arguments = [script.path, "--set-step", stepId, enabled ? "on" : "off"]
-            try? proc.run()
-            proc.waitUntilExit()
-            await MainActor.run { self?.refresh() }
+            proc.standardOutput = Pipe()
+            proc.standardError = Pipe()
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                await MainActor.run { self?.refresh() }
+            } catch {
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.refresh()
+                }
+            }
         }
     }
 

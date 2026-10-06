@@ -147,6 +147,84 @@ class TestSteps(unittest.TestCase):
         ids = steps_for_trigger(cfg, "full")
         self.assertNotIn("npm_cache", ids)
 
+    def test_grok_sessions_on_pressure_trigger(self):
+        cfg = load_config()
+        ids = steps_for_trigger(cfg, "pressure", pressure=True)
+        self.assertIn("grok_sessions", ids)
+
+
+class TestLockSkip(unittest.TestCase):
+    def test_run_skipped_for_lock(self):
+        from vacuum.scheduler import run_skipped_for_lock
+
+        record = RunRecord("x", TriggerKind.JANITOR, started_at=time.time())
+        record.steps.append(
+            StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason="peer holds housekeeper lock")
+        )
+        record.finish(0, summary="skipped; peer holds lock")
+        self.assertTrue(run_skipped_for_lock(record))
+
+    def test_scheduler_does_not_advance_on_lock_skip(self):
+        from unittest.mock import patch
+
+        from vacuum.scheduler import run_scheduler_tick
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data = home / "rv"
+            data.mkdir(parents=True)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(data)
+            cfg["intervals_seconds"] = {"watch": 1, "janitor": 99999, "full": 99999}
+            store = VacuumStore(cfg, home=home)
+            now = time.time()
+            store.touch_scheduler("last_janitor", now)
+            store.touch_scheduler("last_full", now)
+            record = RunRecord("x", TriggerKind.WATCH, started_at=now)
+            record.steps.append(
+                StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason="held")
+            )
+            record.finish(0, summary="watch skipped; lock held")
+
+            with patch("vacuum.scheduler.VacuumEngine") as engine_cls:
+                engine = engine_cls.return_value
+                engine.run_watch_tick.return_value = (record, [], False)
+                run_scheduler_tick(store, now=now)
+            state = store.scheduler_state()
+            self.assertNotIn("last_watch", state)
+
+
+class TestDryRun(unittest.TestCase):
+    def test_destructive_step_skipped_in_dry_run(self):
+        from unittest.mock import patch
+
+        from vacuum.engine import VacuumEngine
+
+        cfg = load_config()
+        cfg["hoghunter_clean"] = "/no/such/script"
+        engine = VacuumEngine(cfg, Path("/tmp"))
+        with patch.object(sys, "platform", "darwin"):
+            _freed, reason, status = engine._dispatch("brew_cleanup", False, "cheap", {}, "normal", dry_run=True)
+        self.assertEqual(status, StepStatus.SKIPPED)
+        self.assertIn("dry run", reason)
+
+
+class TestHealth(unittest.TestCase):
+    def test_launchd_not_required_for_healthy(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data = home / "rv"
+            data.mkdir(parents=True)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(data)
+            store = VacuumStore(cfg, home=home)
+            with patch("vacuum.alerts.launchd_loaded", return_value=False):
+                status = build_status(store, cfg, now=time.time())
+            self.assertEqual(status["health"], "healthy")
+            self.assertFalse(status["launchd_loaded"])
+
 
 if __name__ == "__main__":
     unittest.main()

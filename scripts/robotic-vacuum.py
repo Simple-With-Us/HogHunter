@@ -26,7 +26,7 @@ from vacuum.alerts import evaluate_alerts, notify_macos  # noqa: E402
 from vacuum.config import STEP_CATALOG, load_config  # noqa: E402
 from vacuum.engine import VacuumEngine  # noqa: E402
 from vacuum.models import TriggerKind  # noqa: E402
-from vacuum.scheduler import build_status, run_scheduler_tick  # noqa: E402
+from vacuum.scheduler import build_status, run_scheduler_tick, run_skipped_for_lock  # noqa: E402
 from vacuum.store import VacuumStore  # noqa: E402
 
 
@@ -71,14 +71,16 @@ def main(argv: list[str] | None = None) -> int:
             store.append_run(record)
             patch = {k: watch_scratch[k] for k in ("prev_disk_free_gb", "last_clean_at") if k in watch_scratch}
             store.merge_scheduler_state(patch)
-            store.touch_scheduler("last_watch")
+            if not run_skipped_for_lock(record):
+                store.touch_scheduler("last_watch")
         else:
             trigger = TriggerKind(args.run_now if args.run_now != "pressure" else "pressure")
             pressure = args.run_now == "pressure"
             band = "full" if pressure else "cheap"
             record = engine.run(trigger, pressure=pressure, band=band)
             store.append_run(record)
-            store.touch_scheduler(f"last_{args.run_now if args.run_now != 'pressure' else 'full'}")
+            if not run_skipped_for_lock(record):
+                store.touch_scheduler(f"last_{args.run_now if args.run_now != 'pressure' else 'full'}")
         status = build_status(store, store.cfg)
         store.publish_status(status)
         if args.as_json:

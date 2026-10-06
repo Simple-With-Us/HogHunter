@@ -106,26 +106,49 @@ def os_walk(path: Path):
         yield root, dirs, files
 
 
-def retire_worktrees(
+def retire_candidate(
+    wt_path: str,
+    branch: str,
+    keep_re: re.Pattern[str],
+    stale_days: float,
+    idle_hours: float,
+    git: Callable[..., subprocess.CompletedProcess],
+    gh: Callable[..., subprocess.CompletedProcess],
+) -> bool:
+    wt = Path(wt_path)
+    if keep_re.match(wt_path):
+        return False
+    if (wt / KEEP_SENTINEL).exists():
+        return False
+    if wt_blocking_dirt(wt, git):
+        return False
+    if not worktree_idle_hours(wt, idle_hours):
+        return False
+    if not pr_merged(wt, branch, git, gh):
+        return False
+    try:
+        mtime = wt.stat().st_mtime
+        if time.time() - mtime < stale_days * 86400:
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def plan_retire_worktrees(
     cfg: dict[str, Any],
     home: Path,
     git: Callable[..., subprocess.CompletedProcess],
     gh: Callable[..., subprocess.CompletedProcess],
-    dry_run: bool = False,
-) -> tuple[int, int, str]:
-    """Return (retired_count, bytes_estimate, detail)."""
+) -> list[tuple[str, str]]:
+    """Expensive git/gh checks without holding the housekeeper lock."""
     janitor_cfg = cfg.get("janitor", {})
     if not janitor_cfg.get("reap_worktrees", True):
-        return 0, 0, "worktree retirement disabled"
+        return []
     keep_re = re.compile(cfg.get("keep_worktree_regex") or "")
     stale_days = float(janitor_cfg.get("stale_days", 7))
     idle_hours = float(janitor_cfg.get("idle_hours", 4))
-    retired = 0
-    detail_parts: list[str] = []
-
-    def bump() -> None:
-        nonlocal retired
-        retired += 1
+    candidates: list[tuple[str, str]] = []
 
     for repo in cfg.get("repos") or []:
         repo_path = Path(repo)
@@ -145,21 +168,53 @@ def retire_worktrees(
             elif line.startswith("branch "):
                 branch = line.split(" ", 1)[1].strip()
             elif line == "" and wt_path:
-                _maybe_retire(
-                    wt_path,
-                    branch,
-                    keep_re,
-                    stale_days,
-                    idle_hours,
-                    git,
-                    gh,
-                    dry_run,
-                    on_retire=bump,
-                    detail_parts=detail_parts,
-                )
+                if retire_candidate(wt_path, branch, keep_re, stale_days, idle_hours, git, gh):
+                    candidates.append((wt_path, branch))
                 wt_path = ""
                 branch = ""
+    return candidates
+
+
+def apply_retire_worktrees(
+    candidates: list[tuple[str, str]],
+    git: Callable[..., subprocess.CompletedProcess],
+    dry_run: bool = False,
+) -> tuple[int, int, str]:
+    """Remove planned worktrees; keep this fast for the housekeeper lock."""
+    retired = 0
+    detail_parts: list[str] = []
+    for wt_path, _branch in candidates:
+        if dry_run:
+            detail_parts.append(f"would-retire {wt_path}")
+            continue
+        wt = Path(wt_path)
+        try:
+            repo_root = main_repo_root(wt, git)
+            res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)
+            if res.returncode == 0:
+                retired += 1
+                detail_parts.append(f"retired {wt_path}")
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
     return retired, 0, "; ".join(detail_parts) if detail_parts else "no worktrees retired"
+
+
+def retire_worktrees(
+    cfg: dict[str, Any],
+    home: Path,
+    git: Callable[..., subprocess.CompletedProcess],
+    gh: Callable[..., subprocess.CompletedProcess],
+    dry_run: bool = False,
+    candidates: list[tuple[str, str]] | None = None,
+) -> tuple[int, int, str]:
+    """Return (retired_count, bytes_estimate, detail)."""
+    janitor_cfg = cfg.get("janitor", {})
+    if not janitor_cfg.get("reap_worktrees", True):
+        return 0, 0, "worktree retirement disabled"
+    planned = candidates if candidates is not None else plan_retire_worktrees(cfg, home, git, gh)
+    if not planned:
+        return 0, 0, "no worktrees retired"
+    return apply_retire_worktrees(planned, git, dry_run=dry_run)
 
 
 def _maybe_retire(
@@ -174,26 +229,12 @@ def _maybe_retire(
     on_retire: Callable[[], None],
     detail_parts: list[str],
 ) -> None:
-    wt = Path(wt_path)
-    if keep_re.match(wt_path):
-        return
-    if (wt / KEEP_SENTINEL).exists():
-        return
-    if wt_blocking_dirt(wt, git):
-        return
-    if not worktree_idle_hours(wt, idle_hours):
-        return
-    if not pr_merged(wt, branch, git, gh):
-        return
-    try:
-        mtime = wt.stat().st_mtime
-        if time.time() - mtime < stale_days * 86400:
-            return
-    except OSError:
+    if not retire_candidate(wt_path, branch, keep_re, stale_days, idle_hours, git, gh):
         return
     if dry_run:
         detail_parts.append(f"would-retire {wt_path}")
         return
+    wt = Path(wt_path)
     try:
         repo_root = main_repo_root(wt, git)
         res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)

@@ -70,7 +70,7 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
     },
     "grok_sessions": {
         "title": "Prune old Grok chat sessions",
-        "triggers": ["full"],
+        "triggers": ["full", "pressure"],
     },
     "antigravity_brain": {
         "title": "Prune old Antigravity brain folders",

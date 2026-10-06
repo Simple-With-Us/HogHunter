@@ -6,7 +6,14 @@ from typing import Any
 from .config import load_config
 from .engine import VacuumEngine
 from .models import TriggerKind
+from .models import RunRecord
 from .store import VacuumStore
+
+
+def run_skipped_for_lock(record: RunRecord) -> bool:
+    if record.summary and "lock" in record.summary.lower():
+        return True
+    return any(s.step_id == "housekeeper_lock" for s in record.steps)
 
 
 def should_run(store: VacuumStore, cfg: dict[str, Any], kind: str, now: float | None = None) -> bool:
@@ -37,19 +44,22 @@ def run_scheduler_tick(store: VacuumStore | None = None, now: float | None = Non
     if should_run(store, cfg, "watch", now):
         record, hits, cleaned = engine.run_watch_tick(watch_scratch, prev_free_f)
         store.append_run(record)
-        store.touch_scheduler("last_watch", now)
+        if not run_skipped_for_lock(record):
+            store.touch_scheduler("last_watch", now)
         results.append({"trigger": "watch", "run_id": record.run_id, "hits": len(hits), "cleaned": cleaned})
 
     if should_run(store, cfg, "janitor", now):
         record = engine.run(TriggerKind.JANITOR)
         store.append_run(record)
-        store.touch_scheduler("last_janitor", now)
+        if not run_skipped_for_lock(record):
+            store.touch_scheduler("last_janitor", now)
         results.append({"trigger": "janitor", "run_id": record.run_id})
 
     if should_run(store, cfg, "full", now):
         record = engine.run(TriggerKind.FULL, band="cheap")
         store.append_run(record)
-        store.touch_scheduler("last_full", now)
+        if not run_skipped_for_lock(record):
+            store.touch_scheduler("last_full", now)
         results.append({"trigger": "full", "run_id": record.run_id})
 
     if watch_scratch:
@@ -94,9 +104,6 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
         health = "failed"
 
     from .alerts import launchd_loaded
-
-    if not launchd_loaded():
-        health = "unloaded"
 
     step_states: dict[str, Any] = {}
     if last_record:

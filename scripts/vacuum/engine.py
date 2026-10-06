@@ -12,12 +12,17 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import STEP_CATALOG, expand_path, step_enabled, steps_for_trigger
-from .janitor import retire_worktrees
+from .janitor import plan_retire_worktrees, retire_worktrees
 from .lock import HousekeeperLock, LockHeld
 from .models import RunRecord, StepResult, StepStatus, TriggerKind
 from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 
 KEEP_SENTINEL = ".janitor-keep"
+
+# Steps that interpret dry_run themselves (planning vs destructive apply).
+_DRY_RUN_AWARE_STEPS = frozenset(
+    {"resource_sample", "janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps"}
+)
 
 
 def _subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -29,6 +34,7 @@ class VacuumEngine:
         self.home = home or Path.home()
         self.cfg = cfg
         self.lock_path = expand_path(str(cfg.get("housekeeper_lock", "")), self.home)
+        self._planned_retire_candidates: list[tuple[str, str]] | None = None
 
     def run(
         self,
@@ -44,11 +50,16 @@ class VacuumEngine:
             band=band,
             pressure=pressure,
         )
+        step_ids = steps_for_trigger(self.cfg, trigger.value, pressure=pressure)
+        self._planned_retire_candidates = None
+        if "janitor_worktree_retire" in step_ids:
+            self._planned_retire_candidates = plan_retire_worktrees(
+                self.cfg, self.home, _subprocess_run, _subprocess_run
+            )
         try:
             with HousekeeperLock(self.lock_path):
                 sample = sample_mac()
                 mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
-                step_ids = steps_for_trigger(self.cfg, trigger.value, pressure=pressure)
                 for step_id in step_ids:
                     if not step_enabled(self.cfg, step_id):
                         continue
@@ -67,6 +78,8 @@ class VacuumEngine:
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
             )
             record.finish(0, summary="skipped; peer holds lock")
+        finally:
+            self._planned_retire_candidates = None
         return record
 
     def run_watch_tick(self, rw_state: dict[str, Any], prev_free: Optional[float]) -> tuple[RunRecord, list[dict[str, Any]], bool]:
@@ -145,6 +158,9 @@ class VacuumEngine:
         if sys.platform != "darwin" and step_id not in ("resource_sample",):
             return 0, "skipped on non-macOS host", StepStatus.SKIPPED
 
+        if dry_run and step_id not in _DRY_RUN_AWARE_STEPS:
+            return 0, "dry run; no changes", StepStatus.SKIPPED
+
         handlers: dict[str, Callable[..., tuple[int, str, StepStatus]]] = {
             "resource_sample": lambda: (0, "sampled", StepStatus.RAN),
             "xcode_device_support": self._xcode_device_support,
@@ -162,7 +178,7 @@ class VacuumEngine:
             "codex_archived_sessions": self._codex_archived_sessions,
             "grok_sessions": lambda: self._grok_sessions(pressure),
             "antigravity_brain": self._antigravity_brain,
-            "pressure_apps_deps": lambda: self._pressure_apps_deps() if pressure else (0, "not under pressure", StepStatus.SKIPPED),
+            "pressure_apps_deps": lambda: self._pressure_apps_deps(dry_run) if pressure else (0, "not under pressure", StepStatus.SKIPPED),
             "coolify_remote": self._coolify_remote,
             "janitor_worktree_retire": lambda: self._janitor_worktree_retire(dry_run),
             "janitor_cache_reclaim": lambda: self._janitor_cache_reclaim(sample, mode, dry_run),
@@ -373,7 +389,9 @@ class VacuumEngine:
                     pass
         return 0, f"pruned {removed} folder(s)", StepStatus.RAN
 
-    def _pressure_apps_deps(self) -> tuple[int, str, StepStatus]:
+    def _pressure_apps_deps(self, dry_run: bool = False) -> tuple[int, str, StepStatus]:
+        if dry_run:
+            return 0, "dry run; would clear pressure deps", StepStatus.SKIPPED
         keep_re = re.compile(self.cfg.get("keep_worktree_regex") or "")
         apps_glob = str(expand_path(str(self.cfg.get("apps_glob", "~/apps/*")), self.home))
         freed = 0
@@ -438,7 +456,14 @@ class VacuumEngine:
         return 0, "remote maintenance triggered", StepStatus.RAN
 
     def _janitor_worktree_retire(self, dry_run: bool) -> tuple[int, str, StepStatus]:
-        count, _est, detail = retire_worktrees(self.cfg, self.home, _subprocess_run, _subprocess_run, dry_run=dry_run)
+        count, _est, detail = retire_worktrees(
+            self.cfg,
+            self.home,
+            _subprocess_run,
+            _subprocess_run,
+            dry_run=dry_run,
+            candidates=self._planned_retire_candidates,
+        )
         return 0, detail or f"retired {count}", StepStatus.RAN if count or detail else StepStatus.SKIPPED
 
     def _janitor_cache_reclaim(self, sample: dict[str, Any], mode: str, dry_run: bool) -> tuple[int, str, StepStatus]:
