@@ -4,7 +4,7 @@ Infisical is the sole source of truth for Hog Hunter's app-level settings: secre
 
 ## The policy
 
-Everything Hog Hunter's behavior depends on that is not code lives in the selected Infisical project.  Existing connections retain the original `HogHunter` project (`c1df65f2-adb5-4d64-93c0-f47f969feea1`) until the admin explicitly saves another Project ID.  An admin tunes behavior by editing values in Infisical, not by shipping a build.  The app reads those values at launch into an in-memory cache and serves every runtime read from the cache.
+Everything Hog Hunter's behavior depends on that is not code lives in the selected Infisical project.  A Project ID must be entered explicitly; there is no built-in project destination.  An admin tunes behavior by editing values in Infisical, not by shipping a build.  The app reads those values at launch into an in-memory cache and serves every runtime read from the cache.
 
 ## Who owns the Infisical read
 
@@ -79,7 +79,7 @@ Without a Keychain credential the Infisical code paths are inert: the app runs e
 
 ## Selecting another project
 
-Settings > Advanced accepts Client ID, Client Secret, and Project ID.  The host remains `https://app.infisical.com` and the environment remains `dev`.  Legacy Keychain records without a Project ID decode to the original HogHunter project, without migration or a credential rewrite.
+Settings > Advanced accepts Client ID, Client Secret, and Project ID.  The host remains `https://app.infisical.com` and the environment remains `dev`.  Existing Keychain records without a valid Project ID remain unconfigured; the admin must enter all three fields and save.  There is no automatic migration or hard-coded project fallback.
 
 Save first validates nonblank credentials and a UUID Project ID, then authenticates and reads that project's `dev` settings.  Only after both operations succeed does it atomically update the Keychain and activate the new connection.  Authentication, access, or Keychain failures leave the previous connection and cache usable.  Secrets are not trimmed, logged, or included in error messages.
 
