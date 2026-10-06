@@ -105,13 +105,19 @@ enum InfisicalError: Error, CustomStringConvertible {
     case httpStatus(Int, String)
     case decoding(String)
     case notConfigured
+    case invalidConfiguration
+    case configurationChanged
+    case saveInProgress
 
     var description: String {
         switch self {
-        case .transport(let e): return "network error: \(e.localizedDescription)"
-        case .httpStatus(let code, let body): return "HTTP \(code): \(body.prefix(200))"
+        case .transport: return "Infisical network request failed"
+        case .httpStatus(let code, _): return "Infisical request failed (HTTP \(code))"
         case .decoding(let what): return "could not decode \(what)"
         case .notConfigured: return "Infisical is not configured (no credential in Keychain)"
+        case .invalidConfiguration: return "Enter a Client ID, Client Secret, and valid Project ID"
+        case .configurationChanged: return "The Infisical connection changed; try again"
+        case .saveInProgress: return "An Infisical connection save is already in progress"
         }
     }
 }
@@ -121,6 +127,16 @@ enum InfisicalError: Error, CustomStringConvertible {
 struct InfisicalCredential: Codable {
     var clientId: String
     var clientSecret: String
+    /// Older Keychain records omit this field and keep the original destination.
+    var projectId: String? = nil
+
+    var effectiveProjectId: String { (projectId ?? InfisicalClient.projectId).lowercased() }
+}
+
+protocol InfisicalServing {
+    func login(clientId: String, clientSecret: String) async throws -> String
+    func fetchSecrets(accessToken: String, environment: String, projectId: String) async throws -> [String: String]
+    func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String) async throws
 }
 
 // MARK: - REST client
@@ -129,7 +145,7 @@ struct InfisicalCredential: Codable {
 /// /api/v3/secrets/raw for reads and /api/v3/secrets (PATCH) for
 /// write-through.  The URLSession is injectable so tests can stub the
 /// network without touching the real service.
-final class InfisicalClient {
+final class InfisicalClient: InfisicalServing {
     static let baseURL = URL(string: "https://app.infisical.com")!
     static let projectId = "c1df65f2-adb5-4d64-93c0-f47f969feea1"
 
@@ -169,7 +185,7 @@ final class InfisicalClient {
     }
 
     /// Full settings set for the environment, as key -> value.
-    func fetchSecrets(accessToken: String, environment: String) async throws -> [String: String] {
+    func fetchSecrets(accessToken: String, environment: String, projectId: String) async throws -> [String: String] {
         var components = URLComponents(
             url: baseURL.appendingPathComponent("/api/v3/secrets/raw"),
             resolvingAgainstBaseURL: false
@@ -201,7 +217,7 @@ final class InfisicalClient {
     /// Write-through: create-or-update a single secret.  The secret name goes
     /// in the path (PATCH /api/v3/secrets/{name}); the caller must already
     /// hold a valid access token.
-    func upsertSecret(accessToken: String, environment: String, key: String, value: String) async throws {
+    func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String) async throws {
         var url = baseURL.appendingPathComponent("/api/v3/secrets")
         url.appendPathComponent(key)
         var request = URLRequest(url: url)
@@ -217,6 +233,14 @@ final class InfisicalClient {
         try check(response, data: data)
     }
 
+    func fetchSecrets(accessToken: String, environment: String) async throws -> [String: String] {
+        try await fetchSecrets(accessToken: accessToken, environment: environment, projectId: projectId)
+    }
+
+    func upsertSecret(accessToken: String, environment: String, key: String, value: String) async throws {
+        try await upsertSecret(accessToken: accessToken, environment: environment, key: key, value: value, projectId: projectId)
+    }
+
     private func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
         do {
             return try await session.data(for: request)
@@ -230,8 +254,8 @@ final class InfisicalClient {
             throw InfisicalError.decoding("HTTP response")
         }
         guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw InfisicalError.httpStatus(http.statusCode, body)
+            // Server error bodies can echo credentials or secret values.
+            throw InfisicalError.httpStatus(http.statusCode, "")
         }
     }
 }
@@ -248,6 +272,27 @@ final class InfisicalStore {
 
     private let lock = NSLock()
     private var values: [String: String] = [:]
+    private var projectId: String?
+
+    /// nil means bootstrap has not resolved a target; "local" means explicitly cleared.
+    static let localProjectId = "local"
+
+    var snapshot: (projectId: String?, values: [String: String]) {
+        lock.lock(); defer { lock.unlock() }
+        return (projectId, values)
+    }
+
+    func selectProject(_ projectId: String) {
+        lock.lock(); defer { lock.unlock() }
+        if self.projectId != projectId { values = [:] }
+        self.projectId = projectId
+    }
+
+    func replace(_ values: [String: String], projectId: String) {
+        lock.lock(); defer { lock.unlock() }
+        self.projectId = projectId
+        self.values = values
+    }
 
     init(initial: [String: String] = [:]) {
         self.values = initial
@@ -319,9 +364,20 @@ final class InfisicalSettings: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var lastError: String?
+    @Published private(set) var isSaving = false
+    @Published private(set) var projectId = InfisicalClient.projectId
 
-    private let client: InfisicalClient
+    private let client: InfisicalServing
     private let store: InfisicalStore
+    private let credentialWriter: (InfisicalCredential) throws -> Void
+    private let credentialRemover: () throws -> Void
+    private var generation = UUID()
+    private var activeSave: UUID?
+
+    /// Capture before scheduling work, so an old UI edit cannot target a newer connection.
+    var connectionGeneration: UUID { generation }
+    var snapshot: (projectId: String?, values: [String: String]) { store.snapshot }
+    private var credentialWasCleared = false
     /// Injectable for tests; nil means "read the Keychain".
     var credentialProvider: (() -> InfisicalCredential?)?
     private var timer: Timer?
@@ -329,13 +385,17 @@ final class InfisicalSettings: ObservableObject {
     private var becomeActiveObserver: NSObjectProtocol?
 
     init(
-        client: InfisicalClient = InfisicalClient(),
+        client: InfisicalServing = InfisicalClient(),
         store: InfisicalStore = .shared,
-        credentialProvider: (() -> InfisicalCredential?)? = nil
+        credentialProvider: (() -> InfisicalCredential?)? = nil,
+        credentialWriter: ((InfisicalCredential) throws -> Void)? = nil,
+        credentialRemover: (() throws -> Void)? = nil
     ) {
         self.client = client
         self.store = store
         self.credentialProvider = credentialProvider
+        self.credentialWriter = credentialWriter ?? Self.writeCredentialToKeychain
+        self.credentialRemover = credentialRemover ?? Self.removeCredentialFromKeychain
     }
 
     // MARK: - Lifecycle
@@ -346,9 +406,19 @@ final class InfisicalSettings: ObservableObject {
     func bootstrap() async {
         guard !bootstrapped else { return }
         bootstrapped = true
-        isConfigured = credential() != nil
-        if isConfigured {
+        if let credential = credential() {
+            isConfigured = true
+            projectId = credential.effectiveProjectId
+            // Reconcile persisted effective values before the first network suspension.
+            // This also protects a launch after a Keychain save interrupted by process exit.
+            store.selectProject(projectId)
+            NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
             await refresh()
+        } else {
+            // Resolve startup to local mode so scoped fallback cannot leak and
+            // local edits remain persistable when the Keychain is unavailable.
+            store.selectProject(InfisicalStore.localProjectId)
+            NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
         }
         startRefreshTimer()
         becomeActiveObserver = NotificationCenter.default.addObserver(
@@ -366,30 +436,35 @@ final class InfisicalSettings: ObservableObject {
     /// logs loudly (lastError, for the Advanced tab) but keeps serving the
     /// last-known-good cache -- staleness is safer than an outage.
     func refresh() async {
-        guard !isRefreshing else { return }
+        guard !isRefreshing, !isSaving else { return }
         guard let credential = credential() else {
             isConfigured = false
             return
         }
         isConfigured = true
         isRefreshing = true
-        defer { isRefreshing = false }
+        let requestGeneration = generation
+        defer { if generation == requestGeneration { isRefreshing = false } }
         do {
             let token = try await client.login(
                 clientId: credential.clientId,
                 clientSecret: credential.clientSecret
             )
+            guard generation == requestGeneration else { return }
             let secrets = try await client.fetchSecrets(
                 accessToken: token,
-                environment: Self.environment
+                environment: Self.environment,
+                projectId: credential.effectiveProjectId
             )
-            store.setAll(secrets)
+            guard generation == requestGeneration else { return }
+            store.replace(secrets, projectId: credential.effectiveProjectId)
             lastRefresh = Date()
             lastError = nil
             NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
         } catch {
-            // Cache untouched: last-known-good keeps serving.
-            lastError = String(describing: error)
+            // Only this connection may update its cache or status.
+            guard generation == requestGeneration else { return }
+            lastError = Self.safeMessage(for: error)
         }
     }
 
@@ -397,28 +472,29 @@ final class InfisicalSettings: ObservableObject {
     /// the local cache updates only after it succeeds.  A failed write
     /// throws and the save must be treated as failed -- the cache and
     /// Infisical never diverge silently.
-    func set(_ value: String, forKey key: String) async throws {
-        guard let credential = credential() else {
-            throw InfisicalError.notConfigured
-        }
+    func set(_ value: String, forKey key: String, expectedGeneration: UUID? = nil) async throws {
+        if let expectedGeneration, expectedGeneration != generation { throw InfisicalError.configurationChanged }
+        guard !isSaving else { throw InfisicalError.saveInProgress }
+        guard let credential = credential() else { throw InfisicalError.notConfigured }
+        let requestGeneration = generation
         do {
-            let token = try await client.login(
-                clientId: credential.clientId,
-                clientSecret: credential.clientSecret
-            )
+            let token = try await client.login(clientId: credential.clientId, clientSecret: credential.clientSecret)
+            guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
             try await client.upsertSecret(
-                accessToken: token,
-                environment: Self.environment,
-                key: key,
-                value: value
+                accessToken: token, environment: Self.environment, key: key, value: value,
+                projectId: credential.effectiveProjectId
             )
+            guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
             store.set(value, forKey: key)
         } catch {
-            // Recorded for the Advanced tab; still thrown so the caller
-            // treats the save as failed.
-            lastError = String(describing: error)
+            if generation == requestGeneration { lastError = Self.safeMessage(for: error) }
             throw error
         }
+    }
+
+    /// Do not expose response bodies, transport details, or arbitrary errors.
+    static func safeMessage(for error: Error) -> String {
+        (error as? InfisicalError)?.description ?? "Infisical operation failed"
     }
 
     // MARK: - Refresh scheduling
@@ -452,8 +528,13 @@ final class InfisicalSettings: ObservableObject {
     private var inMemoryCredential: InfisicalCredential?
 
     private func credential() -> InfisicalCredential? {
-        if let provider = credentialProvider { return provider() }
+        if credentialWasCleared { return nil }
         if let cached = inMemoryCredential { return cached }
+        if let provider = credentialProvider {
+            let loaded = provider()
+            inMemoryCredential = loaded
+            return loaded
+        }
         let loaded = Self.readCredentialFromKeychain()
         inMemoryCredential = loaded
         return loaded
@@ -465,39 +546,97 @@ final class InfisicalSettings: ObservableObject {
     /// The one place the client secret is accepted: typed in by the admin,
     /// then stored in the Keychain.  Never in the binary, never in
     /// UserDefaults, never in a file.
-    func saveCredential(clientId: String, clientSecret: String) throws {
-        let credential = InfisicalCredential(clientId: clientId, clientSecret: clientSecret)
+    func saveCredential(clientId: String, clientSecret: String, projectId: String) async throws {
+        guard !isSaving else { throw InfisicalError.saveInProgress }
+        let clientId = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectId = projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !clientId.isEmpty,
+              !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              UUID(uuidString: projectId) != nil else { throw InfisicalError.invalidConfiguration }
+        let candidate = InfisicalCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
+        let requestGeneration = generation
+        let saveID = UUID()
+        activeSave = saveID
+        isSaving = true
+        defer {
+            if activeSave == saveID {
+                activeSave = nil
+                isSaving = false
+            }
+        }
+        do {
+            // A valid identity alone is insufficient: verify project + dev read access.
+            let token = try await client.login(clientId: candidate.clientId, clientSecret: candidate.clientSecret)
+            guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
+            let secrets = try await client.fetchSecrets(
+                accessToken: token, environment: Self.environment, projectId: candidate.effectiveProjectId
+            )
+            guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
+            // Update the existing record atomically; a failed save keeps the working connection.
+            try credentialWriter(candidate)
+            generation = UUID()
+            inMemoryCredential = candidate
+            credentialWasCleared = false
+            self.projectId = candidate.effectiveProjectId
+            isConfigured = true
+            isRefreshing = false
+            // Replace, never merge: nothing from the previous target survives.
+            store.replace(secrets, projectId: candidate.effectiveProjectId)
+            lastRefresh = Date()
+            lastError = nil
+            NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
+        } catch {
+            if generation == requestGeneration { lastError = Self.safeMessage(for: error) }
+            throw error
+        }
+    }
+
+    private static func writeCredentialToKeychain(_ credential: InfisicalCredential) throws {
         let data = try JSONEncoder().encode(credential)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
         ]
-        SecItemDelete(query as CFDictionary)
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-        ]
-        let status = SecItemAdd(add as CFDictionary, nil)
+        let attributes: [String: Any] = [kSecValueData as String: data]
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
         guard status == errSecSuccess else {
             throw InfisicalError.decoding("Keychain save failed (OSStatus \(status))")
         }
-        inMemoryCredential = credential
-        isConfigured = true
     }
 
-    func clearCredential() {
+    func clearCredential() throws {
+        try credentialRemover()
+        generation = UUID()
+        credentialWasCleared = true
+        activeSave = nil
+        isSaving = false
         inMemoryCredential = nil
+        isConfigured = false
+        isRefreshing = false
+        projectId = InfisicalClient.projectId
+        store.replace([:], projectId: InfisicalStore.localProjectId)
+        lastRefresh = nil
+        lastError = nil
+        NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
+    }
+
+    private static func removeCredentialFromKeychain() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
         ]
-        SecItemDelete(query as CFDictionary)
-        isConfigured = false
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw InfisicalError.decoding("Keychain removal failed (OSStatus \(status))")
+        }
     }
 
     private static func readCredentialFromKeychain() -> InfisicalCredential? {
