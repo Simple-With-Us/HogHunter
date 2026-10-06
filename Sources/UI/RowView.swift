@@ -172,6 +172,9 @@ enum HogActions {
     /// force unwrap here would take the whole panel down over a decorative
     /// image.
     static let activityMonitorIcon: NSImage = {
+        if let bundleImage = NSImage(named: "ActivityMonitorIcon") {
+            return bundleImage
+        }
         let icon = NSWorkspace.shared.icon(forFile: activityMonitorURL.path)
         guard icon.isValid else {
             return NSImage(systemSymbolName: "gauge.with.dots.needle.50percent", accessibilityDescription: "Activity Monitor")
@@ -197,15 +200,14 @@ enum HogActions {
     /// guards the fix.
     @MainActor
     static func frontSettingsWindow() {
-        // The panel is only dismissed once there is a real window to put in
-        // front of it.  Closing the panel first and then failing to find the
-        // window would leave the user with nothing open at all.
         guard let window = AppActivationManager.shared.window(for: .settings)
                 ?? NSApp.windows.first(where: { $0.title.contains("Settings") && $0.styleMask.contains(.titled) }) else {
             return
         }
         if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
-        hidePanels()
+        // Elevate level so it sits on top of the menu bar panel (level 101)
+        window.level = NSWindow.Level(Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        AppActivationManager.shared.attachSettingsFocusObservers(for: window)
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
@@ -267,8 +269,13 @@ enum HogActions {
     /// something, which is exactly the bug this hides.
     @MainActor
     static func hidePanels() {
+        let settingsWindow = AppActivationManager.shared.window(for: .settings)
         for window in NSApp.windows {
-            if window is NSPanel || window.className.contains("MenuBarExtra") || window.styleMask.contains(.nonactivatingPanel) {
+            if let settings = settingsWindow, window === settings { continue }
+            if window is NSPanel
+                || window.className.contains("MenuBarExtra")
+                || window.styleMask.contains(.nonactivatingPanel)
+                || window.level.rawValue >= NSWindow.Level.statusBar.rawValue {
                 window.orderOut(nil)
             }
         }

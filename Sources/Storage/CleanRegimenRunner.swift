@@ -237,7 +237,7 @@ final class CleanRegimenRunner: ObservableObject {
         case .logsAndDiagnostics: return "logs"
         case .developer: return "xcode-artifacts"
         case .trash: return "temp-scratch"
-        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
+        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots:
             return "xcode-artifacts"
         }
     }

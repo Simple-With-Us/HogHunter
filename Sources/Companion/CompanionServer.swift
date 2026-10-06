@@ -2,8 +2,8 @@ import Darwin
 import Foundation
 import Network
 
-/// Advertises Hog Hunter on the local network and answers one read-only
-/// snapshot route.  The pairing code stays in the request header.
+/// Advertises Hog Hunter on the local network and serves companion telemetry
+/// and remote control routes.  The pairing code stays in the request header.
 final class CompanionServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "hoghunter.companion")
     private var listener: NWListener?
@@ -94,10 +94,47 @@ final class CompanionServer: @unchecked Sendable {
     }
 
     var allowRemoteQuit = false
+    /// Off until the owner turns on "Allow iPhone to Run Disk Cleaner" in
+    /// Settings, or ticks it when approving a phone.
+    var allowRemoteClean = false
     var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil
     var onRemoteTame: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil
+    var onRemoteClean: (() -> (status: Int, body: Data))? = nil
     var onRemoteExclusionsUpdate: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil
     var onRemoteViewUpdate: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
+    /// Asks the person at the Mac whether `deviceName` may pair.  Called on
+    /// the server queue; `reply` may be called from any thread, once.
+    var onRemotePair: ((_ deviceName: String, _ reply: @escaping @Sendable (Bool) -> Void) -> Void)? = nil
+    /// One approval alert at a time, so a flood of requests cannot stack
+    /// alerts on the Mac.  Touched only on `queue`.
+    private var pairPending = false
+    private var lastPairPromptAt: Date = .distantPast
+
+    /// Pairing waits on a person, so it is answered off the synchronous
+    /// router and never holds the queue that serves snapshots.
+    private func handlePair(_ connection: NWConnection, deviceName: String) {
+        let send: @Sendable (Data) -> Void = { response in
+            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+        }
+        guard let ask = onRemotePair else {
+            send(CompanionHTTP.pairResponse(approvedToken: nil))
+            return
+        }
+        guard !pairPending, Date().timeIntervalSince(lastPairPromptAt) >= 5.0 else {
+            send(CompanionHTTP.pairBusyResponse())
+            return
+        }
+        pairPending = true
+        lastPairPromptAt = Date()
+        ask(deviceName) { [weak self] approved in
+            guard let self else { return }
+            self.queue.async {
+                self.pairPending = false
+                self.lastPairPromptAt = Date()
+                send(CompanionHTTP.pairResponse(approvedToken: approved ? self.token : nil))
+            }
+        }
+    }
 
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] data, _, isComplete, error in
@@ -116,12 +153,24 @@ final class CompanionServer: @unchecked Sendable {
                     self.receive(connection, buffer: buffer)
                     return
                 }
+                if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
+                    self.handlePair(connection, deviceName: deviceName)
+                    return
+                }
                 let response = CompanionHTTP.response(
                     request: buffer,
                     body: self.payload,
                     token: self.token,
                     cleanHandler: { [weak self] _ in
-                        self?.handleRemoteClean() ?? (status: 500, body: Data("{}".utf8))
+                        guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                        guard self.allowRemoteClean else {
+                            let res = ["status": "forbidden", "error": "Running the disk cleaner from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings on the Mac."]
+                            return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+                        }
+                        if let handler = self.onRemoteClean {
+                            return handler()
+                        }
+                        return self.handleRemoteClean()
                     },
                     quitHandler: { [weak self] pid, force in
                         guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }

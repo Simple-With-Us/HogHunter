@@ -20,8 +20,9 @@ invite is not yet a usable installation path.
 - Marketing version is prepared as `1.0.4` for the first upload.  The previous
   `1.0.0` was a simulator-only project version, not an App Store build.
 - `ios/Info.plist` declares Bonjour `_hoghunter._tcp`, local-network usage,
-  and `ITSAppUsesNonExemptEncryption=false`.  The app only requests a Mac
-  snapshot over the local network; it cannot quit processes.
+  and `ITSAppUsesNonExemptEncryption=false`.  The app connects to the Mac app
+  over the local network or Tailscale; process control and disk cleaning require
+  explicit opt-in in Mac Settings.
 - GitHub CI run `36227076281` built the iOS scheme for generic Simulator.
   A signed device archive and TestFlight upload remain unverified.
 - External group `79295c7f-f69f-4614-9ed3-9a16691380ff` has the public invite

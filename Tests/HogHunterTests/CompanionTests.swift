@@ -390,4 +390,246 @@ final class CompanionStorageTelemetryTests: XCTestCase {
         )
         XCTAssertNotNil(snapshot.storage, "the phone renders nothing without this")
     }
+
+    // MARK: - Approve-on-Mac pairing
+
+    func testPairRequestRoundTripsTheDeviceName() {
+        let request = CompanionHTTP.pairRequest(deviceName: "Jay’s iPhone & Co")
+        XCTAssertEqual(CompanionHTTP.pairDeviceName(in: request), "Jay’s iPhone & Co")
+    }
+
+    func testPairDeviceNameIsSanitizedAndCapped() {
+        let hostile = String(repeating: "A", count: 200) + "\u{0007}"
+        let request = CompanionHTTP.pairRequest(deviceName: hostile)
+        let name = CompanionHTTP.pairDeviceName(in: request)
+        XCTAssertEqual(name?.count, CompanionHTTP.maxDeviceNameLength)
+        XCTAssertFalse(name?.contains("\u{0007}") ?? true)
+    }
+
+    func testOnlyPostToPairPathIsAPairRequest() {
+        XCTAssertNil(CompanionHTTP.pairDeviceName(in: CompanionHTTP.request(token: "ABCD2345")))
+        let get = Data("GET /v1/pair?device=x HTTP/1.1\r\n\r\n".utf8)
+        XCTAssertNil(CompanionHTTP.pairDeviceName(in: get))
+        let blank = Data("POST /v1/pair HTTP/1.1\r\n\r\n".utf8)
+        XCTAssertEqual(CompanionHTTP.pairDeviceName(in: blank), "An iPhone")
+    }
+
+    func testPairResponseCarriesTheTokenOnlyWhenApproved() throws {
+        let yes = try XCTUnwrap(CompanionHTTP.parseResponse(CompanionHTTP.pairResponse(approvedToken: "ABCD2345")))
+        XCTAssertEqual(yes.status, 200)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: yes.body) as? [String: String])
+        XCTAssertEqual(json["token"], "ABCD2345")
+
+        let no = try XCTUnwrap(CompanionHTTP.parseResponse(CompanionHTTP.pairResponse(approvedToken: nil)))
+        XCTAssertEqual(no.status, 403)
+        XCTAssertFalse(String(decoding: no.body, as: UTF8.self).contains("ABCD2345"))
+        XCTAssertEqual(CompanionHTTP.parseResponse(CompanionHTTP.pairBusyResponse())?.status, 429)
+    }
+
+    func testPairPathStillNeedsTokenOnTheNormalRouter() {
+        // The server intercepts pairing before the router.  If anything ever
+        // reaches the router on /v1/pair, it must not leak the snapshot.
+        let response = CompanionHTTP.response(
+            request: Data("GET /v1/pair HTTP/1.1\r\n\r\n".utf8),
+            body: Data("{\"secret\":true}".utf8),
+            token: "ABCD2345"
+        )
+        XCTAssertNotEqual(CompanionHTTP.parseResponse(response)?.status, 200)
+    }
+
+    func testSnapshotCarriesRemotePermissions() throws {
+        let snapshot = CompanionSnapshotBuilder.make(
+            hostName: "test", sampledAt: Date(), hasBaseline: true,
+            window: .now, grouping: .apps, scale: .perCore, pulse: MachinePulse.empty, rows: [],
+            remoteQuitAllowed: true, remoteCleanAllowed: false
+        )
+        let decoded = try CompanionJSON.decode(CompanionJSON.encode(snapshot))
+        XCTAssertEqual(decoded.remoteQuitAllowed, true)
+        XCTAssertEqual(decoded.remoteCleanAllowed, false)
+    }
+
+    /// Regression: the "Pair this iPhone?" alert suppressed the `@Published`
+    /// `didSet` publications with `loadingSettings = true` so the snapshot was
+    ///  built once -- but both `didSet`s called `persist()` in that same state,
+    ///  and `persist()` returns early while loading.  The owner's answer was
+    ///  never written to UserDefaults and both flags reverted on next launch.
+    ///  Fix: restore `loadingSettings` before a single `persist()`.
+    @MainActor
+    func testPairAlertPermissionsReachUserDefaults() {
+        let suite = "hoghunter.tests.pairpermissions"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let store = HogStore(defaults: defaults)
+        store.allowRemoteQuit = true
+        store.allowRemoteClean = true
+
+        // Simulate what the alert does: suppress both didSet publications, set
+        // the flags, restore the flag, then persist exactly once.
+        store.setLoadingSettingsForTest(true)
+        store.allowRemoteQuit = true
+        store.allowRemoteClean = true
+        store.setLoadingSettingsForTest(false)
+        store.persistForTest()
+
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteQuit"), true,
+                       "remote-quit permission must survive a restart")
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteClean"), true,
+                       "remote-clean permission must survive a restart")
+
+        // And a fresh store must read the owner's answer back, not reset it.
+        let next = HogStore(defaults: defaults)
+        XCTAssertEqual(next.allowRemoteQuit, true)
+        XCTAssertEqual(next.allowRemoteClean, true)
+    }
+
+    func testSnapshotCarriesCleanProgressRoundTrip() throws {
+        let progress = CompanionCleanProgress(
+            isCleaning: true,
+            phase: "Cleaning",
+            progress: 0.55,
+            statusText: "Removing Xcode DerivedData (5/10)...",
+            currentItem: "Xcode DerivedData",
+            itemsCleaned: 5,
+            totalItems: 10,
+            bytesReclaimed: 104_857_600,
+            formattedBytesReclaimed: "100 MB",
+            snapshotName: "hoghunter-clean-1234",
+            error: nil
+        )
+        let snapshot = CompanionSnapshotBuilder.make(
+            hostName: "test",
+            sampledAt: Date(),
+            hasBaseline: true,
+            window: .now,
+            grouping: .apps,
+            scale: .perCore,
+            pulse: MachinePulse.empty,
+            rows: [],
+            cleanProgress: progress,
+            remoteQuitAllowed: true,
+            remoteCleanAllowed: true
+        )
+        let data = try CompanionJSON.encode(snapshot)
+        let decoded = try CompanionJSON.decode(data)
+        XCTAssertEqual(decoded.cleanProgress, progress)
+        XCTAssertEqual(decoded.cleanProgress?.isCleaning, true)
+        XCTAssertEqual(decoded.cleanProgress?.phase, "Cleaning")
+        XCTAssertEqual(decoded.cleanProgress?.progress, 0.55)
+        XCTAssertEqual(decoded.cleanProgress?.statusText, "Removing Xcode DerivedData (5/10)...")
+        XCTAssertEqual(decoded.cleanProgress?.currentItem, "Xcode DerivedData")
+        XCTAssertEqual(decoded.cleanProgress?.itemsCleaned, 5)
+        XCTAssertEqual(decoded.cleanProgress?.totalItems, 10)
+        XCTAssertEqual(decoded.cleanProgress?.bytesReclaimed, 104_857_600)
+        XCTAssertEqual(decoded.cleanProgress?.formattedBytesReclaimed, "100 MB")
+        XCTAssertEqual(decoded.cleanProgress?.snapshotName, "hoghunter-clean-1234")
+        XCTAssertNil(decoded.cleanProgress?.error)
+    }
+
+    func testCompanionCleanRequestAndResponse() {
+        var cleanCalled = false
+        let handler: (String) -> (status: Int, body: Data) = { _ in
+            cleanCalled = true
+            let res = CompanionCleanResponse(
+                status: "completed",
+                bytesReclaimed: 2_048_000,
+                formattedBytesReclaimed: "2 MB",
+                itemsRemoved: 3,
+                snapshotCreated: true,
+                snapshotName: "hoghunter-clean-1234",
+                tier: "Standard"
+            )
+            return (200, (try? JSONEncoder().encode(res)) ?? Data())
+        }
+
+        let request = CompanionHTTP.cleanRequest(token: "ABCD2345")
+        let response = CompanionHTTP.response(
+            request: request,
+            body: Data(),
+            token: "ABCD2345",
+            cleanHandler: handler
+        )
+        let parsed = CompanionHTTP.parseResponse(response)
+        XCTAssertEqual(parsed?.status, 200)
+        XCTAssertTrue(cleanCalled)
+
+        let decoded = try? JSONDecoder().decode(CompanionCleanResponse.self, from: parsed?.body ?? Data())
+        XCTAssertEqual(decoded?.status, "completed")
+        XCTAssertEqual(decoded?.bytesReclaimed, 2_048_000)
+        XCTAssertEqual(decoded?.formattedBytesReclaimed, "2 MB")
+        XCTAssertEqual(decoded?.itemsRemoved, 3)
+        XCTAssertEqual(decoded?.snapshotCreated, true)
+        XCTAssertEqual(decoded?.snapshotName, "hoghunter-clean-1234")
+        XCTAssertEqual(decoded?.tier, "Standard")
+    }
+}
+
+/// The phone renders a "Mac Storage by App" section from `topApps` in the
+/// snapshot.  These tests pin the host side so a regression surfaces as a
+/// failing XCTest, not as a blank section on someone's iPhone.
+final class CompanionAppStorageTests: XCTestCase {
+
+    override func setUp() {
+        // Each test starts with a clean cache; the scanner is real, so leaving
+        // a populated cache from a previous test would make assertions order-
+        // dependent.
+        CompanionSnapshotBuilder.invalidateTopAppsCache()
+    }
+
+    func testAppStorageRowRoundTripsThroughJSON() throws {
+        let row = CompanionAppStorageRow(
+            id: "com.example.app",
+            name: "Example",
+            bundleId: "com.example.app",
+            totalBytes: 1_500_000_000,
+            bundleBytes: 200_000_000,
+            hiddenBytes: 1_300_000_000,
+            totalText: "1.4 GB",
+            bundleText: "190.7 MB",
+            hiddenText: "1.2 GB",
+            anyApproximate: false,
+            isHiddenHeavy: true
+        )
+        let data = try JSONEncoder().encode(row)
+        let decoded = try JSONDecoder().decode(CompanionAppStorageRow.self, from: data)
+        XCTAssertEqual(decoded, row)
+        XCTAssertTrue(decoded.isHiddenHeavy)
+        XCTAssertFalse(decoded.anyApproximate)
+    }
+
+    func testStorageSummaryDecodesWithoutTopAppsForBackwardCompat() throws {
+        // Older Mac snapshots predate 1.0.6 and have no topApps / topAppsScannedAt.
+        // The decoder must accept them and leave the new fields nil so the
+        // iPhone just hides the new section instead of crashing.
+        let json = """
+        {
+          "freeBytes": 100000,
+          "totalBytes": 1000000,
+          "usedBytes": 900000,
+          "freeText": "100 KB Free",
+          "totalText": "1 MB Total",
+          "usedText": "900 KB Used",
+          "usedPercent": 90.0
+        }
+        """
+        let decoded = try JSONDecoder().decode(CompanionStorageSummary.self,
+                                               from: Data(json.utf8))
+        XCTAssertNil(decoded.topApps)
+        XCTAssertNil(decoded.topAppsScannedAt)
+    }
+
+    func testCurrentStorageSummaryAlwaysCarriesAtLeastAnEmptyTopAppsArray() {
+        // Even on a fresh cache, the snapshot must carry an empty (not nil)
+        // topApps array so the iOS view's `if let apps = ... !apps.isEmpty`
+        // check behaves the same way for every user; only the "scanning"
+        // placeholder is shown when the walk has not returned.
+        let summary = CompanionSnapshotBuilder.currentStorageSummary()
+        XCTAssertNotNil(summary?.topApps)
+    }
+
+    func testCachedTopAppsStartsEmptyAfterInvalidate() {
+        CompanionSnapshotBuilder.invalidateTopAppsCache()
+        XCTAssertTrue(CompanionSnapshotBuilder.cachedTopApps().isEmpty)
+    }
 }

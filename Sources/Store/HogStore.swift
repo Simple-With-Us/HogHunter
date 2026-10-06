@@ -64,7 +64,16 @@ final class HogStore: ObservableObject {
 
     @Published var window: TimeWindow = .now { didSet { persist(); scheduleChoiceChanged() } }
     @Published var grouping: HogGrouping = .apps { didSet { persist(); scheduleChoiceChanged() } }
-    @Published var sort: HogSort = .cpu { didSet { persist(); scheduleChoiceChanged() } }
+    @Published var sort: HogSort = .cpu {
+        didSet {
+            if sort != oldValue {
+                sortAscending = false
+            }
+            persist()
+            scheduleChoiceChanged()
+        }
+    }
+    @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 3 {
@@ -110,7 +119,7 @@ final class HogStore: ObservableObject {
     /// is that first paint follows the OS.  A stored Light or Dark still wins --
     /// only the no-preference fallback changes.
     @Published var appearance: AppearanceChoice = .system { didSet { persist() } }
-    /// Off until the owner turns it on.  The iPhone can read the list.  It cannot quit.
+    /// Off until the owner turns it on.  Shares activity telemetry with the paired iPhone.
     @Published var shareWithIPhone = false {
         didSet {
             persist()
@@ -122,10 +131,24 @@ final class HogStore: ObservableObject {
         didSet {
             persist()
             companionServer.allowRemoteQuit = allowRemoteQuit
+            if !loadingSettings { publishCompanion() }
+        }
+    }
+    /// Off until the owner turns it on in Mac Settings, or ticks it when
+    /// approving a phone.  Gates the phone's Run Safe Clean button.
+    @Published var allowRemoteClean = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteClean = allowRemoteClean
+            if !loadingSettings { publishCompanion() }
         }
     }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
+    /// Current or recently completed disk clean progress, streamed to the iOS companion.
+    @Published private(set) var activeCleanProgress: CompanionCleanProgress? = nil
+    /// Unique run token identifying the current active clean operation.
+    @Published private(set) var activeCleanRunId: UUID? = nil
 
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
@@ -146,6 +169,7 @@ final class HogStore: ObservableObject {
         static let window = "window"
         static let grouping = "grouping"
         static let sort = "sort"
+        static let sortAscending = "sortAscending"
         static let cpuScale = "cpuScale"
         static let menuBarLabelMode = "menuBarLabelMode"
         static let refreshInterval = "refreshInterval"
@@ -156,6 +180,7 @@ final class HogStore: ObservableObject {
         static let appearance = "appearance"
         static let shareWithIPhone = "shareWithIPhone"
         static let allowRemoteQuit = "allowRemoteQuit"
+        static let allowRemoteClean = "allowRemoteClean"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
     }
@@ -512,7 +537,8 @@ final class HogStore: ObservableObject {
     private func buildLiveRows(_ processes: [ProcessSample], groups: [Grouping.Group]) -> [HogRow] {
         if grouping == .processes {
             // Sorted before truncation, so the top 25 really are the top 25.
-            let ranked = processes.sorted(by: processOrder).prefix(Self.rowLimit)
+            let top = processes.sorted(by: processOrderDescending).prefix(Self.rowLimit)
+            let ranked = sortAscending ? Array(top.reversed()) : Array(top)
             let metadata = resolver.resolve(ranked.map(\.key), samples: samples)
             return ranked.map { process in
                 let reason = ProcessControl.blockReason(for: process)
@@ -538,7 +564,8 @@ final class HogStore: ObservableObject {
             }
         }
 
-        let ranked = groups.sorted(by: groupOrder).prefix(Self.rowLimit)
+        let top = groups.sorted(by: groupOrderDescending).prefix(Self.rowLimit)
+        let ranked = sortAscending ? Array(top.reversed()) : Array(top)
         let anchors = ranked.map(Self.anchorKey)
         let metadata = resolver.resolve(anchors, samples: samples)
 
@@ -577,24 +604,58 @@ final class HogStore: ObservableObject {
         return "pid \(group.members[0].key.pid)" + suffix
     }
 
-    private func processOrder(_ a: ProcessSample, _ b: ProcessSample) -> Bool {
+    private func processOrderDescending(_ a: ProcessSample, _ b: ProcessSample) -> Bool {
         switch sort {
         case .cpu:
-            if a.cpuPercent == b.cpuPercent { return a.footprintBytes > b.footprintBytes }
-            return a.cpuPercent > b.cpuPercent
+            let aCpu = a.cpuPercent
+            let bCpu = b.cpuPercent
+            if abs(aCpu - bCpu) < 0.05 {
+                if a.footprintBytes != b.footprintBytes {
+                    return a.footprintBytes > b.footprintBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
+            return aCpu > bCpu
         case .memory:
-            if a.footprintBytes == b.footprintBytes { return a.cpuPercent > b.cpuPercent }
+            let aMemStr = HogFormat.memory(a.footprintBytes)
+            let bMemStr = HogFormat.memory(b.footprintBytes)
+            if aMemStr == bMemStr {
+                if abs(a.cpuPercent - b.cpuPercent) >= 0.05 {
+                    return a.cpuPercent > b.cpuPercent
+                }
+                if a.footprintBytes != b.footprintBytes {
+                    return a.footprintBytes > b.footprintBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
             return a.footprintBytes > b.footprintBytes
         }
     }
 
-    private func groupOrder(_ a: Grouping.Group, _ b: Grouping.Group) -> Bool {
+    private func groupOrderDescending(_ a: Grouping.Group, _ b: Grouping.Group) -> Bool {
         switch sort {
         case .cpu:
-            if a.cpuPercent == b.cpuPercent { return a.memoryBytes > b.memoryBytes }
-            return a.cpuPercent > b.cpuPercent
+            let aCpu = a.cpuPercent
+            let bCpu = b.cpuPercent
+            if abs(aCpu - bCpu) < 0.05 {
+                if a.memoryBytes != b.memoryBytes {
+                    return a.memoryBytes > b.memoryBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
+            return aCpu > bCpu
         case .memory:
-            if a.memoryBytes == b.memoryBytes { return a.cpuPercent > b.cpuPercent }
+            let aMemStr = HogFormat.memory(a.memoryBytes)
+            let bMemStr = HogFormat.memory(b.memoryBytes)
+            if aMemStr == bMemStr {
+                if abs(a.cpuPercent - b.cpuPercent) >= 0.05 {
+                    return a.cpuPercent > b.cpuPercent
+                }
+                if a.memoryBytes != b.memoryBytes {
+                    return a.memoryBytes > b.memoryBytes
+                }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
             return a.memoryBytes > b.memoryBytes
         }
     }
@@ -617,6 +678,9 @@ final class HogStore: ObservableObject {
             // A history error from Past Hour must not linger once the user is
             // back looking at live rows.
             historyError = nil
+            if !lastProcesses.isEmpty {
+                liveRows = buildLiveRows(lastProcesses, groups: lastGroups)
+            }
             rows = liveRows
             publishCompanion()
         } else {
@@ -631,9 +695,10 @@ final class HogStore: ObservableObject {
         let history = self.history
         let groupByApp = grouping == .apps
         let sort = self.sort
+        let ascending = self.sortAscending
         let secondsPerTick = refreshInterval * Double(Self.recordEvery)
         queue.async {
-            let aggregates = history.aggregates(lookback: lookback, groupByApp: groupByApp, sort: sort)
+            let aggregates = history.aggregates(lookback: lookback, groupByApp: groupByApp, sort: sort, ascending: ascending)
             let coverage = history.coverage(lookback: lookback, secondsPerTick: secondsPerTick)
             let error = history.lastError
             DispatchQueue.main.async { [weak self] in
@@ -937,6 +1002,7 @@ final class HogStore: ObservableObject {
         if let raw = defaults.string(forKey: Key.window), let value = TimeWindow(rawValue: raw) { window = value }
         if let raw = defaults.string(forKey: Key.grouping), let value = HogGrouping(rawValue: raw) { grouping = value }
         if let raw = defaults.string(forKey: Key.sort), let value = HogSort(rawValue: raw) { sort = value }
+        sortAscending = defaults.bool(forKey: Key.sortAscending)
         if let raw = defaults.string(forKey: Key.cpuScale), let value = CpuScale(rawValue: raw) { cpuScale = value }
         if let raw = defaults.string(forKey: Key.menuBarLabelMode), let value = MenuBarLabelMode(rawValue: raw) {
             menuBarLabelMode = value
@@ -957,6 +1023,7 @@ final class HogStore: ObservableObject {
         }
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
+        allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -1023,6 +1090,7 @@ final class HogStore: ObservableObject {
         defaults.set(window.rawValue, forKey: Key.window)
         defaults.set(grouping.rawValue, forKey: Key.grouping)
         defaults.set(sort.rawValue, forKey: Key.sort)
+        defaults.set(sortAscending, forKey: Key.sortAscending)
         defaults.set(cpuScale.rawValue, forKey: Key.cpuScale)
         defaults.set(menuBarLabelMode.rawValue, forKey: Key.menuBarLabelMode)
         defaults.set(refreshInterval, forKey: Key.refreshInterval)
@@ -1033,7 +1101,15 @@ final class HogStore: ObservableObject {
         defaults.set(appearance.rawValue, forKey: Key.appearance)
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
+        defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
     }
+
+    // MARK: - Test hooks
+    //  Internal, not private, so `CompanionTests` can drive the exact sequence
+    //  the "Pair this iPhone?" alert uses without a modal in the test process.
+
+    func setLoadingSettingsForTest(_ value: Bool) { loadingSettings = value }
+    func persistForTest() { persist() }
 
     /// Asks for notification permission the moment alerts are switched on, and
     /// never before.  The Settings path goes through `defaultsChanged`.
@@ -1061,6 +1137,10 @@ final class HogStore: ObservableObject {
             if let raw = self.defaults.string(forKey: Key.sort),
                let value = HogSort(rawValue: raw), value != self.sort {
                 self.sort = value
+            }
+            let ascending = self.defaults.bool(forKey: Key.sortAscending)
+            if ascending != self.sortAscending {
+                self.sortAscending = ascending
             }
             if let raw = self.defaults.string(forKey: Key.cpuScale),
                let value = CpuScale(rawValue: raw), value != self.cpuScale {
@@ -1103,6 +1183,10 @@ final class HogStore: ObservableObject {
             if remoteQuit != self.allowRemoteQuit {
                 self.allowRemoteQuit = remoteQuit
             }
+            let remoteClean = self.defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
+            if remoteClean != self.allowRemoteClean {
+                self.allowRemoteClean = remoteClean
+            }
         }
     }
 
@@ -1110,6 +1194,13 @@ final class HogStore: ObservableObject {
 
     private func setupCompanionHandlers() {
         companionServer.allowRemoteQuit = allowRemoteQuit
+        companionServer.allowRemoteClean = allowRemoteClean
+        companionServer.onRemotePair = { [weak self] deviceName, reply in
+            Task { @MainActor in
+                guard let self else { return reply(false) }
+                reply(self.askToApprovePairing(deviceName: deviceName))
+            }
+        }
         companionServer.onRemoteQuit = { [weak self] pid, force in
             guard let self else {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
@@ -1121,6 +1212,12 @@ final class HogStore: ObservableObject {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
             }
             return self.performRemoteTame(pid: pid, action: action)
+        }
+        companionServer.onRemoteClean = { [weak self] in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteClean()
         }
         companionServer.onRemoteExclusionsUpdate = { [weak self] req in
             guard let self else {
@@ -1134,6 +1231,90 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteViewUpdate(req)
         }
+        NotificationCenter.default.addObserver(
+            forName: .diskCleanerProgressChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let runId: UUID
+                let progress: CompanionCleanProgress
+                if let update = note.object as? DiskCleanerProgressUpdate {
+                    runId = update.runId
+                    progress = update.progress
+                } else if let legacyProgress = note.object as? CompanionCleanProgress {
+                    runId = self.activeCleanRunId ?? UUID()
+                    progress = legacyProgress
+                } else {
+                    return
+                }
+                self.activeCleanProgress = progress
+                self.activeCleanRunId = runId
+                self.publishCompanion()
+
+                if !progress.isCleaning {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 10_000_000_000)
+                        await MainActor.run { [weak self] in
+                            guard let self else { return }
+                            // Only clear the run that scheduled this timer.
+                            if self.activeCleanRunId == runId {
+                                self.activeCleanProgress = nil
+                                self.activeCleanRunId = nil
+                                self.publishCompanion()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Shows the "an iPhone wants to pair" alert.  The two boxes start at the
+    /// current Settings values, and what the owner leaves ticked is saved
+    /// back to Settings, so approving a phone is also where its powers are
+    /// granted.  Main thread only.
+    @MainActor
+    private func askToApprovePairing(deviceName: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Pair \(deviceName)?"
+        alert.informativeText = "\(deviceName) is asking to see Hog Hunter on this Mac.  Allow only a phone you own.  You can change these choices later in Settings > iPhone."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Don't Allow")
+
+        let quitBox = NSButton(checkboxWithTitle: "Let it quit or tame apps and processes", target: nil, action: nil)
+        quitBox.state = allowRemoteQuit ? .on : .off
+        let cleanBox = NSButton(checkboxWithTitle: "Let it run the disk cleaner", target: nil, action: nil)
+        cleanBox.state = allowRemoteClean ? .on : .off
+        let stack = NSStackView(views: [quitBox, cleanBox])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
+        alert.accessoryView = stack
+
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        let approved = alert.runModal() == .alertFirstButtonReturn
+        if approved {
+            let wasLoading = loadingSettings
+            loadingSettings = true
+            allowRemoteQuit = quitBox.state == .on
+            allowRemoteClean = cleanBox.state == .on
+            loadingSettings = wasLoading
+            //  Both didSets above called `persist()` while `loadingSettings` was
+            //  still true, and `persist()` returns early in that state -- so the
+            //  owner's answer never reached UserDefaults and both flags reverted
+            //  at the next launch.  Persist now that the flag is restored.  The
+            //  single `publishCompanion()` below replaces the one each didSet
+            //  would have fired, so the snapshot is still rebuilt exactly once.
+            persist()
+            publishCompanion()
+        }
+        AppActivationManager.shared.updatePolicy()
+        return approved
     }
 
     private func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {
@@ -1265,6 +1446,147 @@ final class HogStore: ObservableObject {
         return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
     }
 
+    nonisolated private func performRemoteClean() -> (status: Int, body: Data) {
+        let runId = UUID()
+        let cleaner = DiskCleaner()
+        let exclusions = CleanerExclusions.load()
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultData: Data = Data("{}".utf8)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.activeCleanRunId = runId
+            self.activeCleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "scanning",
+                progress: 0.05,
+                statusText: "Scanning Mac clutter…",
+                currentItem: nil,
+                itemsCleaned: 0,
+                totalItems: 0,
+                bytesReclaimed: 0,
+                formattedBytesReclaimed: "0 B",
+                snapshotName: nil,
+                error: nil
+            )
+            self.publishCompanion()
+        }
+
+        Task {
+            defer { semaphore.signal() }
+            let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
+            let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
+            let totalItems = max(1, itemsToClean.count)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.activeCleanRunId = runId
+                self.activeCleanProgress = CompanionCleanProgress(
+                    isCleaning: true,
+                    phase: "snapshot",
+                    progress: 0.15,
+                    statusText: "Creating APFS safety snapshot…",
+                    currentItem: nil,
+                    itemsCleaned: 0,
+                    totalItems: totalItems,
+                    bytesReclaimed: 0,
+                    formattedBytesReclaimed: "0 B",
+                    snapshotName: nil,
+                    error: nil
+                )
+                self.publishCompanion()
+            }
+
+            var lastReportedTime = Date.distantPast
+            var lastReportedFraction: Double = -1.0
+
+            let cleanResult = await cleaner.clean(
+                items: itemsToClean,
+                tier: .standard,
+                createSnapshot: true,
+                exclusions: exclusions
+            ) { fraction, itemTitle in
+                let now = Date()
+                let isMilestone = itemTitle.contains("snapshot") || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
+                if isMilestone {
+                    lastReportedFraction = fraction
+                    lastReportedTime = now
+                    let scaled = 0.15 + (fraction * 0.8)
+                    let itemsCleaned = Int(fraction * Double(totalItems))
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.activeCleanRunId = runId
+                        self.activeCleanProgress = CompanionCleanProgress(
+                            isCleaning: true,
+                            phase: fraction >= 1.0 ? "finishing" : "cleaning",
+                            progress: scaled,
+                            statusText: itemTitle.contains("snapshot") ? itemTitle : "Cleaning \(itemTitle)…",
+                            currentItem: itemTitle,
+                            itemsCleaned: itemsCleaned,
+                            totalItems: totalItems,
+                            bytesReclaimed: 0,
+                            formattedBytesReclaimed: "…",
+                            snapshotName: nil,
+                            error: nil
+                        )
+                        self.publishCompanion()
+                    }
+                }
+            }
+
+            let responseObj = CompanionCleanResponse(
+                status: "completed",
+                bytesReclaimed: cleanResult.bytesReclaimed,
+                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+                itemsRemoved: cleanResult.itemsRemoved,
+                snapshotCreated: cleanResult.snapshotName != nil,
+                snapshotName: cleanResult.snapshotName,
+                tier: cleanResult.tier.title
+            )
+            if let encoded = try? JSONEncoder().encode(responseObj) {
+                resultData = encoded
+            }
+
+            let completedProgress = CompanionCleanProgress(
+                isCleaning: false,
+                phase: "completed",
+                progress: 1.0,
+                statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
+                currentItem: nil,
+                itemsCleaned: cleanResult.itemsRemoved,
+                totalItems: totalItems,
+                bytesReclaimed: cleanResult.bytesReclaimed,
+                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+                snapshotName: cleanResult.snapshotName,
+                error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
+            )
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.activeCleanRunId = runId
+                self.activeCleanProgress = completedProgress
+                self.publishCompanion()
+            }
+
+            Task {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    // Only clear the run that scheduled this timer.
+                    if self.activeCleanRunId == runId {
+                        self.activeCleanProgress = nil
+                        self.activeCleanRunId = nil
+                        self.publishCompanion()
+                    }
+                }
+            }
+        }
+        let waitResult = semaphore.wait(timeout: .now() + 180)
+        if waitResult == .timedOut {
+            return (504, Data("{\"error\": \"Clean operation timed out\"}".utf8))
+        }
+        return (status: 200, body: resultData)
+    }
+
     // MARK: - iPhone companion
 
     func regenerateCompanionCode() {
@@ -1285,6 +1607,8 @@ final class HogStore: ObservableObject {
         guard shareWithIPhone else {
             companionServer.stop()
             companionStatus = "Off"
+            companionTopAppsRefreshTask?.cancel()
+            companionTopAppsRefreshTask = nil
             return
         }
         companionStatus = "Starting"
@@ -1295,7 +1619,32 @@ final class HogStore: ObservableObject {
             }
         }
         publishCompanion()
+        // First scan: capture the running bundle ids on main (the snapshot
+        // builder's scanner runs them off-thread, so we have to grab the
+        // value before handing a closure to the cache refresher).
+        let initialRunning = self.runningBundleIdsSnapshot()
+        CompanionSnapshotBuilder.refreshTopApps(runningBundleIds: { initialRunning })
+        startCompanionTopAppsTimer()
     }
+
+    /// Re-scans the Mac's installed apps on the same 5-minute cadence the
+    /// `StorageStore` uses, so the phone's "Mac Storage by App" section
+    /// stays current while sharing is on.  The cache itself is the gate;
+    /// this just calls the public refresher.
+    private func startCompanionTopAppsTimer() {
+        companionTopAppsRefreshTask?.cancel()
+        companionTopAppsRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                if Task.isCancelled { return }
+                guard let self, self.shareWithIPhone else { return }
+                let bundleIds = self.runningBundleIdsSnapshot()
+                CompanionSnapshotBuilder.refreshTopApps(runningBundleIds: { bundleIds })
+            }
+        }
+    }
+
+    private var companionTopAppsRefreshTask: Task<Void, Never>?
 
     private func publishCompanion() {
         guard shareWithIPhone else { return }
@@ -1308,7 +1657,10 @@ final class HogStore: ObservableObject {
             grouping: grouping,
             scale: cpuScale,
             pulse: pulse,
-            rows: rows
+            rows: rows,
+            cleanProgress: activeCleanProgress,
+            remoteQuitAllowed: allowRemoteQuit,
+            remoteCleanAllowed: allowRemoteClean
         )
         companionServer.update(snapshot: snapshot)
     }

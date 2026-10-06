@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.6 — Tue, Oct 6, 2026
+
+Mac side:
+
+- Companion snapshot now ships the top eight storage-heavy apps (with the bundle vs hidden split and the hidden-heavy flag) so the phone can show "Mac Storage by App" without owning its own scanner.  The scan runs on a utility queue, caches for five minutes, and is kicked off by `HogStore` whenever Share With iPhone is enabled (plus a five-minute timer while it stays on).
+
+iOS companion:
+
+- The Storage tab reorders: Mac Disk Usage is now the first section, with the new "Mac Storage by App" section right below it.  The iPhone Storage section sits below both.  Previously the iPhone-Storage section sat on top and several users confused it with the Mac storage because the picker defaulted to Activity and the title read "iPhone".
+- New "Mac Storage by App" section renders the snapshot's `CompanionAppStorageRow`s: name + total on top, bundle / hidden numbers beneath, an "approx" tag when a walk had to short-circuit, a red triangle + red row background when hidden bytes are at least five times the .app bundle and over 200 MB, and a "Scanned … ago on &lt;host&gt;" footer from `topAppsScannedAt`.  While the host's first scan is still in flight the section shows a "Scanning installed apps on &lt;host&gt;." hint instead of silently omitting itself.
+
+CI:
+
+- The `Capture app screenshots` step in `.github/workflows/ci.yml` is now wall-clock capped at 8 minutes, marked `continue-on-error: true`, and the matching upload step warns instead of errors on a missing artifact.  This stops the shared macOS-15 runner's two-attempt hang from cancelling the entire `test` status check and blocking PR merge (branch protection does not allow admin override of a `cancelled` required check).
+
+Tests: 200 total, 0 failures (4 new — `CompanionAppStorageTests` pins the new Codable, the backward-compat decode, the always-non-nil topApps array, and the cached-after-invalidate behaviour).  iOS Simulator build green locally.
+
+## 1.0.5 — Mon, Oct 5, 2026
+
+Mac Activity panel:
+
+- The TIME / SHOW / SORT controls now use a custom `SegmentedToggleGroup` instead of a stock segmented `Picker`.  Every segment gets the same 8 pt L/R internal padding so the spacing feels even and short labels (like "Now") are visibly narrower than long ones (like "Past 24 Hours"), instead of every segment being padded to the longest label.
+- The sort-direction arrow has moved from sitting next to the SORT picker to being pinned to the far right of the controls row.  The three toggle groups now sit evenly across the row with the arrow as a clear right-anchored control.
+
+iOS companion:
+
+- The Activity / Storage / Network tab picker is now visible at the top of every dashboard render with a "Tap a tab to switch view." caption above it.  Previously the picker existed but defaulted to Activity, so users missed the Storage and Network views entirely on first launch.
+- The Storage tab now includes an "iPhone Storage" section above the existing "Mac Disk Usage" section, showing the iPhone's own used / free / total storage with the same colour thresholds (red above 90 %, orange above 80 %).  Implementation reads `URL.resourceValues(forKeys:)` against the iOS sandbox root `/`; no extra entitlement needed.
+- The offline / looking status page now explicitly nudges first-time users on cellular toward Tailscale, with the recommended port (`\(CompanionModel.defaultPort)`) and a worked example of what to type (`my-mac.tailnet.ts.net`).  The Connect by Tailscale or Address button was already there; the copy now makes the path obvious instead of hidden behind "Open Hog Hunter on your Mac".
+
+Tests: 196 tests, 0 failures (no new tests — the change is layout polish plus a 30-line storage helper that's exercised through the iOS app at runtime).
+
 ## 1.0.4 — Wed, Sep 30, 2026
 
 - Fleet-wide version alignment: aligned macOS and iOS companion marketing versions to `1.0.4` with UTC timestamp build numbers (`YYYYMMDDHHMM`), conforming to fleet-wide release numbering standards across all platforms and retiring legacy `1.4.0 (6)`.
@@ -10,8 +42,9 @@
 
 iPhone:
 
-- New Hog Hunter iPhone app.  It finds the Mac on the same Wi-Fi and shows the same Now, Past Hour, or Past 24 Hours list the menu bar app is showing.  It is read only.  Quit stays on the Mac.
+- Hog Hunter iPhone companion.  It finds the Mac on the same Wi-Fi or connects remotely over Tailscale to monitor activity, storage, and network connections.  When enabled in Mac Settings, you can safely tame runaway CPU hogs, quit apps, and trigger a safe disk clean.
 - On the Mac, Settings has Share With iPhone.  It is off until you turn it on.  The pairing code is shown there.  New Code replaces it.  The code is not advertised on the network.
+- Remote control capabilities (quitting/taming apps and running the safe disk cleaner) require individual opt-in in Mac Settings or the pairing approval dialog.
 - The phone asks for Local Network access so it can see the Mac.  Allow it on both devices if macOS or iOS asks.
 
 Icon:

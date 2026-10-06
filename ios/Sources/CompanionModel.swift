@@ -1,6 +1,9 @@
 import Foundation
 import Network
 import Observation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct SavedMac: Codable, Equatable {
     var peerID: String
@@ -24,6 +27,10 @@ enum CompanionClientError: Error, Equatable {
     case unauthorized
     case badResponse
     case timedOut
+    /// The Mac said no, with a reason worth showing (403).
+    case forbidden(String)
+    /// The Mac is already showing another pairing alert (429).
+    case busy
 }
 
 /// Finds Hog Hunter on the Wi-Fi or connects remotely via Tailscale / Domain.
@@ -45,12 +52,23 @@ final class CompanionModel {
     var isDemoMode = false
 
     var isRemoteSheetPresented = false
+    var showForgetConfirm = false
     var remoteHostDraft = ""
     var remotePortDraft = "24240"
     var remoteTokenDraft = ""
     var remoteNameDraft = ""
     var remoteConnectError: String?
     var isConnectingRemote = false
+    /// True while the Mac is showing its "Pair this iPhone?" alert.
+    var isWaitingForApproval = false
+    /// False when this iPhone has no Wi-Fi path, so Bonjour cannot find a
+    /// Mac and the app should offer Tailscale or a custom address instead.
+    private(set) var isOnWiFi = true
+    /// The port Hog Hunter listens on unless the Mac says otherwise.
+    static let defaultPort = 24240
+    /// How long to wait for the person at the Mac to answer the alert.
+    static let approvalTimeout: Duration = .seconds(90)
+    private var pathMonitor: NWPathMonitor?
 
     private var browser: NWBrowser?
     private var poll: Task<Void, Never>?
@@ -78,6 +96,7 @@ final class CompanionModel {
         }
         saved = loadSaved()
         startBrowser()
+        startPathMonitor()
         poll = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -118,6 +137,73 @@ final class CompanionModel {
         } catch {
             codeError = "The Mac did not answer.  Check that Share With iPhone is on."
         }
+    }
+
+    /// Asks the Mac on this Wi-Fi to approve the phone instead of typing the
+    /// code.  The Mac shows an alert; on Allow it hands the code back.
+    func requestApproval() async {
+        guard case let .code(peerID) = phase else {
+            codeError = "Pick a Mac first."
+            return
+        }
+        guard let mac = discovered.first(where: { $0.id == peerID }) else {
+            codeError = "That Mac is no longer on this Wi-Fi.  Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
+            return
+        }
+        codeError = nil
+        isWaitingForApproval = true
+        defer { isWaitingForApproval = false }
+        do {
+            let token = try await Self.approve(endpoint: mac.endpoint)
+            let next = try await Self.fetch(endpoint: mac.endpoint, token: token)
+            saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
+            persistSaved()
+            snapshot = next
+            phase = .live
+        } catch {
+            codeError = Self.approvalMessage(for: error)
+        }
+    }
+
+    private static func approve(endpoint: NWEndpoint) async throws -> String {
+        let name = await deviceName()
+        return try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask { try await CompanionConnection.requestPair(endpoint: endpoint, deviceName: name) }
+            group.addTask {
+                try await Task.sleep(for: approvalTimeout)
+                throw CompanionClientError.timedOut
+            }
+            guard let value = try await group.next() else { throw CompanionClientError.badResponse }
+            group.cancelAll()
+            return value
+        }
+    }
+
+    private static func deviceName() async -> String {
+        #if canImport(UIKit)
+        return await MainActor.run { UIDevice.current.name }
+        #else
+        return "iPhone"
+        #endif
+    }
+
+    private static func approvalMessage(for error: Error) -> String {
+        switch error as? CompanionClientError {
+        case .forbidden(let reason)?: return reason
+        case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
+        case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
+        default: return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
+        }
+    }
+
+    private func startPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let wifi = path.status == .satisfied && path.usesInterfaceType(.wifi)
+            Task { @MainActor in self?.isOnWiFi = wifi }
+        }
+        monitor.start(queue: .global(qos: .utility))
+        pathMonitor = monitor
     }
 
     func forget() {
@@ -334,16 +420,32 @@ final class CompanionModel {
         return nil
     }
 
+    private var remoteConnectTask: Task<Void, Never>?
+
+    func startRemoteConnect() {
+        remoteConnectTask?.cancel()
+        remoteConnectTask = Task { [weak self] in
+            await self?.connectRemote()
+        }
+    }
+
+    func cancelRemoteConnect() {
+        remoteConnectTask?.cancel()
+        remoteConnectTask = nil
+        isConnectingRemote = false
+        isWaitingForApproval = false
+    }
+
     func connectRemote() async {
         let host = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
             remoteConnectError = "Enter a Tailscale MagicDNS name, IP address, or domain."
             return
         }
-        let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 24240
-        let token = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
-        guard token.count >= 8 else {
-            remoteConnectError = "Enter the 8 character pairing code from Mac Settings."
+        let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Self.defaultPort
+        let typed = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
+        guard typed.isEmpty || typed.count >= 8 else {
+            remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
             return
         }
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(portNum)) else {
@@ -353,11 +455,28 @@ final class CompanionModel {
 
         isConnectingRemote = true
         remoteConnectError = nil
-        defer { isConnectingRemote = false }
+        let previous = remoteConnectTask
+        defer {
+            isConnectingRemote = false
+            //  Only clear the handle if it is still the one this run installed.
+            //  A cancelled run that unwinds late must not nil out the live task
+            //  a later attempt is holding.
+            if remoteConnectTask == previous { remoteConnectTask = nil }
+        }
 
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
         do {
+            let token: String
+            if typed.isEmpty {
+                isWaitingForApproval = true
+                defer { isWaitingForApproval = false }
+                token = try await Self.approve(endpoint: endpoint)
+            } else {
+                token = typed
+            }
+            guard !Task.isCancelled else { return }
             let fetched = try await Self.fetch(endpoint: endpoint, token: token)
+            guard !Task.isCancelled else { return }
             let trimmedName = remoteNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayName = trimmedName.isEmpty ? fetched.hostName : trimmedName
             let peerID = "remote-\(host):\(portNum)"
@@ -371,9 +490,12 @@ final class CompanionModel {
                 UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
             }
         } catch CompanionClientError.unauthorized {
-            remoteConnectError = "Pairing code does not match this Mac."
+            remoteConnectError = "Pairing Code does not match this Mac."
+        } catch let error as CompanionClientError where error != .badResponse {
+            remoteConnectError = Self.approvalMessage(for: error)
         } catch {
-            remoteConnectError = "Could not connect to \(host):\(portNum). Check that Hog Hunter is running on the Mac and the port is reachable."
+            guard !Task.isCancelled else { return }
+            remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
         }
     }
 
@@ -414,8 +536,34 @@ final class CompanionModel {
         if isDemoMode {
             isCleaning = true
             cleanError = nil
-            try? await Task.sleep(for: .seconds(1))
-            isCleaning = false
+            snapshot?.cleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "snapshot",
+                progress: 0.15,
+                statusText: "Creating APFS safety snapshot…",
+                currentItem: nil,
+                itemsCleaned: 0,
+                totalItems: 28,
+                bytesReclaimed: 0,
+                formattedBytesReclaimed: "0 B",
+                snapshotName: nil,
+                error: nil
+            )
+            try? await Task.sleep(for: .milliseconds(800))
+            snapshot?.cleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "cleaning",
+                progress: 0.55,
+                statusText: "Cleaning User Caches…",
+                currentItem: "com.apple.Safari",
+                itemsCleaned: 15,
+                totalItems: 28,
+                bytesReclaimed: 2_100_000_000,
+                formattedBytesReclaimed: "2.1 GB",
+                snapshotName: nil,
+                error: nil
+            )
+            try? await Task.sleep(for: .milliseconds(800))
             let demoRes = CompanionCleanResponse(
                 status: "success",
                 bytesReclaimed: 4_200_000_000,
@@ -425,7 +573,21 @@ final class CompanionModel {
                 snapshotName: "com.apple.TimeMachine.2026-10-01-DemoSnapshot.local",
                 tier: "standard"
             )
+            snapshot?.cleanProgress = CompanionCleanProgress(
+                isCleaning: false,
+                phase: "completed",
+                progress: 1.0,
+                statusText: "Clean complete: Reclaimed 4.2 GB",
+                currentItem: nil,
+                itemsCleaned: 28,
+                totalItems: 28,
+                bytesReclaimed: 4_200_000_000,
+                formattedBytesReclaimed: "4.2 GB",
+                snapshotName: "com.apple.TimeMachine.2026-10-01-DemoSnapshot.local",
+                error: nil
+            )
             lastCleanResult = demoRes
+            isCleaning = false
             return
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
@@ -433,17 +595,33 @@ final class CompanionModel {
         cleanError = nil
         let defaults = UserDefaults(suiteName: appGroupSuite)
         defaults?.set("Cleaning…", forKey: "clean_status")
-        defer { isCleaning = false }
+
+        // Start high-frequency polling during clean execution so progress updates are relayed smoothly
+        let pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                await self?.refresh()
+            }
+        }
+
+        defer {
+            pollingTask.cancel()
+            isCleaning = false
+        }
+
         do {
             let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token)
             lastCleanResult = res
             defaults?.set("Cleaned", forKey: "clean_status")
             defaults?.set(Date().timeIntervalSince1970, forKey: "last_clean_date")
             defaults?.set(res.formattedBytesReclaimed, forKey: "last_clean_bytes")
-            // Refresh snapshot to reflect reclaimed memory/disk immediately
+            // Final refresh to ensure completed clean state is captured
             await refresh()
+        } catch CompanionClientError.forbidden(let reason) {
+            cleanError = reason
+            defaults?.set("Clean not allowed", forKey: "clean_status")
         } catch {
-            cleanError = "Could not start safe clean. The Mac may be busy or unreachable."
+            cleanError = "Could not start safe clean.  The Mac may be busy or unreachable."
             defaults?.set("Clean failed", forKey: "clean_status")
         }
     }

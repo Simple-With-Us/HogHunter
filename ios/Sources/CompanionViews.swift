@@ -13,6 +13,62 @@ enum CompanionSort: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Live read of the iPhone's own storage volume, used by the iOS Storage
+/// tab alongside the existing Mac-disk section.  Pulls once via
+/// `URL.resourceValues(forKeys:)`, which works inside the iOS sandbox without
+/// any extra entitlement because `/` is the app's own sandbox root.
+struct iPhoneStorageSummary: Equatable {
+    var name: String
+    var totalBytes: UInt64
+    var freeBytes: UInt64
+    var usedPercent: Double
+    var usedText: String
+    var freeText: String
+}
+
+enum iPhoneStorage {
+    /// Reads the current iPhone storage summary, or nil if the kernel
+    /// cannot answer (very rare on iOS, but the sim can return nil values).
+    static func summary() -> iPhoneStorageSummary? {
+        let url = URL(fileURLWithPath: "/")
+        let keys: Set<URLResourceKey> = [
+            .volumeAvailableCapacityKey,
+            .volumeTotalCapacityKey,
+            .volumeLocalizedNameKey
+        ]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        // iOS gives back Int64 for capacity values; promote to UInt64 here
+        // so the call site can do math without overflow concerns.
+        guard let totalInt = values.volumeTotalCapacity else { return nil }
+        guard let freeInt = values.volumeAvailableCapacity else { return nil }
+        let totalBytes = UInt64(max(0, totalInt))
+        let freeBytes = UInt64(max(0, freeInt))
+        guard freeBytes <= totalBytes, totalBytes > 0 else { return nil }
+        let used = totalBytes - freeBytes
+        let usedPercent = totalBytes > 0 ? (Double(used) / Double(totalBytes)) * 100 : 0
+        return iPhoneStorageSummary(
+            name: values.volumeLocalizedName ?? "iPhone Storage",
+            totalBytes: totalBytes,
+            freeBytes: freeBytes,
+            usedPercent: usedPercent,
+            usedText: iPhoneStorage.format(bytes: used),
+            freeText: iPhoneStorage.format(bytes: freeBytes)
+        )
+    }
+
+    /// Locale-pinned binary units, matching the Mac pane's HogFormat.memory so
+    /// "1.5 GB" reads the same on both sides regardless of region.
+    static func format(bytes: UInt64) -> String {
+        let gb = Double(bytes) / 1_073_741_824
+        let mb = Double(bytes) / 1_048_576
+        let kb = Double(bytes) / 1024
+        let posix = Locale(identifier: "en_US_POSIX")
+        if mb >= 1023.5 { return String(format: "%.1f GB", locale: posix, gb) }
+        if kb >= 1023.5 { return String(format: "%.0f MB", locale: posix, mb) }
+        return String(format: "%.0f KB", locale: posix, kb)
+    }
+}
+
 enum UsageParser {
     static func parseCPU(_ text: String) -> Double {
         let digits = text.filter { $0.isNumber || $0 == "." }
@@ -71,12 +127,21 @@ struct CompanionRootView: View {
                     }
                     if model.saved != nil {
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button("Forget Mac") { model.forget() }
+                            Button { model.showForgetConfirm = true } label: {
+                                Image(systemName: "link")
+                            }
+                            .accessibilityLabel("Forget Mac")
                         }
                     }
                 }
         }
         .onAppear { model.start() }
+        .alert("Forget \(model.saved?.name ?? "This Mac")?", isPresented: $model.showForgetConfirm) {
+            Button("Forget Mac", role: .destructive) { model.forget() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This iPhone will stop showing it until you pair again.")
+        }
         .sheet(isPresented: codePresented) {
             CodeEntryView(model: model)
                 .presentationDetents([.medium])
@@ -111,7 +176,8 @@ struct CompanionRootView: View {
         case .offline:
             StatusPage(
                 title: "Mac Offline or Not Found",
-                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.",
+                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.  Off Wi-Fi or remote?  Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
+                isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
@@ -123,7 +189,8 @@ struct CompanionRootView: View {
         case .looking, .code:
             StatusPage(
                 title: "Looking for Your Mac",
-                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.",
+                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.  Off Wi-Fi?  Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
+                isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
@@ -139,6 +206,7 @@ struct CompanionRootView: View {
 private struct StatusPage: View {
     let title: String
     let message: String
+    var isOnWiFi: Bool = true
     var onRemoteConnect: (() -> Void)? = nil
     var onDemoMode: (() -> Void)? = nil
 
@@ -155,14 +223,28 @@ private struct StatusPage: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
+            if !isOnWiFi, onRemoteConnect != nil {
+                VStack(spacing: 6) {
+                    Label("This iPhone is not on Wi-Fi", systemImage: "wifi.slash")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Do you use Tailscale or another route to your Mac?  Connect by address on port \(CompanionModel.defaultPort).")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemBackground)))
+            }
+
             if onRemoteConnect != nil || onDemoMode != nil {
                 VStack(spacing: 10) {
                     if let onRemoteConnect {
                         Button(action: onRemoteConnect) {
-                            Label("Connect via Tailscale or Domain…", systemImage: "network")
+                            Label("Connect by Tailscale or Address…", systemImage: "network")
                                 .font(.subheadline.weight(.semibold))
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.borderedProminent)
                     }
 
                     if let onDemoMode {
@@ -209,7 +291,7 @@ private struct MacListView: View {
                     model.remoteConnectError = nil
                     model.isRemoteSheetPresented = true
                 } label: {
-                    Label("Connect via Tailscale or Domain…", systemImage: "network")
+                    Label("Connect by Tailscale or Address…", systemImage: "network")
                 }
             }
         }
@@ -218,6 +300,7 @@ private struct MacListView: View {
                 StatusPage(
                     title: "Looking for Your Mac",
                     message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.",
+                    isOnWiFi: model.isOnWiFi,
                     onRemoteConnect: {
                         model.remoteConnectError = nil
                         model.isRemoteSheetPresented = true
@@ -244,9 +327,23 @@ private struct CodeEntryView: View {
                         .autocorrectionDisabled()
                         .font(.system(.title3, design: .monospaced))
                         .focused($focused)
-                    Text("Type the code shown in Hog Hunter Settings on your Mac.  The iPhone can look at the list.  It cannot quit anything.")
+                    Text("Type the code shown in Hog Hunter Settings > iPhone on your Mac.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+                Section {
+                    Button {
+                        Task { await model.requestApproval() }
+                    } label: {
+                        HStack {
+                            Label(model.isWaitingForApproval ? "Check Your Mac and Click Allow" : "Ask Mac to Approve Instead", systemImage: "desktopcomputer")
+                            Spacer()
+                            if model.isWaitingForApproval { ProgressView() }
+                        }
+                    }
+                    .disabled(model.isWaitingForApproval || model.isSubmittingCode)
+                } footer: {
+                    Text("No code needed.  Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.")
                 }
                 if let codeError = model.codeError {
                     Section {
@@ -276,12 +373,21 @@ struct DashboardView: View {
     @Bindable var model: CompanionModel
     @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
+    @State private var sortAscending: Bool = false
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
     @State private var isForceQuit = false
     @State private var showQuitConfirm = false
     @State private var lastQuitResult: CompanionQuitResponse?
     @State private var showQuitResultAlert = false
+    @State private var pendingTameRow: CompanionRow?
+    @State private var pendingTameAction = "tame"
+    /// Action and result land as ONE value.  Holding them in separate `@State`
+    /// let two in-flight tasks interleave, so a stale response could label a tame
+    /// failure "Could Not Restore Priority" (or the reverse).
+    @State private var lastTameOutcome: (action: String, result: CompanionTameResponse)?
+    @State private var showTameConfirm = false
+    @State private var showTameResultAlert = false
     @State private var showAddPathAlert = false
     @State private var newPathInput = ""
 
@@ -291,21 +397,41 @@ struct DashboardView: View {
         showQuitConfirm = true
     }
 
+    private func confirmTame(row: CompanionRow, action: String) {
+        pendingTameRow = row
+        pendingTameAction = action
+        showTameConfirm = true
+    }
+
     private var sortedRows: [CompanionRow] {
-        snapshot.rows.sorted { a, b in
+        let sorted = snapshot.rows.sorted(by: { a, b in
             switch sortOrder {
             case .cpu:
-                if a.sortCPU != b.sortCPU {
-                    return a.sortCPU > b.sortCPU
+                let aCpu = a.sortCPU
+                let bCpu = b.sortCPU
+                if abs(aCpu - bCpu) < 0.05 {
+                    if a.sortMemory != b.sortMemory {
+                        return a.sortMemory > b.sortMemory
+                    }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
                 }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return aCpu > bCpu
             case .memory:
-                if a.sortMemory != b.sortMemory {
-                    return a.sortMemory > b.sortMemory
+                let aMemStr = a.memoryText
+                let bMemStr = b.memoryText
+                if aMemStr == bMemStr {
+                    if abs(a.sortCPU - b.sortCPU) >= 0.05 {
+                        return a.sortCPU > b.sortCPU
+                    }
+                    if a.sortMemory != b.sortMemory {
+                        return a.sortMemory > b.sortMemory
+                    }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
                 }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return a.sortMemory > b.sortMemory
             }
-        }
+        })
+        return sortAscending ? sorted.reversed() : sorted
     }
 
     var body: some View {
@@ -330,15 +456,21 @@ struct DashboardView: View {
                 .background(Color.blue.opacity(0.12))
             }
 
-            Picker("Tab", selection: $selectedTab) {
-                ForEach(CompanionTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Tap a tab to switch view.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                Picker("Tab", selection: $selectedTab) {
+                    ForEach(CompanionTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.bottom, 6)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
 
             List {
                 hostHeaderSection
@@ -385,6 +517,43 @@ struct DashboardView: View {
             Text(isForceQuit
                 ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).  Any unsaved work will be lost."
                 : "Quitting \(pendingQuitRow?.name ?? "this app") will ask it to close gracefully on \(snapshot.hostName).")
+        }
+        .confirmationDialog(
+            "\(pendingTameAction == "untame" ? "Restore Priority for" : "Tame") \(pendingTameRow?.name ?? "App")?",
+            isPresented: $showTameConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
+                if let row = pendingTameRow, let pid = row.pid {
+                    let action = pendingTameAction
+                    Task {
+                        let res = await model.tameProcess(pid: pid, action: action)
+                        lastTameOutcome = (action, res)
+                        showTameResultAlert = true
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(pendingTameAction == "untame"
+                ? "Restores normal CPU scheduling priority for \(pendingTameRow?.name ?? "this app") on \(snapshot.hostName)."
+                : "Lowers CPU priority (renices to +10) for \(pendingTameRow?.name ?? "this app") so it does not starve other apps on \(snapshot.hostName).")
+        }
+        .alert(
+            lastTameOutcome?.result.error != nil
+                ? (lastTameOutcome?.action == "untame" ? "Could Not Restore Priority" : "Could Not Tame App")
+                : "Priority Updated",
+            isPresented: $showTameResultAlert
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            if let error = lastTameOutcome?.result.error {
+                Text(error)
+            } else if let message = lastTameOutcome?.result.message {
+                Text(message)
+            } else {
+                Text("Command delivered to \(snapshot.hostName).")
+            }
         }
         .alert(
             lastQuitResult?.error != nil ? "Could Not Quit" : "Quit Request Delivered",
@@ -544,7 +713,7 @@ struct DashboardView: View {
                             .foregroundStyle(rank <= 3 ? Color.orange : Color.secondary)
                             .frame(width: 26, alignment: .leading)
 
-                        Image(systemName: row.isApp ? "app.fill" : "gearshape")
+                        Image(systemName: row.isApp ? "app.fill" : "cpu")
                             .frame(width: 20)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
@@ -595,17 +764,17 @@ struct DashboardView: View {
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        if row.canTame != false, let pid = row.pid {
+                        if row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                    confirmTame(row: row, action: "untame")
                                 } label: {
                                     Label("Restore", systemImage: "hare")
                                 }
                                 .tint(.blue)
                             } else {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                    confirmTame(row: row, action: "tame")
                                 } label: {
                                     Label("Tame", systemImage: "tortoise")
                                 }
@@ -614,18 +783,18 @@ struct DashboardView: View {
                         }
                     }
                     .contextMenu {
-                        if row.canTame != false, let pid = row.pid {
+                        if row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "untame") }
+                                    confirmTame(row: row, action: "untame")
                                 } label: {
                                     Label("Restore Normal Priority", systemImage: "hare")
                                 }
                             } else {
                                 Button {
-                                    Task { _ = await model.tameProcess(pid: pid, action: "tame") }
+                                    confirmTame(row: row, action: "tame")
                                 } label: {
-                                    Label("Tame Hog (Lower Priority)", systemImage: "tortoise")
+                                    Label("Tame App (Lower Priority)", systemImage: "tortoise")
                                 }
                             }
                         }
@@ -648,7 +817,7 @@ struct DashboardView: View {
                 }
             }
         } header: {
-            HStack {
+            HStack(spacing: 8) {
                 Text(snapshot.grouping == "Processes" ? "Busy Processes" : "Busy Apps")
                 Spacer()
                 Picker("Sort", selection: $sortOrder) {
@@ -657,17 +826,41 @@ struct DashboardView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 160)
+                .frame(maxWidth: 150)
+                .onChange(of: sortOrder) {
+                    sortAscending = false
+                }
+
+                Button {
+                    sortAscending.toggle()
+                } label: {
+                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(5)
+                        .background(Color(.secondarySystemBackground), in: Circle())
+                }
+                .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
         }
 
         Section {
-            if snapshot.rows.contains(where: { $0.canQuit }) {
-                Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName). System processes and tasks owned by other users are protected.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            if snapshot.remoteQuitAllowed == true {
+                if snapshot.rows.contains(where: { $0.canQuit }) {
+                    Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if sortedRows.isEmpty {
+                    Text("Remote control is enabled on \(snapshot.hostName).  Waiting for active process telemetry.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Remote control is enabled on \(snapshot.hostName).  All visible processes are protected system tasks and cannot be quit or tamed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             } else {
-                Text("Remote quit is off.  Turn on 'Allow iPhone to Quit Apps & Processes' in Hog Hunter Settings on your Mac.")
+                Text("Quitting from iPhone is off.  Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -676,6 +869,12 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var storageContent: some View {
+        // Mac storage is intentionally FIRST.  Prior to 1.0.6 the iPhone-storage
+        // section sat on top and several users assumed it WAS the Mac storage
+        // (the phone is showing its own storage, not the Mac's).  Putting the
+        // Mac disk usage and the per-app breakdown up top is the principle that
+        // answers "why does the iPhone show CPU and memory for the Mac but no
+        // disk?" without burying the answer under a section titled differently.
         Section("Mac Disk Usage") {
             if let storage = snapshot.storage {
                 VStack(alignment: .leading, spacing: 10) {
@@ -709,13 +908,88 @@ struct DashboardView: View {
             }
         }
 
+        if let apps = snapshot.storage?.topApps, !apps.isEmpty {
+            Section {
+                ForEach(apps) { app in
+                    macAppStorageRow(app)
+                }
+                if let scanned = snapshot.storage?.topAppsScannedAt {
+                    HStack {
+                        Spacer()
+                        Text("Scanned \(Self.relativeTimeFormatter.localizedString(for: scanned, relativeTo: Date())) on \(snapshot.hostName).")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Mac Storage by App")
+                    if let top = snapshot.storage?.topApps, top.contains(where: { $0.isHiddenHeavy }) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption2)
+                    }
+                    Spacer()
+                }
+            } footer: {
+                Text("Top apps on \(snapshot.hostName), sorted by total on-disk size.  Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).  Open the Storage pane on the Mac for the full list and cleanup.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } else if snapshot.storage != nil {
+            // Storage summary landed but the per-app walk has not yet returned;
+            // show a single "Scanning" hint instead of nothing so the section
+            // does not silently disappear on first render.
+            Section("Mac Storage by App") {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning installed apps on \(snapshot.hostName).")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        Section("iPhone Storage") {
+            if let phoneStorage = iPhoneStorage.summary() {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label(phoneStorage.name, systemImage: "iphone")
+                            .font(.headline)
+                        Spacer()
+                        Text(String(format: "%.0f%% Used", phoneStorage.usedPercent))
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.primary))
+                    }
+
+                    ProgressView(value: min(max(phoneStorage.usedPercent / 100.0, 0), 1.0))
+                        .tint(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.accentColor))
+
+                    HStack {
+                        Text(phoneStorage.usedText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(phoneStorage.freeText)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                Text("Reading iPhone storage.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
         Section("Disk & System Clutter") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("Safe Mac Clean", systemImage: "sparkles")
                         .font(.headline)
                     Spacer()
-                    if model.isCleaning {
+                    if model.isCleaning || snapshot.cleanProgress?.isCleaning == true {
                         ProgressView()
                             .controlSize(.small)
                     }
@@ -724,7 +998,64 @@ struct DashboardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if let result = model.lastCleanResult {
+                if let progress = snapshot.cleanProgress, progress.isCleaning || model.isCleaning {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(progress.statusText.isEmpty ? "Cleaning in progress…" : progress.statusText)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text("\(Int(progress.progress * 100))%")
+                                .font(.caption.monospacedDigit().weight(.bold))
+                                .foregroundStyle(Color.accentColor)
+                        }
+
+                        ProgressView(value: max(0.05, progress.progress), total: 1.0)
+                            .tint(.accentColor)
+
+                        if let item = progress.currentItem, !item.isEmpty, item != progress.statusText {
+                            Text(item)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        if progress.totalItems > 0 {
+                            HStack {
+                                Text("\(progress.itemsCleaned) of \(progress.totalItems) items cleaned")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if progress.bytesReclaimed > 0 {
+                                    Text("Reclaimed \(progress.formattedBytesReclaimed)")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                if let progress = snapshot.cleanProgress, progress.phase == "completed" {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reclaimed \(progress.formattedBytesReclaimed) (\(progress.itemsCleaned) items)")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.green)
+                            if let snap = progress.snapshotName {
+                                Text("APFS Snapshot: \(snap)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                } else if let result = model.lastCleanResult {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
@@ -735,7 +1066,7 @@ struct DashboardView: View {
                     .padding(.vertical, 2)
                 }
 
-                if let error = model.cleanError {
+                if let error = model.cleanError ?? snapshot.cleanProgress?.error {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -750,14 +1081,28 @@ struct DashboardView: View {
                 } label: {
                     HStack {
                         Spacer()
-                        Text(model.isCleaning ? "Cleaning Mac…" : "Clean Mac Clutter (Safe)")
-                            .font(.subheadline.weight(.semibold))
+                        if let progress = snapshot.cleanProgress, progress.isCleaning {
+                            Text("Cleaning Mac… (\(Int(progress.progress * 100))%)")
+                                .font(.subheadline.weight(.semibold))
+                        } else if model.isCleaning {
+                            Text("Cleaning Mac…")
+                                .font(.subheadline.weight(.semibold))
+                        } else {
+                            Text("Clean Mac Clutter (Safe)")
+                                .font(.subheadline.weight(.semibold))
+                        }
                         Spacer()
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning)
+                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
+
+                if snapshot.remoteCleanAllowed != true {
+                    Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.vertical, 4)
         }
@@ -871,7 +1216,7 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var networkContent: some View {
-        Section("Active Connection Hogs") {
+        Section("Active Network Connections") {
             if let networkRows = snapshot.network, !networkRows.isEmpty {
                 ForEach(networkRows) { row in
                     VStack(alignment: .leading, spacing: 6) {
@@ -904,7 +1249,7 @@ struct DashboardView: View {
                     Image(systemName: "network.slash")
                         .font(.title2)
                         .foregroundStyle(.secondary)
-                    Text("No active connection hogs detected on \(snapshot.hostName).")
+                    Text("No high-bandwidth connections detected on \(snapshot.hostName).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -917,6 +1262,70 @@ struct DashboardView: View {
     private func rowColor(_ severity: String) -> Color {
         severity == "calm" ? Color.primary : CompanionColor.color(severity)
     }
+
+    /// One row of the new "Mac Storage by App" section.  Mirrors the Mac
+    /// pane's `StorageRowView` at a glance level: app name + total bytes on
+    /// the top line, bundle vs hidden split on the bottom, and a red outline
+    /// when the app owns way more outside the .app than inside it.
+    @ViewBuilder
+    private func macAppStorageRow(_ app: CompanionAppStorageRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if app.isHiddenHeavy {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.caption2)
+                        .accessibilityLabel("Hidden bytes flag")
+                }
+                Text(app.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(app.totalText)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+
+            HStack(spacing: 6) {
+                Text("Bundle")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(app.bundleText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text("·")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text("Hidden")
+                    .font(.caption2)
+                    .foregroundStyle(app.isHiddenHeavy ? Color.red : Color.secondary)
+                Text(app.hiddenText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(app.isHiddenHeavy ? .red : .secondary)
+                if app.anyApproximate {
+                    Text("approx")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+            }
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(app.isHiddenHeavy ? Color.red.opacity(0.06) : Color.clear)
+                .padding(.vertical, 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(app.name), total \(app.totalText), bundle \(app.bundleText), hidden \(app.hiddenText)\(app.isHiddenHeavy ? ", flagged: hidden exceeds five times bundle and over two hundred megabytes" : "")")
+    }
+
+    static let relativeTimeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
 }
 
 private struct MeterCard: View {
@@ -973,27 +1382,43 @@ struct RemoteConnectSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Mac Connection Details") {
-                    TextField("Host, Tailscale IP, or Domain", text: $model.remoteHostDraft)
+                Section {
+                    TextField("Tailscale Name, IP, or Domain", text: $model.remoteHostDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                        .textContentType(.URL)
 
-                    TextField("Port", text: $model.remotePortDraft)
-                        .keyboardType(.numberPad)
+                    LabeledContent("Port") {
+                        TextField("\(CompanionModel.defaultPort)", text: $model.remotePortDraft)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .font(.body.monospacedDigit())
+                    }
+                } header: {
+                    Text("Mac Address")
+                } footer: {
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  Using a VPN, port forward, or your own domain instead?  Point it at that port.")
+                }
 
-                    TextField("Pairing Code (from Mac Settings)", text: $model.remoteTokenDraft)
+                Section {
+                    TextField("Leave Blank to Approve on Mac", text: $model.remoteTokenDraft)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
                         .font(.system(.body, design: .monospaced))
 
                     TextField("Mac Name (Optional)", text: $model.remoteNameDraft)
+                } header: {
+                    Text("Pairing Code")
+                } footer: {
+                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.  Or type the code from Hog Hunter Settings > iPhone.")
                 }
 
-                Section {
-                    Text("Connect via Tailscale IP (e.g. 100.x.y.z), MagicDNS name (*.ts.net), or a domain mapped to your Mac.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                if model.isWaitingForApproval {
+                    Section {
+                        Label("Check your Mac and click Allow.", systemImage: "desktopcomputer")
+                            .font(.subheadline.weight(.semibold))
+                    }
                 }
 
                 if let error = model.remoteConnectError {
@@ -1006,12 +1431,7 @@ struct RemoteConnectSheet: View {
 
                 Section {
                     Button {
-                        Task {
-                            await model.connectRemote()
-                            if model.remoteConnectError == nil {
-                                dismiss()
-                            }
-                        }
+                        model.startRemoteConnect()
                     } label: {
                         HStack {
                             Spacer()
@@ -1019,7 +1439,7 @@ struct RemoteConnectSheet: View {
                                 ProgressView()
                                     .padding(.trailing, 6)
                             }
-                            Text(model.isConnectingRemote ? "Connecting…" : "Connect to Mac")
+                            Text(model.isWaitingForApproval ? "Waiting for Mac…" : (model.isConnectingRemote ? "Connecting…" : "Connect to Mac"))
                                 .font(.body.weight(.semibold))
                             Spacer()
                         }
@@ -1027,12 +1447,25 @@ struct RemoteConnectSheet: View {
                     .disabled(model.isConnectingRemote || model.remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .navigationTitle("Remote Connection")
+            .navigationTitle("Connect by Address")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        model.cancelRemoteConnect()
+                        dismiss()
+                    }
                 }
+            }
+            .onChange(of: model.isRemoteSheetPresented) { _, isPresented in
+                if !isPresented {
+                    dismiss()
+                }
+            }
+            .onDisappear {
+                // cancelRemoteConnect() must also run for a connect that was just
+                // scheduled: isConnectingRemote is not set until the task body runs.
+                model.cancelRemoteConnect()
             }
         }
     }

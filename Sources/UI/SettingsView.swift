@@ -359,15 +359,16 @@ private struct IPhoneSettingsTab: View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  Quitting and taming require the opt-in below.  A standard clean can still run from the phone while sharing is on.  Turn this off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi, or from anywhere over Tailscale.  Quitting, taming, and cleaning each need the opt-ins below.  Turn this off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if store.shareWithIPhone {
                     LabeledContent("Pairing Code") {
-                        Text(spacedCode(store.companionCode))
-                            .font(.system(.title3, design: .monospaced))
-                            .textSelection(.enabled)
+                        PairingCodeField(
+                            code: spacedCode(store.companionCode),
+                            rawCode: store.companionCode
+                        )
                     }
                     Text(store.companionStatus)
                         .font(.system(size: 11))
@@ -380,9 +381,18 @@ private struct IPhoneSettingsTab: View {
             }
 
             if store.shareWithIPhone {
-                Section("Remote Process Control") {
+                Section("Remote Control") {
                     Toggle("Allow iPhone to Quit or Tame Apps & Processes", isOn: $store.allowRemoteQuit)
-                    Text("When enabled, the paired iPhone can quit, force quit, or tame user-owned apps.  System-critical processes and other users' processes are always protected.  Taming is off with this switch.")
+                    Text("When enabled, the paired iPhone can quit, force quit, or tame user-owned apps.  The phone asks you to confirm each one.  System-critical processes and other users' processes are always protected.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Allow iPhone to Run Disk Cleaner", isOn: $store.allowRemoteClean)
+                    Text("When enabled, the paired iPhone can start a Standard clean.  A local snapshot is taken first and items go to the Trash.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A phone without the code can ask to pair.  This Mac then shows an alert where you can allow it and pick these same two choices.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -428,6 +438,104 @@ private struct IPhoneSettingsTab: View {
     private func copyCompanionCode() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(store.companionCode, forType: .string)
+    }
+}
+
+private struct PairingCodeField: View {
+    let code: String
+    let rawCode: String
+    @State private var isHovering = false
+    @State private var justCopied = false
+    /// Pending "Copied" reset, cancelled on a re-click so only the newest click
+    /// controls the badge.
+    @State private var copyResetTask: Task<Void, Never>?
+    @State private var cursorPushed = false
+
+    var body: some View {
+        Button(action: copyToClipboard) {
+            HStack(spacing: 8) {
+                Text(code)
+                    .font(.system(.title3, design: .monospaced))
+                    .foregroundStyle(.primary)
+
+                if justCopied {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("Copied")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.12), in: Capsule())
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                } else if isHovering {
+                    HStack(spacing: 3) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 10))
+                        Text("Click to copy")
+                            .font(.system(size: 11))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+                    .transition(.opacity)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovering || justCopied ? Color.primary.opacity(0.05) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+            if hovering {
+                if !cursorPushed {
+                    NSCursor.pointingHand.push()
+                    cursorPushed = true
+                }
+            } else {
+                if cursorPushed {
+                    NSCursor.pop()
+                    cursorPushed = false
+                }
+            }
+        }
+        .onDisappear {
+            if cursorPushed {
+                NSCursor.pop()
+                cursorPushed = false
+            }
+        }
+        .help(justCopied ? "Copied" : "Click to copy")
+        .accessibilityLabel("Pairing Code \(code)")
+        .accessibilityHint(justCopied ? "Copied to clipboard" : "Click to copy pairing code to clipboard")
+    }
+
+    private func copyToClipboard() {
+        //  A second click inside the window must own the whole window: cancel the
+        //  pending reset first, or the first click's timer clears "Copied" early.
+        copyResetTask?.cancel()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rawCode, forType: .string)
+        withAnimation(.easeInOut(duration: 0.15)) {
+            justCopied = true
+        }
+        copyResetTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                justCopied = false
+            }
+        }
     }
 }
 

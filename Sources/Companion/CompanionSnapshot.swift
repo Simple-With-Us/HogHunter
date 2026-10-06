@@ -10,6 +10,7 @@ enum CompanionService {
     static let tamePath = "/v1/tame"
     static let exclusionsPath = "/v1/exclusions"
     static let viewPath = "/v1/view"
+    static let pairPath = "/v1/pair"
     static let version = 1
 }
 
@@ -22,6 +23,31 @@ struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var snapshotCreated: Bool
     var snapshotName: String?
     var tier: String
+}
+
+/// Live progress and status of an active or recently completed safe disk cleaning run.
+struct CompanionCleanProgress: Codable, Equatable, Sendable {
+    var isCleaning: Bool
+    var phase: String
+    var progress: Double
+    var statusText: String
+    var currentItem: String?
+    var itemsCleaned: Int
+    var totalItems: Int
+    var bytesReclaimed: UInt64
+    var formattedBytesReclaimed: String
+    var snapshotName: String?
+    var error: String?
+}
+
+extension Notification.Name {
+    static let diskCleanerProgressChanged = Notification.Name("hoghunter.diskCleanerProgressChanged")
+}
+
+/// Update payload carrying clean progress and its unique execution run ID.
+struct DiskCleanerProgressUpdate: Sendable {
+    var runId: UUID
+    var progress: CompanionCleanProgress
 }
 
 /// Response returned when the iOS companion asks to quit a process on the Mac.
@@ -94,7 +120,7 @@ enum CompanionToken {
     }
 }
 
-/// Read-only picture of the Mac panel.  Numbers are already formatted the way
+/// Live telemetry snapshot of the Mac panel.  Numbers are already formatted the way
 /// the menu bar app shows them, so the phone does not keep a second copy of
 /// the scale rules.
 struct CompanionSnapshot: Codable, Equatable {
@@ -109,6 +135,11 @@ struct CompanionSnapshot: Codable, Equatable {
     var rows: [CompanionRow]
     var storage: CompanionStorageSummary? = nil
     var network: [CompanionNetworkRow]? = nil
+    /// What the Mac owner has allowed the phone to do.  Optional so an older
+    /// Mac that does not send them decodes as "unknown" rather than failing.
+    var remoteQuitAllowed: Bool? = nil
+    var remoteCleanAllowed: Bool? = nil
+    var cleanProgress: CompanionCleanProgress? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
@@ -178,6 +209,33 @@ struct CompanionStorageSummary: Codable, Equatable {
     var excludedPathsCount: Int? = nil
     var categoryBreakdown: [CompanionStorageCategorySummary]? = nil
     var excludedPaths: [String]? = nil
+    /// Top storage-heavy apps on the host.  Mirrors the Mac pane's "App Storage"
+    /// tab so the phone can show "Mac Storage by App" without owning a separate
+    /// scanner.  Optional because the scanner is cached on the host and the first
+    /// snapshot after pairing may not have run yet.
+    var topApps: [CompanionAppStorageRow]? = nil
+    /// When `topApps` was last refreshed on the host.  The phone uses this for
+    /// a "Scanned 2 min ago" caption.
+    var topAppsScannedAt: Date? = nil
+}
+
+/// One row of the Mac pane's App Storage list, packaged for the phone.  All
+/// values are pre-formatted on the host so the phone can render without
+/// re-doing the scale rules.
+struct CompanionAppStorageRow: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var bundleId: String?
+    var totalBytes: UInt64
+    var bundleBytes: UInt64
+    var hiddenBytes: UInt64
+    var totalText: String
+    var bundleText: String
+    var hiddenText: String
+    /// True when one or more walks had to be capped (time or file-count budget).
+    var anyApproximate: Bool
+    /// True when hidden bytes are at least 5x the bundle and over 200 MB.
+    var isHiddenHeavy: Bool
 }
 
 struct CompanionNetworkRow: Codable, Equatable, Identifiable {

@@ -3,6 +3,75 @@ import Network
 
 /// One HTTP GET over the Bonjour endpoint the browser already resolved.
 enum CompanionConnection {
+    /// Asks the Mac to approve this phone.  The Mac shows an alert, so the
+    /// reply can take as long as the person takes; the caller sets the limit.
+    /// Returns the pairing code the Mac hands back on Allow.
+    static func requestPair(endpoint: NWEndpoint, deviceName: String) async throws -> String {
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = PairResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let request = CompanionHTTP.pairRequest(deviceName: deviceName)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                        connection.cancel()
+                    default:
+                        break
+                    }
+                }
+                receivePair(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .userInitiated))
+            }
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
+        }
+    }
+
+    private static func receivePair(_ connection: NWConnection, reader: PairResponseReader, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let parsed = CompanionHTTP.parseResponse(buffer) {
+                let json = (try? JSONSerialization.jsonObject(with: parsed.body)) as? [String: Any]
+                switch parsed.status {
+                case 200:
+                    if let token = json?["token"] as? String, !token.isEmpty {
+                        reader.succeed(token)
+                    } else {
+                        reader.fail(CompanionClientError.badResponse)
+                    }
+                case 403:
+                    reader.fail(CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac did not allow this iPhone."))
+                case 429:
+                    reader.fail(CompanionClientError.busy)
+                case 404:
+                    reader.fail(CompanionClientError.forbidden("This Mac's copy of Hog Hunter is too old to approve phones.  Update it, or type the code from Settings."))
+                default:
+                    reader.fail(CompanionClientError.badResponse)
+                }
+                connection.cancel()
+                return
+            }
+            if isComplete || error != nil {
+                reader.fail(error ?? CompanionClientError.badResponse)
+                connection.cancel()
+                return
+            }
+            receivePair(connection, reader: reader, buffer: buffer)
+        }
+    }
+
     static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
         let connection = NWConnection(to: endpoint, using: .tcp)
         let reader = ResponseReader()
@@ -14,10 +83,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.request(token: token)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -42,10 +115,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.cleanRequest(token: token)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -70,10 +147,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.quitRequest(token: token, pid: pid, force: force)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -98,10 +179,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.tameRequest(token: token, pid: pid, action: action)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -132,10 +217,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.exclusionsRequest(token: token, toggleCategory: toggleCategory, addPath: addPath, removePath: removePath)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -166,10 +255,14 @@ enum CompanionConnection {
                     case .ready:
                         let request = CompanionHTTP.viewRequest(token: token, window: window, grouping: grouping, cpuScale: cpuScale)
                         connection.send(content: request, completion: .contentProcessed { error in
-                            if let error { reader.fail(error) }
+                            if let error {
+                                reader.fail(error)
+                                connection.cancel()
+                            }
                         })
                     case .failed(let error):
                         reader.fail(error)
+                        connection.cancel()
                     default:
                         break
                     }
@@ -226,6 +319,9 @@ enum CompanionConnection {
                     }
                 case 401:
                     reader.fail(CompanionClientError.unauthorized)
+                case 403:
+                    let json = (try? JSONSerialization.jsonObject(with: parsed.body)) as? [String: Any]
+                    reader.fail(CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac does not allow cleaning from iPhone."))
                 default:
                     reader.fail(CompanionClientError.badResponse)
                 }
@@ -483,6 +579,27 @@ private final class ViewResponseReader: @unchecked Sendable {
     }
 
     private func resume(_ result: Result<CompanionViewUpdateResponse, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+private final class PairResponseReader: @unchecked Sendable {
+    var continuation: CheckedContinuation<String, Error>?
+    private let lock = NSLock()
+
+    func succeed(_ token: String) {
+        resume(.success(token))
+    }
+
+    func fail(_ error: Error) {
+        resume(.failure(error))
+    }
+
+    private func resume(_ result: Result<String, Error>) {
         lock.lock()
         let continuation = self.continuation
         self.continuation = nil

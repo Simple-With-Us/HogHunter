@@ -561,17 +561,19 @@ private struct CategoryCardView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
 
-            Button {
-                store.revealInFinder(url: item.url)
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+            if item.canRevealInFinder {
+                Button {
+                    store.revealInFinder(url: item.url)
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in Finder")
+                .accessibilityLabel("Reveal \(item.title) in Finder")
+                .padding(.trailing, 8)
             }
-            .buttonStyle(.plain)
-            .help("Reveal in Finder")
-            .accessibilityLabel("Reveal \(item.title) in Finder")
-            .padding(.trailing, 8)
         }
         .padding(.vertical, 5)
     }
@@ -587,6 +589,7 @@ private struct CategoryCardView: View {
         case .aiArtifacts: color = .green
         case .localAIModels: color = .mint
         case .largeAndOldFiles: color = .teal
+        case .apfsSnapshots: color = .cyan
         }
 
         return ZStack {

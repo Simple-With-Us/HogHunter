@@ -4,6 +4,7 @@ import AppKit
 enum StorageTab: String, CaseIterable, Identifiable {
     case appStorage = "App Storage"
     case diskCleaner = "Disk Cleaner"
+    case roboticVacuum = "Robotic Vacuum"
 
     var id: String { rawValue }
 }
@@ -18,8 +19,10 @@ enum StorageTab: String, CaseIterable, Identifiable {
 struct StorageView: View {
     @StateObject private var store: StorageStore
     @StateObject private var cleanerStore = DiskCleanerStore()
+    @StateObject private var vacuumStore = RoboticVacuumStore()
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
+    @State private var sortAscending: Bool = false
     @State private var filter: StorageFilter = .all
     @State private var expandedUsageId: String?
 
@@ -45,6 +48,8 @@ struct StorageView: View {
                 footer
             case .diskCleaner:
                 DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
+            case .roboticVacuum:
+                RoboticVacuumView(store: vacuumStore)
             }
         }
         .padding(embeddedInPanel ? 0 : 16)
@@ -89,13 +94,13 @@ struct StorageView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : "internaldrive")
+            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : (selectedTab == .roboticVacuum ? "fanblades.fill" : "internaldrive"))
                 .font(.system(size: 20))
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
-                Text(selectedTab == .diskCleaner ? "Disk Cleaner" : "Storage")
+                Text(headerTitle)
                     .font(.system(size: 17, weight: .semibold))
-                Text(selectedTab == .diskCleaner ? "Reclaim space from caches, leftovers, and clutter" : subtitle)
+                Text(headerSubtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -104,11 +109,12 @@ struct StorageView: View {
             Spacer()
 
             Picker("Mode", selection: $selectedTab) {
-                Text("Disk Cleaner").tag(StorageTab.diskCleaner)
-                Text("App Storage").tag(StorageTab.appStorage)
+                Text("Cleaner").tag(StorageTab.diskCleaner)
+                Text("Vacuum").tag(StorageTab.roboticVacuum)
+                Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
-            .frame(width: 200)
+            .frame(width: 260)
             .disabled(cleanerStore.isCleaning)
         }
     }
@@ -141,10 +147,41 @@ struct StorageView: View {
                     Text("Bundle").tag(StorageSort.bundle)
                 }
                 .pickerStyle(.menu)
-                // 90 pt truncated every option to "T…".  A menu style picker
-                // only needs room for the widest label plus the chevron.
-                .frame(width: 132)
+                .frame(width: 115)
+
+                Button {
+                    sortAscending.toggle()
+                } label: {
+                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 20, height: 18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
+                .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
+        }
+    }
+
+    private var headerTitle: String {
+        switch selectedTab {
+        case .diskCleaner: return "Disk Cleaner"
+        case .roboticVacuum: return "Robotic Vacuum"
+        case .appStorage: return "Storage"
+        }
+    }
+
+    private var headerSubtitle: String {
+        switch selectedTab {
+        case .diskCleaner: return "Reclaim space from caches, leftovers, and clutter"
+        case .roboticVacuum: return "Scheduled cleaning with a clear status when something is late"
+        case .appStorage: return subtitle
         }
     }
 
@@ -199,11 +236,25 @@ struct StorageView: View {
 
     private var filteredApps: [StorageUsage] {
         let base = filter == .running ? store.apps.filter(\.isRunning) : store.apps
+        let sorted: [StorageUsage]
         switch sortOrder {
-        case .total: return base.sorted { $0.totalBytes > $1.totalBytes }
-        case .hidden: return base.sorted { $0.hiddenBytes > $1.hiddenBytes }
-        case .bundle: return base.sorted { $0.bundleBytes > $1.bundleBytes }
+        case .total:
+            sorted = base.sorted(by: { a, b in
+                if a.totalBytes != b.totalBytes { return a.totalBytes > b.totalBytes }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
+        case .hidden:
+            sorted = base.sorted(by: { a, b in
+                if a.hiddenBytes != b.hiddenBytes { return a.hiddenBytes > b.hiddenBytes }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
+        case .bundle:
+            sorted = base.sorted(by: { a, b in
+                if a.bundleBytes != b.bundleBytes { return a.bundleBytes > b.bundleBytes }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            })
         }
+        return sortAscending ? sorted.reversed() : sorted
     }
 
     private var list: some View {
