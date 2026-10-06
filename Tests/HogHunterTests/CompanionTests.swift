@@ -564,3 +564,72 @@ final class CompanionStorageTelemetryTests: XCTestCase {
         XCTAssertEqual(decoded?.tier, "Standard")
     }
 }
+
+/// The phone renders a "Mac Storage by App" section from `topApps` in the
+/// snapshot.  These tests pin the host side so a regression surfaces as a
+/// failing XCTest, not as a blank section on someone's iPhone.
+final class CompanionAppStorageTests: XCTestCase {
+
+    override func setUp() {
+        // Each test starts with a clean cache; the scanner is real, so leaving
+        // a populated cache from a previous test would make assertions order-
+        // dependent.
+        CompanionSnapshotBuilder.invalidateTopAppsCache()
+    }
+
+    func testAppStorageRowRoundTripsThroughJSON() throws {
+        let row = CompanionAppStorageRow(
+            id: "com.example.app",
+            name: "Example",
+            bundleId: "com.example.app",
+            totalBytes: 1_500_000_000,
+            bundleBytes: 200_000_000,
+            hiddenBytes: 1_300_000_000,
+            totalText: "1.4 GB",
+            bundleText: "190.7 MB",
+            hiddenText: "1.2 GB",
+            anyApproximate: false,
+            isHiddenHeavy: true
+        )
+        let data = try JSONEncoder().encode(row)
+        let decoded = try JSONDecoder().decode(CompanionAppStorageRow.self, from: data)
+        XCTAssertEqual(decoded, row)
+        XCTAssertTrue(decoded.isHiddenHeavy)
+        XCTAssertFalse(decoded.anyApproximate)
+    }
+
+    func testStorageSummaryDecodesWithoutTopAppsForBackwardCompat() throws {
+        // Older Mac snapshots predate 1.0.6 and have no topApps / topAppsScannedAt.
+        // The decoder must accept them and leave the new fields nil so the
+        // iPhone just hides the new section instead of crashing.
+        let json = """
+        {
+          "freeBytes": 100000,
+          "totalBytes": 1000000,
+          "usedBytes": 900000,
+          "freeText": "100 KB Free",
+          "totalText": "1 MB Total",
+          "usedText": "900 KB Used",
+          "usedPercent": 90.0
+        }
+        """
+        let decoded = try JSONDecoder().decode(CompanionStorageSummary.self,
+                                               from: Data(json.utf8))
+        XCTAssertNil(decoded.topApps)
+        XCTAssertNil(decoded.topAppsScannedAt)
+    }
+
+    func testCurrentStorageSummaryAlwaysCarriesAtLeastAnEmptyTopAppsArray() {
+        // Even on a fresh cache, the snapshot must carry an empty (not nil)
+        // topApps array so the iOS view's `if let apps = ... !apps.isEmpty`
+        // check behaves the same way for every user; only the "scanning"
+        // placeholder is shown when the walk has not returned.
+        let summary = CompanionSnapshotBuilder.currentStorageSummary()
+        XCTAssertNotNil(summary?.topApps)
+    }
+
+    func testCachedTopAppsStartsEmptyAfterInvalidate() {
+        CompanionSnapshotBuilder.invalidateTopAppsCache()
+        XCTAssertTrue(CompanionSnapshotBuilder.cachedTopApps().isEmpty)
+    }
+}

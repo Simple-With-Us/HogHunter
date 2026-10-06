@@ -1607,6 +1607,8 @@ final class HogStore: ObservableObject {
         guard shareWithIPhone else {
             companionServer.stop()
             companionStatus = "Off"
+            companionTopAppsRefreshTask?.cancel()
+            companionTopAppsRefreshTask = nil
             return
         }
         companionStatus = "Starting"
@@ -1617,7 +1619,32 @@ final class HogStore: ObservableObject {
             }
         }
         publishCompanion()
+        // First scan: capture the running bundle ids on main (the snapshot
+        // builder's scanner runs them off-thread, so we have to grab the
+        // value before handing a closure to the cache refresher).
+        let initialRunning = self.runningBundleIdsSnapshot()
+        CompanionSnapshotBuilder.refreshTopApps(runningBundleIds: { initialRunning })
+        startCompanionTopAppsTimer()
     }
+
+    /// Re-scans the Mac's installed apps on the same 5-minute cadence the
+    /// `StorageStore` uses, so the phone's "Mac Storage by App" section
+    /// stays current while sharing is on.  The cache itself is the gate;
+    /// this just calls the public refresher.
+    private func startCompanionTopAppsTimer() {
+        companionTopAppsRefreshTask?.cancel()
+        companionTopAppsRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                if Task.isCancelled { return }
+                guard let self, self.shareWithIPhone else { return }
+                let bundleIds = self.runningBundleIdsSnapshot()
+                CompanionSnapshotBuilder.refreshTopApps(runningBundleIds: { bundleIds })
+            }
+        }
+    }
+
+    private var companionTopAppsRefreshTask: Task<Void, Never>?
 
     private func publishCompanion() {
         guard shareWithIPhone else { return }
