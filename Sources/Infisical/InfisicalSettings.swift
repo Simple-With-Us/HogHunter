@@ -127,10 +127,16 @@ enum InfisicalError: Error, CustomStringConvertible {
 struct InfisicalCredential: Codable {
     var clientId: String
     var clientSecret: String
-    /// Older Keychain records omit this field and keep the original destination.
+    /// Older records without this field remain unconfigured until explicitly saved.
     var projectId: String? = nil
 
-    var effectiveProjectId: String { (projectId ?? InfisicalClient.projectId).lowercased() }
+    var effectiveProjectId: String { (projectId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    var isComplete: Bool {
+        !clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && UUID(uuidString: effectiveProjectId) != nil
+    }
 }
 
 protocol InfisicalServing {
@@ -147,20 +153,16 @@ protocol InfisicalServing {
 /// network without touching the real service.
 final class InfisicalClient: InfisicalServing {
     static let baseURL = URL(string: "https://app.infisical.com")!
-    static let projectId = "c1df65f2-adb5-4d64-93c0-f47f969feea1"
 
     private let session: URLSession
     private let baseURL: URL
-    private let projectId: String
 
     init(
         session: URLSession = .shared,
-        baseURL: URL = InfisicalClient.baseURL,
-        projectId: String = InfisicalClient.projectId
+        baseURL: URL = InfisicalClient.baseURL
     ) {
         self.session = session
         self.baseURL = baseURL
-        self.projectId = projectId
     }
 
     /// Universal-auth login.  Returns a short-lived access token.
@@ -231,14 +233,6 @@ final class InfisicalClient: InfisicalServing {
         ])
         let (data, response) = try await perform(request)
         try check(response, data: data)
-    }
-
-    func fetchSecrets(accessToken: String, environment: String) async throws -> [String: String] {
-        try await fetchSecrets(accessToken: accessToken, environment: environment, projectId: projectId)
-    }
-
-    func upsertSecret(accessToken: String, environment: String, key: String, value: String) async throws {
-        try await upsertSecret(accessToken: accessToken, environment: environment, key: key, value: value, projectId: projectId)
     }
 
     private func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
@@ -365,7 +359,7 @@ final class InfisicalSettings: ObservableObject {
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var lastError: String?
     @Published private(set) var isSaving = false
-    @Published private(set) var projectId = InfisicalClient.projectId
+    @Published private(set) var projectId = ""
 
     private let client: InfisicalServing
     private let store: InfisicalStore
@@ -531,11 +525,11 @@ final class InfisicalSettings: ObservableObject {
         if credentialWasCleared { return nil }
         if let cached = inMemoryCredential { return cached }
         if let provider = credentialProvider {
-            let loaded = provider()
+            guard let loaded = provider(), loaded.isComplete else { return nil }
             inMemoryCredential = loaded
             return loaded
         }
-        let loaded = Self.readCredentialFromKeychain()
+        guard let loaded = Self.readCredentialFromKeychain(), loaded.isComplete else { return nil }
         inMemoryCredential = loaded
         return loaded
     }
@@ -620,7 +614,7 @@ final class InfisicalSettings: ObservableObject {
         inMemoryCredential = nil
         isConfigured = false
         isRefreshing = false
-        projectId = InfisicalClient.projectId
+        projectId = ""
         store.replace([:], projectId: InfisicalStore.localProjectId)
         lastRefresh = nil
         lastError = nil
