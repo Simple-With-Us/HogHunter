@@ -225,14 +225,23 @@ class TestLockSkip(unittest.TestCase):
         from vacuum.engine import VacuumEngine
         from vacuum.models import StepStatus, TriggerKind
 
-        cfg = load_config()
-        cfg["keep_worktree_regex"] = "[invalid"
-        cfg["repos"] = []
-        engine = VacuumEngine(cfg, Path("/tmp"))
-        with patch.object(sys, "platform", "darwin"):
-            record = engine.run(TriggerKind.JANITOR)
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = load_config(home=home)
+            cfg["keep_worktree_regex"] = "[invalid"
+            cfg["repos"] = []
+            cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+            cfg.setdefault("janitor", {})["reap_worktrees"] = True
+            for step_id in steps_for_trigger(cfg, "janitor"):
+                if step_id != "janitor_worktree_retire":
+                    cfg.setdefault("steps", {})[step_id] = {"enabled": False}
+            cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+            engine = VacuumEngine(cfg, home=home)
+            with patch("vacuum.pressure.janitor_pressure_mode", return_value="normal"):
+                record = engine.run(TriggerKind.JANITOR)
         step = next(s for s in record.steps if s.step_id == "janitor_worktree_retire")
         self.assertEqual(step.status, StepStatus.FAILED)
+        self.assertTrue(all(s.step_id == "janitor_worktree_retire" for s in record.steps))
 
 
 class TestDryRun(unittest.TestCase):
