@@ -4,13 +4,13 @@ Infisical is the sole source of truth for Hog Hunter's app-level settings: secre
 
 ## The policy
 
-Everything Hog Hunter's behavior depends on that is not code lives in the app's Infisical project (`HogHunter`, project ID `c1df65f2-adb5-4d64-93c0-f47f969feea1`).  An admin tunes behavior by editing values in Infisical, not by shipping a build.  The app reads those values at launch into an in-memory cache and serves every runtime read from the cache.
+Everything Hog Hunter's behavior depends on that is not code lives in the selected Infisical project.  Existing connections retain the original `HogHunter` project (`c1df65f2-adb5-4d64-93c0-f47f969feea1`) until the admin explicitly saves another Project ID.  An admin tunes behavior by editing values in Infisical, not by shipping a build.  The app reads those values at launch into an in-memory cache and serves every runtime read from the cache.
 
 ## Who owns the Infisical read
 
 Hog Hunter has no backend.  The Mac app is the whole product (the iPhone companion connects directly to the Mac app over Bonjour or Tailscale), and the local user IS the admin -- the canonical pattern's single-user case.  So the Mac app owns the Infisical read.
 
-A universal-auth client secret is never embedded in the binary.  The admin enters it once in Settings > Advanced and it is stored in the Keychain (`com.simplewithus.hoghunter.infisical` / `universal-auth`).  Until a credential is saved, the app behaves exactly as it did before this change: built-in defaults and UserDefaults stand.
+A universal-auth client secret is never embedded in the binary.  The admin enters Client ID, Client Secret, and Project ID in Settings > Advanced; the connection is stored together in the Keychain (`com.simplewithus.hoghunter.infisical` / `universal-auth`).  Until a credential is saved, the app behaves exactly as it did before this change: built-in defaults and UserDefaults stand.
 
 The iOS companion never talks to Infisical and never holds a credential.  It receives the effective settings through the Mac's companion snapshot channel.
 
@@ -76,3 +76,15 @@ Edit the key in the Infisical dashboard (project `HogHunter`, environment `dev`)
 ## Local development
 
 Without a Keychain credential the Infisical code paths are inert: the app runs exactly as before, and the test suite stubs the network entirely (`Tests/HogHunterTests/InfisicalSettingsTests.swift`).  CI needs no Infisical access.
+
+## Selecting another project
+
+Settings > Advanced accepts Client ID, Client Secret, and Project ID.  The host remains `https://app.infisical.com` and the environment remains `dev`.  Legacy Keychain records without a Project ID decode to the original HogHunter project, without migration or a credential rewrite.
+
+Save first validates nonblank credentials and a UUID Project ID, then authenticates and reads that project's `dev` settings.  Only after both operations succeed does it atomically update the Keychain and activate the new connection.  Authentication, access, or Keychain failures leave the previous connection and cache usable.  Secrets are not trimmed, logged, or included in error messages.
+
+A successful target change replaces the cache rather than merging it and resets project-derived effective and persisted fallback values, including the alert webhook.  Same-target refresh failures retain last-known-good settings.  A persisted project marker keeps another project's fallback out of an offline relaunch.  Clearing a connection also clears its project-derived values.  Display preferences and consent choices are unaffected.
+
+Every in-flight refresh, write, and queued settings edit is bound to its original connection generation.  An old operation cannot update the new connection or redirect a queued batch into its project.  A write already sent to the old project may still complete there; its late response is discarded locally.  Concurrent saves are rejected, and a clear invalidates pending saves.
+
+Synthetic regression coverage lives in `InfisicalProjectSelectionTests.swift`; HTTP routing is covered in `InfisicalSettingsTests.swift`.  These tests inject credential persistence and never access the Keychain or a real Infisical identity.  This feature does not create identities, grant project permissions, rotate credentials, add telemetry, or change the iPhone companion.
