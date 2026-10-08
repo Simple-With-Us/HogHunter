@@ -549,11 +549,10 @@ def rule_temp_scratch() -> list[Candidate]:
     # depth 3, so a top-level `find -maxdepth 1 -name 'ssr-*'` misses them.
     # Enumerate by depth and filter on the `ssr/` leaf's own mtime.
     try:
-        res = subprocess.run(
-            ["/usr/bin/find", str(root), "-maxdepth", "3", "-type", "d", "-name", "ssr"],
-            capture_output=True, text=True, timeout=RULE_BUDGET_SEC,
+        ssr_dirs = find_paths(
+            [str(root), "-maxdepth", "3", "-type", "d", "-name", "ssr"],
+            RULE_BUDGET_SEC,
         )
-        ssr_dirs = [ln for ln in res.stdout.splitlines() if ln.strip()]
     except (OSError, subprocess.SubprocessError):
         ssr_dirs = []
 
@@ -595,11 +594,10 @@ def rule_temp_scratch() -> list[Candidate]:
     # Codex per-run markers are FILES, not directories -- find -type d misses
     # them entirely and du -sh on each is wasted work.
     try:
-        res = subprocess.run(
-            ["/usr/bin/find", str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
-            capture_output=True, text=True, timeout=60,
-        )
-        for f in res.stdout.splitlines():
+        for f in find_paths(
+            [str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
+            60,
+        ):
             if not f.strip() or f in seen:
                 continue
             seen.add(f)
@@ -755,6 +753,55 @@ def rule_simulator_runtimes() -> list[Candidate]:
     return cands
 
 
+def split_find_output(raw: bytes) -> list[str]:
+    """Split `find -print0` output.  A newline inside a path is not a separator."""
+    return [os.fsdecode(part) for part in raw.split(b"\0") if part]
+
+
+def find_paths(args: list[str], timeout: float) -> list[str]:
+    """Run find and return each path whole, including paths that contain newlines."""
+    res = subprocess.run(
+        ["/usr/bin/find", *args, "-print0"],
+        capture_output=True,
+        timeout=timeout,
+    )
+    if res.returncode != 0:
+        # find exits non-zero when a directory is unreadable and still prints
+        # the paths it could read.  Keep those paths.  A rejected primary must
+        # not look like an empty tree.
+        err = res.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200]
+        log(f"find exited {res.returncode}: {err}")
+    return split_find_output(res.stdout)
+
+
+def report_path(path: str) -> str:
+    """One report line per path.  Newlines and terminal controls stay visible as text."""
+    out: list[str] = []
+    for ch in path:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            # Printable non-ASCII (caf\u00e9, \u65e5\u672c\u8a9e) passes through unchanged;
+            # lone surrogates from os.fsdecode become visible \udcXX text instead
+            # of raising UnicodeEncodeError on the way to stdout.
+            out.append(ch.encode("utf-8", "backslashreplace").decode("utf-8"))
+    return "".join(out)
+
+
+def log_scan_roots() -> list[Path]:
+    """Library logs and the housekeeper tree.  Repo checkouts are not logs."""
+    return [
+        HOME / "Library/Logs",
+        HOME / ".botfleet",
+    ]
+
+
 def rule_unbounded_logs() -> list[Candidate]:
     """Log and JSONL files that grew without a rotation policy.
 
@@ -765,12 +812,7 @@ def rule_unbounded_logs() -> list[Candidate]:
     that, which is strictly better.
     """
     cands: list[Candidate] = []
-    roots = [
-        HOME / "Library/Logs",
-        HOME / ".botfleet",
-        HOME / "apps",
-        HOME / "Code",
-    ]
+    roots = log_scan_roots()
     keep_mib = 16
     deadline = time.time() + RULE_BUDGET_SEC
     for root in roots:
@@ -780,13 +822,12 @@ def rule_unbounded_logs() -> list[Candidate]:
             log("logs: budget exhausted, keeping partial results")
             break
         try:
-            res = subprocess.run(
-                ["/usr/bin/find", str(root), "-maxdepth", "3", "-type", "f",
+            files = find_paths(
+                [str(root), "-maxdepth", "3", "-type", "f",
                  "(", "-name", "*.log", "-o", "-name", "*.jsonl", "-o", "-name", "*.out",
                  "-o", "-name", "*.err", ")", "-size", "+64M"],
-                capture_output=True, text=True, timeout=RULE_BUDGET_SEC,
+                RULE_BUDGET_SEC,
             )
-            files = [ln for ln in res.stdout.splitlines() if ln.strip()]
         except (OSError, subprocess.SubprocessError):
             continue
         for f in files:
@@ -829,12 +870,11 @@ def rule_sqlite_wals() -> list[Candidate]:
         if not root.is_dir() or is_forbidden(str(root)):
             continue
         try:
-            res = subprocess.run(
-                ["/usr/bin/find", str(root), "-maxdepth", "3", "-type", "f",
+            files = find_paths(
+                [str(root), "-maxdepth", "3", "-type", "f",
                  "-name", "*.db-wal", "-size", "+32M"],
-                capture_output=True, text=True, timeout=60,
+                60,
             )
-            files = [ln for ln in res.stdout.splitlines() if ln.strip()]
         except (OSError, subprocess.SubprocessError):
             continue
         for wal in files:
@@ -1216,9 +1256,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[{marker}] {cat} — {len(items)} items, {total:.1f}M")
             for c in items[:6]:
                 flag = "x" if c.applied else ("E" if c.error else ("R" if c.tier == "ask-first" else " "))
-                print(f"    {flag} {c.mib:9.1f}M  {c.path}")
+                print(f"    {flag} {c.mib:9.1f}M  {report_path(c.path)}")
                 if c.error:
-                    print(f"        error: {c.error}")
+                    print(f"        error: {report_path(c.error)}")
             if len(items) > 6:
                 print(f"      ... and {len(items) - 6} more")
     return 0

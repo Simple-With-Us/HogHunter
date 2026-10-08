@@ -65,6 +65,38 @@ def test_snapshot_derivation_is_lossless(hh):
         assert len(stamp) == len("2026-01-02-030405"), stamp
 
 
+def test_find_output_keeps_a_newline_inside_a_path(hh):
+    """find -print0 must not split a path that contains a newline.
+
+    A newline-split path would truncate or delete the wrong file.
+    """
+    raw = b"/tmp/plain.log\0/tmp/has\nnewline.log\0"
+    assert hh.split_find_output(raw) == ["/tmp/plain.log", "/tmp/has\nnewline.log"]
+    assert hh.split_find_output(b"") == []
+    assert hh.split_find_output(b"\0\0") == []
+
+
+def test_report_path_stays_on_one_line(hh):
+    shown = hh.report_path("/tmp/has\nnewline.log")
+    assert shown == "/tmp/has\\nnewline.log"
+    assert "\n" not in shown
+    assert "\x1b" not in hh.report_path("/tmp/\x1b[2Jcleared")
+    assert "\n" not in hh.report_path("oops\npath")
+    # Printable non-ASCII must not crash the report or get mangled.
+    assert hh.report_path("/tmp/caf\u00e9.log") == "/tmp/caf\u00e9.log"
+    assert hh.report_path("/tmp/\u65e5\u672c\u8a9e.log") == "/tmp/\u65e5\u672c\u8a9e.log"
+    # Lone surrogates from os.fsdecode become visible \udcXX text, not a crash.
+    assert "\\udc80" in hh.report_path("/tmp/\udc80odd.log")
+
+
+def test_log_scan_skips_repo_trees(hh):
+    """~/Code and ~/apps hold source checkouts, not rotatable daemon logs."""
+    roots = {p.resolve() for p in hh.log_scan_roots()}
+    assert (hh.HOME / "Code").resolve() not in roots
+    assert (hh.HOME / "apps").resolve() not in roots
+    assert (hh.HOME / "Library/Logs").resolve() in roots
+
+
 def test_disk_bands(hh):
     """Band thresholds are what decide whether the semi-safe and expensive tiers
     open at all, so they are pinned here instead of left to drift with a
