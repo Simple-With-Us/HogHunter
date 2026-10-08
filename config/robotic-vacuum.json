@@ -12,11 +12,18 @@
   "data_dir": "~/Library/Application Support/HogHunter/RoboticVacuum",
   "hoghunter_clean": "",
   "repos": [],
-  "apps_glob": "~/apps/*",
   "keep_worktree_regex": "",
   "coolify_ssh_host": "",
   "grok_session_days": 7,
   "grok_session_days_pressure": 3,
+  "lanes": {
+    "doctor_command": ["~/apps/lane", "ls", "--json"],
+    "max_report_age_seconds": 900,
+    "min_schema": 2,
+    "timeout_seconds": 300,
+    "retire_min_days": 7,
+    "dependency_min_idle_hours": 24
+  },
   "janitor": {
     "low_free_gib": 80,
     "pressure_free_gib": 65,

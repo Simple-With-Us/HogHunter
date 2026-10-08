@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import glob
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -11,13 +9,22 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import lanes
 from .config import STEP_CATALOG, expand_path, step_enabled, steps_for_trigger
-from .janitor import plan_retire_worktrees, retire_worktrees
+from .janitor import RetirePlan, data_dir_for, keep_regex, plan_retire_worktrees, retire_worktrees
 from .lock import HousekeeperLock, LockHeld
 from .models import RunRecord, StepResult, StepStatus, TriggerKind
 from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 
-KEEP_SENTINEL = ".janitor-keep"
+# Steps that run the lane doctor.  Under extreme host load they are skipped like the other heavy janitor work.
+_HEAVY_LANE_STEPS = ("janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps")
+
+# Gates for the older `full` steps, from config/reclaim-policy.json: the xcode-artifacts and dev-caches rules skip
+# while any of these processes run (skipWhenAny), a DerivedData project must be untouched for the cache idle gate
+# (idlenessGates.cacheMinutes, 90), and an iOS DeviceSupport version for 7 days (idlenessGates.deviceSupportDays).
+_BUILD_PROCESSES = ("xcodebuild", "swift-frontend", "clang")
+_DERIVED_DATA_IDLE_SECONDS = 90 * 60.0
+_DEVICE_SUPPORT_IDLE_SECONDS = 7 * 86400.0
 
 # Steps that interpret dry_run themselves (planning vs destructive apply).
 _DRY_RUN_AWARE_STEPS = frozenset(
@@ -30,11 +37,26 @@ def _subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProces
 
 
 class VacuumEngine:
-    def __init__(self, cfg: dict[str, Any], home: Path | None = None) -> None:
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        home: Path | None = None,
+        runner: Optional[Callable[..., Any]] = None,
+        doctor_runner: Optional[lanes.DoctorRunner] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self.home = home or Path.home()
         self.cfg = cfg
         self.lock_path = expand_path(str(cfg.get("housekeeper_lock", "")), self.home)
-        self._planned_retire_candidates: list[tuple[str, str]] | None = None
+        # Injectable for tests: the process runner (git, pgrep, lsof, du), the doctor runner, and the clock.
+        self._runner: Callable[..., Any] = runner or _subprocess_run
+        self._doctor_runner = doctor_runner
+        self._clock = clock
+        self._planned_retire_plan: RetirePlan | None = None
+        self._lane_report_cache: lanes.LaneReport | None = None
+        self._busy_reason = ""
+        # Itemized actions (dry run: what would happen; real run: what happened).  The CLI prints this.
+        self.plan: list[dict[str, Any]] = []
 
     def run(
         self,
@@ -51,7 +73,8 @@ class VacuumEngine:
             pressure=pressure,
         )
         step_ids = steps_for_trigger(self.cfg, trigger.value, pressure=pressure)
-        self._planned_retire_candidates = None
+        self._planned_retire_plan = None
+        self._lane_report_cache = None
         try:
             with HousekeeperLock(self.lock_path):
                 sample = sample_mac()
@@ -61,16 +84,22 @@ class VacuumEngine:
                         continue
                     meta = STEP_CATALOG.get(step_id, {})
                     title = str(meta.get("title", step_id))
-                    if mode == "hard" and step_id in ("janitor_worktree_retire", "janitor_cache_reclaim"):
+                    if mode == "hard" and step_id in _HEAVY_LANE_STEPS:
                         record.steps.append(
                             StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
                         )
                         continue
-                    self._planned_retire_candidates = None
+                    self._planned_retire_plan = None
                     if step_id == "janitor_worktree_retire":
                         try:
-                            self._planned_retire_candidates = plan_retire_worktrees(
-                                self.cfg, self.home, _subprocess_run, _subprocess_run
+                            keep_regex(self.cfg)  # an invalid keep list fails the step before the doctor runs
+                            self._planned_retire_plan = plan_retire_worktrees(
+                                self.cfg,
+                                self.home,
+                                self._runner,
+                                report=self._lane_report,
+                                clock=self._clock,
+                                dry_run=dry_run,
                             )
                         except Exception as exc:  # noqa: BLE001 — bad operator config must not kill the tick
                             record.steps.append(
@@ -86,10 +115,13 @@ class VacuumEngine:
             )
             record.finish(0, summary="skipped; peer holds lock")
         finally:
-            self._planned_retire_candidates = None
+            self._planned_retire_plan = None
+            self._lane_report_cache = None
         return record
 
-    def run_watch_tick(self, rw_state: dict[str, Any], prev_free: Optional[float]) -> tuple[RunRecord, list[dict[str, Any]], bool]:
+    def run_watch_tick(
+        self, rw_state: dict[str, Any], prev_free: Optional[float], dry_run: bool = False
+    ) -> tuple[RunRecord, list[dict[str, Any]], bool]:
         sample = sample_mac()
         hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
         rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
@@ -121,7 +153,7 @@ class VacuumEngine:
                     )
                     if now - last_clean >= cooldown:
                         should_clean = True
-                        pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full")
+                        pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full", dry_run=dry_run)
                         record.steps.extend(pressure_record.steps)
                         rw_state["last_clean_at"] = now
                         escalation_failed = any(s.status == StepStatus.FAILED for s in pressure_record.steps)
@@ -224,32 +256,91 @@ class VacuumEngine:
                 pass
         return before, "cleared", StepStatus.RAN
 
+    def _build_running(self) -> str:
+        """Non-empty when xcodebuild, swift-frontend or clang runs, or when the check itself failed.  This is the
+        skipWhenAny gate of the xcode-artifacts and dev-caches rules in config/reclaim-policy.json."""
+        for name in _BUILD_PROCESSES:
+            busy, reason = lanes.process_state(self._runner, name, f"{name} is running")
+            if busy:
+                return reason
+        return ""
+
+    def _clear_idle_children(self, directory: Path, idle_seconds: float, what: str) -> tuple[int, str, StepStatus]:
+        """Delete the child folders of directory that nothing wrote to within idle_seconds, and only while no
+        build runs.  A symlink, a loose file, a folder with a keep marker, and a folder that cannot be read in
+        full (unreadable, or too large to walk) are kept."""
+        if directory.is_symlink() or not directory.is_dir():
+            return 0, "path missing", StepStatus.SKIPPED
+        busy = self._build_running()
+        if busy:
+            return 0, f"skipped: {busy}", StepStatus.SKIPPED
+        freed = cleared = kept = failed = 0
+        try:
+            children = sorted(directory.iterdir())
+        except OSError as exc:
+            return 0, f"cannot list {directory.name} ({type(exc).__name__})", StepStatus.SKIPPED
+        for child in children:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            if os.path.lexists(child / lanes.KEEP_SENTINEL) or lanes.tree_changed_within(
+                str(child), idle_seconds, self._clock, cap=lanes.NESTED_WALK_CAP
+            ):
+                kept += 1
+                continue
+            size = self._dir_size_before_clear(child)
+            try:
+                shutil.rmtree(child)
+            except OSError:
+                failed += 1
+                continue
+            freed += size
+            cleared += 1
+        reason = f"cleared {cleared} {what} folder(s), kept {kept} in use or changed recently"
+        if failed:
+            reason += f", {failed} could not be removed"
+        return freed, reason, StepStatus.RAN if cleared else StepStatus.SKIPPED
+
     def _xcode_device_support(self) -> tuple[int, str, StepStatus]:
-        return self._clear_glob_children(self.home / "Library/Developer/Xcode/iOS DeviceSupport")
+        """Off by default (Mode 3 in docs/DEV-CLEANUP-PLAYBOOK.md).  When on: per OS version, untouched 7 days."""
+        return self._clear_idle_children(
+            self.home / "Library/Developer/Xcode/iOS DeviceSupport", _DEVICE_SUPPORT_IDLE_SECONDS, "DeviceSupport version"
+        )
 
     def _xcode_derived_data(self) -> tuple[int, str, StepStatus]:
-        return self._clear_glob_children(self.home / "Library/Developer/Xcode/DerivedData")
+        """Per project folder, untouched 90 minutes, and never while a build runs."""
+        return self._clear_idle_children(
+            self.home / "Library/Developer/Xcode/DerivedData", _DERIVED_DATA_IDLE_SECONDS, "DerivedData project"
+        )
 
     def _core_simulator_caches(self) -> tuple[int, str, StepStatus]:
         return self._clear_glob_children(self.home / "Library/Developer/CoreSimulator/Caches")
 
     def _simctl_delete_unavailable(self) -> tuple[int, str, StepStatus]:
-        if not shutil.which("xcrun"):
-            return 0, "xcrun not found", StepStatus.SKIPPED
-        # Never simctl shutdown all — fleet recall + legacy mac-auto-cleanup comments.
-        res = subprocess.run(["xcrun", "simctl", "delete", "unavailable"], capture_output=True, text=True, timeout=120)
-        if res.returncode != 0:
-            return 0, (res.stderr or res.stdout or "simctl failed")[:120], StepStatus.FAILED
-        return 0, "unavailable simulators removed", StepStatus.RAN
+        """Never runs anything.  `xcrun simctl delete unavailable` deletes simulator devices (user simulator state)
+        under CoreSimulator/Devices, which config/reclaim-policy.json and scripts/hoghunter-clean never touch.  The
+        step stays in the catalog so the app's toggle for it keeps working; it only reports why it did nothing."""
+        return (
+            0,
+            "not run: it would delete simulator devices in CoreSimulator/Devices, which no cleanup step touches",
+            StepStatus.SKIPPED,
+        )
 
     def _npm_cache(self) -> tuple[int, str, StepStatus]:
         if not shutil.which("npm"):
             return 0, "npm not installed", StepStatus.SKIPPED
         if self._install_running("npm (install|ci|update|prune)"):
-            return 0, "npm install in progress", StepStatus.SKIPPED
+            return 0, self._skip_busy("npm install in progress"), StepStatus.SKIPPED
+        busy = self._build_running()
+        if busy:
+            return 0, f"skipped: {busy}", StepStatus.SKIPPED
         subprocess.run(["npm", "cache", "clean", "--force"], capture_output=True, timeout=300)
         npx = self.home / ".npm/_npx"
-        freed = self._dir_size_before_clear(npx) if npx.is_dir() else 0
+        if npx.is_symlink() or not npx.is_dir():
+            return 0, "npm cache cleaned", StepStatus.RAN
+        # Tools started with npx (MCP servers, for one) run from ~/.npm/_npx; keep it while any process names it.
+        if self._pgrep_f(str(npx)):
+            return 0, "npm cache cleaned; npx folder kept", StepStatus.RAN
+        freed = self._dir_size_before_clear(npx)
         shutil.rmtree(npx, ignore_errors=True)
         return freed, "npm cache cleaned", StepStatus.RAN
 
@@ -257,23 +348,35 @@ class VacuumEngine:
         if not shutil.which("pnpm"):
             return 0, "pnpm not installed", StepStatus.SKIPPED
         if self._install_running("pnpm (install|update|add|import|dlx|link)"):
-            return 0, "pnpm install in progress", StepStatus.SKIPPED
+            return 0, self._skip_busy("pnpm install in progress"), StepStatus.SKIPPED
+        busy = self._build_running()
+        if busy:
+            return 0, f"skipped: {busy}", StepStatus.SKIPPED
         subprocess.run(["pnpm", "store", "prune"], capture_output=True, timeout=300)
         return 0, "pnpm store pruned", StepStatus.RAN
 
     def _yarn_cache(self) -> tuple[int, str, StepStatus]:
         if not shutil.which("yarn"):
             return 0, "yarn not installed", StepStatus.SKIPPED
+        if self._install_running("yarn (install|add|upgrade|up|remove)|yarn$"):
+            return 0, self._skip_busy("yarn install in progress"), StepStatus.SKIPPED
+        busy = self._build_running()
+        if busy:
+            return 0, f"skipped: {busy}", StepStatus.SKIPPED
         subprocess.run(["yarn", "cache", "clean"], capture_output=True, timeout=300)
         return 0, "yarn cache cleaned", StepStatus.RAN
 
     def _brew_cleanup(self) -> tuple[int, str, StepStatus]:
+        """The brew rule of config/reclaim-policy.json: `brew cleanup --prune=all`, skipped while brew or node-gyp
+        runs."""
         if not shutil.which("brew"):
             return 0, "brew not installed", StepStatus.SKIPPED
-        if self._install_running("brew (install|upgrade|reinstall)"):
-            return 0, "brew install in progress", StepStatus.SKIPPED
-        subprocess.run(["brew", "cleanup", "-s"], capture_output=True, timeout=600)
-        return 0, "brew cleanup finished", StepStatus.RAN
+        if self._install_running(r"brew(\.sh|\.rb)? (install|upgrade|reinstall|update|cleanup|bundle|fetch|uninstall)"):
+            return 0, self._skip_busy("brew install in progress"), StepStatus.SKIPPED
+        if self._install_running("node-gyp"):
+            return 0, self._skip_busy("node-gyp build in progress"), StepStatus.SKIPPED
+        subprocess.run(["brew", "cleanup", "--prune=all"], capture_output=True, timeout=600)
+        return 0, "brew cleanup --prune=all finished", StepStatus.RAN
 
     def _hoghunter_reclaim(self, band: str) -> tuple[int, str, StepStatus]:
         path = Path(str(self.cfg.get("hoghunter_clean", "")))
@@ -396,52 +499,89 @@ class VacuumEngine:
                     pass
         return 0, f"pruned {removed} folder(s)", StepStatus.RAN
 
-    def _pressure_apps_deps(self, dry_run: bool = False) -> tuple[int, str, StepStatus]:
-        if dry_run:
-            return 0, "dry run; would clear pressure deps", StepStatus.SKIPPED
-        keep_re = re.compile(self.cfg.get("keep_worktree_regex") or "")
-        apps_glob = str(expand_path(str(self.cfg.get("apps_glob", "~/apps/*")), self.home))
-        freed = 0
-        for wt in glob.glob(apps_glob):
-            if not os.path.isdir(wt) or keep_re.match(wt):
-                continue
-            if os.path.exists(os.path.join(wt, KEEP_SENTINEL)):
-                continue
-            if not self._is_git_worktree(wt):
-                continue
-            if self._wt_has_blocking_dirt(wt):
-                continue
-            if self._wt_is_active(wt, 4 * 3600):
-                continue
-            if self._pgrep_f(wt):
-                continue
-            for sub in ("node_modules", ".next", ".turbo"):
-                target = os.path.join(wt, sub)
-                if not os.path.isdir(target):
-                    continue
-                if self._git_tracks_path(wt, sub):
-                    continue
-                freed += self._du_bytes(Path(target))
-                shutil.rmtree(target, ignore_errors=True)
-        return freed, "pressure deps reap", StepStatus.RAN
+    def _lane_report(self) -> lanes.LaneReport:
+        """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice."""
+        if self._lane_report_cache is None:
+            settings = lanes.lane_settings(self.cfg, self.home)
+            self._lane_report_cache = lanes.load_report(settings, self.home, self._doctor_runner, self._clock)
+        return self._lane_report_cache
 
-    def _du_bytes(self, path: Path) -> int:
-        if not path.exists():
-            return 0
-        if sys.platform == "darwin" and shutil.which("du"):
-            try:
-                res = subprocess.run(
-                    ["du", "-sk", str(path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
+    def _note(self, step_id: str, action: str, **fields: Any) -> dict[str, Any]:
+        entry = {"step_id": step_id, "action": action, **fields}
+        self.plan.append(entry)
+        return entry
+
+    @staticmethod
+    def _log(data_dir: Optional[Path], entry: dict[str, Any]) -> None:
+        if data_dir is not None:
+            lanes.append_action_log(data_dir, entry)
+
+    def _pressure_apps_deps(self, dry_run: bool = False) -> tuple[int, str, StepStatus]:
+        """Clear regenerable build folders (node_modules and friends) in idle lanes.  The lane list comes from the
+        lane doctor, so nested lanes are visible.  Fleet lanes only (never harness-managed worktrees).  A lane
+        need not be merged, but it must be idle for 24 hours, have no process in it, no keep marker, and a clean
+        tracked tree.  Only the folders in lanes.REGENERABLE_NAMES are ever deleted, and a folder holding a
+        nested git repository is kept."""
+        step = "pressure_apps_deps"
+        keep_re = keep_regex(self.cfg)
+        report = self._lane_report()
+        if not report.ok:
+            return 0, f"lane doctor unusable: {report.reason}; nothing removed", StepStatus.SKIPPED
+        ctx = lanes.LaneContext(self.home, keep_re, lanes.lane_settings(self.cfg, self.home), self._runner, self._clock)
+        passing, refused = lanes.dependency_candidates(report, ctx)
+        data_dir = data_dir_for(self.cfg, self.home)
+        freed = 0
+        planned_bytes = 0
+        folders = 0
+        touched = 0
+        for path, co in passing:
+            choice, why = lanes.evaluate_dependency_lane(path, co, ctx)
+            if choice is None:
+                if why:  # an empty reason means the lane has nothing to clean, which is not a refusal
+                    refused.append({"path": path, "reason": why})
+                continue
+            did_any = False
+            for target in choice.targets:
+                # Re-checked right before the delete: still a plain folder in the lane, no nested git repository.
+                full, why = lanes.deletable_target(path, target["path"])
+                if not full:
+                    refused.append({"path": os.path.join(path, target["path"]), "reason": why})
+                    continue
+                size = lanes.dir_size_bytes(full, self._runner)
+                if size is None:
+                    size = self._dir_size_before_clear(Path(full))
+                command = f"shutil.rmtree {full}"
+                if dry_run:
+                    planned_bytes += size
+                    folders += 1
+                    did_any = True
+                    self._note(step, "would-remove-folder", path=full, lane=path, size_bytes=size, command=command)
+                    continue
+                try:
+                    shutil.rmtree(full)
+                except OSError as exc:
+                    self._log(
+                        data_dir,
+                        self._note(
+                            step, "failed", path=full, lane=path, size_bytes=size, command=command, error=type(exc).__name__
+                        ),
+                    )
+                    continue
+                freed += size
+                folders += 1
+                did_any = True
+                self._log(
+                    data_dir, self._note(step, "removed-folder", path=full, lane=path, size_bytes=size, command=command)
                 )
-                if res.returncode == 0 and res.stdout.strip():
-                    kib = int(res.stdout.split()[0])
-                    return kib * 1024
-            except (subprocess.TimeoutExpired, ValueError, IndexError, OSError):
-                pass
-        return self._dir_size_before_clear(path)
+            touched += 1 if did_any else 0
+        if dry_run:
+            for item in refused:
+                self._note(step, "refused", **item)
+        if not folders:
+            return 0, f"no idle lanes with regenerable folders ({len(refused)} lane(s) refused)", StepStatus.SKIPPED
+        if dry_run:
+            return 0, f"would clear {folders} folder(s) in {touched} lane(s), {lanes.format_size(planned_bytes)}", StepStatus.RAN
+        return freed, f"cleared {folders} folder(s) in {touched} lane(s), {lanes.format_size(freed)}", StepStatus.RAN
 
     def _coolify_remote(self) -> tuple[int, str, StepStatus]:
         host_value = self.cfg.get("coolify_ssh_host")
@@ -463,15 +603,29 @@ class VacuumEngine:
         return 0, "remote maintenance triggered", StepStatus.RAN
 
     def _janitor_worktree_retire(self, dry_run: bool) -> tuple[int, str, StepStatus]:
-        count, _est, detail = retire_worktrees(
+        step = "janitor_worktree_retire"
+        plan = self._planned_retire_plan
+        if plan is None:
+            plan = plan_retire_worktrees(
+                self.cfg, self.home, self._runner, report=self._lane_report, clock=self._clock, dry_run=dry_run
+            )
+        outcome = retire_worktrees(
             self.cfg,
             self.home,
-            _subprocess_run,
-            _subprocess_run,
+            self._runner,
             dry_run=dry_run,
-            candidates=self._planned_retire_candidates,
+            plan=plan,
+            clock=self._clock,
+            data_dir=data_dir_for(self.cfg, self.home),
         )
-        return 0, detail or f"retired {count}", StepStatus.RAN if count or detail else StepStatus.SKIPPED
+        for action in outcome.actions:
+            self._note(step, action.pop("action", "action"), **action)
+        if dry_run:
+            for item in plan.refused:
+                self._note(step, "refused", **item)
+        if not plan.ok:
+            return 0, outcome.detail, StepStatus.SKIPPED
+        return outcome.bytes_freed, outcome.detail, StepStatus.RAN if outcome.actions else StepStatus.SKIPPED
 
     def _janitor_cache_reclaim(self, sample: dict[str, Any], mode: str, dry_run: bool) -> tuple[int, str, StepStatus]:
         if mode == "hard":
@@ -487,70 +641,19 @@ class VacuumEngine:
         return self._hoghunter_reclaim(band)
 
     def _install_running(self, pattern: str) -> bool:
-        try:
-            res = subprocess.run(["pgrep", "-f", pattern], capture_output=True, timeout=3)
-            return bool(res.stdout.strip())
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return False
+        """True when a matching process runs OR the check itself failed.  A pgrep that errors says nothing
+        about what is running, so it counts as busy and the caller skips the step."""
+        busy, reason = lanes.process_state(self._runner, pattern)
+        self._busy_reason = reason
+        return busy
 
     def _pgrep_f(self, path: str) -> bool:
-        try:
-            res = subprocess.run(["pgrep", "-f", path], capture_output=True, timeout=3)
-            return bool(res.stdout.strip())
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return False
+        """True when a process's command line names this path, matched literally, or when the check failed."""
+        busy, reason = lanes.path_process_state(self._runner, path)
+        self._busy_reason = reason
+        return busy
 
-    def _is_git_worktree(self, path: str) -> bool:
-        git_dir = os.path.join(path, ".git")
-        if not (os.path.isdir(git_dir) or os.path.isfile(git_dir)):
-            return False
-        try:
-            res = subprocess.run(
-                ["git", "-C", path, "rev-parse", "--is-inside-work-tree"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return res.returncode == 0 and res.stdout.strip() == "true"
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return False
-
-    def _wt_has_blocking_dirt(self, path: str) -> bool:
-        try:
-            res = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True, timeout=5)
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return True
-        if res.returncode != 0:
-            return True
-        for line in res.stdout.splitlines():
-            if re.match(
-                r"^\?\? (node_modules/|\.next/|\.turbo/|next-env\.d\.ts$|tsconfig\.tsbuildinfo$|\.DS_Store$|[^ ]*\.log$|data/app\.db(-wal|-shm)?$)",
-                line,
-            ):
-                continue
-            return True
-        return False
-
-    def _wt_is_active(self, path: str, idle_sec: float) -> bool:
-        now = time.time()
-        skip = {".git", "node_modules", ".next", ".turbo"}
-        for root, dirs, files in os.walk(path):
-            dirs[:] = [d for d in dirs if d not in skip]
-            for f in files:
-                try:
-                    if now - os.path.getmtime(os.path.join(root, f)) < idle_sec:
-                        return True
-                except OSError:
-                    continue
-        return False
-
-    def _git_tracks_path(self, wt: str, sub: str) -> bool:
-        try:
-            res = subprocess.run(
-                ["git", "-C", wt, "ls-files", "--error-unmatch", "--", sub],
-                capture_output=True,
-                timeout=5,
-            )
-            return res.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return True
+    def _skip_busy(self, base: str) -> str:
+        if "treated as busy" in self._busy_reason:
+            return f"skipped: {self._busy_reason}"
+        return base

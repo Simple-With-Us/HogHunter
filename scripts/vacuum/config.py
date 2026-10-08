@@ -5,7 +5,7 @@ import os
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = REPO_ROOT / "config" / "robotic-vacuum.json"
@@ -98,6 +98,33 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
 DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
 DEFAULT_HOUSEKEEPER_LOCK = "~/.claude-disk-janitor/.housekeeper.lock"
 
+# Lane doctor settings (see vacuum/lanes.py).  The only setting is where the doctor is installed, a machine-local
+# path like hoghunter_clean.  The report age, schema, timeout, and age limits are code constants in lanes.py, and
+# numeric keys in a `lanes` config block are ignored.
+DEFAULT_LANES: dict[str, Any] = {
+    # Argv, never a shell.  A leading ~ means the Vacuum's home.  HOGHUNTER_LANE_DOCTOR_COMMAND overrides it.
+    "doctor_command": ["~/apps/lane", "ls", "--json"],
+}
+
+# Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
+# docs/DEV-CLEANUP-PLAYBOOK.md: it re-downloads only when that device is attached again.
+DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support"})
+
+# Seat suffixes the keep regex protects in flat lanes (~/apps/<prefix>-<suffix>).  Order is part of the pattern.
+KEEP_SEAT_SUFFIXES: tuple[str, ...] = (
+    "claude",
+    "codex",
+    "live",
+    "antigravity",
+    "cursor",
+    "monet",
+    "grok",
+    "grok-build",
+    "deepseek",
+    "minimax",
+    "mm",
+)
+
 
 def expand_path(value: str, home: Path | None = None) -> Path:
     home = home or Path.home()
@@ -106,14 +133,47 @@ def expand_path(value: str, home: Path | None = None) -> Path:
     return Path(value.replace("~", str(home))).expanduser()
 
 
-def default_keep_worktree_regex(home: Path) -> str:
-    """Generic fleet layout; owner-specific keep list lives in Application Support config.json."""
+def find_fleet_apps_json(home: Path, env: Mapping[str, str] | None = None) -> Path | None:
+    env = os.environ if env is None else env
+    override = (env.get("FLEET_APPS_JSON") or "").strip()
+    for candidate in ([Path(override)] if override else []) + [home / "apps" / "lane-tools" / "fleet-apps.json"]:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def retired_seat_suffixes(path: Path | None) -> set[str]:
+    """Worktree suffixes whose seats are ALL marked retired in fleet-apps.json.  Empty on any doubt: a missing
+    file, bad JSON, or an unexpected shape returns nothing, so the keep list stays as it is."""
+    if path is None:
+        return set()
+    try:
+        seats = json.loads(path.read_text(encoding="utf-8")).get("seats")
+    except (OSError, ValueError, AttributeError):
+        return set()
+    if not isinstance(seats, list):
+        return set()
+    retired: dict[str, bool] = {}
+    for seat in seats:
+        if not isinstance(seat, dict):
+            continue
+        suffix = seat.get("worktreeSuffix")
+        if not isinstance(suffix, str) or not suffix:
+            continue
+        retired[suffix] = retired.get(suffix, True) and seat.get("retired") is True
+    return {suffix for suffix, all_retired in retired.items() if all_retired}
+
+
+def default_keep_worktree_regex(home: Path, env: Mapping[str, str] | None = None) -> str:
+    """Generic fleet layout; owner-specific keep list lives in Application Support config.json.
+
+    Seats that fleet-apps.json marks retired stop being force-kept, so their old lanes are judged by the lane
+    doctor like any other.  When the file is not reachable the full list stays.  Nothing is ever added."""
+    retired = retired_seat_suffixes(find_fleet_apps_json(home, env))
+    seats = "|".join(s for s in KEEP_SEAT_SUFFIXES if s not in retired)
     code = re.escape(str(home / "Code"))
     apps = re.escape(str(home / "apps"))
-    return (
-        rf"^({code}/[^/]+|"
-        rf"{apps}/[a-z0-9]+-(claude|codex|live|antigravity|cursor|monet|grok|grok-build|deepseek|minimax|mm))$"
-    )
+    return rf"^({code}/[^/]+|{apps}/[a-z0-9]+-({seats}))$"
 
 
 def default_repos(home: Path) -> list[str]:
@@ -150,6 +210,8 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
             base["hoghunter_clean"] = str(candidate)
         else:
             base["hoghunter_clean"] = str(home / "Code" / "HogHunter" / "scripts" / "hoghunter-clean")
+    lanes = base.get("lanes")
+    base["lanes"] = _deep_merge(DEFAULT_LANES, lanes if isinstance(lanes, dict) else {})
     janitor = base.setdefault("janitor", {})
     env_max_load = os.environ.get("JANITOR_MAX_LOAD")
     if env_max_load:
@@ -159,7 +221,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
             pass
     steps = base.setdefault("steps", {})
     for step_id in STEP_CATALOG:
-        steps.setdefault(step_id, {"enabled": True})
+        steps.setdefault(step_id, {"enabled": step_id not in DEFAULT_OFF_STEPS})
     return base
 
 
@@ -174,7 +236,7 @@ def _deep_merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
 
 
 def step_enabled(cfg: dict[str, Any], step_id: str) -> bool:
-    return bool(cfg.get("steps", {}).get(step_id, {}).get("enabled", True))
+    return bool(cfg.get("steps", {}).get(step_id, {}).get("enabled", step_id not in DEFAULT_OFF_STEPS))
 
 
 def steps_for_trigger(cfg: dict[str, Any], trigger: str, pressure: bool = False) -> list[str]:

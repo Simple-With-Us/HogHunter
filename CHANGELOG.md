@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+Robotic Vacuum (Python and docs only; the Vacuum is not loaded on this Mac and nothing here installs it):
+
+- Worktree retirement and idle-lane build-folder cleanup now act on the fleet lane doctor's report instead of the old heuristics.  A lane is removed only when the doctor lists it as a cleaner candidate (merged PR matched by head sha, idle 7 days or more) and the Vacuum's own live re-check agrees right before removal.  HEAD must match the report.  No ignored entry other than regenerable build output may be present, and no ignored folder may hold a nested git repository.  No skip-worktree or assume-unchanged flag may be set, and no process may be inside.  There must be no keep marker.  Commits missing from every remote are accepted only on the reported branch, where the merged or closed PR covers that HEAD, and never on a detached HEAD.  Removal is `git worktree remove` without force.
+- Fails closed.  A missing, slow, malformed, stale, future-dated, other-home, or low-schema report removes nothing, and so does `lsof` not ok.  Lane removal also needs `gh` ok.  A `pgrep` error now reads as busy instead of idle, and a lane path is matched literally, regex characters and all.
+- The build-folder step sees nested lanes under `~/apps/lanes`, deletes only named regenerable folders, and needs a lane idle 24 hours with a clean tracked tree.  It skips harness-managed worktrees and any folder holding a nested git repository.  The flat `apps_glob` setting is gone.
+- New `--dry-run` for `scripts/robotic-vacuum.py` prints the plan as JSON and writes nothing.  Every real action is logged with its size and exact command in `lane-actions.jsonl`.
+- New `lanes.doctor_command` setting and a `HOGHUNTER_LANE_DOCTOR_COMMAND` override.  Report age (15 minutes), schema (2), doctor timeout (5 minutes), and the 7-day and 24-hour floors are code constants that config cannot change in either direction.
+- Older `full` steps follow the reclaim policy.  Xcode DerivedData folders are deleted only when untouched 90 minutes and never while a build runs.  iOS DeviceSupport is off by default and, when on, deletes only versions untouched 7 days.  `simctl delete unavailable` is no longer run, because it deletes simulator devices.  Homebrew uses `cleanup --prune=all` and waits for node-gyp, and the package-cache steps wait for a build.
+- The retire step now reports SKIPPED, not RAN, when nothing is eligible, and fills in bytes freed.
+- Retired seats in `fleet-apps.json` no longer force-keep their old flat lanes.
+- The "not loaded in the background" alert now fires only for a Vacuum that was installed (its launch agent plist exists, `history.json` holds a real run, or `alerts.alert_when_not_installed` is true; default false).  `HOGHUNTER_NO_NOTIFY` silences every banner and `--dry-run` sets it.  The tests set it, fail on any unexpected `notify_macos` call, and run with a fixed git identity and an empty HOME, so they pass on a machine with no global git setup.
+
+Docs:
+
+- `docs/DEV-CLEANUP-PLAYBOOK.md` describes three cleanup modes (automatic, manual, extreme or developer), their safety checks, the ledger, and the order for the Swift developer tier.
+- `docs/rollouts/2026-10-08-lane-doctor-vacuum.md` has the verification state, what is not live, rollback, and open questions.
+
 ## 1.0.6 — Tue, Oct 6, 2026
 
 Mac side:

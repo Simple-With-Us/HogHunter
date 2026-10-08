@@ -7,6 +7,8 @@ with a single launchd agent driven from this repo.
 Usage:
   robotic-vacuum.py --tick scheduler          # every 5 min from launchd
   robotic-vacuum.py --run-now full|janitor|watch
+  robotic-vacuum.py --dry-run [--tick scheduler | --run-now full|janitor|watch|pressure]
+                                              # plan only: prints JSON, deletes and records nothing
   robotic-vacuum.py --status [--json]
   robotic-vacuum.py --check-alerts
   robotic-vacuum.py --set-step STEP_ID on|off
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,12 +25,37 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from vacuum.alerts import evaluate_alerts, notify_macos  # noqa: E402
+from vacuum.alerts import NO_NOTIFY_ENV, evaluate_alerts, notify_macos  # noqa: E402
 from vacuum.config import STEP_CATALOG, load_config  # noqa: E402
 from vacuum.engine import VacuumEngine  # noqa: E402
 from vacuum.models import TriggerKind  # noqa: E402
 from vacuum.scheduler import build_status, run_scheduler_tick, run_skipped_for_lock  # noqa: E402
 from vacuum.store import VacuumStore  # noqa: E402
+
+
+def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:
+    """Plan-only run.  Stdout is one JSON document and nothing else; nothing is persisted.
+
+    It never evaluates alerts or calls notify_macos, so alert-state.json and history.json stay untouched.  The
+    no-notify switch below is a second lock: nothing reached from here can post a banner, even by mistake."""
+    os.environ[NO_NOTIFY_ENV] = "1"
+    if args.run_now:
+        engine = VacuumEngine(store.cfg, store.home)
+        if args.run_now == "watch":
+            state = store.scheduler_state()
+            scratch: dict[str, object] = {}
+            if "last_clean_at" in state:
+                scratch["last_clean_at"] = state["last_clean_at"]
+            prev = state.get("prev_disk_free_gb")
+            record, _hits, _cleaned = engine.run_watch_tick(scratch, float(prev) if prev is not None else None, dry_run=True)
+        else:
+            pressure = args.run_now == "pressure"
+            record = engine.run(TriggerKind(args.run_now), pressure=pressure, band="full" if pressure else "cheap", dry_run=True)
+        result = {"dry_run": True, "plan": engine.plan, "records": [record.as_dict()]}
+    else:
+        result = run_scheduler_tick(store, dry_run=True)
+    print(json.dumps(result, indent=2))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,7 +66,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON (with --status)")
     parser.add_argument("--check-alerts", action="store_true", help="Evaluate alerts and notify")
     parser.add_argument("--set-step", nargs=2, metavar=("STEP_ID", "on|off"), help="Toggle a cleaning step")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Plan only: run the tick (or the --run-now cadence) with every deleting step in plan-only mode and "
+        "print the plan as JSON.  Nothing is deleted and history.json, scheduler state and status are not written.",
+    )
     args = parser.parse_args(argv)
+
+    if args.dry_run and (args.set_step or args.status or args.check_alerts):
+        parser.error("--dry-run only combines with --tick or --run-now")
 
     store = VacuumStore.open()
 
@@ -51,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
         store.save_step_toggles({step_id: enabled})
         print(f"{step_id} -> {'enabled' if enabled else 'disabled'}")
         return 0
+
+    if args.dry_run:
+        return _dry_run(store, args)
 
     if args.tick == "scheduler":
         result = run_scheduler_tick(store)
