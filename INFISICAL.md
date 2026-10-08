@@ -55,8 +55,15 @@ These stay in UserDefaults (or the app-group defaults for shared state).  They a
 - Cleaner exclusions and the regimen's enabled-rule set -- per-user choices about what may be deleted on this Mac.
 - `hoghunter.cleaner.regimen.lastRunAt` -- local operational state.
 - `config/reclaim-policy.json` -- the machine-readable reclaim policy with owner rulings and rationale, shared with the `scripts/hoghunter-clean` CLI.  Only its numeric bands are migrated (see the `hoghunter.reclaim.*` keys); the document itself, its comments, and its rule inventory stay in the repo.
-
 No secrets, env vars, or build-time configuration existed in the repo before this change -- there was no `.env` file, no API keys, no service URLs.  The only secret in the inventory is the alert webhook URL, which the admin fills in.
+
+### Robotic Vacuum (Python, Not Migrated)
+
+The Robotic Vacuum (`scripts/vacuum/`) is a Python helper with no Infisical reader.  Its config is `config/robotic-vacuum.json`, with a per-user override in Application Support.  It is not in the migrated table, and it is not one of the per-user exclusions above.  It is an open item, and no owner ruling is recorded.
+
+- The lane doctor work of 2026-10-08 adds no tunable.  Report age (15 minutes), doctor schema (2), doctor timeout (5 minutes), the 7-day retire floor, and the 24-hour dependency floor are code constants in `scripts/vacuum/lanes.py`.  Config cannot change them in either direction, and the numeric keys still present in the shipped `lanes` block are ignored.
+- `lanes.doctor_command` and the `HOGHUNTER_LANE_DOCTOR_COMMAND` override name where the lane doctor is installed on this Mac.  That is a machine-local path, like `hoghunter_clean` and `data_dir`, not a fleet knob.
+- The Vacuum's older settings (intervals, `janitor.*` and `resource_watch.*` thresholds, session ages) predate this change and stay in the JSON file.  Moving them to Infisical needs a reader on the Python side and an owner decision (`docs/rollouts/2026-10-08-lane-doctor-vacuum.md`, open question 9).
 
 ## The runtime contract
 
