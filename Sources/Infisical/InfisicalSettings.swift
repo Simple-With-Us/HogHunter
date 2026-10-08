@@ -153,14 +153,6 @@ protocol InfisicalServing {
     func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String) async throws
 }
 
-/// One Keychain lookup.  `terminal` is true only when the Keychain answered:
-/// the item was read, or it is definitively absent.  A locked Keychain or a
-/// suppressed auth prompt is not terminal and stays retryable.
-struct KeychainCredentialRead {
-    var credential: InfisicalCredential?
-    var terminal: Bool
-}
-
 // MARK: - REST client
 
 /// Thin wrapper over the Infisical REST API: universal-auth login, then
