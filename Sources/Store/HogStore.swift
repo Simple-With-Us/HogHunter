@@ -229,12 +229,15 @@ final class HogStore: ObservableObject {
     private static let diskRefreshEvery = 20
     private static let rowLimit = 25
 
+    /// Default arguments are nonisolated.  `InfisicalSettings.shared` is
+    /// main-actor isolated, so resolve it in this body.
     init(
         historyURL: URL? = nil,
         defaults: UserDefaults = .standard,
-        infisical: InfisicalSettings = .shared,
+        infisical: InfisicalSettings? = nil,
         startImmediately: Bool = true
     ) {
+        let infisical = infisical ?? InfisicalSettings.shared
         self.defaults = defaults
         self.infisical = infisical
         let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
