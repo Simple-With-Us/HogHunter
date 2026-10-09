@@ -368,7 +368,7 @@ private struct IPhoneSettingsTab: View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi or over Tailscale.\u{00A0} With the opt-ins below it can also act on this Mac: quit or tame apps, run the cleaner, and change cleaner exclusions and the panel view.\u{00A0} Each opt-in is off until you turn it on, and controls are accepted only from your local network or Tailscale.\u{00A0} Turn Share With iPhone off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi or over Tailscale.\u{00A0} With the opt-ins below it can also act on this Mac: quit, tame or sample apps, run the cleaner, and change cleaner exclusions, the panel view, refresh, alerts and the webhook.\u{00A0} Each opt-in is off until you turn it on, and controls are accepted only from your local network or Tailscale.\u{00A0} Turn Share With iPhone off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -423,7 +423,7 @@ private struct IPhoneSettingsTab: View {
             if store.shareWithIPhone {
                 Section("Remote Control") {
                     Toggle("Allow iPhone to Quit or Tame Apps & Processes", isOn: $store.allowRemoteQuit)
-                    Text("When enabled, the paired iPhone can quit, force quit, or tame user-owned apps.  The phone asks you to confirm each one.  System-critical processes and other users' processes are always protected.")
+                    Text("When enabled, the paired iPhone can quit, force quit, tame, or sample user-owned apps.  The phone asks you to confirm each one.  System-critical processes and other users' processes are always protected.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -433,7 +433,7 @@ private struct IPhoneSettingsTab: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Toggle("Allow iPhone to Change Exclusions & View", isOn: $store.allowRemoteEdit)
-                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, and switch this panel's lookback, grouping, and CPU scale.")
+                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, switch this panel's lookback, grouping, and CPU scale, and change the refresh interval, alerts, and webhook.  The webhook URL can be replaced or cleared from the phone but never read back.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

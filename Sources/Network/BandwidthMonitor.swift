@@ -64,6 +64,15 @@ struct BandwidthReading: Equatable {
     )
 }
 
+extension BandwidthReading {
+    /// The caption under the "Now" card.  Shared by the Network tab and the
+    /// phone so the two never word it differently.
+    var footnote: String {
+        guard isMeasured else { return "Measuring…" }
+        return "Last \(Int(windowSeconds.rounded())) s"
+    }
+}
+
 /// Turns cumulative counters into a rate by differencing readings.
 ///
 /// A single-sample difference is far too jumpy to put on screen: one counter
@@ -140,6 +149,23 @@ struct NetworkPeaks: Equatable {
         sampledSeconds: 0,
         hasSamples: false
     )
+}
+
+extension NetworkPeaks {
+    /// The caption under the "24-Hour Peak" card.
+    var footnote: String {
+        guard hasSamples else { return "No History Yet" }
+        return "Sampled \(HogFormat.duration(sampledSeconds))"
+    }
+
+    /// What the peak means and, when known, when it was reached.
+    var help: String {
+        guard let at = peakAt else {
+            return "The fastest sustained download or upload seen in the last 24 hours."
+        }
+        let when = DateFormatter.localizedString(from: at, dateStyle: .none, timeStyle: .short)
+        return "The fastest sustained rate in the last 24 hours, reached at \(when)."
+    }
 }
 
 /// Samples interface counters on its own timer and keeps the peaks in the

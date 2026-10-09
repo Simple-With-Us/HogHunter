@@ -368,6 +368,13 @@ private struct CodeEntryView: View {
     }
 }
 
+/// The result of one Sample for 3 Seconds, held as one value so a late reply
+/// cannot be shown under another row's name.
+struct SampleOutcome: Identifiable {
+    let id = UUID()
+    let response: CompanionSampleResponse
+}
+
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
@@ -390,6 +397,8 @@ struct DashboardView: View {
     @State private var showTameResultAlert = false
     @State private var showAddPathAlert = false
     @State private var newPathInput = ""
+    @State private var showMacSettings = false
+    @State private var sampleOutcome: SampleOutcome?
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
         pendingQuitRow = row
@@ -405,6 +414,28 @@ struct DashboardView: View {
 
     /// Exclusion and view changes exist only when the Mac owner turned them on.
     private var canEdit: Bool { snapshot.remoteEditAllowed == true }
+
+    /// The CPU rows' scale as the Mac reports it ("Per Core" or "Share of Machine").
+    private var isMachineScale: Bool {
+        let scale = snapshot.cpuScale.lowercased()
+        return scale.contains("machine") || scale.contains("share")
+    }
+
+    /// Cores the Per Machine scale divides by.  An older Mac sends only the
+    /// caption ("of all 10 cores").
+    private var coreCount: Int {
+        if let cores = snapshot.pulse.coreCount, cores > 0 { return cores }
+        let digits = snapshot.pulse.cpuCaption.split(whereSeparator: { !$0.isNumber }).first.flatMap { Int($0) }
+        return max(1, digits ?? 1)
+    }
+
+    /// The same words Settings > General shows on the Mac.
+    private var scaleExplanation: String {
+        if isMachineScale {
+            return "Per Machine divides every row by all \(coreCount) cores, so 100% means the whole machine and one row never exceeds 100%."
+        }
+        return "Per Core matches Activity Monitor: 100% is one core fully busy, so one row can read \(100 * coreCount)%."
+    }
 
     private static let editOffNote = "Changing exclusions and the Mac's view from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on your Mac."
 
@@ -603,6 +634,30 @@ struct DashboardView: View {
                 model.showCleanDialogRequested = false
             }
         }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showMacSettings = true
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                }
+                .accessibilityLabel("Mac Settings")
+            }
+        }
+        .sheet(isPresented: $showMacSettings) {
+            MacSettingsView(snapshot: snapshot, model: model)
+        }
+        .sheet(item: $sampleOutcome) { outcome in
+            SampleResultView(response: outcome.response, hostName: snapshot.hostName)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+    private func runSample(_ row: CompanionRow) {
+        Task {
+            let response = await model.sampleProcess(row: row)
+            sampleOutcome = SampleOutcome(response: response)
+        }
     }
 
     private var hostHeaderSection: some View {
@@ -640,7 +695,8 @@ struct DashboardView: View {
                     value: snapshot.pulse.cpuPercent,
                     headline: snapshot.pulse.cpuText,
                     caption: snapshot.pulse.cpuCaption,
-                    severity: snapshot.pulse.cpuSeverity
+                    severity: snapshot.pulse.cpuSeverity,
+                    history: snapshot.cpuHistory
                 )
                 MeterCard(
                     title: "Memory",
@@ -712,6 +768,28 @@ struct DashboardView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+
+                HStack(spacing: 8) {
+                    Text("CPU Scale")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 68, alignment: .leading)
+                    Picker("CPU Scale", selection: Binding(
+                        get: { isMachineScale ? "machine" : "core" },
+                        set: { next in
+                            let scale = next == "machine" ? "Share of Machine" : "Per Core"
+                            Task { await model.switchCpuScale(scale) }
+                        }
+                    )) {
+                        Text("Per Core").tag("core")
+                        Text("Per Machine").tag("machine")
+                    }
+                    .pickerStyle(.segmented)
+                }
+                Text(scaleExplanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.vertical, 2)
             .disabled(!canEdit)
@@ -749,6 +827,11 @@ struct DashboardView: View {
                                 Text(row.name)
                                     .font(.body.weight(.medium))
                                     .lineLimit(1)
+                                if model.samplingRowId == row.id {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                        .accessibilityLabel("Sampling")
+                                }
                                 if row.isSleepBlocker == true {
                                     Image(systemName: "moon.fill")
                                         .font(.caption)
@@ -829,6 +912,15 @@ struct DashboardView: View {
                             }
                         }
 
+                        if controlsOn, row.pid != nil {
+                            Button {
+                                runSample(row)
+                            } label: {
+                                Label("Sample for 3 Seconds", systemImage: "waveform.path.ecg")
+                            }
+                            .disabled(model.samplingRowId != nil)
+                        }
+
                         if controlsOn && row.canQuit && row.pid != nil {
                             Button {
                                 confirmQuit(row: row, force: false)
@@ -877,7 +969,7 @@ struct DashboardView: View {
         Section {
             if snapshot.remoteQuitAllowed == true {
                 if snapshot.rows.contains(where: { $0.canQuit }) {
-                    Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press for options on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
+                    Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press to quit, tame or sample it on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else if sortedRows.isEmpty {
@@ -1256,6 +1348,26 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var networkContent: some View {
+        if let bandwidth = snapshot.bandwidth {
+            Section {
+                HStack(alignment: .top, spacing: 12) {
+                    BandwidthCard(title: "Now", down: bandwidth.downText, up: bandwidth.upText, footnote: bandwidth.nowFootnote)
+                    BandwidthCard(title: "24-Hour Peak", down: bandwidth.peakDownText, up: bandwidth.peakUpText, footnote: bandwidth.peakFootnote)
+                }
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                Text(bandwidth.peakHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let error = bandwidth.error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            } header: {
+                Text("Bandwidth on \(snapshot.hostName)")
+            }
+        }
+
         Section("Active Network Connections") {
             if let networkRows = snapshot.network, !networkRows.isEmpty {
                 ForEach(networkRows) { row in
@@ -1375,6 +1487,9 @@ private struct MeterCard: View {
     let headline: String
     let caption: String
     let severity: String
+    /// Recent readings, oldest first.  Drawn with the same sparkline the Mac
+    /// menu bar uses once there are enough to draw.
+    var history: [Double]? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1387,6 +1502,11 @@ private struct MeterCard: View {
                 .minimumScaleFactor(0.7)
             ProgressView(value: min(max(value / 100, 0), 1))
                 .tint(CompanionColor.color(severity))
+            if let history, history.count >= 2 {
+                CpuSparklineView(samples: history, width: 120, height: 24)
+                    .accessibilityLabel("Recent CPU")
+                    .accessibilityValue("Latest \(Int(history.last ?? 0)) percent")
+            }
             Text(caption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1396,6 +1516,110 @@ private struct MeterCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .accessibilityValue("\(headline), \(caption)")
+    }
+}
+
+/// One of the Network tab's two bandwidth cards.  The Mac sends the text,
+/// so this prints it as received.
+private struct BandwidthCard: View {
+    let title: String
+    let down: String
+    let up: String
+    let footnote: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            rateRow(symbol: "arrow.down", word: "Download", text: down)
+            rateRow(symbol: "arrow.up", word: "Upload", text: up)
+            Text(footnote)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue("Download \(down), Upload \(up).\u{00A0} \(footnote)")
+    }
+
+    private func rateRow(symbol: String, word: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(word)
+            Text(text)
+                .font(.subheadline.weight(.medium).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+    }
+}
+
+/// What a Sample for 3 Seconds produced.  The report itself stays on the Mac.
+struct SampleResultView: View {
+    let response: CompanionSampleResponse
+    let hostName: String
+    @Environment(\.dismiss) private var dismiss
+
+    private var succeeded: Bool { response.status == "ok" }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Label(
+                        succeeded ? "Sample Saved" : "Could Not Sample",
+                        systemImage: succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .font(.headline)
+                    .foregroundStyle(succeeded ? Color.green : Color.orange)
+                    if let text = response.error ?? response.message {
+                        Text(text)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if succeeded {
+                    Section("Report on \(hostName)") {
+                        if let name = response.fileName {
+                            LabeledContent("File") {
+                                Text(name)
+                                    .font(.caption.monospaced())
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
+                        if let bytes = response.bytes {
+                            LabeledContent("Size", value: iPhoneStorage.format(bytes: UInt64(max(0, bytes))))
+                        }
+                    }
+                    if let summary = response.summary, !summary.isEmpty {
+                        Section {
+                            ForEach(Array(summary.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        } header: {
+                            Text("Busiest Call Sites")
+                        } footer: {
+                            Text("The first lines of the report's top-of-stack summary.\u{00A0} Open the file on the Mac for the full call graph.")
+                        }
+                    }
+                }
+            }
+            .navigationTitle(response.name.isEmpty ? "Sample" : response.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 

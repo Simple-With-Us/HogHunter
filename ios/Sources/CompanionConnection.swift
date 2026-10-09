@@ -10,6 +10,9 @@ enum CompanionConnection {
     static let defaultTimeout: TimeInterval = 8
     /// A snapshot poll.  The caller adds its own, shorter limit on top.
     static let snapshotTimeout: TimeInterval = 5
+    /// Sample for 3 Seconds answers when the report is written.  Longer than
+    /// the Mac's own 45 second deadline for it.
+    static let sampleTimeout: TimeInterval = 50
     /// A clean answers when the Mac has finished, which can take minutes.
     /// Longer than the Mac's own 15 minute reply deadline.
     static let cleanTimeout: TimeInterval = 16 * 60
@@ -142,6 +145,32 @@ enum CompanionConnection {
         return try decode(CompanionViewUpdateResponse.self, from: reply)
     }
 
+    /// Changes the refresh interval, alerts or webhook on the Mac.  The Mac
+    /// checks every value and answers 400 with the reason when one is out of range.
+    static func triggerSettingsUpdate(
+        endpoint: NWEndpoint,
+        token: String,
+        update: CompanionSettingsUpdateRequest
+    ) async throws -> CompanionSettingsUpdateResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.settingsRequest(token: token, update: update),
+            timeout: defaultTimeout
+        )
+        return try decode(CompanionSettingsUpdateResponse.self, from: reply)
+    }
+
+    /// Runs Sample for 3 Seconds on a row.  The Mac answers once the report
+    /// is written, a few seconds later.
+    static func triggerSample(endpoint: NWEndpoint, token: String, rowId: String) async throws -> CompanionSampleResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.sampleRequest(token: token, rowId: rowId),
+            timeout: sampleTimeout
+        )
+        return try decode(CompanionSampleResponse.self, from: reply)
+    }
+
     // MARK: - Reply handling
 
     /// Turns one reply into a value or a readable error.  A typed body wins
@@ -156,6 +185,9 @@ enum CompanionConnection {
             throw CompanionClientError.unauthorized
         case 403:
             throw CompanionClientError.forbidden(message ?? "The Mac does not allow that from this iPhone.")
+        case 404:
+            // A Mac that predates the route answers 404 with plain text.
+            throw CompanionClientError.tooOld
         case 429:
             throw CompanionClientError.throttled(retryAfter: (json?["retryAfter"] as? Int) ?? 0)
         default:

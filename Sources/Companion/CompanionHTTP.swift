@@ -12,6 +12,8 @@ enum CompanionHTTP {
         tameHandler: ((_ request: CompanionProcessRequest, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
         viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
+        settingsHandler: ((CompanionSettingsUpdateRequest) -> (status: Int, body: Data))? = nil,
+        sampleHandler: ((CompanionProcessRequest) -> (status: Int, body: Data))? = nil,
         peerTrusted: Bool = true,
         deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
@@ -33,7 +35,9 @@ enum CompanionHTTP {
             || path == CompanionService.quitPath
             || path == CompanionService.tamePath
             || path == CompanionService.exclusionsPath
-            || path == CompanionService.viewPath else {
+            || path == CompanionService.viewPath
+            || path == CompanionService.settingsPath
+            || path == CompanionService.samplePath else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
@@ -173,8 +177,99 @@ enum CompanionHTTP {
             }
             let (code, resBody) = viewHandler(updateReq)
             return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.settingsPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let settingsHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Settings Not Configured".utf8))
+            }
+            // The webhook URL is a secret, so it travels in the body and never
+            // in a query string that a log or a proxy would keep.
+            guard let updateReq = try? JSONDecoder().decode(CompanionSettingsUpdateRequest.self, from: bodyData(of: request)) else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The settings change could not be read."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            guard !updateReq.isEmpty else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The settings change was empty."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = settingsHandler(updateReq)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.samplePath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let sampleHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Sample Not Configured".utf8))
+            }
+            // Addressed by row id like quit and tame.  A bare pid is not
+            // accepted: sampling is new, so there is no older phone to serve.
+            let processRequest = parseProcessRequest(fullPath: fullPath, request: request) { _, _ in } bodyField: { _ in }
+            guard processRequest.rowId != nil else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"error": "Missing row parameter"}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = sampleHandler(CompanionProcessRequest(rowId: processRequest.rowId, pid: nil))
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         }
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
+    }
+
+    // MARK: - Reading a whole request
+
+    /// The most a request body may carry.  The largest legitimate one is a
+    /// settings change with a webhook URL, a few kilobytes at most.
+    static let maxBodyBytes = 16_384
+    /// The most a request line plus headers may carry.
+    static let maxHeadBytes = 8_192
+
+    enum RequestCompleteness: Equatable {
+        /// More bytes are needed before the request can be answered.
+        case needsMore
+        case complete
+        /// The head or the declared body is larger than the Mac reads.
+        case tooLarge
+    }
+
+    private static let headerBreak = Data("\r\n\r\n".utf8)
+
+    /// Whether `buffer` holds a whole request.  A request with a body is not
+    /// whole until `Content-Length` bytes of it have arrived: TCP may deliver
+    /// the headers and the body in separate reads, and answering on the
+    /// headers alone drops the body.
+    static func completeness(of buffer: Data) -> RequestCompleteness {
+        guard let end = buffer.range(of: headerBreak) else {
+            return buffer.count >= maxHeadBytes ? .tooLarge : .needsMore
+        }
+        guard end.lowerBound <= maxHeadBytes else { return .tooLarge }
+        let head = String(data: buffer.subdata(in: buffer.startIndex..<end.lowerBound), encoding: .isoLatin1) ?? ""
+        guard let declared = contentLength(inHead: head), declared > 0 else { return .complete }
+        guard declared <= maxBodyBytes else { return .tooLarge }
+        return buffer.count - end.upperBound >= declared ? .complete : .needsMore
+    }
+
+    /// The body of a request: the bytes after the header break, cut to
+    /// `Content-Length` when the request declares one.
+    static func bodyData(of request: Data) -> Data {
+        guard let end = request.range(of: headerBreak) else { return Data() }
+        let head = String(data: request.subdata(in: request.startIndex..<end.lowerBound), encoding: .isoLatin1) ?? ""
+        let rest = request.subdata(in: end.upperBound..<request.endIndex)
+        if let declared = contentLength(inHead: head), declared >= 0, declared < rest.count {
+            return rest.prefix(declared)
+        }
+        return rest
+    }
+
+    private static func contentLength(inHead head: String) -> Int? {
+        for line in head.components(separatedBy: "\r\n").dropFirst() {
+            let halves = line.split(separator: ":", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+            guard halves.count == 2, halves[0].caseInsensitiveCompare("Content-Length") == .orderedSame else { continue }
+            return Int(halves[1])
+        }
+        return nil
+    }
+
+    /// The answer to a request whose head or body is larger than the Mac reads.
+    static func payloadTooLargeReply() -> Data {
+        jsonReply(status: 413, body: Data(#"{"status":"rejected","error":"That request was too large for the Mac to read."}"#.utf8))
     }
 
     /// The answer to a control request from an address outside the local
@@ -270,6 +365,7 @@ enum CompanionHTTP {
         case 403: return "Forbidden"
         case 404: return "Not Found"
         case 409: return "Conflict"
+        case 413: return "Payload Too Large"
         case 429: return "Too Many Requests"
         case 501: return "Not Implemented"
         case 504: return "Gateway Timeout"
@@ -473,6 +569,44 @@ enum CompanionHTTP {
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
         let lines = [
             "POST \(CompanionService.viewPath)\(queryString) HTTP/1.1",
+            "Host: hoghunter",
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    /// A request with a JSON body.  The body is sent in the same write as the
+    /// headers, and the Mac waits for `Content-Length` bytes either way.
+    private static func jsonPostRequest(path: String, token: String, body: Data) -> Data {
+        let lines = [
+            "POST \(path) HTTP/1.1",
+            "Host: hoghunter",
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Content-Type: application/json",
+            "Content-Length: \(body.count)",
+            "Connection: close",
+            "",
+            "",
+        ]
+        var data = Data(lines.joined(separator: "\r\n").utf8)
+        data.append(body)
+        return data
+    }
+
+    static func settingsRequest(token: String, update: CompanionSettingsUpdateRequest) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
+        return jsonPostRequest(path: CompanionService.settingsPath, token: token, body: body)
+    }
+
+    static func sampleRequest(token: String, rowId: String) -> Data {
+        let lines = [
+            "POST \(CompanionService.samplePath)?row=\(queryAllowedValue(rowId)) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",

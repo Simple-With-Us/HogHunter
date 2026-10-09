@@ -80,6 +80,8 @@ targets:
       - path: ios/Sources
       - path: Sources/Companion/CompanionSnapshot.swift
       - path: Sources/Companion/CompanionHTTP.swift
+      # The same sparkline the Mac menu bar draws, so the two cannot differ.
+      - path: Sources/UI/CpuSparklineView.swift
       - path: ios/Assets.xcassets
     dependencies:
       - target: HogHunterWidgets

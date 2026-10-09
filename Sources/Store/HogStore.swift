@@ -111,6 +111,7 @@ final class HogStore: ObservableObject {
     @Published var alertWebhookURL: String = "" {
         didSet {
             persist()
+            webhookConfiguredMirror.value = !alertWebhookURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             alerts.webhookURL = alertWebhookURL
             writeThroughInfisical(key: InfisicalKey.alertWebhookURL, value: alertWebhookURL)
         }
@@ -201,6 +202,10 @@ final class HogStore: ObservableObject {
     }
 
     private let companionServer: CompanionServer
+    /// Whether a webhook is set, readable from the server queue.  The URL
+    /// itself is main-actor state and a secret; the router only needs to know
+    /// whether a test message has anywhere to go.
+    private let webhookConfiguredMirror = CompanionLocked(false)
     /// The phones paired with this Mac, one token each.
     let companionDevices: CompanionDeviceRegistry
     /// Paired phones, newest first, for Settings.  Refreshed when one pairs or
@@ -1308,6 +1313,19 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteViewUpdate(req)
         }
+        companionServer.onRemoteSettings = { [weak self] req in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteSettings(req)
+        }
+        companionServer.onRemoteSample = { [weak self] target, completion in
+            guard let self else {
+                completion((500, Data("{\"error\": \"Store unavailable\"}".utf8)))
+                return
+            }
+            self.performRemoteSample(target: target, completion: completion)
+        }
         NotificationCenter.default.addObserver(
             forName: .diskCleanerProgressChanged,
             object: nil,
@@ -1361,11 +1379,11 @@ final class HogStore: ObservableObject {
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Don't Allow")
 
-        let quitBox = NSButton(checkboxWithTitle: "Let it quit or tame apps and processes", target: nil, action: nil)
+        let quitBox = NSButton(checkboxWithTitle: "Let it quit, tame or sample apps and processes", target: nil, action: nil)
         quitBox.state = allowRemoteQuit ? .on : .off
         let cleanBox = NSButton(checkboxWithTitle: "Let it run the disk cleaner", target: nil, action: nil)
         cleanBox.state = allowRemoteClean ? .on : .off
-        let editBox = NSButton(checkboxWithTitle: "Let it change cleaner exclusions and the panel view", target: nil, action: nil)
+        let editBox = NSButton(checkboxWithTitle: "Let it change cleaner exclusions, the panel view and settings", target: nil, action: nil)
         editBox.state = allowRemoteEdit ? .on : .off
         let stack = NSStackView(views: [quitBox, cleanBox, editBox])
         stack.orientation = .vertical
@@ -1446,14 +1464,7 @@ final class HogStore: ObservableObject {
             }
         }
 
-        var targetCpuScale: CpuScale?
-        if let sc = req.cpuScale {
-            if sc.lowercased().contains("machine") || sc.lowercased().contains("share") {
-                targetCpuScale = .machineShare
-            } else if sc.lowercased().contains("core") {
-                targetCpuScale = .perCore
-            }
-        }
+        let targetCpuScale: CpuScale? = req.cpuScale.flatMap { CpuScale.fromPhone($0) }
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1472,6 +1483,76 @@ final class HogStore: ObservableObject {
         )
         let data = (try? JSONEncoder().encode(resp)) ?? Data("{}".utf8)
         return (200, data)
+    }
+
+    /// Checks a settings change from the phone and hands it to the main actor.
+    /// Runs on the server queue: it reads no main-actor state.
+    nonisolated func performRemoteSettings(_ req: CompanionSettingsUpdateRequest) -> (status: Int, body: Data) {
+        let encoder = JSONEncoder()
+        switch CompanionSettingsValidator.validate(req) {
+        case .failure(let rejection):
+            return (400, (try? encoder.encode(CompanionSettingsUpdateResponse.rejected(rejection.message))) ?? Data())
+        case .success(let validated):
+            if validated.testWebhook {
+                let willHaveWebhook = validated.webhookURL.map { !$0.isEmpty } ?? webhookConfiguredMirror.value
+                guard willHaveWebhook else {
+                    let none = CompanionSettingsUpdateResponse.rejected("No webhook is set.\u{00A0} Add one first.")
+                    return (400, (try? encoder.encode(none)) ?? Data())
+                }
+            }
+            Task { @MainActor [weak self] in self?.applyRemoteSettings(validated) }
+            let message = validated.testWebhook ? "Settings updated.\u{00A0} A test message is on its way." : "Settings updated."
+            let ok = CompanionSettingsUpdateResponse(status: "ok", message: message, error: nil)
+            return (200, (try? encoder.encode(ok)) ?? Data())
+        }
+    }
+
+    /// Applies a checked change through the same properties Settings uses, so
+    /// persistence, Infisical write-through and the timer restart all happen
+    /// the way they do for a change made at the Mac.
+    func applyRemoteSettings(_ validated: CompanionSettingsValidator.Validated) {
+        if let interval = validated.refreshInterval, interval != refreshInterval { refreshInterval = interval }
+        if let enabled = validated.alertsEnabled, enabled != alertsEnabled { alertsEnabled = enabled }
+        if let threshold = validated.alertThresholdPercent, threshold != alertThresholdPercent { alertThresholdPercent = threshold }
+        if let minutes = validated.alertSustainedMinutes, minutes != alertSustainedMinutes { alertSustainedMinutes = minutes }
+        if let webhook = validated.webhookURL, webhook != alertWebhookURL { alertWebhookURL = webhook }
+        if validated.testWebhook { alerts.sendTestWebhook(to: alertWebhookURL) }
+        publishCompanion()
+    }
+
+    /// Runs Sample for 3 Seconds on the first live member of the row the phone
+    /// chose and answers with the report's name and busiest call sites.  The
+    /// report is written where the Mac's own sample writes it, and no window
+    /// opens on the Mac.
+    nonisolated func performRemoteSample(target: CompanionTarget, completion: @escaping @Sendable (CompanionServer.Reply) -> Void) {
+        func reply(_ status: Int, _ response: CompanionSampleResponse) -> CompanionServer.Reply {
+            (status, (try? JSONEncoder().encode(response)) ?? Data())
+        }
+        switch ProcessControl.sampleChoice(members: target.members, fallbackName: target.name) {
+        case .changed(let name):
+            completion(reply(400, CompanionSampleResponse(status: "changed", name: name, error: CompanionTargets.unresolvedMessage(for: CompanionProcessRequest(rowId: target.rowId, pid: nil)))))
+        case .blocked(let name, let reason):
+            completion(reply(400, CompanionSampleResponse(status: "blocked", name: name, error: "\(name) is \(reason).\u{00A0} Hog Hunter will not sample it.")))
+        case .ready(let key, let name):
+            SampleReport.run(name: name, pid: key.pid) { outcome in
+                switch outcome {
+                case .failed(let message):
+                    completion(reply(400, CompanionSampleResponse(status: "failed", name: name, error: message)))
+                case .written(let url):
+                    DispatchQueue.global(qos: .utility).async {
+                        let summary = SampleReport.summary(of: SampleReport.tailText(of: url))
+                        completion(reply(200, CompanionSampleResponse(
+                            status: "ok",
+                            name: name,
+                            message: "Sampled \(name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
+                            fileName: url.lastPathComponent,
+                            bytes: SampleReport.byteCount(of: url),
+                            summary: summary
+                        )))
+                    }
+                }
+            }
+        }
     }
 
     /// Tames or restores every live process behind the row the phone chose.
@@ -1801,7 +1882,18 @@ final class HogStore: ObservableObject {
             cleanProgress: activeCleanProgress,
             remoteQuitAllowed: allowRemoteQuit,
             remoteCleanAllowed: allowRemoteClean,
-            remoteEditAllowed: allowRemoteEdit
+            remoteEditAllowed: allowRemoteEdit,
+            bandwidth: CompanionSnapshotBuilder.bandwidth(reading: bandwidth.reading, peaks: bandwidth.peaks, error: bandwidth.lastError),
+            cpuHistory: recentCpuPercents,
+            settings: CompanionSnapshotBuilder.settingsSummary(
+                refreshInterval: refreshInterval,
+                alertsEnabled: alertsEnabled,
+                alertThresholdPercent: alertThresholdPercent,
+                alertSustainedMinutes: alertSustainedMinutes,
+                webhookURL: alertWebhookURL,
+                webhookStatus: alerts.lastWebhookStatus,
+                notificationsDenied: alerts.authorizationDenied
+            )
         )
         companionServer.update(snapshot: snapshot, targets: CompanionTargets.index(rows))
     }

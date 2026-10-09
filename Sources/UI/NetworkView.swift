@@ -93,23 +93,11 @@ struct NetworkView: View {
         }
     }
 
-    private var nowFootnote: String {
-        guard bandwidth.reading.isMeasured else { return "Measuring…" }
-        return "Last \(Int(bandwidth.reading.windowSeconds.rounded())) s"
-    }
+    private var nowFootnote: String { bandwidth.reading.footnote }
 
-    private var peakFootnote: String {
-        guard bandwidth.peaks.hasSamples else { return "No History Yet" }
-        return "Sampled \(HogFormat.duration(bandwidth.peaks.sampledSeconds))"
-    }
+    private var peakFootnote: String { bandwidth.peaks.footnote }
 
-    private var peakHelp: String {
-        guard let at = bandwidth.peaks.peakAt else {
-            return "The fastest sustained download or upload seen in the last 24 hours."
-        }
-        let when = DateFormatter.localizedString(from: at, dateStyle: .none, timeStyle: .short)
-        return "The fastest sustained rate in the last 24 hours, reached at \(when)."
-    }
+    private var peakHelp: String { bandwidth.peaks.help }
 
     private var header: some View {
         HStack(spacing: 10) {
