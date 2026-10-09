@@ -143,6 +143,16 @@ final class HogStore: ObservableObject {
             if !loadingSettings { publishCompanion() }
         }
     }
+    /// Off until the owner turns it on in Mac Settings, or ticks it when
+    /// approving a phone.  Gates the phone's changes to cleaner exclusions and
+    /// to the Mac panel's lookback, grouping and CPU scale.
+    @Published var allowRemoteEdit = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteEdit = allowRemoteEdit
+            if !loadingSettings { publishCompanion() }
+        }
+    }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
@@ -185,6 +195,7 @@ final class HogStore: ObservableObject {
         static let shareWithIPhone = "shareWithIPhone"
         static let allowRemoteQuit = "allowRemoteQuit"
         static let allowRemoteClean = "allowRemoteClean"
+        static let allowRemoteEdit = "allowRemoteEdit"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
     }
@@ -1039,6 +1050,7 @@ final class HogStore: ObservableObject {
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
         allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
+        allowRemoteEdit = defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -1145,6 +1157,7 @@ final class HogStore: ObservableObject {
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
         defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
+        defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
     }
 
     // MARK: - Test hooks
@@ -1230,6 +1243,10 @@ final class HogStore: ObservableObject {
             if remoteClean != self.allowRemoteClean {
                 self.allowRemoteClean = remoteClean
             }
+            let remoteEdit = self.defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
+            if remoteEdit != self.allowRemoteEdit {
+                self.allowRemoteEdit = remoteEdit
+            }
         }
     }
 
@@ -1238,6 +1255,7 @@ final class HogStore: ObservableObject {
     private func setupCompanionHandlers() {
         companionServer.allowRemoteQuit = allowRemoteQuit
         companionServer.allowRemoteClean = allowRemoteClean
+        companionServer.allowRemoteEdit = allowRemoteEdit
         companionServer.onRemotePair = { [weak self] deviceName, reply in
             Task { @MainActor in
                 guard let self else { return reply(false) }
@@ -1335,11 +1353,13 @@ final class HogStore: ObservableObject {
         quitBox.state = allowRemoteQuit ? .on : .off
         let cleanBox = NSButton(checkboxWithTitle: "Let it run the disk cleaner", target: nil, action: nil)
         cleanBox.state = allowRemoteClean ? .on : .off
-        let stack = NSStackView(views: [quitBox, cleanBox])
+        let editBox = NSButton(checkboxWithTitle: "Let it change cleaner exclusions and the panel view", target: nil, action: nil)
+        editBox.state = allowRemoteEdit ? .on : .off
+        let stack = NSStackView(views: [quitBox, cleanBox, editBox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
-        stack.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
+        stack.frame = NSRect(x: 0, y: 0, width: 360, height: 66)
         alert.accessoryView = stack
 
         if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
@@ -1350,6 +1370,7 @@ final class HogStore: ObservableObject {
             loadingSettings = true
             allowRemoteQuit = quitBox.state == .on
             allowRemoteClean = cleanBox.state == .on
+            allowRemoteEdit = editBox.state == .on
             loadingSettings = wasLoading
             //  Both didSets above called `persist()` while `loadingSettings` was
             //  still true, and `persist()` returns early in that state -- so the
@@ -1751,7 +1772,8 @@ final class HogStore: ObservableObject {
             networkNote: networkScan.note,
             cleanProgress: activeCleanProgress,
             remoteQuitAllowed: allowRemoteQuit,
-            remoteCleanAllowed: allowRemoteClean
+            remoteCleanAllowed: allowRemoteClean,
+            remoteEditAllowed: allowRemoteEdit
         )
         companionServer.update(snapshot: snapshot, targets: CompanionTargets.index(rows))
     }

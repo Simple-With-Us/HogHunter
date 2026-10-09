@@ -360,7 +360,7 @@ private struct IPhoneSettingsTab: View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi, or from anywhere over Tailscale.  Quitting, taming, and cleaning each need the opt-ins below.  Turn this off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi or over Tailscale.\u{00A0} With the opt-ins below it can also act on this Mac: quit or tame apps, run the cleaner, and change cleaner exclusions and the panel view.\u{00A0} Each opt-in is off until you turn it on, and controls are accepted only from your local network or Tailscale.\u{00A0} Turn Share With iPhone off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -393,7 +393,12 @@ private struct IPhoneSettingsTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("A phone without the code can ask to pair.  This Mac then shows an alert where you can allow it and pick these same two choices.")
+                    Toggle("Allow iPhone to Change Exclusions & View", isOn: $store.allowRemoteEdit)
+                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, and switch this panel's lookback, grouping, and CPU scale.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick these same three choices.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

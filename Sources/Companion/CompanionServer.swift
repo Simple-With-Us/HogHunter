@@ -105,6 +105,7 @@ final class CompanionServer: @unchecked Sendable {
     /// each sits behind a lock instead of being a bare stored property.
     private let quitFlag = CompanionLocked(false)
     private let cleanFlag = CompanionLocked(false)
+    private let editFlag = CompanionLocked(false)
 
     var allowRemoteQuit: Bool {
         get { quitFlag.value }
@@ -119,6 +120,12 @@ final class CompanionServer: @unchecked Sendable {
     /// Called with the live processes behind the row the phone pointed at.
     /// The server resolves the target itself, from the rows it was last
     /// handed, so the store never sees an address it cannot verify.
+    /// Off until the owner allows the phone to change cleaner exclusions and
+    /// the Mac panel's lookback, grouping and CPU scale.
+    var allowRemoteEdit: Bool {
+        get { editFlag.value }
+        set { editFlag.value = newValue }
+    }
     var onRemoteQuit: ((_ target: CompanionTarget, _ force: Bool) -> Reply)? = nil
     var onRemoteTame: ((_ target: CompanionTarget, _ action: String) -> Reply)? = nil
     /// A clean takes minutes.  The handler starts it and calls `completion`
@@ -265,6 +272,7 @@ final class CompanionServer: @unchecked Sendable {
             },
             exclusionsHandler: { [weak self] req in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteEdit else { return Self.editRefusal }
                 if let handler = self.onRemoteExclusionsUpdate {
                     return handler(req)
                 }
@@ -272,6 +280,7 @@ final class CompanionServer: @unchecked Sendable {
             },
             viewHandler: { [weak self] req in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteEdit else { return Self.editRefusal }
                 if let handler = self.onRemoteViewUpdate {
                     return handler(req)
                 }
@@ -283,6 +292,13 @@ final class CompanionServer: @unchecked Sendable {
             onSnapshotServed?()
         }
         return .reply(response)
+    }
+
+    /// The answer to an exclusions or view change while the owner has not
+    /// allowed phone edits.
+    static var editRefusal: Reply {
+        let res = ["status": "forbidden", "error": "Changing cleaner exclusions or the panel view from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on the Mac."]
+        return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
     }
 
     /// How long the connection of an unfinished clean is held before the

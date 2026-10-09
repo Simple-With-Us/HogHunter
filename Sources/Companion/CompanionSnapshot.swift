@@ -158,6 +158,8 @@ struct CompanionSnapshot: Codable, Equatable {
     /// Mac that does not send them decodes as "unknown" rather than failing.
     var remoteQuitAllowed: Bool? = nil
     var remoteCleanAllowed: Bool? = nil
+    /// Whether the phone may change cleaner exclusions and the panel view.
+    var remoteEditAllowed: Bool? = nil
     var cleanProgress: CompanionCleanProgress? = nil
 }
 
