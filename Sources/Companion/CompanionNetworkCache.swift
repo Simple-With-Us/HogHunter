@@ -94,8 +94,7 @@ extension CompanionSnapshotBuilder {
     }
 
     /// Runs one `lsof` pass and packages it for the phone.
-    static func currentNetworkScan(limit: Int = 10) -> CompanionNetworkScan {
-        let scanner = NetworkScanner()
+    static func currentNetworkScan(limit: Int = 10, scanner: NetworkScanner = NetworkScanner()) -> CompanionNetworkScan {
         let snapshot = scanner.snapshot { pid in
             #if canImport(AppKit)
             if let app = NSRunningApplication(processIdentifier: pid) {

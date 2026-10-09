@@ -11,6 +11,8 @@ enum CompanionService {
     static let exclusionsPath = "/v1/exclusions"
     static let viewPath = "/v1/view"
     static let pairPath = "/v1/pair"
+    /// Trades the shared pairing code for a token of the phone's own.
+    static let enrollPath = "/v1/enroll"
     static let version = 1
 }
 
@@ -50,6 +52,16 @@ struct DiskCleanerProgressUpdate: Sendable {
     var progress: CompanionCleanProgress
 }
 
+/// What a quit or tame request points at.  The phone sends the id of the row
+/// it was looking at, so the Mac acts on that exact app or process.  A bare
+/// pid is still accepted from an older phone.
+struct CompanionProcessRequest: Equatable, Sendable {
+    var rowId: String? = nil
+    var pid: Int32? = nil
+
+    var isAddressed: Bool { (rowId?.isEmpty == false) || pid != nil }
+}
+
 /// Response returned when the iOS companion asks to quit a process on the Mac.
 struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var status: String
@@ -57,6 +69,10 @@ struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var name: String
     var message: String?
     var error: String?
+    /// How many processes of the row were signalled, and how many were left
+    /// alone (changed since sampling, protected).  Nil from an older Mac.
+    var acted: Int? = nil
+    var skipped: Int? = nil
 }
 
 /// Response returned when the iOS companion asks to tame or untame a process on the Mac.
@@ -67,6 +83,8 @@ struct CompanionTameResponse: Codable, Equatable, Sendable {
     var isTamed: Bool
     var message: String?
     var error: String?
+    var acted: Int? = nil
+    var skipped: Int? = nil
 }
 
 /// Request sent by the iOS companion to update cleaner category and folder exclusions on the Mac.
@@ -103,6 +121,14 @@ struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
 enum CompanionToken {
     static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+
+    /// A phone's own token starts with this.  The 8 character pairing code
+    /// cannot, so the two are told apart at a glance.
+    static let devicePrefix = "hh1_"
+
+    static func isDeviceToken(_ token: String) -> Bool {
+        token.hasPrefix(devicePrefix) && token.count > devicePrefix.count
+    }
 
     static func make(length: Int = 8) -> String {
         String((0..<length).compactMap { _ in alphabet.randomElement() })
@@ -142,6 +168,8 @@ struct CompanionSnapshot: Codable, Equatable {
     /// Mac that does not send them decodes as "unknown" rather than failing.
     var remoteQuitAllowed: Bool? = nil
     var remoteCleanAllowed: Bool? = nil
+    /// Whether the phone may change cleaner exclusions and the panel view.
+    var remoteEditAllowed: Bool? = nil
     var cleanProgress: CompanionCleanProgress? = nil
 }
 

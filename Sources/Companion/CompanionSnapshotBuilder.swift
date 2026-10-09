@@ -19,7 +19,8 @@ enum CompanionSnapshotBuilder {
         networkNote: String? = nil,
         cleanProgress: CompanionCleanProgress? = nil,
         remoteQuitAllowed: Bool? = nil,
-        remoteCleanAllowed: Bool? = nil
+        remoteCleanAllowed: Bool? = nil,
+        remoteEditAllowed: Bool? = nil
     ) -> CompanionSnapshot {
         let cores = max(1, pulse.coreCount)
         let pressure = Severity.forPressure(pulse.pressure)
@@ -73,6 +74,7 @@ enum CompanionSnapshotBuilder {
             networkNote: networkNote,
             remoteQuitAllowed: remoteQuitAllowed,
             remoteCleanAllowed: remoteCleanAllowed,
+            remoteEditAllowed: remoteEditAllowed,
             cleanProgress: cleanProgress
         )
     }

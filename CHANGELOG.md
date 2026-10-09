@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+iPhone companion, phone parity batch 1 (board `eb0efb86`, issue 63), hardening:
+
+- Quit and Tame check the live process before they act.  The phone names the row it is looking at, the Mac resolves it from the rows it last published with every member's start time, and a pid that now belongs to another process is skipped as changed instead of signalled.  Quitting or taming an app now acts on all of its processes, each checked on its own.  A pid-only request from an older phone is accepted only if the last snapshot listed that pid.  The pid-only entry points are gone, including the ones behind the Mac panel's Tame and Restore buttons.  A group with one protected helper now reads as TAMED.
+- New Allow iPhone to Change Exclusions & View setting, off by default, also offered in the pairing alert.  Until it is on, `/v1/exclusions` and `/v1/view` answer 403 and the phone greys out the lookback and grouping pickers and the exclusion controls, with the reason.  A Mac that was already allowing a phone to change these now needs this turned on once.
+- Wrong codes and tokens are throttled per client address: five free misses, then a lockout that doubles up to 15 minutes, answered 429 with `Retry-After`.  A good request clears the slate, and a global cap covers rotating addresses.
+- Each paired iPhone gets a token of its own (192 random bits).  The Mac stores only a hash, lists the phones under Settings > iPhone > Paired iPhones, and Revoke cuts off one phone or all of them.  The 8 character code now pairs a new phone, which trades it for its token at `/v1/enroll`, and Approve on Mac hands out a token too.  The shared code still reads the snapshot, so a phone on an older build keeps showing data, but it cannot quit, tame, clean or edit until it updates.  A phone with the new build swaps its saved code for a token on its own the next time it connects.  A new code no longer disconnects paired phones.
+- Quit, tame, clean, exclusions, view and pairing are accepted only from the local network and Tailscale (loopback, link-local, private, unique-local, 100.64.0.0/10).  Reading the snapshot with a valid credential still works from anywhere, so a phone that pairs from outside keeps a read-only connection with the code and swaps it for its own token once it is on the local network or Tailscale.  The global lockout for rotating addresses applies only to outside addresses, so strangers guessing through a forwarded port cannot shut out the phone on the home Wi-Fi.  Settings no longer suggests forwarding the port; it says not to.
+
+Not done, tracked as follow-ups: the link is still plain HTTP (TLS), the phone keeps its token in app defaults rather than the Keychain, and Restore Priority cannot work for an ordinary user because Tame uses a nice value that only root can lower (board `d4c36387`).
+
 iPhone companion, phone parity batch 1 (board `eb0efb86`), broken controls:
 
 - Quit and Tame show on a row only when the Mac owner has allowed them.  Before, the swipe and long-press actions appeared on every row and answered 403.  A long-press now says the controls are off.

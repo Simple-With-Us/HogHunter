@@ -3,6 +3,10 @@ import XCTest
 @testable import HogHunter
 
 final class CompanionTests: XCTestCase {
+    /// A phone's own token.  Control routes accept nothing else.
+    static let deviceToken = "hh1_TESTDEVICETOKEN"
+    static func isDevice(_ presented: String) -> Bool { presented == deviceToken }
+
     func testAuthorizedResponseReturnsTheSnapshotBody() {
         let body = Data("{\"secret\":true}".utf8)
         let response = CompanionHTTP.response(
@@ -115,24 +119,28 @@ final class CompanionTests: XCTestCase {
 
     func testCompanionTameRequestAndResponse() {
         var tamedPid: pid_t?
+        var tamedRow: String?
         var tameAction: String?
-        let handler: (pid_t, String) -> (status: Int, body: Data) = { pid, action in
-            tamedPid = pid
+        let handler: (CompanionProcessRequest, String) -> (status: Int, body: Data) = { request, action in
+            tamedPid = request.pid
+            tamedRow = request.rowId
             tameAction = action
-            let resp = CompanionTameResponse(status: "tamed", pid: pid, name: "test", isTamed: true, message: "OK", error: nil)
+            let resp = CompanionTameResponse(status: "tamed", pid: request.pid ?? 0, name: "test", isTamed: true, message: "OK", error: nil)
             return (200, (try? JSONEncoder().encode(resp)) ?? Data())
         }
 
-        let request = CompanionHTTP.tameRequest(token: "ABCD2345", pid: 9999, action: "tame")
+        let request = CompanionHTTP.tameRequest(token: CompanionTests.deviceToken, pid: 9999, rowId: "a-app:com.example.tool", action: "tame")
         let response = CompanionHTTP.response(
             request: request,
             body: Data(),
             token: "ABCD2345",
-            tameHandler: handler
+            tameHandler: handler,
+            deviceAuthenticator: CompanionTests.isDevice
         )
         let parsed = CompanionHTTP.parseResponse(response)
         XCTAssertEqual(parsed?.status, 200)
         XCTAssertEqual(tamedPid, 9999)
+        XCTAssertEqual(tamedRow, "a-app:com.example.tool", "the row id must survive percent-encoding")
         XCTAssertEqual(tameAction, "tame")
 
         let decoded = try? JSONDecoder().decode(CompanionTameResponse.self, from: parsed?.body ?? Data())
@@ -207,7 +215,7 @@ final class CompanionTests: XCTestCase {
         }
 
         let request = CompanionHTTP.exclusionsRequest(
-            token: "ABCD2345",
+            token: CompanionTests.deviceToken,
             toggleCategory: "userCaches",
             addPath: "/Users/jay/Excluded"
         )
@@ -215,7 +223,8 @@ final class CompanionTests: XCTestCase {
             request: request,
             body: Data(),
             token: "ABCD2345",
-            exclusionsHandler: handler
+            exclusionsHandler: handler,
+            deviceAuthenticator: CompanionTests.isDevice
         )
         let parsed = CompanionHTTP.parseResponse(response)
         XCTAssertEqual(parsed?.status, 200)
@@ -243,7 +252,7 @@ final class CompanionTests: XCTestCase {
         }
 
         let request = CompanionHTTP.viewRequest(
-            token: "ABCD2345",
+            token: CompanionTests.deviceToken,
             window: "Past Hour",
             grouping: "Processes",
             cpuScale: "Machine Share"
@@ -252,7 +261,8 @@ final class CompanionTests: XCTestCase {
             request: request,
             body: Data(),
             token: "ABCD2345",
-            viewHandler: handler
+            viewHandler: handler,
+            deviceAuthenticator: CompanionTests.isDevice
         )
         let parsed = CompanionHTTP.parseResponse(response)
         XCTAssertEqual(parsed?.status, 200)
@@ -543,12 +553,13 @@ final class CompanionStorageTelemetryTests: XCTestCase {
             return (200, (try? JSONEncoder().encode(res)) ?? Data())
         }
 
-        let request = CompanionHTTP.cleanRequest(token: "ABCD2345")
+        let request = CompanionHTTP.cleanRequest(token: CompanionTests.deviceToken)
         let response = CompanionHTTP.response(
             request: request,
             body: Data(),
             token: "ABCD2345",
-            cleanHandler: handler
+            cleanHandler: handler,
+            deviceAuthenticator: CompanionTests.isDevice
         )
         let parsed = CompanionHTTP.parseResponse(response)
         XCTAssertEqual(parsed?.status, 200)

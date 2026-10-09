@@ -45,6 +45,35 @@ enum CompanionConnection {
         }
     }
 
+    /// Trades the Mac's pairing code for a token of this phone's own.  A Mac
+    /// that predates per-phone tokens answers 404 (`tooOld`).
+    static func enroll(endpoint: NWEndpoint, code: String, deviceName: String) async throws -> String {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.enrollRequest(code: code, deviceName: deviceName),
+            timeout: defaultTimeout
+        )
+        let json = (try? JSONSerialization.jsonObject(with: reply.body)) as? [String: Any]
+        switch reply.status {
+        case 200:
+            if let token = json?["token"] as? String, CompanionToken.isDeviceToken(token) { return token }
+            throw CompanionClientError.badResponse
+        case 401:
+            throw CompanionClientError.unauthorized
+        case 403:
+            if json?["reason"] as? String == "untrusted-network" {
+                throw CompanionClientError.untrustedNetwork
+            }
+            throw CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac did not allow this iPhone to pair.")
+        case 404:
+            throw CompanionClientError.tooOld
+        case 429:
+            throw CompanionClientError.throttled(retryAfter: (json?["retryAfter"] as? Int) ?? 0)
+        default:
+            throw CompanionClientError.badResponse
+        }
+    }
+
     static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
         let reply = try await exchange(
             endpoint: endpoint,
@@ -65,19 +94,19 @@ enum CompanionConnection {
         return try decode(CompanionCleanResponse.self, from: reply)
     }
 
-    static func triggerQuit(endpoint: NWEndpoint, token: String, pid: Int32, force: Bool = false) async throws -> CompanionQuitResponse {
+    static func triggerQuit(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, force: Bool = false) async throws -> CompanionQuitResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.quitRequest(token: token, pid: pid, force: force),
+            request: CompanionHTTP.quitRequest(token: token, pid: pid, rowId: rowId, force: force),
             timeout: defaultTimeout
         )
         return try decode(CompanionQuitResponse.self, from: reply)
     }
 
-    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, action: String = "tame") async throws -> CompanionTameResponse {
+    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, action: String = "tame") async throws -> CompanionTameResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.tameRequest(token: token, pid: pid, action: action),
+            request: CompanionHTTP.tameRequest(token: token, pid: pid, rowId: rowId, action: action),
             timeout: defaultTimeout
         )
         return try decode(CompanionTameResponse.self, from: reply)

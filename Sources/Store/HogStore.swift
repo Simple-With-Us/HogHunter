@@ -143,6 +143,16 @@ final class HogStore: ObservableObject {
             if !loadingSettings { publishCompanion() }
         }
     }
+    /// Off until the owner turns it on in Mac Settings, or ticks it when
+    /// approving a phone.  Gates the phone's changes to cleaner exclusions and
+    /// to the Mac panel's lookback, grouping and CPU scale.
+    @Published var allowRemoteEdit = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteEdit = allowRemoteEdit
+            if !loadingSettings { publishCompanion() }
+        }
+    }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
@@ -185,11 +195,17 @@ final class HogStore: ObservableObject {
         static let shareWithIPhone = "shareWithIPhone"
         static let allowRemoteQuit = "allowRemoteQuit"
         static let allowRemoteClean = "allowRemoteClean"
+        static let allowRemoteEdit = "allowRemoteEdit"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
     }
 
-    private let companionServer = CompanionServer()
+    private let companionServer: CompanionServer
+    /// The phones paired with this Mac, one token each.
+    let companionDevices: CompanionDeviceRegistry
+    /// Paired phones, newest first, for Settings.  Refreshed when one pairs or
+    /// is revoked and whenever Settings opens.
+    @Published private(set) var pairedDevices: [CompanionDevice] = []
     private var companionPeerID = ""
 
     // MARK: - Machinery
@@ -242,6 +258,10 @@ final class HogStore: ObservableObject {
     ) {
         let infisical = infisical ?? InfisicalSettings.shared
         self.defaults = defaults
+        let devices = CompanionDeviceRegistry(defaults: defaults)
+        self.companionDevices = devices
+        self.companionServer = CompanionServer(devices: devices)
+        self.pairedDevices = devices.devices
         self.infisical = infisical
         let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
         self.history = history
@@ -589,7 +609,7 @@ final class HogStore: ObservableObject {
         return zip(ranked, anchors).map { group, anchor in
             let blocks = group.members.map { ProcessControl.blockReason(for: $0) }
             let canQuit = blocks.contains(where: { $0 == nil })
-            let isTamed = !group.members.isEmpty && group.members.allSatisfy(\.isTamed)
+            let isTamed = Self.groupIsTamed(group.members)
             let isSleepBlocker = group.members.contains(where: \.isSleepBlocker)
             return HogRow(
                 id: Self.groupRowId(group.key),
@@ -611,6 +631,15 @@ final class HogStore: ObservableObject {
                 canTame: canQuit
             )
         }
+    }
+
+    /// Tame skips protected members (another user's, a system process), so
+    /// they can never read as tamed.  A row reads as tamed when every member
+    /// Tame can reach is, or an app with one protected helper never shows
+    /// TAMED.
+    nonisolated static func groupIsTamed(_ members: [ProcessSample]) -> Bool {
+        let tameable = members.filter { ProcessControl.blockReason(for: $0) == nil }
+        return !tameable.isEmpty && tameable.allSatisfy(\.isTamed)
     }
 
     private func groupDetail(_ group: Grouping.Group) -> String {
@@ -960,15 +989,11 @@ final class HogStore: ObservableObject {
     func tame(_ row: HogRow) {
         lastError = nil
         lastNotice = nil
-        var tamedCount = 0
-        for member in row.keys {
-            let res = ProcessControl.tame(pid: member.pid)
-            if res.outcome.isAction { tamedCount += 1 }
-        }
-        if tamedCount > 0 {
+        let outcome = ProcessControl.tame(members: row.keys, fallbackName: row.name)
+        if outcome.actedOn > 0 {
             lastNotice = "Tamed \(row.name) (nice priority 20 & background QoS)."
         } else {
-            lastError = "Could not tame \(row.name)."
+            lastError = outcome.message ?? "Could not tame \(row.name)."
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.tick()
@@ -978,15 +1003,11 @@ final class HogStore: ObservableObject {
     func untame(_ row: HogRow) {
         lastError = nil
         lastNotice = nil
-        var untamedCount = 0
-        for member in row.keys {
-            let res = ProcessControl.untame(pid: member.pid)
-            if res.outcome.isAction { untamedCount += 1 }
-        }
-        if untamedCount > 0 {
+        let outcome = ProcessControl.untame(members: row.keys, fallbackName: row.name)
+        if outcome.actedOn > 0 {
             lastNotice = "Restored priority for \(row.name)."
         } else {
-            lastError = "Could not restore priority for \(row.name)."
+            lastError = outcome.message ?? "Could not restore priority for \(row.name)."
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.tick()
@@ -1038,6 +1059,7 @@ final class HogStore: ObservableObject {
         shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
         allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
+        allowRemoteEdit = defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -1144,6 +1166,7 @@ final class HogStore: ObservableObject {
         defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
         defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
+        defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
     }
 
     // MARK: - Test hooks
@@ -1229,31 +1252,39 @@ final class HogStore: ObservableObject {
             if remoteClean != self.allowRemoteClean {
                 self.allowRemoteClean = remoteClean
             }
+            let remoteEdit = self.defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
+            if remoteEdit != self.allowRemoteEdit {
+                self.allowRemoteEdit = remoteEdit
+            }
         }
     }
 
     // MARK: - Companion Handlers
 
     private func setupCompanionHandlers() {
+        companionDevices.onChange { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshPairedDevices() }
+        }
         companionServer.allowRemoteQuit = allowRemoteQuit
         companionServer.allowRemoteClean = allowRemoteClean
+        companionServer.allowRemoteEdit = allowRemoteEdit
         companionServer.onRemotePair = { [weak self] deviceName, reply in
             Task { @MainActor in
                 guard let self else { return reply(false) }
                 reply(self.askToApprovePairing(deviceName: deviceName))
             }
         }
-        companionServer.onRemoteQuit = { [weak self] pid, force in
+        companionServer.onRemoteQuit = { [weak self] target, force in
             guard let self else {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
             }
-            return self.performRemoteQuit(pid: pid, force: force)
+            return self.performRemoteQuit(target: target, force: force)
         }
-        companionServer.onRemoteTame = { [weak self] pid, action in
+        companionServer.onRemoteTame = { [weak self] target, action in
             guard let self else {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
             }
-            return self.performRemoteTame(pid: pid, action: action)
+            return self.performRemoteTame(target: target, action: action)
         }
         companionServer.onRemoteClean = { [weak self] completion in
             guard let self else {
@@ -1325,7 +1356,7 @@ final class HogStore: ObservableObject {
     private func askToApprovePairing(deviceName: String) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Pair \(deviceName)?"
-        alert.informativeText = "\(deviceName) is asking to see Hog Hunter on this Mac.  Allow only a phone you own.  You can change these choices later in Settings > iPhone."
+        alert.informativeText = "\(deviceName) is asking to see Hog Hunter on this Mac.\u{00A0} Allow only a phone you own.\u{00A0} You can change these choices, or remove the phone, later in Settings > iPhone."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Don't Allow")
@@ -1334,11 +1365,13 @@ final class HogStore: ObservableObject {
         quitBox.state = allowRemoteQuit ? .on : .off
         let cleanBox = NSButton(checkboxWithTitle: "Let it run the disk cleaner", target: nil, action: nil)
         cleanBox.state = allowRemoteClean ? .on : .off
-        let stack = NSStackView(views: [quitBox, cleanBox])
+        let editBox = NSButton(checkboxWithTitle: "Let it change cleaner exclusions and the panel view", target: nil, action: nil)
+        editBox.state = allowRemoteEdit ? .on : .off
+        let stack = NSStackView(views: [quitBox, cleanBox, editBox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
-        stack.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
+        stack.frame = NSRect(x: 0, y: 0, width: 360, height: 66)
         alert.accessoryView = stack
 
         if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
@@ -1349,6 +1382,7 @@ final class HogStore: ObservableObject {
             loadingSettings = true
             allowRemoteQuit = quitBox.state == .on
             allowRemoteClean = cleanBox.state == .on
+            allowRemoteEdit = editBox.state == .on
             loadingSettings = wasLoading
             //  Both didSets above called `persist()` while `loadingSettings` was
             //  still true, and `persist()` returns early in that state -- so the
@@ -1440,73 +1474,76 @@ final class HogStore: ObservableObject {
         return (200, data)
     }
 
-    func performRemoteTame(pid: pid_t, action: String) -> (status: Int, body: Data) {
+    /// Tames or restores every live process behind the row the phone chose.
+    /// Each member is checked against the live process table first, so a pid
+    /// that now belongs to something else is left alone.
+    nonisolated func performRemoteTame(target: CompanionTarget, action: String) -> (status: Int, body: Data) {
         let isTame = action.lowercased() == "tame"
-        let result = isTame ? ProcessControl.tame(pid: pid) : ProcessControl.untame(pid: pid)
-        let isNowTamed = ProcessControl.isTamed(pid: pid)
-        let acted = result.outcome.isAction
-        var errorText: String? = nil
-        switch result.outcome {
-        case .asked, .forced:
-            break
-        case .changed:
-            errorText = "\(result.name) is no longer running or changed PID."
-        case .blocked(let reason):
-            errorText = "Cannot \(isTame ? "tame" : "restore") \(result.name): \(reason)."
-        case .failed(let reason):
-            errorText = "Failed to \(isTame ? "tame" : "restore") \(result.name): \(reason)."
+        let outcome = isTame
+            ? ProcessControl.tame(members: target.members, fallbackName: target.name)
+            : ProcessControl.untame(members: target.members, fallbackName: target.name)
+        let acted = outcome.actedOn
+        let skipped = outcome.results.count - acted
+        // The row reads as tamed only if every member we may touch is.
+        let tameable = outcome.results.filter {
+            if case .changed = $0.outcome { return false }
+            if case .blocked = $0.outcome { return false }
+            return true
         }
+        let isNowTamed = !tameable.isEmpty && tameable.allSatisfy { ProcessControl.isTamed(pid: $0.key.pid) }
+        let verb = isTame ? "tamed" : "restored"
         let response = CompanionTameResponse(
-            status: acted ? "ok" : "blocked",
-            pid: pid,
-            name: result.name,
+            status: acted > 0 ? "ok" : Self.failureStatus(outcome),
+            pid: target.members.first?.pid ?? 0,
+            name: target.name,
             isTamed: isNowTamed,
-            message: acted ? (isTame ? "Process tamed" : "Process restored") : nil,
-            error: errorText
+            message: acted > 0 ? (outcome.message ?? "\(target.name) \(verb).") : nil,
+            error: acted > 0 ? nil : outcome.message,
+            acted: acted,
+            skipped: skipped
         )
         let data = (try? JSONEncoder().encode(response)) ?? Data()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.tick()
+            Task { @MainActor [weak self] in self?.tick() }
         }
         // 400, not 200, when nothing happened: the phone must not show
         // "Priority Updated" for a blocked or failed request.
-        return (acted ? 200 : 400, data)
+        return (acted > 0 ? 200 : 400, data)
     }
 
-    private func performRemoteQuit(pid: pid_t, force: Bool) -> (status: Int, body: Data) {
-        let result = ProcessControl.quit(pid: pid, force: force)
-        let statusStr: String
-        var errorStr: String? = nil
-        var messageStr: String? = nil
-        switch result.outcome {
-        case .asked:
-            statusStr = "asked"
-            messageStr = "Quit signal sent to \(result.name)."
-        case .forced:
-            statusStr = "forced"
-            messageStr = "Force quit signal sent to \(result.name)."
-        case .changed:
-            statusStr = "changed"
-            errorStr = "\(result.name) is no longer running or changed PID."
-        case .blocked(let reason):
-            statusStr = "blocked"
-            errorStr = "Cannot quit \(result.name): \(reason)."
-        case .failed(let reason):
-            statusStr = "failed"
-            errorStr = "Failed to quit \(result.name): \(reason)."
+    /// `changed`, `blocked`, or `failed`, from what stopped a request that acted on nothing.
+    nonisolated static func failureStatus(_ outcome: ProcessControl.QuitOutcome) -> String {
+        for result in outcome.results {
+            switch result.outcome {
+            case .changed: return "changed"
+            case .blocked: return "blocked"
+            case .failed: return "failed"
+            case .asked, .forced: continue
+            }
         }
+        return "changed"
+    }
+
+    /// Quits, or force quits, every live process behind the row the phone
+    /// chose, each after a live identity check.
+    nonisolated func performRemoteQuit(target: CompanionTarget, force: Bool) -> (status: Int, body: Data) {
+        let outcome = ProcessControl.quit(members: target.members, fallbackName: target.name, force: force)
+        let acted = outcome.actedOn
+        let skipped = outcome.results.count - acted
+        let sent = force ? "Force quit signal sent to" : "Quit signal sent to"
         let response = CompanionQuitResponse(
-            status: statusStr,
-            pid: pid,
-            name: result.name,
-            message: messageStr,
-            error: errorStr
+            status: acted > 0 ? (force ? "forced" : "asked") : Self.failureStatus(outcome),
+            pid: target.members.first?.pid ?? 0,
+            name: target.name,
+            message: acted > 0 ? (outcome.message ?? "\(sent) \(target.name).") : nil,
+            error: acted > 0 ? nil : outcome.message,
+            acted: acted,
+            skipped: skipped
         )
-        if let data = try? CompanionJSON.encoder().encode(response) {
-            let httpStatus = (result.outcome.isAction) ? 200 : 400
-            return (httpStatus, data)
+        guard let data = try? CompanionJSON.encoder().encode(response) else {
+            return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
         }
-        return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
+        return (acted > 0 ? 200 : 400, data)
     }
 
     /// Starts a phone-requested clean and calls `completion` once, when it
@@ -1663,6 +1700,22 @@ final class HogStore: ObservableObject {
 
     // MARK: - iPhone companion
 
+    func refreshPairedDevices() {
+        pairedDevices = companionDevices.devices
+    }
+
+    /// Cuts off one phone.  Its token stops working at once; it falls back to
+    /// the pairing screen the next time it asks.
+    func revokeCompanionDevice(id: String) {
+        companionDevices.revoke(id: id)
+        refreshPairedDevices()
+    }
+
+    func revokeAllCompanionDevices() {
+        companionDevices.revokeAll()
+        refreshPairedDevices()
+    }
+
     func regenerateCompanionCode() {
         companionCode = CompanionToken.make()
         defaults.set(companionCode, forKey: Key.companionCode)
@@ -1747,9 +1800,10 @@ final class HogStore: ObservableObject {
             networkNote: networkScan.note,
             cleanProgress: activeCleanProgress,
             remoteQuitAllowed: allowRemoteQuit,
-            remoteCleanAllowed: allowRemoteClean
+            remoteCleanAllowed: allowRemoteClean,
+            remoteEditAllowed: allowRemoteEdit
         )
-        companionServer.update(snapshot: snapshot)
+        companionServer.update(snapshot: snapshot, targets: CompanionTargets.index(rows))
     }
 
     // MARK: - Staleness

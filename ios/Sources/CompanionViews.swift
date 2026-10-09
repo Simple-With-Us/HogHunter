@@ -403,6 +403,11 @@ struct DashboardView: View {
         showTameConfirm = true
     }
 
+    /// Exclusion and view changes exist only when the Mac owner turned them on.
+    private var canEdit: Bool { snapshot.remoteEditAllowed == true }
+
+    private static let editOffNote = "Changing exclusions and the Mac's view from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on your Mac."
+
     private var sortedRows: [CompanionRow] {
         let sorted = snapshot.rows.sorted(by: { a, b in
             switch sortOrder {
@@ -504,9 +509,9 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button(isForceQuit ? "Force Quit" : "Quit", role: .destructive) {
-                if let row = pendingQuitRow, let pid = row.pid {
+                if let row = pendingQuitRow, row.pid != nil {
                     Task {
-                        let res = await model.quitProcess(pid: pid, force: isForceQuit)
+                        let res = await model.quitProcess(row: row, force: isForceQuit)
                         lastQuitResult = res
                         showQuitResultAlert = true
                     }
@@ -524,10 +529,10 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
-                if let row = pendingTameRow, let pid = row.pid {
+                if let row = pendingTameRow, row.pid != nil {
                     let action = pendingTameAction
                     Task {
-                        let res = await model.tameProcess(pid: pid, action: action)
+                        let res = await model.tameProcess(row: row, action: action)
                         lastTameOutcome = (action, res)
                         showTameResultAlert = true
                     }
@@ -709,6 +714,12 @@ struct DashboardView: View {
                 }
             }
             .padding(.vertical, 2)
+            .disabled(!canEdit)
+            if !canEdit {
+                Text(Self.editOffNote)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
 
         Section {
@@ -1165,6 +1176,7 @@ struct DashboardView: View {
                                 }
                             ))
                             .labelsHidden()
+                            .disabled(!canEdit)
                         }
                         .padding(.vertical, 2)
                     }
@@ -1206,6 +1218,7 @@ struct DashboardView: View {
                                     .foregroundStyle(.red)
                             }
                             .buttonStyle(.borderless)
+                            .disabled(!canEdit)
                         }
                     }
                     .onDelete { indices in
@@ -1214,6 +1227,7 @@ struct DashboardView: View {
                             Task { await model.removeExcludedPath(path) }
                         }
                     }
+                    .deleteDisabled(!canEdit)
                 }
 
                 Button {
@@ -1222,6 +1236,13 @@ struct DashboardView: View {
                 } label: {
                     Label("Exclude Folder…", systemImage: "plus.circle")
                         .font(.subheadline.weight(.semibold))
+                }
+                .disabled(!canEdit)
+
+                if !canEdit {
+                    Text(Self.editOffNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 

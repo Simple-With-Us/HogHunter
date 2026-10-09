@@ -5,11 +5,22 @@ import Network
 /// Advertises Hog Hunter on the local network and serves companion telemetry
 /// and remote control routes.  The pairing code stays in the request header.
 final class CompanionServer: @unchecked Sendable {
+    /// The phones paired with this Mac, one token each.
+    let devices: CompanionDeviceRegistry
     private let queue = DispatchQueue(label: "hoghunter.companion")
     private var listener: NWListener?
     private var payload = Data()
+    private var targets: [String: CompanionTarget] = [:]
+    /// Wrong-credential counts per client address.  Touched only on `queue`.
+    private var throttle = CompanionAuthThrottle()
     private var token = ""
     private var onStatus: (@Sendable (String) -> Void)?
+
+    /// `devices` defaults to an empty, memory-only registry, so a bare server
+    /// in a test starts with no paired phones and writes nothing to disk.
+    init(devices: CompanionDeviceRegistry? = nil) {
+        self.devices = devices ?? CompanionDeviceRegistry(defaults: nil)
+    }
 
     static let defaultPort: UInt16 = 24240
     private(set) var activePort: UInt16 = defaultPort
@@ -63,9 +74,14 @@ final class CompanionServer: @unchecked Sendable {
         }
     }
 
-    func update(snapshot: CompanionSnapshot) {
+    /// Stores the snapshot to serve and the processes behind its rows.  The
+    /// phone names a row; these are what that name resolves to.
+    func update(snapshot: CompanionSnapshot, targets: [String: CompanionTarget] = [:]) {
         guard let data = try? CompanionJSON.encode(snapshot) else { return }
-        queue.async { self.payload = data }
+        queue.async {
+            self.payload = data
+            self.targets = targets
+        }
     }
 
     func updateToken(_ token: String) {
@@ -90,7 +106,7 @@ final class CompanionServer: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)
-        receive(connection, buffer: Data())
+        receive(connection, buffer: Data(), peer: CompanionPeer.from(connection.endpoint))
     }
 
     typealias Reply = (status: Int, body: Data)
@@ -99,6 +115,7 @@ final class CompanionServer: @unchecked Sendable {
     /// each sits behind a lock instead of being a bare stored property.
     private let quitFlag = CompanionLocked(false)
     private let cleanFlag = CompanionLocked(false)
+    private let editFlag = CompanionLocked(false)
 
     var allowRemoteQuit: Bool {
         get { quitFlag.value }
@@ -110,8 +127,17 @@ final class CompanionServer: @unchecked Sendable {
         get { cleanFlag.value }
         set { cleanFlag.value = newValue }
     }
-    var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> Reply)? = nil
-    var onRemoteTame: ((_ pid: pid_t, _ action: String) -> Reply)? = nil
+    /// Called with the live processes behind the row the phone pointed at.
+    /// The server resolves the target itself, from the rows it was last
+    /// handed, so the store never sees an address it cannot verify.
+    /// Off until the owner allows the phone to change cleaner exclusions and
+    /// the Mac panel's lookback, grouping and CPU scale.
+    var allowRemoteEdit: Bool {
+        get { editFlag.value }
+        set { editFlag.value = newValue }
+    }
+    var onRemoteQuit: ((_ target: CompanionTarget, _ force: Bool) -> Reply)? = nil
+    var onRemoteTame: ((_ target: CompanionTarget, _ action: String) -> Reply)? = nil
     /// A clean takes minutes.  The handler starts it and calls `completion`
     /// once, when it finishes, from any thread.  It must not block: the
     /// server queue also answers the phone's snapshot polls.
@@ -131,9 +157,15 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Pairing waits on a person, so it is answered off the synchronous
     /// router and never holds the queue that serves snapshots.
-    private func handlePair(_ connection: NWConnection, deviceName: String) {
+    private func handlePair(_ connection: NWConnection, deviceName: String, peer: CompanionPeer) {
         let send: @Sendable (Data) -> Void = { response in
             connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+        }
+        // Pairing hands out a credential that can change this Mac, so it is
+        // offered only on the local network and Tailscale.
+        guard peer.isTrusted else {
+            send(CompanionHTTP.untrustedNetworkReply())
+            return
         }
         guard let ask = onRemotePair else {
             send(CompanionHTTP.pairResponse(approvedToken: nil))
@@ -150,12 +182,13 @@ final class CompanionServer: @unchecked Sendable {
             self.queue.async {
                 self.pairPending = false
                 self.lastPairPromptAt = Date()
-                send(CompanionHTTP.pairResponse(approvedToken: approved ? self.token : nil))
+                // Each approved phone gets a token of its own, not the shared code.
+                send(CompanionHTTP.pairResponse(approvedToken: approved ? self.devices.issue(name: deviceName).token : nil))
             }
         }
     }
 
-    private func receive(_ connection: NWConnection, buffer: Data) {
+    private func receive(_ connection: NWConnection, buffer: Data, peer: CompanionPeer) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] data, _, isComplete, error in
             guard let self else {
                 connection.cancel()
@@ -169,14 +202,19 @@ final class CompanionServer: @unchecked Sendable {
                     || error != nil
                     || buffer.count >= 8_192
                 guard finished else {
-                    self.receive(connection, buffer: buffer)
+                    self.receive(connection, buffer: buffer, peer: peer)
                     return
                 }
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
-                    self.handlePair(connection, deviceName: deviceName)
+                    self.handlePair(connection, deviceName: deviceName, peer: peer)
                     return
                 }
-                switch self.disposition(for: buffer) {
+                if let enrollment = CompanionHTTP.enrollParams(in: buffer) {
+                    let reply = self.enroll(code: enrollment.code, deviceName: enrollment.deviceName, peer: peer)
+                    connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
+                    return
+                }
+                switch self.disposition(for: buffer, peer: peer) {
                 case .reply(let response):
                     connection.send(content: response, completion: .contentProcessed { _ in
                         connection.cancel()
@@ -205,7 +243,12 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Routes one request.  Runs on `queue`; split out so tests can drive it
     /// without opening a socket.
-    func disposition(for buffer: Data) -> Disposition {
+    func disposition(for buffer: Data, peer: CompanionPeer, now: Date = Date()) -> Disposition {
+        // A client that keeps presenting wrong credentials is told to wait
+        // before anything about the request is looked at.
+        if let wait = throttle.retryAfter(for: peer.key, now: now, appliesGlobal: !peer.isTrusted) {
+            return .reply(CompanionHTTP.throttledReply(retryAfter: wait))
+        }
         var cleanRequested = false
         let response = CompanionHTTP.response(
             request: buffer,
@@ -224,30 +267,39 @@ final class CompanionServer: @unchecked Sendable {
                 // Placeholder: never sent.  `startClean` answers later.
                 return (202, Data())
             },
-            quitHandler: { [weak self] pid, force in
+            quitHandler: { [weak self] request, force in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
                 guard self.allowRemoteQuit else {
                     let res = ["status": "forbidden", "error": "Remote process termination is disabled in Hog Hunter Mac Settings."]
                     return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
                 }
-                if let handler = self.onRemoteQuit {
-                    return handler(pid, force)
+                guard let handler = self.onRemoteQuit else {
+                    return (501, Data("{\"error\": \"Quit handler not configured\"}".utf8))
                 }
-                return (501, Data("{\"error\": \"Quit handler not configured\"}".utf8))
+                guard let target = CompanionTargets.resolve(request, in: self.targets) else {
+                    let res = CompanionQuitResponse(status: "changed", pid: request.pid ?? 0, name: "", message: nil, error: CompanionTargets.unresolvedMessage(for: request))
+                    return (400, (try? JSONEncoder().encode(res)) ?? Data())
+                }
+                return handler(target, force)
             },
-            tameHandler: { [weak self] pid, action in
+            tameHandler: { [weak self] request, action in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
                 guard self.allowRemoteQuit else {
                     let res = ["status": "forbidden", "error": "Remote process control is disabled in Hog Hunter Mac Settings."]
                     return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
                 }
-                if let handler = self.onRemoteTame {
-                    return handler(pid, action)
+                guard let handler = self.onRemoteTame else {
+                    return (501, Data("{\"error\": \"Tame handler not configured\"}".utf8))
                 }
-                return (501, Data("{\"error\": \"Tame handler not configured\"}".utf8))
+                guard let target = CompanionTargets.resolve(request, in: self.targets) else {
+                    let res = CompanionTameResponse(status: "changed", pid: request.pid ?? 0, name: "", isTamed: false, message: nil, error: CompanionTargets.unresolvedMessage(for: request))
+                    return (400, (try? JSONEncoder().encode(res)) ?? Data())
+                }
+                return handler(target, action)
             },
             exclusionsHandler: { [weak self] req in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteEdit else { return Self.editRefusal }
                 if let handler = self.onRemoteExclusionsUpdate {
                     return handler(req)
                 }
@@ -255,17 +307,55 @@ final class CompanionServer: @unchecked Sendable {
             },
             viewHandler: { [weak self] req in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteEdit else { return Self.editRefusal }
                 if let handler = self.onRemoteViewUpdate {
                     return handler(req)
                 }
                 return (501, Data("{\"error\": \"View handler not configured\"}".utf8))
-            }
+            },
+            peerTrusted: peer.isTrusted,
+            deviceAuthenticator: { [devices] presented in devices.authenticate(presented, now: now) }
         )
+        // 401 is a wrong credential.  404 never got as far as checking one.
+        // Anything else means the credential was accepted.
+        let status = CompanionHTTP.statusCode(of: response)
+        if status == 401 {
+            throttle.recordFailure(peer: peer.key, now: now, countsTowardGlobal: !peer.isTrusted)
+        } else if status != 404 {
+            throttle.recordSuccess(peer: peer.key)
+        }
         if cleanRequested { return .startClean }
-        if CompanionHTTP.isSnapshotRequest(buffer), CompanionHTTP.parseResponse(response)?.status == 200 {
+        if CompanionHTTP.isSnapshotRequest(buffer), status == 200 {
             onSnapshotServed?()
         }
         return .reply(response)
+    }
+
+    /// Trades the shared pairing code for a token of the phone's own.  Runs on
+    /// `queue`.  The code is the proof that someone read it off this Mac's
+    /// Settings, so a wrong one counts against the throttle like any other
+    /// wrong credential, and the route works only for local and Tailscale peers.
+    func enroll(code: String, deviceName: String, peer: CompanionPeer, now: Date = Date()) -> Data {
+        if let wait = throttle.retryAfter(for: peer.key, now: now, appliesGlobal: !peer.isTrusted) {
+            return CompanionHTTP.throttledReply(retryAfter: wait)
+        }
+        guard peer.isTrusted else {
+            return CompanionHTTP.untrustedNetworkReply()
+        }
+        guard CompanionToken.matches(code, token) else {
+            throttle.recordFailure(peer: peer.key, now: now, countsTowardGlobal: !peer.isTrusted)
+            return CompanionHTTP.enrollRejectedReply()
+        }
+        throttle.recordSuccess(peer: peer.key)
+        let issued = devices.issue(name: deviceName, now: now)
+        return CompanionHTTP.enrollResponse(token: issued.token, deviceId: issued.device.id)
+    }
+
+    /// The answer to an exclusions or view change while the owner has not
+    /// allowed phone edits.
+    static var editRefusal: Reply {
+        let res = ["status": "forbidden", "error": "Changing cleaner exclusions or the panel view from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on the Mac."]
+        return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
     }
 
     /// How long the connection of an unfinished clean is held before the
