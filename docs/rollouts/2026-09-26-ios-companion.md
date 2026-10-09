@@ -10,7 +10,9 @@ The iPhone app browses for `_hoghunter._tcp` on the local network.  The Mac adve
 
 The pairing code is an 8 character token stored on the Mac.  The phone sends it as `Authorization: Bearer`.  A wrong code gets 401 and does not receive the snapshot.  The code is not in the Bonjour TXT record.  TXT carries only `ver` and a stable `id` so the phone can find the same Mac after a restart changes the port.
 
-There is no quit route.  The only path the server answers is `GET /v1/snapshot`.
+> **Superseded on 2026-10-09.**  The two paragraphs above and the next line describe the first release.  The owner has since ruled that the phone reaches parity with the desktop app, mutations included.  The server now answers quit, tame, clean, exclusions, view, enroll and pair routes behind opt-ins, each phone has its own token instead of sharing the 8 character code as a bearer, and the shared code only reads.  See `docs/rollouts/2026-10-09-phone-parity-batch-1.md` for the current design.
+
+~~There is no quit route.  The only path the server answers is `GET /v1/snapshot`.~~
 
 Share With iPhone defaults to off.
 

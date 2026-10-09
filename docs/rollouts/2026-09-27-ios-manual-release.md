@@ -80,8 +80,12 @@ A successful upload command is not evidence of a processed or approved beta.
 Check ASC for the expected bundle/version/build, successful processing, export
 compliance, beta description, What to Test, and review contact details.  Explain
 that the reviewer needs a Mac running Hog Hunter on the same Wi-Fi with
-**Share With iPhone** enabled and its pairing code.  The iPhone companion is a
-read-only view of that Mac, with no hosted demo account.
+**Share With iPhone** enabled and its pairing code.  The iPhone companion shows
+that Mac live and, since the 2026-10-09 owner ruling, can act on it (quit, tame,
+clean, edit exclusions and the view).  Each control is off until the Mac owner
+turns it on in Settings > iPhone, and the Mac accepts them only from its local
+network or Tailscale.  There is no hosted demo account; the app's Demo Mode shows
+the controls without a Mac.
 
 Assign the eligible build to the existing external group, submit beta review
 when required, and verify that the public TestFlight link offers the approved

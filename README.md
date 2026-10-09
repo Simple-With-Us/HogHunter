@@ -26,9 +26,9 @@ History only covers time the menu bar app has been running.  Turn on **Launch at
 
 ## iPhone
 
-Hog Hunter on iPhone shows the same list the Mac is showing, over the Wi-Fi you are both on.  It cannot quit anything.
+Hog Hunter on iPhone shows the same list the Mac is showing, over the Wi-Fi you are both on or over Tailscale, and it can act on that Mac: quit or force quit an app, tame a runaway one, run the safe clean, and change cleaner exclusions and the panel view.  Each of those is off until you turn it on in Settings > iPhone on the Mac, the phone asks you to confirm every action, and the Mac accepts them only from your local network or Tailscale.
 
-On the Mac, open Settings and turn on **Share With iPhone**.  Type the pairing code into the phone.  Leave the switch off on a network you do not trust.
+On the Mac, open Settings and turn on **Share With iPhone**.  Type the pairing code into the phone, or let the phone ask and approve it on the Mac.  Each phone gets a token of its own and is listed under **Paired iPhones**, where **Revoke** cuts it off.  Leave the switch off on a network you do not trust.  Do not forward the port from your router: the link is not encrypted yet.  See `docs/rollouts/2026-10-09-phone-parity-batch-1.md`.
 
 Build the phone app for the simulator with scheme `HogHunterIOS`.  TestFlight builds come from the release workflow; there is no App Store release, and no public install link is published here.
 

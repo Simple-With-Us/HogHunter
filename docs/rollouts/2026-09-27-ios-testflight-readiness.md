@@ -48,6 +48,13 @@ Settings → Share With iPhone enabled and the Mac's pairing code.  There is no
 hosted demo account or internet remote-control service.  Do not invent access
 credentials or claim that the reviewer can test the paired view without setup.
 
+The paired view includes controls that act on the Mac (quit, tame, clean, and
+changing exclusions and the view).  As of the 2026-10-09 owner ruling each one is
+off until the Mac owner turns it on in Settings > iPhone, the phone confirms every
+action, and the Mac accepts them only from its local network or Tailscale.  A
+reviewer who wants to see them without a Mac can use Demo Mode in the app.  The
+review notes must not describe the app as read-only.
+
 Tracking: [HogHunter #22](https://github.com/jaywedgeworth22/HogHunter/issues/22),
 fleet release [#296](https://github.com/jaywedgeworth22/AI-Fleet-Coordinator/issues/296),
 effort board `1dd567c8c0054e708882ee69e91c2652`.

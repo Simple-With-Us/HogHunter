@@ -50,8 +50,9 @@ Non-sensitive defaults were seeded into the `dev` environment from the values th
 These stay in UserDefaults (or the app-group defaults for shared state).  They are per-user display choices, consent toggles, device identity, or local operational state -- explicitly out of scope for the SOT.
 
 - `window`, `grouping`, `sort`, `cpuScale`, `menuBarLabelMode`, `appearance` -- per-user display preferences.
-- `alertsEnabled`, `shareWithIPhone`, `allowRemoteQuit` -- per-user consent toggles.  Sharing and remote quit are off until the owner turns them on; that decision is not a fleet setting.
+- `alertsEnabled`, `shareWithIPhone`, `allowRemoteQuit`, `allowRemoteClean`, `allowRemoteEdit` -- per-user consent toggles.  Sharing, remote quit or tame, remote clean, and remote changes to exclusions and the panel view are each off until the owner turns them on; that decision is not a fleet setting.
 - `companionCode`, `companionPeerID` -- per-device pairing identity.
+- `companionDevices` -- the list of paired iPhones (name, SHA-256 hash of its token, paired and last-seen times).  Per-device pairing state, never a fleet setting, and it holds hashes only: the tokens themselves are shown to the phone once and not stored on the Mac.
 - Cleaner exclusions and the regimen's enabled-rule set -- per-user choices about what may be deleted on this Mac.
 - `hoghunter.cleaner.regimen.lastRunAt` -- local operational state.
 - `config/reclaim-policy.json` -- the machine-readable reclaim policy with owner rulings and rationale, shared with the `scripts/hoghunter-clean` CLI.  Only its numeric bands are migrated (see the `hoghunter.reclaim.*` keys); the document itself, its comments, and its rule inventory stay in the repo.
