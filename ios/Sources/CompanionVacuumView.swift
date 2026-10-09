@@ -350,10 +350,18 @@ struct VacuumView: View {
                 Text("Recent Runs")
             } footer: {
                 if vacuum.recentRuns?.isEmpty == false {
-                    Text("Newest first.\u{00A0} Watch is the quick disk and memory check that runs every few minutes.\u{00A0} The last run above never counts it.")
+                    Text(recentRunsFooter)
                 }
             }
         }
+    }
+
+    /// The last run leaves watch ticks out unless every run on record is one,
+    /// so the second sentence is only true while the Mac reports another kind.
+    private var recentRunsFooter: String {
+        let note = "Newest first.\u{00A0} Watch is the quick disk and memory check that runs every few minutes."
+        guard vacuum?.lastRunTrigger != "watch" else { return note }
+        return note + "\u{00A0} The last run above never counts it."
     }
 
     private static func color(forStatus label: String) -> Color {
