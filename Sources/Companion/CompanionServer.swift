@@ -214,7 +214,7 @@ final class CompanionServer: @unchecked Sendable {
             cleanHandler: { [weak self] _ in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
                 guard self.allowRemoteClean else {
-                    let res = ["status": "forbidden", "error": "Running the disk cleaner from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings on the Mac."]
+                    let res = ["status": "forbidden", "error": "Running the disk cleaner from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings on the Mac."]
                     return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
                 }
                 guard self.onRemoteClean != nil else {
@@ -281,7 +281,7 @@ final class CompanionServer: @unchecked Sendable {
             connection.send(content: data, completion: .contentProcessed { _ in connection.cancel() })
         }
         queue.asyncAfter(deadline: .now() + Self.cleanReplyDeadline) {
-            let body = Data(#"{"status":"running","error":"The clean is still running on the Mac.  Watch its progress in the app."}"#.utf8)
+            let body = Data(#"{"status":"running","error":"The clean is still running on the Mac.\u00a0 Watch its progress in the app."}"#.utf8)
             once.send(CompanionHTTP.jsonReply(status: 504, body: body))
         }
         begin { reply in
