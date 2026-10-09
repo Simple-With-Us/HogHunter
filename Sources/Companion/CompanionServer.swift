@@ -9,6 +9,8 @@ final class CompanionServer: @unchecked Sendable {
     private var listener: NWListener?
     private var payload = Data()
     private var targets: [String: CompanionTarget] = [:]
+    /// Wrong-credential counts per client address.  Touched only on `queue`.
+    private var throttle = CompanionAuthThrottle()
     private var token = ""
     private var onStatus: (@Sendable (String) -> Void)?
 
@@ -96,7 +98,7 @@ final class CompanionServer: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)
-        receive(connection, buffer: Data())
+        receive(connection, buffer: Data(), peer: CompanionPeer.from(connection.endpoint))
     }
 
     typealias Reply = (status: Int, body: Data)
@@ -147,9 +149,15 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Pairing waits on a person, so it is answered off the synchronous
     /// router and never holds the queue that serves snapshots.
-    private func handlePair(_ connection: NWConnection, deviceName: String) {
+    private func handlePair(_ connection: NWConnection, deviceName: String, peer: CompanionPeer) {
         let send: @Sendable (Data) -> Void = { response in
             connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+        }
+        // Pairing hands out a credential that can change this Mac, so it is
+        // offered only on the local network and Tailscale.
+        guard peer.isTrusted else {
+            send(CompanionHTTP.untrustedNetworkReply())
+            return
         }
         guard let ask = onRemotePair else {
             send(CompanionHTTP.pairResponse(approvedToken: nil))
@@ -171,7 +179,7 @@ final class CompanionServer: @unchecked Sendable {
         }
     }
 
-    private func receive(_ connection: NWConnection, buffer: Data) {
+    private func receive(_ connection: NWConnection, buffer: Data, peer: CompanionPeer) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] data, _, isComplete, error in
             guard let self else {
                 connection.cancel()
@@ -185,14 +193,14 @@ final class CompanionServer: @unchecked Sendable {
                     || error != nil
                     || buffer.count >= 8_192
                 guard finished else {
-                    self.receive(connection, buffer: buffer)
+                    self.receive(connection, buffer: buffer, peer: peer)
                     return
                 }
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
-                    self.handlePair(connection, deviceName: deviceName)
+                    self.handlePair(connection, deviceName: deviceName, peer: peer)
                     return
                 }
-                switch self.disposition(for: buffer) {
+                switch self.disposition(for: buffer, peer: peer) {
                 case .reply(let response):
                     connection.send(content: response, completion: .contentProcessed { _ in
                         connection.cancel()
@@ -221,7 +229,12 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Routes one request.  Runs on `queue`; split out so tests can drive it
     /// without opening a socket.
-    func disposition(for buffer: Data) -> Disposition {
+    func disposition(for buffer: Data, peer: CompanionPeer, now: Date = Date()) -> Disposition {
+        // A client that keeps presenting wrong credentials is told to wait
+        // before anything about the request is looked at.
+        if let wait = throttle.retryAfter(for: peer.key, now: now) {
+            return .reply(CompanionHTTP.throttledReply(retryAfter: wait))
+        }
         var cleanRequested = false
         let response = CompanionHTTP.response(
             request: buffer,
@@ -285,10 +298,19 @@ final class CompanionServer: @unchecked Sendable {
                     return handler(req)
                 }
                 return (501, Data("{\"error\": \"View handler not configured\"}".utf8))
-            }
+            },
+            peerTrusted: peer.isTrusted
         )
+        // 401 is a wrong credential.  404 never got as far as checking one.
+        // Anything else means the credential was accepted.
+        let status = CompanionHTTP.statusCode(of: response)
+        if status == 401 {
+            throttle.recordFailure(peer: peer.key, now: now)
+        } else if status != 404 {
+            throttle.recordSuccess(peer: peer.key)
+        }
         if cleanRequested { return .startClean }
-        if CompanionHTTP.isSnapshotRequest(buffer), CompanionHTTP.parseResponse(response)?.status == 200 {
+        if CompanionHTTP.isSnapshotRequest(buffer), status == 200 {
             onSnapshotServed?()
         }
         return .reply(response)

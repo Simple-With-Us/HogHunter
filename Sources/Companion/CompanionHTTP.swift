@@ -11,7 +11,8 @@ enum CompanionHTTP {
         quitHandler: ((_ request: CompanionProcessRequest, _ force: Bool) -> (status: Int, body: Data))? = nil,
         tameHandler: ((_ request: CompanionProcessRequest, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
-        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
+        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
+        peerTrusted: Bool = true
     ) -> Data {
         let text = String(data: request, encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
@@ -38,6 +39,13 @@ enum CompanionHTTP {
         let presented = bearerToken(in: lines)
         guard CompanionToken.matches(presented, token) else {
             return message(status: 401, reason: "Unauthorized", body: Data("Unauthorized".utf8))
+        }
+
+        // Reading the snapshot is allowed from anywhere with a valid token.
+        // Everything that changes the Mac is not: the link is unencrypted, so
+        // it is accepted only from the local network or Tailscale.
+        if path != CompanionService.path, !peerTrusted {
+            return untrustedNetworkReply()
         }
 
         if path == CompanionService.path {
@@ -155,6 +163,30 @@ enum CompanionHTTP {
             return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
         }
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
+    }
+
+    /// The answer to a control request from an address outside the local
+    /// network and Tailscale.
+    static func untrustedNetworkReply() -> Data {
+        let body = Data(#"{"status":"forbidden","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
+        return jsonReply(status: 403, body: body)
+    }
+
+    /// The answer to a client that has been guessing.  `Retry-After` is in seconds.
+    static func throttledReply(retryAfter: Int) -> Data {
+        let body = (try? JSONSerialization.data(withJSONObject: [
+            "status": "throttled",
+            "error": "Too many wrong tries.\u{00A0} Wait \(retryAfter) seconds, then try again.",
+            "retryAfter": retryAfter,
+        ] as [String: Any])) ?? Data()
+        return message(status: 429, reason: "Too Many Requests", body: body, type: "application/json; charset=utf-8", extraHeaders: ["Retry-After: \(retryAfter)"])
+    }
+
+    /// The status code of a complete reply, without parsing its body.
+    static func statusCode(of response: Data) -> Int? {
+        guard let line = String(data: response.prefix(32), encoding: .isoLatin1)?.components(separatedBy: "\r\n").first else { return nil }
+        let parts = line.split(separator: " ")
+        return parts.count >= 2 ? Int(parts[1]) : nil
     }
 
     /// A JSON reply built outside the router, for answers that come later
@@ -427,15 +459,16 @@ enum CompanionHTTP {
         return ""
     }
 
-    private static func message(status: Int, reason: String, body: Data, type: String = "text/plain; charset=utf-8") -> Data {
-        let header = [
-            "HTTP/1.1 \(status) \(reason)",
-            "Content-Type: \(type)",
-            "Content-Length: \(body.count)",
-            "Connection: close",
-            "Cache-Control: no-store",
-            "",
-        ].joined(separator: "\r\n") + "\r\n"
+    private static func message(status: Int, reason: String, body: Data, type: String = "text/plain; charset=utf-8", extraHeaders: [String] = []) -> Data {
+        let header = (
+            [
+                "HTTP/1.1 \(status) \(reason)",
+                "Content-Type: \(type)",
+                "Content-Length: \(body.count)",
+                "Connection: close",
+                "Cache-Control: no-store",
+            ] + extraHeaders + [""]
+        ).joined(separator: "\r\n") + "\r\n"
         var data = Data(header.utf8)
         data.append(body)
         return data

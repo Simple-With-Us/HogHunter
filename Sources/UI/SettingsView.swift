@@ -404,7 +404,7 @@ private struct IPhoneSettingsTab: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Section("Remote Access (Tailscale / Domain)") {
+                Section("Remote Access (Tailscale)") {
                     let addresses = CompanionServer.detectHostAddresses()
                     LabeledContent("Port") {
                         Text("\(store.companionPort)")
@@ -425,7 +425,7 @@ private struct IPhoneSettingsTab: View {
                                 .textSelection(.enabled)
                         }
                     }
-                    Text("Away from this Wi-Fi: Connect via Tailscale using your Tailscale IP or MagicDNS hostname, or forward port \(store.companionPort) on your domain.")
+                    Text("Away from this Wi-Fi, connect over Tailscale using your Tailscale IP or MagicDNS name.\u{00A0} Do not forward port \(store.companionPort) from your router.\u{00A0} The connection is not encrypted, so quit, tame, clean, and edit commands are accepted only from your local network or Tailscale.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
