@@ -101,7 +101,7 @@ def capture_extras(udid, out_dir):
             print(f"  WARN: extra screen {name}: frame rejected: {problem}")
             os.remove(out_file)
             continue
-        print(f"  ✓ Saved {out_file}")
+        print(f"  OK extra screen saved: {out_file}")
 
 
 def screenshot_problem(path):
