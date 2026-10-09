@@ -139,6 +139,14 @@ struct InfisicalCredential: Codable {
     }
 }
 
+/// One Keychain lookup.  `terminal` is true only when the Keychain answered:
+/// the item was read, or it is definitively absent.  A locked Keychain or a
+/// suppressed auth prompt is not terminal and stays retryable.
+struct KeychainCredentialRead {
+    var credential: InfisicalCredential?
+    var terminal: Bool
+}
+
 protocol InfisicalServing {
     func login(clientId: String, clientSecret: String) async throws -> String
     func fetchSecrets(accessToken: String, environment: String, projectId: String) async throws -> [String: String]
@@ -374,6 +382,9 @@ final class InfisicalSettings: ObservableObject {
     private var credentialWasCleared = false
     /// Injectable for tests; nil means "read the Keychain".
     var credentialProvider: (() -> InfisicalCredential?)?
+    /// Injectable for tests.  Production reads the Keychain with
+    /// authentication UI suppressed, so a retry cannot raise a prompt.
+    var keychainReader: @MainActor () -> KeychainCredentialRead
     private var timer: Timer?
     private var bootstrapped = false
     private var becomeActiveObserver: NSObjectProtocol?
@@ -388,6 +399,7 @@ final class InfisicalSettings: ObservableObject {
         self.client = client
         self.store = store
         self.credentialProvider = credentialProvider
+        self.keychainReader = { InfisicalSettings.readCredentialFromKeychain() }
         self.credentialWriter = credentialWriter ?? Self.writeCredentialToKeychain
         self.credentialRemover = credentialRemover ?? Self.removeCredentialFromKeychain
     }
@@ -504,22 +516,36 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    private func refreshIfDue() async {
-        guard isConfigured else { return }
+    func refreshIfDue() async {
+        guard backgroundRefreshAllowed else { return }
         let minutes = store.double(for: InfisicalKey.settingsRefreshMinutes) ?? 5
         let interval = max(60, minutes * 60)
         await refreshIfStale(minimumGap: interval)
     }
 
     private func refreshIfStale(minimumGap: TimeInterval) async {
-        guard isConfigured, !isRefreshing else { return }
+        guard backgroundRefreshAllowed, !isRefreshing else { return }
         if let last = lastRefresh, Date().timeIntervalSince(last) < minimumGap { return }
         await refresh()
+    }
+
+    /// Timer and become-active refresh must not raise a Keychain prompt.
+    /// An injected credential never touches the Keychain, so it may refresh
+    /// even though the memory cache is empty.  A cached credential refreshes
+    /// from memory.  A terminal miss stays quiet.  A transient miss (locked,
+    /// or interaction suppressed) stays retryable so unlock can recover.
+    private var backgroundRefreshAllowed: Bool {
+        if let provider = credentialProvider {
+            return provider() != nil
+        }
+        if inMemoryCredential != nil { return true }
+        return !keychainReadAttempted
     }
 
     // MARK: - Credential (Keychain)
 
     private var inMemoryCredential: InfisicalCredential?
+    private var keychainReadAttempted = false
 
     private func credential() -> InfisicalCredential? {
         if credentialWasCleared { return nil }
@@ -529,8 +555,16 @@ final class InfisicalSettings: ObservableObject {
             inMemoryCredential = loaded
             return loaded
         }
-        guard let loaded = Self.readCredentialFromKeychain(), loaded.isComplete else { return nil }
-        inMemoryCredential = loaded
+        guard !keychainReadAttempted else { return nil }
+        let read = keychainReader()
+        inMemoryCredential = read.credential
+        // Latch only after the Keychain answers.  A transient status must
+        // stay retryable; latching before the read made a locked launch
+        // or a suppressed prompt permanent for the process lifetime.
+        if read.terminal {
+            keychainReadAttempted = true
+        }
+        guard let loaded = read.credential, loaded.isComplete else { return nil }
         return loaded
     }
 
@@ -570,6 +604,7 @@ final class InfisicalSettings: ObservableObject {
             try credentialWriter(candidate)
             generation = UUID()
             inMemoryCredential = candidate
+            keychainReadAttempted = false
             credentialWasCleared = false
             self.projectId = candidate.effectiveProjectId
             isConfigured = true
@@ -612,6 +647,7 @@ final class InfisicalSettings: ObservableObject {
         activeSave = nil
         isSaving = false
         inMemoryCredential = nil
+        keychainReadAttempted = true
         isConfigured = false
         isRefreshing = false
         projectId = ""
@@ -633,20 +669,35 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    private static func readCredentialFromKeychain() -> InfisicalCredential? {
+    /// `errSecSuccess` and `errSecItemNotFound` are answers.  Every other
+    /// status (locked Keychain, interaction suppressed, auth failure) is
+    /// transient and must not latch.  Pure, so it stays `nonisolated` and
+    /// synchronous tests can call it off the main actor.
+    nonisolated static func isTerminalKeychainStatus(_ status: OSStatus) -> Bool {
+        status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private static func readCredentialFromKeychain() -> KeychainCredentialRead {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
             kSecAttrAccount as String: Self.keychainAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard isTerminalKeychainStatus(status) else {
+            return KeychainCredentialRead(credential: nil, terminal: false)
+        }
+        guard status == errSecSuccess,
               let data = item as? Data,
               let credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
-              !credential.clientId.isEmpty, !credential.clientSecret.isEmpty
-        else { return nil }
-        return credential
+              credential.isComplete
+        else {
+            return KeychainCredentialRead(credential: nil, terminal: true)
+        }
+        return KeychainCredentialRead(credential: credential, terminal: true)
     }
 }

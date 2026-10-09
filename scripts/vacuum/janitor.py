@@ -1,251 +1,227 @@
+"""Retire merged lanes.
+
+Candidates come ONLY from the lane doctor through vacuum.lanes.  The old heuristics (branch-name PR match,
+git status without --ignored, no unpushed or process check) are gone: a squash-merged branch name can be
+reused, an ignored env file or database is invisible to a plain git status, and a lane someone is standing
+in looked idle.  Removal is `git worktree remove` WITHOUT force; a non-zero exit is logged and the run
+carries on with the next lane.
+"""
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional  # noqa: F401 — Callable used in signatures
+from typing import Any, Callable, NamedTuple, Optional
 
-KEEP_SENTINEL = ".janitor-keep"
-GENERATED_UNTRACKED = re.compile(
-    r"^\?\? (node_modules/|\.next/|next-env\.d\.ts$|tsconfig\.tsbuildinfo$|\.DS_Store$|[^ ]*\.log$|data/app\.db(-wal|-shm)?$)"
-)
+from . import lanes
+from .config import expand_path
 
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
-def wt_blocking_dirt(worktree: Path, git: Callable[..., subprocess.CompletedProcess]) -> bool:
-    try:
-        res = git(["-C", str(worktree), "status", "--porcelain"], capture_output=True, text=True, timeout=5)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return True
-    if res.returncode != 0:
-        return True
-    for line in res.stdout.splitlines():
-        if GENERATED_UNTRACKED.match(line):
-            continue
-        return True
-    return False
+DETAIL_LIMIT = 600
+NEVER_MATCH = r"(?!)"
 
 
-def main_repo_root(worktree: Path, git: Callable[..., subprocess.CompletedProcess]) -> Path:
-    """Git worktree remove must run from the main repository, not a linked worktree's parent dir."""
-    try:
-        res = git(
-            ["-C", str(worktree), "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return worktree
-    if res.returncode != 0:
-        return worktree
-    common = Path(res.stdout.strip())
-    if not common.is_absolute():
-        common = (worktree / common).resolve()
-    return common.parent
+class RetireOutcome(NamedTuple):
+    retired: int
+    bytes_freed: int
+    detail: str
+    actions: list
 
 
-def github_repo(worktree: Path, git: Callable[..., subprocess.CompletedProcess]) -> Optional[str]:
-    try:
-        res = git(["-C", str(worktree), "remote", "get-url", "origin"], capture_output=True, text=True, timeout=5)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
-    if res.returncode != 0:
-        return None
-    url = res.stdout.strip()
-    url = url.removesuffix(".git")
-    for prefix in ("git@github.com:", "https://github.com/", "http://github.com/", "ssh://git@github.com/"):
-        if url.startswith(prefix):
-            url = url[len(prefix) :]
-            break
-    return url if "/" in url else None
+@dataclass
+class RetirePlan:
+    """What a run would retire, and why everything else was refused.  ok False means the doctor was
+    unusable (reason says why) and nothing may be removed."""
+
+    ok: bool
+    reason: str = ""
+    choices: list = field(default_factory=list)
+    refused: list = field(default_factory=list)
+    generated_at: str = ""
+    doctor_seconds: float = 0.0
+    dry_run: bool = False
+
+    def as_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "reason": self.reason,
+            "dry_run": self.dry_run,
+            "report_generated_at": self.generated_at,
+            "doctor_seconds": round(self.doctor_seconds, 1),
+            "candidates": [c.as_dict() for c in self.choices],
+            "refused": list(self.refused),
+        }
 
 
-def pr_merged(worktree: Path, branch: str, git: Callable[..., subprocess.CompletedProcess], gh: Callable[..., subprocess.CompletedProcess]) -> bool:
-    br = branch.removeprefix("refs/heads/")
-    if not br or br == "HEAD":
-        return False
-    repo = github_repo(worktree, git)
-    if not repo:
-        return False
-    try:
-        res = gh(
-            ["pr", "list", "--repo", repo, "--head", br, "--state", "merged", "--json", "number", "--jq", "length"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-    if res.returncode != 0:
-        return False
-    try:
-        return int((res.stdout or "0").strip() or "0") > 0
-    except ValueError:
-        return False
-
-
-def worktree_idle_hours(worktree: Path, idle_hours: float) -> bool:
-    cutoff = time.time() - idle_hours * 3600
-    skip_dirs = {".git", "node_modules", ".next", ".turbo"}
-    for root, dirs, files in os_walk(worktree):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
-        for name in files:
-            try:
-                if Path(root, name).stat().st_mtime >= cutoff:
-                    return False
-            except OSError:
-                continue
-    return True
-
-
-def os_walk(path: Path):
-    import os
-
-    for root, dirs, files in os.walk(path):
-        yield root, dirs, files
-
-
-def retire_candidate(
-    wt_path: str,
-    branch: str,
-    keep_re: re.Pattern[str],
-    stale_days: float,
-    idle_hours: float,
-    git: Callable[..., subprocess.CompletedProcess],
-    gh: Callable[..., subprocess.CompletedProcess],
-) -> bool:
-    wt = Path(wt_path)
-    if keep_re.match(wt_path):
-        return False
-    if (wt / KEEP_SENTINEL).exists():
-        return False
-    if wt_blocking_dirt(wt, git):
-        return False
-    if not worktree_idle_hours(wt, idle_hours):
-        return False
-    if not pr_merged(wt, branch, git, gh):
-        return False
-    try:
-        mtime = wt.stat().st_mtime
-        if time.time() - mtime < stale_days * 86400:
-            return False
-    except OSError:
-        return False
-    return True
+def keep_regex(cfg: dict[str, Any]) -> "re.Pattern[str]":
+    """Compile the keep list.  An empty pattern means no keep list (re.compile('') would match everything)."""
+    return re.compile(cfg.get("keep_worktree_regex") or NEVER_MATCH)
 
 
 def plan_retire_worktrees(
     cfg: dict[str, Any],
     home: Path,
-    git: Callable[..., subprocess.CompletedProcess],
-    gh: Callable[..., subprocess.CompletedProcess],
-) -> list[tuple[str, str]]:
-    """Expensive git/gh checks without holding the housekeeper lock."""
+    runner: Runner,
+    *,
+    report: Any = None,
+    doctor_runner: Optional[lanes.DoctorRunner] = None,
+    clock: Callable[[], float] = time.time,
+    dry_run: bool = False,
+) -> RetirePlan:
+    """Ask the doctor which lanes are removable and re-check each one.  Plans only; it never removes.
+    report is a LaneReport, or a callable that returns one (the engine passes its cached loader, so a
+    disabled step or an invalid keep regex never pays for a doctor run).  Raises re.error for an invalid
+    keep regex so the engine can record a failed step."""
     janitor_cfg = cfg.get("janitor", {})
     if not janitor_cfg.get("reap_worktrees", True):
-        return []
-    keep_re = re.compile(cfg.get("keep_worktree_regex") or "")
-    stale_days = float(janitor_cfg.get("stale_days", 7))
-    idle_hours = float(janitor_cfg.get("idle_hours", 4))
-    candidates: list[tuple[str, str]] = []
+        return RetirePlan(ok=False, reason="worktree retirement disabled", dry_run=dry_run)
+    keep_re = keep_regex(cfg)
+    settings = lanes.lane_settings(cfg, home)
+    if callable(report):
+        report = report()
+    if report is None:
+        report = lanes.load_report(settings, home, doctor_runner, clock)
+    ctx = lanes.LaneContext(home, keep_re, settings, runner, clock)
+    scan = lanes.removable_lanes(report, ctx)
+    return RetirePlan(
+        ok=scan.ok,
+        reason=scan.reason,
+        choices=scan.choices,
+        refused=scan.refused,
+        generated_at=scan.generated_at,
+        doctor_seconds=scan.doctor_seconds,
+        dry_run=dry_run,
+    )
 
-    for repo in cfg.get("repos") or []:
-        repo_path = Path(repo)
-        if not repo_path.is_dir():
-            continue
-        try:
-            res = git(["-C", str(repo_path), "worktree", "list", "--porcelain"], capture_output=True, text=True, timeout=30)
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            continue
-        if res.returncode != 0:
-            continue
-        wt_path = ""
-        branch = ""
-        for line in res.stdout.splitlines():
-            if line.startswith("worktree "):
-                wt_path = line.split(" ", 1)[1].strip()
-            elif line.startswith("branch "):
-                branch = line.split(" ", 1)[1].strip()
-            elif line == "" and wt_path:
-                if retire_candidate(wt_path, branch, keep_re, stale_days, idle_hours, git, gh):
-                    candidates.append((wt_path, branch))
-                wt_path = ""
-                branch = ""
-    return candidates
+
+def _clip(parts: list[str]) -> str:
+    """Join the per-lane notes for the step reason without cutting one in half.  The first note is always
+    whole (it carries the exact command); later ones are dropped, with a count, once the limit is reached.
+    The full list is in the action log."""
+    out: list[str] = []
+    used = 0
+    for index, part in enumerate(parts):
+        if out and used + len(part) + 2 > DETAIL_LIMIT:
+            out.append(f"... (+{len(parts) - index} more, see {lanes.ACTION_LOG_NAME})")
+            break
+        out.append(part)
+        used += len(part) + 2
+    return "; ".join(out)
 
 
 def apply_retire_worktrees(
-    candidates: list[tuple[str, str]],
-    git: Callable[..., subprocess.CompletedProcess],
+    plan: RetirePlan,
+    cfg: dict[str, Any],
+    home: Path,
+    runner: Runner,
     dry_run: bool = False,
-) -> tuple[int, int, str]:
-    """Remove planned worktrees; keep this fast for the housekeeper lock."""
+    clock: Callable[[], float] = time.time,
+    data_dir: Optional[Path] = None,
+) -> RetireOutcome:
+    """Remove the planned lanes.  Each one is re-checked immediately before its removal, so a lane that
+    changed since planning is skipped and logged.  Dry run returns what would happen and removes nothing."""
+    actions: list[dict[str, Any]] = []
+    if not plan.ok:
+        reason = plan.reason or "unknown reason"
+        return RetireOutcome(0, 0, f"lane doctor unusable: {reason}; nothing removed", actions)
+    if not plan.choices:
+        note = f"no lanes eligible ({len(plan.refused)} refused)" if plan.refused else "no lanes eligible"
+        return RetireOutcome(0, 0, note, actions)
+
+    ctx = lanes.LaneContext(home, keep_regex(cfg), lanes.lane_settings(cfg, home), runner, clock)
     retired = 0
-    detail_parts: list[str] = []
-    for wt_path, _branch in candidates:
+    freed = 0
+    parts: list[str] = []
+
+    def record(entry: dict[str, Any]) -> None:
+        actions.append(entry)
+        if data_dir is not None and not dry_run:
+            lanes.append_action_log(data_dir, {"step_id": "janitor_worktree_retire", **entry})
+
+    for choice in plan.choices:
+        size_text = lanes.format_size(choice.size_bytes)
         if dry_run:
-            detail_parts.append(f"would-retire {wt_path}")
+            record({"action": "would-retire", **choice.as_dict()})
+            parts.append(f"would-retire {choice.path} ({size_text}) via {shlex.join(choice.command)}")
             continue
-        wt = Path(wt_path)
-        try:
-            if wt_blocking_dirt(wt, git):
-                detail_parts.append(f"skipped {wt_path}: dirty since planning")
-                continue
-            repo_root = main_repo_root(wt, git)
-            res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)
-            if res.returncode == 0:
-                retired += 1
-                detail_parts.append(f"retired {wt_path}")
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-    return retired, 0, "; ".join(detail_parts) if detail_parts else "no worktrees retired"
+        repo_root, why = lanes.recheck_for_removal(choice.path, choice.checkout, ctx)
+        if why:
+            record({"action": "skipped", "path": choice.path, "reason": why, "size_bytes": choice.size_bytes})
+            parts.append(f"skipped {choice.path}: {why}")
+            continue
+        argv = lanes.removal_argv(repo_root, choice.path)
+        command = shlex.join(argv)
+        res, err = lanes.call(runner, argv, 120.0, env=lanes.git_env())
+        if res is None:
+            record(
+                {"action": "failed", "path": choice.path, "size_bytes": choice.size_bytes, "command": command, "error": err}
+            )
+            parts.append(f"failed {choice.path} ({size_text}): {err}")
+            continue
+        if res.returncode != 0:
+            tail = " ".join((res.stderr or "").split())[:200]
+            record(
+                {
+                    "action": "failed",
+                    "path": choice.path,
+                    "size_bytes": choice.size_bytes,
+                    "command": command,
+                    "exit": res.returncode,
+                    "error": tail,
+                }
+            )
+            parts.append(f"failed {choice.path} ({size_text}): git exited {res.returncode} {tail}".rstrip())
+            continue
+        retired += 1
+        freed += choice.size_bytes or 0
+        record(
+            {
+                "action": "retired",
+                "path": choice.path,
+                "branch": choice.branch,
+                "head_sha": choice.head_sha,
+                "size_bytes": choice.size_bytes,
+                "command": command,
+                "exit": 0,
+                "reasons": list(choice.reasons),
+            }
+        )
+        parts.append(f"retired {choice.path} ({size_text}) via {command}")
+    return RetireOutcome(retired, freed, _clip(parts) if parts else "no worktrees retired", actions)
 
 
 def retire_worktrees(
     cfg: dict[str, Any],
     home: Path,
-    git: Callable[..., subprocess.CompletedProcess],
-    gh: Callable[..., subprocess.CompletedProcess],
+    runner: Runner,
     dry_run: bool = False,
-    candidates: list[tuple[str, str]] | None = None,
-) -> tuple[int, int, str]:
-    """Return (retired_count, bytes_estimate, detail)."""
+    plan: Optional[RetirePlan] = None,
+    report: Optional[lanes.LaneReport] = None,
+    doctor_runner: Optional[lanes.DoctorRunner] = None,
+    clock: Callable[[], float] = time.time,
+    data_dir: Optional[Path] = None,
+) -> RetireOutcome:
+    """Plan (unless a plan is passed in) and apply.  With dry_run true nothing is removed and the outcome
+    lists what would happen, command and size included."""
     janitor_cfg = cfg.get("janitor", {})
     if not janitor_cfg.get("reap_worktrees", True):
-        return 0, 0, "worktree retirement disabled"
-    planned = candidates if candidates is not None else plan_retire_worktrees(cfg, home, git, gh)
-    if not planned:
-        return 0, 0, "no worktrees retired"
-    return apply_retire_worktrees(planned, git, dry_run=dry_run)
+        return RetireOutcome(0, 0, "worktree retirement disabled", [])
+    if plan is None:
+        plan = plan_retire_worktrees(
+            cfg, home, runner, report=report, doctor_runner=doctor_runner, clock=clock, dry_run=dry_run
+        )
+    return apply_retire_worktrees(plan, cfg, home, runner, dry_run=dry_run, clock=clock, data_dir=data_dir)
 
 
-def _maybe_retire(
-    wt_path: str,
-    branch: str,
-    keep_re: re.Pattern[str],
-    stale_days: float,
-    idle_hours: float,
-    git: Callable[..., subprocess.CompletedProcess],
-    gh: Callable[..., subprocess.CompletedProcess],
-    dry_run: bool,
-    on_retire: Callable[[], None],
-    detail_parts: list[str],
-) -> None:
-    if not retire_candidate(wt_path, branch, keep_re, stale_days, idle_hours, git, gh):
-        return
-    if dry_run:
-        detail_parts.append(f"would-retire {wt_path}")
-        return
-    wt = Path(wt_path)
-    if wt_blocking_dirt(wt, git):
-        detail_parts.append(f"skipped {wt_path}: dirty since planning")
-        return
+def data_dir_for(cfg: dict[str, Any], home: Path) -> Optional[Path]:
+    value = str(cfg.get("data_dir") or "").strip()
+    if not value:
+        return None
     try:
-        repo_root = main_repo_root(wt, git)
-        res = git(["-C", str(repo_root), "worktree", "remove", str(wt)], capture_output=True, text=True, timeout=30)
-        if res.returncode == 0:
-            on_retire()
-            detail_parts.append(f"retired {wt_path}")
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
+        return expand_path(value, home)
+    except ValueError:
+        return None

@@ -1,3 +1,4 @@
+import Security
 import XCTest
 @testable import HogHunter
 
@@ -328,6 +329,7 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertNil(settings.lastError)
         XCTAssertNil(StubURLProtocol.takeNotes()["network-used"])
     }
+
     @MainActor
     func testSelectedProjectRoutesReadAndWriteRequests() async throws {
         let selectedProject = "11111111-2222-3333-4444-555555555555"
@@ -362,4 +364,112 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(settings.lastError, "Infisical request failed (HTTP 403)")
     }
 
+    // MARK: - Keychain prompt latch
+
+    func testKeychainLatchTreatsOnlyAnswersAsTerminal() {
+        XCTAssertTrue(InfisicalSettings.isTerminalKeychainStatus(errSecSuccess))
+        XCTAssertTrue(InfisicalSettings.isTerminalKeychainStatus(errSecItemNotFound))
+        XCTAssertFalse(InfisicalSettings.isTerminalKeychainStatus(errSecInteractionNotAllowed))
+        XCTAssertFalse(InfisicalSettings.isTerminalKeychainStatus(errSecAuthFailed))
+    }
+
+    /// An injected credential leaves the memory cache empty.  The timer
+    /// must still refresh, and it must not consult the Keychain.
+    @MainActor
+    func testInjectedCredentialRefreshesWithoutMemoryCache() async {
+        StubURLProtocol.handler = loginHandler()
+        var reads = 0
+        let settings = makeSettings()
+        settings.keychainReader = {
+            reads += 1
+            return KeychainCredentialRead(credential: nil, terminal: true)
+        }
+
+        await settings.refreshIfDue()
+
+        XCTAssertTrue(settings.isConfigured)
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(StubURLProtocol.takeRecorded().count, 2)
+    }
+
+    @MainActor
+    func testMissingInjectedCredentialSkipsBackgroundRefresh() async {
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.note("called", for: "network-used")
+            return (500, Data())
+        }
+        let settings = InfisicalSettings(
+            client: InfisicalClient(session: makeSession()),
+            store: InfisicalStore(),
+            credentialProvider: { nil }
+        )
+
+        await settings.refreshIfDue()
+
+        XCTAssertFalse(settings.isConfigured)
+        XCTAssertNil(StubURLProtocol.takeNotes()["network-used"])
+    }
+
+    @MainActor
+    func testTransientKeychainMissStaysRetryable() async {
+        var reads = 0
+        var terminal = false
+        var credential: InfisicalCredential?
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.note("called", for: "network-used")
+            return (500, Data())
+        }
+        let settings = InfisicalSettings(
+            client: InfisicalClient(session: makeSession()),
+            store: InfisicalStore()
+        )
+        settings.keychainReader = {
+            reads += 1
+            return KeychainCredentialRead(credential: credential, terminal: terminal)
+        }
+
+        await settings.refreshIfDue()
+        XCTAssertFalse(settings.isConfigured)
+        XCTAssertEqual(reads, 1)
+        XCTAssertNil(StubURLProtocol.takeNotes()["network-used"])
+
+        await settings.refreshIfDue()
+        XCTAssertEqual(reads, 2)
+        XCTAssertFalse(settings.isConfigured)
+        XCTAssertNil(StubURLProtocol.takeNotes()["network-used"])
+
+        terminal = true
+        credential = InfisicalCredential(
+            clientId: "id",
+            clientSecret: "secret",
+            projectId: "00000000-1111-2222-3333-444444444444"
+        )
+        StubURLProtocol.handler = loginHandler()
+        await settings.refreshIfDue()
+        XCTAssertTrue(settings.isConfigured)
+        XCTAssertEqual(reads, 3)
+
+        await settings.refresh()
+        XCTAssertEqual(reads, 3, "a cached credential must not re-read the Keychain")
+    }
+
+    @MainActor
+    func testAbsentKeychainItemDoesNotReread() async {
+        var reads = 0
+        let settings = InfisicalSettings(
+            client: InfisicalClient(session: makeSession()),
+            store: InfisicalStore()
+        )
+        settings.keychainReader = {
+            reads += 1
+            return KeychainCredentialRead(credential: nil, terminal: true)
+        }
+
+        await settings.refreshIfDue()
+        await settings.refreshIfDue()
+        await settings.refresh()
+
+        XCTAssertFalse(settings.isConfigured)
+        XCTAssertEqual(reads, 1)
+    }
 }

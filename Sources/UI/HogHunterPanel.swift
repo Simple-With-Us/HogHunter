@@ -205,7 +205,8 @@ struct HogHunterPanel: View {
 
     /// Opens Settings rather than a menu.  Storage and Network left this menu
     /// when they became tabs in this window, so what was left was one action,
-    /// and one action does not need a menu to hold it.
+    /// and one action does not need a menu to hold it.  Matches the Activity
+    /// Monitor squircle button beside it.
     private var settingsButton: some View {
         Button {
             if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
@@ -218,8 +219,11 @@ struct HogHunterPanel: View {
             // open? come forward" pass has to be retried, not run once.
             HogActions.scheduleFrontSettingsWindow()
         } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 17, weight: .regular))
+            Image(nsImage: HogActions.settingsIcon)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
         .fixedSize()

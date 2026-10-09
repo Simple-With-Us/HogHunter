@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
 from .store import VacuumStore
 
 LAUNCHD_LABEL = "com.simplewithus.hoghunter.robotic-vacuum"
+
+# Set to any value but 0, false, no, off, or empty and notify_macos posts nothing.  Tests and dry runs set it
+# so that a Mac never shows a real banner from code that was only meant to be exercised.
+NO_NOTIFY_ENV = "HOGHUNTER_NO_NOTIFY"
+_FALSY = frozenset({"", "0", "false", "no", "off"})
 
 
 @dataclass
@@ -31,25 +38,61 @@ def launchd_loaded(home_label: str = LAUNCHD_LABEL) -> bool:
         return False
 
 
-def evaluate_alerts(store: VacuumStore, cfg: dict[str, Any], now: float | None = None) -> list[AlertDecision]:
+def notifications_suppressed(env: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if env is None else env
+    return env.get(NO_NOTIFY_ENV, "").strip().lower() not in _FALSY
+
+
+def plist_path(home: Path) -> Path:
+    return home / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+def _is_real_tick(record: Any) -> bool:
+    return isinstance(record, dict) and not record.get("dry_run")
+
+
+def vacuum_ever_installed(store: VacuumStore, cfg: dict[str, Any], home: Path | None = None) -> bool:
+    """True once the Vacuum has been installed or the owner asked to hear about it being absent.
+
+    Any one of these is enough: its launch agent plist is on disk, history.json already holds a real (not dry
+    run) record, or `alerts.alert_when_not_installed` is true in the config (default false).  A Vacuum that was
+    never installed has nothing to be unloaded, so it must not nag."""
+    block = cfg.get("alerts")
+    if isinstance(block, dict) and block.get("alert_when_not_installed") is True:
+        return True
+    if os.path.exists(str(plist_path(Path(home) if home else store.home))):
+        return True
+    return any(_is_real_tick(r) for r in store.load_history())
+
+
+def evaluate_alerts(
+    store: VacuumStore, cfg: dict[str, Any], now: float | None = None, home: Path | None = None
+) -> list[AlertDecision]:
     now = now or time.time()
     intervals = cfg.get("intervals_seconds", {})
     mult = float(cfg.get("overdue_multiplier", 1.5))
     state = store.load_alert_state()
     decisions: list[AlertDecision] = []
 
-    launchd_ok = launchd_loaded() if sys.platform == "darwin" else True
-    decisions.append(
-        _dedupe(
-            state,
-            key="launchd_missing",
-            condition_active=sys.platform == "darwin" and not launchd_ok,
-            kind="launchd_missing",
-            active_message="Robotic Vacuum is not loaded in the background.  Scheduled cleaning will not run until you install or reload it.",
-            recovered_message="Robotic Vacuum is loaded again.  Scheduled cleaning resumed.",
-            now=now,
+    if sys.platform == "darwin" and not vacuum_ever_installed(store, cfg, home):
+        # Never installed: stay quiet, and drop any stale "active" flag without a "loaded again" banner for
+        # something that was never loaded.
+        prev = state.get("launchd_missing", {})
+        state["launchd_missing"] = {"active": False, "last_sent": prev.get("last_sent", 0)}
+        decisions.append(AlertDecision(False, "launchd_missing", ""))
+    else:
+        launchd_ok = launchd_loaded() if sys.platform == "darwin" else True
+        decisions.append(
+            _dedupe(
+                state,
+                key="launchd_missing",
+                condition_active=sys.platform == "darwin" and not launchd_ok,
+                kind="launchd_missing",
+                active_message="Robotic Vacuum is not loaded in the background.  Scheduled cleaning will not run until you install or reload it.",
+                recovered_message="Robotic Vacuum is loaded again.  Scheduled cleaning resumed.",
+                now=now,
+            )
         )
-    )
 
     for trigger, interval in (("watch", intervals.get("watch", 300)), ("janitor", intervals.get("janitor", 1800)), ("full", intervals.get("full", 14400))):
         last = store.last_run_for(trigger)
@@ -117,6 +160,8 @@ def _dedupe(
 
 
 def notify_macos(title: str, body: str) -> None:
+    if notifications_suppressed():
+        return
     if sys.platform != "darwin":
         return
     script = f'display notification "{_escape_apple(body)}" with title "{_escape_apple(title)}"'
