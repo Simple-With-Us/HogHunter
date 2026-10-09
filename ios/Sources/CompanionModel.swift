@@ -839,6 +839,7 @@ final class CompanionModel {
         ],
         // Demo mode shows every control, the way a Mac with all opt-ins on does.
         remoteQuitAllowed: true,
-        remoteCleanAllowed: true
+        remoteCleanAllowed: true,
+        remoteEditAllowed: true
     )
 }
