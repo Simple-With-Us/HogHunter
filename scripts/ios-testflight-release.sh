@@ -76,6 +76,16 @@ apps=("$work_dir/ipa/Payload/"*.app)
 [[ "${#apps[@]}" == 1 ]] || { echo 'error: expected exactly one exported app' >&2; exit 1; }
 validate_app "${apps[0]}" true
 
+# Single source: pull the marketing version and bundle id from the validator
+# the build is checked against (which reads project.yml), so the altool upload
+# flags and the step summary cannot drift from the archived identity.
+read -r BUNDLE_ID MARKETING_VERSION < <(python3 -c '
+import importlib.util
+spec = importlib.util.spec_from_file_location("v", "scripts/validate-ios-release.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.BUNDLE_ID, m.MARKETING_VERSION)
+')
+
 if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
   # Classic altool JWT auth looks for AuthKey_<KEY_ID>.p8 under
   # ~/.appstoreconnect/private_keys (or API_PRIVATE_KEYS_DIR).  --p8-file-path
@@ -90,16 +100,6 @@ if [[ "${HH_TESTFLIGHT_UPLOAD:-false}" == true ]]; then
   cp "$ASC_KEY_PATH" "$staged_asc_key"
   chmod 600 "$staged_asc_key"
   export API_PRIVATE_KEYS_DIR="$asc_keys_dir"
-
-  # Single source: pull the marketing version and bundle id from the
-  # validator the build is checked against, so the altool upload flags
-  # cannot drift from the archived identity.
-  read -r BUNDLE_ID MARKETING_VERSION < <(python3 -c '
-import importlib.util
-spec = importlib.util.spec_from_file_location("v", "scripts/validate-ios-release.py")
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-print(m.BUNDLE_ID, m.MARKETING_VERSION)
-')
 
   set +e
   xcrun altool --upload-package "${ipas[0]}" \
@@ -147,7 +147,7 @@ printf '%s\n' "$result"
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
     printf '## Hog Hunter iOS\n\n'
-    printf 'App Store Connect app: 6816633156  \nBundle: com.simplewithus.hoghunter.ios  \nVersion: 1.0.4  \nBuild: %s\n\n' "$HH_BUILD_NUMBER"
+    printf 'App Store Connect app: 6816633156  \nBundle: %s  \nVersion: %s  \nBuild: %s\n\n' "$BUNDLE_ID" "$MARKETING_VERSION" "$HH_BUILD_NUMBER"
     printf '%s\n' "$result"
   } >> "$GITHUB_STEP_SUMMARY"
 fi
