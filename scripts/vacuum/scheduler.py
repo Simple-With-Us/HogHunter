@@ -140,9 +140,12 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
 
     from .alerts import launchd_loaded
 
+    # The latest result of each step, from whichever run last ran it.  The last record alone is almost always a
+    # watch tick (every five minutes), whose only steps are the disk and memory check, so the UI would show
+    # nothing for the cleaning steps.  History is oldest first, so a newer result replaces an older one.
     step_states: dict[str, Any] = {}
-    if last_record:
-        for s in last_record.get("steps") or []:
+    for record in history:
+        for s in record.get("steps") or []:
             step_states[s.get("step_id")] = s
 
     return {

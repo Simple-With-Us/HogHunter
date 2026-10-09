@@ -1134,6 +1134,7 @@ final class CompanionModel {
             nextFullRunAt: ended.addingTimeInterval(24 * 3600),
             lastRunBytesFreed: 3_400_000_000,
             lastRunEndedAt: ended,
+            lastRunTrigger: "full",
             steps: [
                 CompanionVacuumStep(stepId: "resource_sample", title: "Check disk and memory", statusLabel: "Done", reason: "Disk 76% used.\u{00A0} Memory pressure normal.", bytesFreed: 0),
                 CompanionVacuumStep(stepId: "hoghunter_reclaim", title: "Hog Hunter disk reclaim", statusLabel: "Done", reason: "Standard clean reclaimed 1.1 GB.", bytesFreed: 1_100_000_000),
@@ -1144,7 +1145,28 @@ final class CompanionModel {
                 CompanionVacuumStep(stepId: "xcode_derived_data", title: "Clear Xcode build cache", statusLabel: "Skipped", reason: "Xcode is open.", bytesFreed: 0),
                 CompanionVacuumStep(stepId: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", statusLabel: "Done", reason: "Nothing to remove.", bytesFreed: 0),
                 CompanionVacuumStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
-            ]
+            ],
+            recentRuns: sampleRecentRuns(now: now, ended: ended, endedSecondsAgo: endedSecondsAgo)
         )
+    }
+
+    /// Newest first, the way the Mac lists them: the watch ticks since the
+    /// full run, the full run itself, and the runs before it, one of which
+    /// exited with an error.
+    private static func sampleRecentRuns(now: Date, ended: Date, endedSecondsAgo: TimeInterval) -> [CompanionVacuumRun] {
+        func run(_ id: String, _ trigger: String, endedAt: Date, freed: Int = 0, exitCode: Int = 0, seconds: Int = 0) -> CompanionVacuumRun {
+            CompanionVacuumRun(runId: id, trigger: trigger, endedAt: endedAt, bytesFreed: freed, exitCode: exitCode, durationSeconds: seconds)
+        }
+        var runs: [CompanionVacuumRun] = []
+        if endedSecondsAgo > 900 {
+            runs.append(run("sample-watch-3", "watch", endedAt: now.addingTimeInterval(-120)))
+            runs.append(run("sample-watch-2", "watch", endedAt: now.addingTimeInterval(-420)))
+        }
+        runs.append(run("sample-full", "full", endedAt: ended, freed: 3_400_000_000, seconds: 412))
+        runs.append(run("sample-watch-1", "watch", endedAt: ended.addingTimeInterval(-300)))
+        runs.append(run("sample-janitor", "janitor", endedAt: ended.addingTimeInterval(-1_800), freed: 0, exitCode: 1, seconds: 95))
+        runs.append(run("sample-watch-0", "watch", endedAt: ended.addingTimeInterval(-2_100)))
+        runs.append(run("sample-janitor-0", "janitor", endedAt: ended.addingTimeInterval(-3_600), freed: 220_000_000, seconds: 71))
+        return runs
     }
 }
