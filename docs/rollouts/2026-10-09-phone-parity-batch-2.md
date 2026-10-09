@@ -61,12 +61,20 @@ The Mac re-checks the row's processes against the live process table (the start 
 |---|---|---|
 | Scan for the Standard or Extreme tier | `POST /v1/clean/scan?tier=standard\|extreme[&ack=1]` | Allow iPhone to Run Disk Cleaner |
 | Preview the scan, pick items, read cleanup history | `GET /v1/clean/report` | Allow iPhone to Run Disk Cleaner |
-| Clean the picked items | `POST /v1/clean` with a JSON body (`scanId`, `tier`, `items`, `acknowledgedExtreme`) | Allow iPhone to Run Disk Cleaner |
+| Clean the picked items | `POST /v1/clean/run` with a JSON body (`scanId`, `tier`, `items`, `acknowledgedExtreme`) | Allow iPhone to Run Disk Cleaner |
 | Record phone cleans in cleanup history | the same code path as the Mac's cleaner | n/a |
 
 ### The phone never names a path
 
 `CleanItem.id` is the item's path, so the phone is not allowed to send one.  The Mac holds the scan under an id (`RemoteCleanScan`), the report lists items with short references (`"3.12"` is the thirteenth item of the fourth category), and a clean sends the scan id and the references back.  `CompanionCleanerReport.plan` resolves them against the Mac's own scan and refuses the whole request on any of: no scan, a different scan id, a scan older than 30 minutes, a tier that does not match the scan, an unknown tier, an unknown reference, Extreme without the acknowledgement, or nothing selected.  A scan is spent by one clean.  `DiskCleaner.clean` then re-applies the current exclusions and `isSafeToDelete` to every item, as it does for the Mac.
+
+### Choosing items has its own route
+
+`POST /v1/clean` takes no body and is always the Standard clean with the Mac's default selection, exactly as an older phone expects.  Choosing items is `POST /v1/clean/run`, a route an older Mac does not have, so a new phone talking to an older Mac gets 404 ("older than this app") instead of having the Mac ignore the body and run its default clean in place of the one the person confirmed.  The phone also drops the scan it is showing whenever the Mac stops vouching for it (404, 403, 401) or the phone forgets the Mac, leaves demo mode or reconnects.
+
+### Snapshot thinning is Mac-only
+
+`DiskCleaner.clean` thins every APFS local snapshot in one call whichever row is ticked, and it does so before the safety snapshot is taken.  Ticking one snapshot row therefore removes the rollback point an earlier clean left, and the confirmation ("A snapshot is created first, and if that fails nothing is deleted") would be false.  The Mac has the same behavior, but a phone feature must not ship without its safeguards, so the phone neither lists nor accepts that category.  This is a deliberate gap in parity and is easy to lift once thinning is fixed to be per-item and to run after the safety snapshot.
 
 ### Extreme
 
@@ -82,7 +90,7 @@ The report lists at most 100 items per category, largest first, and says how man
 
 ### Existing opt-in gains a little
 
-An owner who already allows Run Disk Cleaner now also allows Extreme (with the phone's acknowledgement), item selection, and reading the scan and history.  The Settings description says so.  A bare `POST /v1/clean` from an older phone is unchanged: the Standard clean with the Mac's default selection, and now recorded in history.
+An owner who already allows Run Disk Cleaner now also allows Extreme (with the phone's acknowledgement), item selection, and reading the scan and history.  The Settings description says so.  A bare `POST /v1/clean` from an older phone is unchanged: the Standard clean with the Mac's default selection, and now recorded in history.  A scan that never finishes is replaced by a new one after 15 minutes, and turning the cleaner opt-in off drops the held scan.
 
 ### Follow-ups
 

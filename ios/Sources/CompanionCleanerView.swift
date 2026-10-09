@@ -396,7 +396,7 @@ struct CleanerView: View {
         } header: {
             Text("Cleanup History")
         } footer: {
-            Text("Every clean is recorded on \(hostName), whether it started there or here.")
+            Text("Every clean that removes something is recorded on \(hostName), whether it started there or here.")
         }
     }
 }
