@@ -14,6 +14,15 @@ enum CompanionService {
     static let version = 1
 }
 
+/// Address-backed companion saves (Tailscale MagicDNS, LAN IP, custom domain) are not
+/// discovered via `_hoghunter._tcp`.  Bonjour browse churn must not mark them offline.
+enum CompanionReach {
+    static func keepsManualHost(_ remoteHost: String?) -> Bool {
+        let host = remoteHost?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !host.isEmpty
+    }
+}
+
 /// Response returned when the iOS companion triggers a safe remote clean on the Mac.
 struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var status: String
