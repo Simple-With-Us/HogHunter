@@ -118,8 +118,10 @@ def evaluate_alerts(
     history = store.load_history()
     if history:
         last = history[-1]
+        # Keyed on the failed steps, not the exit code: a partial run exits 0 so it does not read as a failed run,
+        # but a step that fails every time must not go quiet.  The banner says "failed step(s)", which is true.
         fails = [s for s in (last.get("steps") or []) if s.get("status") == "failed"]
-        run_failed = bool(fails) and int(last.get("exit_code", 0)) != 0
+        run_failed = bool(fails)
     decisions.append(
         _dedupe(
             state,

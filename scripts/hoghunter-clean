@@ -21,6 +21,7 @@ Usage
   hoghunter-clean --scan                 read-only, print plan
   hoghunter-clean --clean                apply the safe tier
   hoghunter-clean --clean --band=full   also apply semi-safe tier
+  hoghunter-clean --clean --budget-sec=600   stop starting work after 10 minutes
   hoghunter-clean --scan --categories=snapshots,logs --json
 
 Modes are mutually exclusive with --categories=... --policy to see everything.
@@ -84,6 +85,18 @@ CHUNK_LOAD_HIGH = 40.0
 # (keep going), high load with LOW idle is thrash (back off the burst).
 CHUNK_IDLE_LOW_PCT = 12.0
 
+# How the chunks are cut.  The ruling above is "divide the work into 2-4 smaller tasks", so a chunk is a slot
+# of work, not a file.  A heavy candidate (a tree, a snapshot, a WAL, a brew run) takes a whole slot.  A light
+# one (a file or small tree under LIGHT_CANDIDATE_BYTES) takes 1/LIGHT_PER_SLOT of a slot, so 1,710 per-run marker
+# files are 3 chunks of 600, not 570 chunks with a 5 to 20 s sleep after each.  Counting files made one sweep
+# run past an hour while the Robotic Vacuum killed it at 900 s every time (Oct 9 2026), so nothing was freed.
+LIGHT_CANDIDATE_BYTES = 8 * 1024 * 1024
+LIGHT_PER_SLOT = 200
+
+# What proc_count answers when pgrep itself failed.  A failed look is not an empty room: the callers read any
+# non-zero count as "busy", so a timeout under load 600 skips the work instead of running it blind.
+PROBE_FAILED = 10 ** 6
+
 # Idle gates.  "No file touched in N minutes" proves nothing is mid-write.
 IDLE_MIN_OK = 90
 IDLE_MIN_SCRATCH = 180   # 3h for temp scratch
@@ -123,6 +136,44 @@ FORBIDDEN_EXACT = (
 
 def log(msg: str) -> None:
     print(f"[hoghunter-clean] {msg}", file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------
+# Time budget
+#
+# `--budget-sec N` is how a caller with its own deadline (the Robotic Vacuum
+# gives this engine 10 minutes of its 15) gets a finished, honest report
+# instead of a kill.  The clock starts when main() starts, so the scan counts.
+# Nothing is lost when the budget runs out: the next run rescans, what was
+# removed is gone, and the rest is the new list.  No flag means no limit.
+# --------------------------------------------------------------------------
+
+_DEADLINE: float | None = None
+
+
+def set_budget(seconds: float) -> None:
+    """Start the clock.  Zero or less clears any budget."""
+    global _DEADLINE
+    _DEADLINE = time.monotonic() + seconds if seconds and seconds > 0 else None
+
+
+def budget_left() -> float:
+    """Seconds left in the budget, or infinity when there is none."""
+    if _DEADLINE is None:
+        return float("inf")
+    return max(0.0, _DEADLINE - time.monotonic())
+
+
+# A heavy candidate (a tree, a snapshot, a brew run) is not started with less than this left.  Starting
+# `brew cleanup` with 5 s in hand and killing it half done helps nobody; the next run starts it with a fresh budget.
+MIN_HEAVY_START_SEC = 30.0
+
+
+def op_timeout(default: float) -> float:
+    """The timeout for one apply-time command: its usual limit, cut to what is left of the budget (never under
+    5 s).  Every subprocess an apply step starts takes its timeout from here, so none can run past the budget by
+    more than a few seconds and into the caller's hard stop."""
+    return min(float(default), max(5.0, budget_left()))
 
 
 # --------------------------------------------------------------------------
@@ -254,9 +305,22 @@ def open_handles(path: str) -> int:
 
     Housekeeper rule: `lsof +D` HANGS on big trees -- never use it.  Ask
     lsof about the exact path instead.
+
+    A look that failed is not an empty room.  lsof that times out (it does,
+    under load 600) or cannot run counts as one open handle, so the caller
+    leaves the path alone.  lsof exits 1 for "nothing found", so the exit code
+    does not decide it: the pids on stdout do.
     """
-    out = _run(["/usr/sbin/lsof", "-F", "p", "--", str(path)], timeout=25)
-    pids = {ln for ln in out.splitlines() if ln.startswith("p")}
+    try:
+        p = subprocess.run(["/usr/sbin/lsof", "-F", "p", "--", str(path)],
+                           capture_output=True, text=True, timeout=25)
+    except (subprocess.TimeoutExpired, OSError):
+        log(f"lsof could not look at {path!r}; treating it as open")
+        return 1
+    pids = {ln for ln in p.stdout.splitlines() if ln.startswith("p")}
+    if not pids and p.returncode not in (0, 1):
+        log(f"lsof exited {p.returncode} for {path!r}; treating it as open")
+        return 1
     return len(pids)
 
 
@@ -301,9 +365,24 @@ def proc_count(pattern: str) -> int:
 
     Never `ps`/`pgrep -l`/`pgrep -fl` -- argv on this Mac carries live API
     keys and lands them in logs.  Count only.
+
+    pgrep exits 1 for "no match".  Any other outcome (a timeout, a missing
+    binary, another exit code) returns PROBE_FAILED, which every caller reads
+    as busy.  Reading a failed look as "nothing running" would let the dev
+    caches and Xcode artifacts go while a build runs.
     """
-    out = _run(["/usr/bin/pgrep", "-f", pattern], timeout=15)
-    return len([ln for ln in out.splitlines() if ln.strip()])
+    try:
+        p = subprocess.run(["/usr/bin/pgrep", "-f", pattern],
+                           capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        log(f"pgrep {pattern!r} failed; treating it as busy")
+        return PROBE_FAILED
+    if p.returncode == 1:
+        return 0
+    if p.returncode != 0:
+        log(f"pgrep {pattern!r} exited {p.returncode}; treating it as busy")
+        return PROBE_FAILED
+    return len([ln for ln in p.stdout.splitlines() if ln.strip()])
 
 
 def dir_bytes(path: str, max_depth: int = 8) -> int:
@@ -351,8 +430,11 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
 # result is verified against a fresh df by the caller, never the exit code.
 # --------------------------------------------------------------------------
 
-def apply_delete(path: str) -> tuple[int, str]:
-    """Delete a file or tree for real.  Returns (bytes_freed, error)."""
+def apply_delete(path: str, known_bytes: int | None = None) -> tuple[int, str]:
+    """Delete a file or tree for real.  Returns (bytes_freed, error).
+
+    known_bytes is the size the scan already measured; passing it spares a second walk of a big tree.  The
+    delete never outlives the run's budget by more than a few seconds."""
     p = Path(path)
     if is_forbidden(path):
         return 0, "forbidden path"
@@ -360,14 +442,14 @@ def apply_delete(path: str) -> tuple[int, str]:
         return 0, f"{KEEP_SENTINEL} sentinel present"
     if not p.exists():
         return 0, ""
-    before = dir_bytes(path)
+    before = known_bytes if known_bytes is not None else dir_bytes(path)
     try:
         if p.is_dir() and not p.is_symlink():
             # -depth so children go before parents; -delete removes empty
             # dirs.  Do NOT use `rm -rf` -- mavis-trash swallows it.
             subprocess.run(
                 ["/usr/bin/find", str(p), "-depth", "-delete"],
-                capture_output=True, timeout=600,
+                capture_output=True, timeout=op_timeout(600),
             )
         else:
             p.unlink()
@@ -471,10 +553,10 @@ def apply_snapshot_delete(name: str) -> tuple[int, str]:
     the Data volume's free space held against the container.
     """
     out = _run(["/usr/bin/tmutil", "deletelocalsnapshots",
-                snapshot_timestamp(name)], timeout=120)
+                snapshot_timestamp(name)], timeout=op_timeout(120))
     if "Deleted local snapshot" in out or "Deleted snapshot" in out:
         return 0, ""
-    remaining = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=60)
+    remaining = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=op_timeout(60))
     if name not in remaining:
         return 0, ""
     # Surface WHY.  A bare "delete did not take effect" cost a wake cycle on
@@ -1098,20 +1180,24 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
     return out
 
 
+_KEEP_MIB_RE = re.compile(r"(\d+)M")
+
+
 def apply_candidate(c: Candidate) -> None:
     if c.tier == "ask-first" or c.op == "report":
         return
     try:
         if c.op == "delete":
-            freed, err = apply_delete(c.path)
+            freed, err = apply_delete(c.path, known_bytes=c.bytes)
         elif c.op == "truncate":
-            freed, err = apply_truncate(c.path, keep_mib=int(re.search(r"(\d+)M", c.detail).group(1)) if re.search(r"(\d+)M", c.detail) else 16)
+            keep = _KEEP_MIB_RE.search(c.detail or "")
+            freed, err = apply_truncate(c.path, keep_mib=int(keep.group(1)) if keep else 16)
         elif c.op == "wal-checkpoint":
             freed, err = apply_wal_checkpoint(c.path)
         elif c.op == "snapshot-delete":
             freed, err = apply_snapshot_delete(c.path.split(":", 1)[1])
         elif c.op == "brew-cleanup":
-            _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=600)
+            _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=op_timeout(600))
             freed, err = 0, ""
         else:
             return
@@ -1122,6 +1208,37 @@ def apply_candidate(c: Candidate) -> None:
     c.error = err
     if freed and not c.error:
         c.bytes = max(c.bytes, freed) if c.op == "delete" else freed
+
+
+def is_light(c: Candidate) -> bool:
+    """A file or small tree that goes in one quick delete or truncate.  Everything else is heavy."""
+    return c.op in ("delete", "truncate") and c.bytes < LIGHT_CANDIDATE_BYTES
+
+
+def apply_order(c: Candidate) -> tuple[int, int]:
+    """Snapshots first (the biggest reclaim, and a few metadata calls), then biggest first, so a run that stops
+    on its budget has done the most valuable part."""
+    return (0 if c.op == "snapshot-delete" else 1, -c.bytes)
+
+
+def plan_chunks(items: Sequence[Candidate], size: int) -> list[list[Candidate]]:
+    """Cut the work into chunks of `size` slots.  A heavy candidate takes a whole slot and LIGHT_PER_SLOT light
+    ones share one, so the number of chunks follows the weight of the work and never its file count.  The order
+    of `items` is kept."""
+    capacity = max(1, size) * LIGHT_PER_SLOT
+    chunks: list[list[Candidate]] = []
+    current: list[Candidate] = []
+    used = 0
+    for c in items:
+        weight = 1 if is_light(c) else LIGHT_PER_SLOT
+        if current and used + weight > capacity:
+            chunks.append(current)
+            current, used = [], 0
+        current.append(c)
+        used += weight
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1138,11 +1255,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--list", action="store_true", help="list rule names and exit")
     p.add_argument("--size-ask-first", action="store_true",
                    help="also walk the ask-first trees to size them (slow under load)")
+    p.add_argument("--budget-sec", type=float, default=0.0,
+                   help="stop starting work after this many seconds and report what is left "
+                        "(0 = no limit); the next run rescans and carries on")
     p.add_argument("--version", action="store_true")
     args = p.parse_args(argv)
 
     global SIZE_ASK_FIRST
     SIZE_ASK_FIRST = args.size_ask_first
+    started = time.monotonic()
+    set_budget(args.budget_sec)
 
     if args.version:
         print(f"hoghunter-clean {VERSION}")
@@ -1195,32 +1317,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     actionable = [c for c in cands if c.tier in allowed]
+    budget_exhausted = False
+    attempted = 0
     if args.clean:
         # CHUNKED APPLY.  Under pressure the work is split into small batches
         # with a pause and a re-read between them, so the host gets breathing
         # room while deletes land.  The SCOPE is unchanged -- same candidates,
         # same tiers -- only the burst size shrinks.  (Owner ruling
-        # 2026-10-02.)
-        total = len(actionable)
-        size = max(1, band.chunk_size)
-        for idx in range(0, total, size):
-            batch = actionable[idx:idx + size]
+        # 2026-10-02.)  A chunk is a slot of work, not a file (plan_chunks),
+        # and a run with a budget stops starting work when the budget is
+        # spent: the rest is found again by the next scan.
+        ordered = sorted(actionable, key=apply_order)
+        chunks = plan_chunks(ordered, band.chunk_size)
+        for n, batch in enumerate(chunks, 1):
+            if budget_left() <= 0:
+                budget_exhausted = True
+                break
+            applied_here = 0
             for c in batch:
+                left = budget_left()
+                if left <= 0:
+                    budget_exhausted = True
+                    break
+                if not is_light(c) and left < MIN_HEAVY_START_SEC:
+                    budget_exhausted = True  # too little time to start this one; a light item may still fit
+                    continue
                 apply_candidate(c)
-            n = idx // size + 1
-            log(f"chunk {n}/{(total + size - 1) // size}: applied {len(batch)} "
-                f"({total} total)")
-            if idx + size < total and band.chunk_pause_sec > 0:
-                time.sleep(band.chunk_pause_sec)
+                attempted += 1
+                applied_here += 1
+            log(f"chunk {n}/{len(chunks)}: applied {applied_here} "
+                f"({len(ordered)} total)")
+            if budget_exhausted:
+                break
+            if n < len(chunks) and band.chunk_pause_sec > 0:
+                time.sleep(min(band.chunk_pause_sec, budget_left()))
+                if budget_left() <= 0:
+                    budget_exhausted = True
+                    break
                 mid = read_band()
                 log(f"  after chunk: load1 {mid.load1:.0f}, "
                     f"{mid.cpu_idle_pct:.0f}% idle, "
                     f"swap {mid.swap_used_pct:.0f}%, {mid.pressure_label}")
+        if budget_exhausted:
+            log(f"budget of {args.budget_sec:.0f}s spent: {attempted} of {len(ordered)} "
+                f"applied, {len(ordered) - attempted} left for the next run")
         # Snapshots report zero bytes by nature, so trust df, not the tally.
-        after = read_band()
-        snapshot_delta = (band.disk_free_gb - after.disk_free_gb) * 1024
-        if snapshot_delta > 512:
-            log(f"snapshot prune freed {snapshot_delta:.0f}M (df-verified)")
+        if budget_left() > 0:
+            after = read_band()
+            snapshot_delta = (band.disk_free_gb - after.disk_free_gb) * 1024
+            if snapshot_delta > 512:
+                log(f"snapshot prune freed {snapshot_delta:.0f}M (df-verified)")
 
     if args.json:
         print(json.dumps({
@@ -1232,6 +1378,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "reclaimable_mib": round(
                 sum(c.bytes for c in cands if c.tier in allowed) / (1024 * 1024), 1),
             "applied_mib": round(sum(c.bytes for c in actionable if c.applied) / (1024 * 1024), 1),
+            # Added with --budget-sec.  The Robotic Vacuum reads these to report real bytes and a partial run.
+            "applied_bytes": sum(c.bytes for c in actionable if c.applied),
+            "applied_count": sum(1 for c in actionable if c.applied),
+            "failed_count": sum(1 for c in actionable if c.error),
+            "actionable_count": len(actionable),
+            "budget_exhausted": budget_exhausted,
+            "remaining_count": (len(actionable) - attempted) if args.clean else 0,
+            "elapsed_sec": round(time.monotonic() - started, 1),
         }, indent=2))
         return 0
 
