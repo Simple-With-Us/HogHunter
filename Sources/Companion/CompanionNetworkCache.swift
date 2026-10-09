@@ -108,7 +108,7 @@ extension CompanionSnapshotBuilder {
         case let .snapshot(_, usages):
             return CompanionNetworkScan(rows: networkRows(from: usages, limit: limit), note: nil)
         case let .unavailable(reason):
-            return CompanionNetworkScan(rows: [], note: "The Mac could not list network connections.  \(reason)")
+            return CompanionNetworkScan(rows: [], note: "The Mac could not list network connections.\u{00A0} \(reason)")
         }
     }
 }

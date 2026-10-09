@@ -1564,7 +1564,7 @@ final class HogStore: ObservableObject {
     /// One clean at a time, whoever started it.
     nonisolated static func cleanRefusal(remoteInFlight: Bool, macIsCleaning: Bool) -> CompanionServer.Reply? {
         guard remoteInFlight || macIsCleaning else { return nil }
-        let body = #"{"status":"busy","error":"A clean is already running on this Mac.  Watch its progress in the app."}"#
+        let body = #"{"status":"busy","error":"A clean is already running on this Mac.\u00a0 Watch its progress in the app."}"#
         return (409, Data(body.utf8))
     }
 
