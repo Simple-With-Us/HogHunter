@@ -57,8 +57,8 @@ TLS is not half-done in batch 1 on purpose.  Pinning on iOS needs a migration fo
 
 ## Verification state
 
-- Mac: `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` passes (349 tests on the last run before PR B opened), including real child processes for the identity checks and a real loopback listener that proves an accepted connection reports a numeric, trusted peer.  `DiskCleanerTests.testScanAPFSSnapshotsFallsBackToAggregateWhenListFails` depends on local Time Machine snapshots: it failed at baseline and on two runs, then passed.
-- iOS: no simulator and no local `xcodebuild`, by owner rule for small changes.  `swiftc -typecheck` against the iOS 17 simulator SDK passes for the app target and, separately, the widget target.  The hosted iOS build in CI is the real check.  Nothing here has been run on a phone.
+- Mac: `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` passes (357 tests on the last run before PR B merged), including real child processes for the identity checks and a real loopback listener that proves an accepted connection reports a numeric, trusted peer.  `DiskCleanerTests.testScanAPFSSnapshotsFallsBackToAggregateWhenListFails` depends on local Time Machine snapshots: it failed at baseline and on two runs, then passed.
+- iOS: no simulator and no local `xcodebuild`, by owner rule for small changes.  `swiftc -typecheck` against the iOS 17 simulator SDK passes for the app target and, separately, the widget target.  The hosted iOS build in CI is the real check, and it passed for #96 and #97.  Nothing here has been run on a phone yet.
 - There is no `Package.swift`, so there is no `swift test`.
 
 ## Rollback
