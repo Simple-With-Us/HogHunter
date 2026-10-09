@@ -160,6 +160,39 @@ enum CompanionConnection {
         return try decode(CompanionSettingsUpdateResponse.self, from: reply)
     }
 
+    /// Starts a scan on the Mac for the chosen tier.  The Mac answers at once
+    /// (`scanning`, or `busy` while another scan or a clean is running) and
+    /// the phone reads progress from the report.
+    static func startCleanScan(endpoint: NWEndpoint, token: String, tier: String, acknowledgedExtreme: Bool) async throws -> CompanionCleanScanResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.cleanScanRequest(token: token, tier: tier, acknowledgedExtreme: acknowledgedExtreme),
+            timeout: defaultTimeout
+        )
+        return try decode(CompanionCleanScanResponse.self, from: reply)
+    }
+
+    /// The Mac's last scan, its progress and the cleanup history.
+    static func fetchCleanReport(endpoint: NWEndpoint, token: String) async throws -> CompanionCleanReport {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.cleanReportRequest(token: token),
+            timeout: defaultTimeout
+        )
+        return try decode(CompanionCleanReport.self, from: reply, decoder: CompanionJSON.decoder())
+    }
+
+    /// Cleans the items the person chose from a scan the Mac is holding, and
+    /// waits for the Mac to finish.
+    static func triggerClean(endpoint: NWEndpoint, token: String, request: CompanionCleanRequest) async throws -> CompanionCleanResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.cleanRequest(token: token, request: request),
+            timeout: cleanTimeout
+        )
+        return try decode(CompanionCleanResponse.self, from: reply)
+    }
+
     /// Runs Sample for 3 Seconds on a row.  The Mac answers once the report
     /// is written, a few seconds later.
     static func triggerSample(endpoint: NWEndpoint, token: String, rowId: String) async throws -> CompanionSampleResponse {

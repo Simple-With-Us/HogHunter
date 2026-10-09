@@ -21,6 +21,9 @@ struct CleanupHistoryRecord: Codable, Equatable, Sendable {
     /// The APFS local snapshot name created before the cleanup, if any.  Lets
     /// the user roll back without needing to remember which snapshot applies.
     var snapshotName: String?
+    /// Who started the clean: "iPhone" for one the phone started, nil for one
+    /// started at the Mac.  Absent in older rows, which decode as nil.
+    var source: String? = nil
 
     init(bytesReclaimed: UInt64,
          itemsRemoved: Int,
@@ -28,6 +31,7 @@ struct CleanupHistoryRecord: Codable, Equatable, Sendable {
          categoryIds: [String],
          itemTitles: [String],
          snapshotName: String?,
+         source: String? = nil,
          cleanedAt: Date = Date()) {
         self.cleanedAt = cleanedAt
         self.bytesReclaimed = bytesReclaimed
@@ -36,6 +40,27 @@ struct CleanupHistoryRecord: Codable, Equatable, Sendable {
         self.categoryIds = categoryIds
         self.itemTitles = itemTitles
         self.snapshotName = snapshotName
+        self.source = source
+    }
+
+    /// The row a finished clean leaves, or nil when it removed nothing.  A
+    /// failed clean (no items removed) is not worth a row: the user did not
+    /// reclaim anything.  History mirrors successes only -- selected-but-failed
+    /// items (thin failure, `isSafeToDelete` rejection, `trashItem` throw) stay
+    /// out of the "Last cleanup" summary.  One function, used by the Mac's
+    /// cleaner and by a clean the phone starts, so the two cannot disagree.
+    static func record(from result: CleanResult, source: String? = nil) -> CleanupHistoryRecord? {
+        guard result.itemsRemoved > 0 else { return nil }
+        return CleanupHistoryRecord(
+            bytesReclaimed: result.bytesReclaimed,
+            itemsRemoved: result.itemsRemoved,
+            tier: result.tier,
+            categoryIds: result.removedCategoryIds,
+            itemTitles: Array(result.removedItemTitles.prefix(50)),
+            snapshotName: result.snapshotName,
+            source: source,
+            cleanedAt: result.cleanedAt
+        )
     }
 
     var formattedBytesReclaimed: String {
@@ -46,7 +71,8 @@ struct CleanupHistoryRecord: Codable, Equatable, Sendable {
 /// Append-only log of cleanup runs under the existing internal app-support
 /// namespace (AGENTS.md: stable across the bundle-ID migration, must not be renamed).
 ///
-/// Every write is an append under a process-wide lock: create an empty file if
+/// Every write is an append under a process-wide lock (shared by every
+/// instance, because the Mac's cleaner and the phone's each hold their own): create an empty file if
 /// needed, then seek-to-end and write the line.  Two concurrent first writes
 /// cannot each take an atomic-create branch and clobber each other.  Reads
 /// tolerate a missing or empty file (returning `[]`) and any record that fails
@@ -56,8 +82,10 @@ final class CleanupHistoryStore: @unchecked Sendable {
     /// command-line checks never touch the installed app's log.
     let url: URL
     /// Serializes create-vs-append so two concurrent first writes cannot
-    /// each invent the file and replace each other.
-    private let lock = NSLock()
+    /// each invent the file and replace each other.  Static, so it holds
+    /// across the instances the Mac's cleaner and the phone's clean each own.
+    private static let fileLock = NSLock()
+    private var lock: NSLock { Self.fileLock }
 
     init(url: URL) {
         self.url = url
@@ -162,6 +190,31 @@ final class CleanupHistoryStore: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// The newest `limit` records, newest first, read from a bounded tail of
+    /// the log so a long history costs the same as a short one.
+    func recentRecords(limit: Int) -> [CleanupHistoryRecord] {
+        guard limit > 0, FileManager.default.fileExists(atPath: url.path),
+              let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(), size > 0 else { return [] }
+        // A record holds at most 50 titles, so a few hundred bytes to a few
+        // kilobytes each; 256 KB comfortably holds the last dozens.
+        let window: UInt64 = 256 * 1024
+        try? handle.seek(toOffset: size > window ? size - window : 0)
+        let tail = (try? handle.readToEnd()) ?? Data()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var records: [CleanupHistoryRecord] = []
+        for line in tail.split(separator: 0x0A).reversed() {
+            guard !line.isEmpty else { continue }
+            if let record = try? decoder.decode(CleanupHistoryRecord.self, from: Data(line)) {
+                records.append(record)
+                if records.count >= limit { break }
+            }
+        }
+        return records
     }
 
     // MARK: - Display helpers

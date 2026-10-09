@@ -1227,6 +1227,18 @@ struct DashboardView: View {
                 }
             }
             .padding(.vertical, 4)
+
+            NavigationLink {
+                CleanerView(model: model)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Review & Choose What To Clean", systemImage: "list.bullet.rectangle")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Scan, tick items, try Extreme Clean, and read the cleanup history.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
 
         if let storage = snapshot.storage {

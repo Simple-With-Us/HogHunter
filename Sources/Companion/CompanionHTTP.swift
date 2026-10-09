@@ -7,7 +7,9 @@ enum CompanionHTTP {
         request: Data,
         body: Data,
         token: String,
-        cleanHandler: ((String) -> (status: Int, body: Data))? = nil,
+        cleanHandler: ((CompanionCleanRequest?) -> (status: Int, body: Data))? = nil,
+        cleanScanHandler: ((CompanionCleanScanRequest) -> (status: Int, body: Data))? = nil,
+        cleanReportHandler: (() -> (status: Int, body: Data))? = nil,
         quitHandler: ((_ request: CompanionProcessRequest, _ force: Bool) -> (status: Int, body: Data))? = nil,
         tameHandler: ((_ request: CompanionProcessRequest, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
@@ -32,6 +34,8 @@ enum CompanionHTTP {
         let path = fullPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
         guard path == CompanionService.path
             || path == CompanionService.cleanPath
+            || path == CompanionService.cleanScanPath
+            || path == CompanionService.cleanReportPath
             || path == CompanionService.quitPath
             || path == CompanionService.tamePath
             || path == CompanionService.exclusionsPath
@@ -74,11 +78,50 @@ enum CompanionHTTP {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
             }
             if let cleanHandler {
-                let (code, resBody) = cleanHandler(presented)
+                // No body is the older phone's plain Standard clean.  A body
+                // that is present but unreadable is refused, never guessed at.
+                var cleanRequest: CompanionCleanRequest?
+                let body = bodyData(of: request)
+                if !body.isEmpty {
+                    guard let decoded = try? JSONDecoder().decode(CompanionCleanRequest.self, from: body) else {
+                        return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The clean request could not be read."}"#.utf8), type: "application/json; charset=utf-8")
+                    }
+                    cleanRequest = decoded
+                }
+                let (code, resBody) = cleanHandler(cleanRequest)
                 return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
             } else {
                 return message(status: 501, reason: "Not Implemented", body: Data("Clean Not Configured".utf8))
             }
+        } else if path == CompanionService.cleanScanPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let cleanScanHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Scan Not Configured".utf8))
+            }
+            var scanRequest = CompanionCleanScanRequest(tier: "standard")
+            if fullPath.contains("?") {
+                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                for param in query.split(separator: "&") {
+                    let kv = param.split(separator: "=", maxSplits: 1)
+                    guard kv.count == 2 else { continue }
+                    let value = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                    if kv[0] == "tier" { scanRequest.tier = value.lowercased() }
+                    if kv[0] == "ack" { scanRequest.acknowledgedExtreme = (value == "1" || value.lowercased() == "true") }
+                }
+            }
+            let (code, resBody) = cleanScanHandler(scanRequest)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.cleanReportPath {
+            guard method == "GET" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let cleanReportHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Report Not Configured".utf8))
+            }
+            let (code, resBody) = cleanReportHandler()
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.quitPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -464,6 +507,40 @@ enum CompanionHTTP {
     static func cleanRequest(token: String) -> Data {
         let lines = [
             "POST \(CompanionService.cleanPath) HTTP/1.1",
+            "Host: hoghunter",
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    /// A clean from a scan the Mac is holding: the scan's id, the tier, the
+    /// references to clean, and the Extreme acknowledgement.
+    static func cleanRequest(token: String, request: CompanionCleanRequest) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = (try? encoder.encode(request)) ?? Data("{}".utf8)
+        return jsonPostRequest(path: CompanionService.cleanPath, token: token, body: body)
+    }
+
+    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool) -> Data {
+        let ack = acknowledgedExtreme ? "&ack=1" : ""
+        let lines = [
+            "POST \(CompanionService.cleanScanPath)?tier=\(queryAllowedValue(tier))\(ack) HTTP/1.1",
+            "Host: hoghunter",
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    static func cleanReportRequest(token: String) -> Data {
+        let lines = [
+            "GET \(CompanionService.cleanReportPath) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",
