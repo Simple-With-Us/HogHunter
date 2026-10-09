@@ -88,14 +88,10 @@ final class DiskCleanerTests: XCTestCase {
         for path in criticalPaths {
             let url = URL(fileURLWithPath: path)
             for category in CleanCategory.allCases {
-                //  `isSafeToDelete` answers "will this path be trashed?" for
-                //  every category except timeMachineSnapshots, where there is
-                //  no path to trash at all: snapshots live in APFS metadata and
-                //  are thinned via `tmutil`, so for that category the predicate
-                //  only proves the URL is the startup mount.  `/` is exactly
-                //  that mount, so `true` there is correct and is not a
-                //  filesystem-root deletion.
-                if category == .timeMachineSnapshots { continue }
+                // Root and other critical paths stay denied for every category,
+                // including apfsSnapshots.  Thinning hardcodes the mount inside
+                // SnapshotSafety; isSafeToDelete must never widen "/" into a
+                // pass-through for a future caller that trashes the CleanItem URL.
                 XCTAssertFalse(
                     cleaner.isSafeToDelete(url: url, category: category),
                     "Path \(path) must NOT be safe to delete under \(category)"
@@ -104,19 +100,24 @@ final class DiskCleanerTests: XCTestCase {
         }
     }
 
-    /// The Time Machine category is the one place `isSafeToDelete` may accept
-    /// `/`, because nothing is trashed -- `tmutil` thins APFS snapshots and the
-    /// check only proves the URL is the startup mount.  Pin that behaviour so a
-    /// later "fix" cannot quietly turn it into a real root-deletion path, and
-    /// assert the property that actually matters: a thin may never be
-    /// redirected at a non-root volume.
-    func testTimeMachineThinOnlyAcceptsTheStartupMount() {
-        XCTAssertTrue(cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/"), category: .timeMachineSnapshots),
-                      "the startup mount is the only valid thin target")
+    /// APFS snapshot rows use synthetic `/.snapshots/<name>` URLs.  Root and
+    /// foreign volumes stay denied; only the synthetic snapshot path passes.
+    func testAPFSSnapshotSafetyAcceptsOnlySyntheticSnapshotPaths() {
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/"), category: .apfsSnapshots),
+            "startup volume root must stay denied"
+        )
         for volume in ["/Volumes/Backup", "/Volumes/External"] {
-            XCTAssertFalse(cleaner.isSafeToDelete(url: URL(fileURLWithPath: volume), category: .timeMachineSnapshots),
-                           "a thin must never be redirected at \(volume)")
+            XCTAssertFalse(
+                cleaner.isSafeToDelete(url: URL(fileURLWithPath: volume), category: .apfsSnapshots),
+                "a thin must never be redirected at \(volume)"
+            )
         }
+        let synthetic = URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.2026-10-05-062128.local")
+        XCTAssertTrue(
+            cleaner.isSafeToDelete(url: synthetic, category: .apfsSnapshots),
+            "synthetic snapshot URLs are the only apfsSnapshots allowlist entries"
+        )
     }
 
     func testIsSafeToDeleteDisallowsHogHunterPaths() {

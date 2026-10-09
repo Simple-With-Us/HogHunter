@@ -251,13 +251,17 @@ enum SnapshotSafety {
         process.standardError = pipe
         do {
             try process.run()
+            // Drain before waiting and close the read end: a full ~64 KB pipe
+            // buffer blocks the child on write(2), and an unclosed handle leaks.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
             process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             return output.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { $0.hasPrefix("com.apple.TimeMachine.") }
         } catch {
+            try? pipe.fileHandleForReading.close()
             return []
         }
     }
@@ -298,9 +302,11 @@ enum SnapshotSafety {
                 thinProcessLock.unlock()
             }
             try process.run()
-            // Drain before waiting: a child that fills the 64 KB pipe buffer
-            // blocks on write and never exits, deadlocking waitUntilExit().
+            // Drain before waiting and close the read end: a child that fills
+            // the ~64 KB pipe buffer blocks on write(2), and an unclosed handle
+            // leaks across every thin call.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
             process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             let thinned = output.components(separatedBy: .newlines)
@@ -308,6 +314,7 @@ enum SnapshotSafety {
             // SIGTERM from cancelActiveThin yields a non-zero status; treat as cancelled failure.
             return (process.terminationStatus == 0, process.terminationStatus == 0 ? max(1, thinned.count) : thinned.count)
         } catch {
+            try? pipe.fileHandleForReading.close()
             return (false, 0)
         }
     }
@@ -424,14 +431,29 @@ struct CleanResult: Sendable {
     var cleanedAt: Date
     var snapshotName: String?
     var tier: CleanTier
+    /// Titles of items that actually succeeded (not merely selected).  Caps
+    /// at 50 in the history writer; the engine keeps the full success list so
+    /// a partial clean cannot credit untouched rows in the "Last cleanup" line.
+    var removedItemTitles: [String]
+    /// Category ids that had at least one successful removal, in first-success order.
+    var removedCategoryIds: [String]
 
-    init(bytesReclaimed: UInt64, itemsRemoved: Int, errors: [String], cleanedAt: Date, snapshotName: String? = nil, tier: CleanTier = .standard) {
+    init(bytesReclaimed: UInt64,
+         itemsRemoved: Int,
+         errors: [String],
+         cleanedAt: Date,
+         snapshotName: String? = nil,
+         tier: CleanTier = .standard,
+         removedItemTitles: [String] = [],
+         removedCategoryIds: [String] = []) {
         self.bytesReclaimed = bytesReclaimed
         self.itemsRemoved = itemsRemoved
         self.errors = errors
         self.cleanedAt = cleanedAt
         self.snapshotName = snapshotName
         self.tier = tier
+        self.removedItemTitles = removedItemTitles
+        self.removedCategoryIds = removedCategoryIds
     }
 
     var formattedBytesReclaimed: String {
@@ -1338,9 +1360,34 @@ final class DiskCleaner: @unchecked Sendable {
         var removedCount = 0
         var errors: [String] = []
         var snapshotCreatedName: String?
+        var removedTitles: [String] = []
+        var removedCategoryIds: [String] = []
+        var seenCategories: Set<String> = []
+
+        func noteSuccess(_ item: CleanItem) {
+            removedTitles.append(item.title)
+            let cat = item.category.rawValue
+            if seenCategories.insert(cat).inserted {
+                removedCategoryIds.append(cat)
+            }
+        }
+
+        func resultSoFar(bytes: UInt64 = 0, removed: Int, snapshot: String? = nil) -> CleanResult {
+            CleanResult(
+                bytesReclaimed: bytes,
+                itemsRemoved: removed,
+                errors: errors,
+                cleanedAt: Date(),
+                snapshotName: snapshot,
+                tier: tier,
+                removedItemTitles: removedTitles,
+                removedCategoryIds: removedCategoryIds
+            )
+        }
 
         let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
-        let hasSnapshotItems = activeItems.contains { $0.category == .apfsSnapshots }
+        let snapshotItems = activeItems.filter { $0.category == .apfsSnapshots }
+        let hasSnapshotItems = !snapshotItems.isEmpty
 
         // Track thinning completed before the safety snapshot so a failed
         // localsnapshot still reports any irreversible thin accurately.
@@ -1349,14 +1396,7 @@ final class DiskCleaner: @unchecked Sendable {
         if hasSnapshotItems {
             guard !Task.isCancelled else {
                 errors.append("Cleanup cancelled")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: 0,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: 0)
             }
             progress?(0.0, "Thinning APFS local snapshots…")
             // Offload the blocking tmutil wait to a utility task, but wire
@@ -1372,31 +1412,20 @@ final class DiskCleaner: @unchecked Sendable {
             if thinned {
                 thinnedCount = count
                 removedCount += count
+                for item in snapshotItems {
+                    noteSuccess(item)
+                }
             } else if Task.isCancelled {
                 errors.append("Cleanup cancelled")
                 progress?(1.0, "Stopped")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: thinnedCount,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: thinnedCount)
             } else {
                 errors.append("Failed to thin APFS local snapshots")
             }
             if Task.isCancelled {
                 errors.append("Cleanup cancelled")
                 progress?(1.0, "Stopped")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: removedCount,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: removedCount)
             }
         }
 
@@ -1412,14 +1441,7 @@ final class DiskCleaner: @unchecked Sendable {
                     ? "APFS snapshot failed.  APFS local snapshots were already thinned; no other data was deleted."
                     : "APFS snapshot failed.  Nothing was deleted.")
                 progress?(1.0, "Stopped")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: thinnedCount,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: thinnedCount)
             }
         }
 
@@ -1452,12 +1474,14 @@ final class DiskCleaner: @unchecked Sendable {
                     try fileManager.removeItem(at: item.url)
                     reclaimed &+= item.bytes
                     removedCount += 1
+                    noteSuccess(item)
                 } else {
                     // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
                     try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
                     reclaimed &+= item.bytes
                     removedCount += 1
+                    noteSuccess(item)
                 }
             } catch {
                 errors.append("Failed to clean \(item.title): \(error.localizedDescription)")
@@ -1466,14 +1490,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         progress?(1.0, "Complete")
 
-        return CleanResult(
-            bytesReclaimed: reclaimed,
-            itemsRemoved: removedCount,
-            errors: errors,
-            cleanedAt: Date(),
-            snapshotName: snapshotCreatedName,
-            tier: tier
-        )
+        return resultSoFar(bytes: reclaimed, removed: removedCount, snapshot: snapshotCreatedName)
     }
 
     // MARK: - Safety Guard

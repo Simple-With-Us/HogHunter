@@ -43,20 +43,20 @@ struct CleanupHistoryRecord: Codable, Equatable, Sendable {
     }
 }
 
-/// Append-only log of cleanup runs under the existing internal namespace
-/// (`~/Library/Application Support/HogHunter/` — AGENTS.md: stable across the
-/// bundle-ID migration, must not be renamed).
+/// Append-only log of cleanup runs under the existing internal app-support
+/// namespace (AGENTS.md: stable across the bundle-ID migration, must not be renamed).
 ///
-/// Writes go to a temp file that is then renamed over the real log, so a
-/// partial write never produces a half-decodable file.  Reads tolerate a
-/// missing or empty file (returning `[]`) and any record that fails to decode is
-/// skipped, so a corrupted line does not brick the panel.
+/// Every write is an append under a process-wide lock: create an empty file if
+/// needed, then seek-to-end and write the line.  Two concurrent first writes
+/// cannot each take an atomic-create branch and clobber each other.  Reads
+/// tolerate a missing or empty file (returning `[]`) and any record that fails
+/// to decode is skipped, so a corrupted line does not brick the panel.
 final class CleanupHistoryStore: @unchecked Sendable {
     /// The file Hog Hunter reads on disk.  Always explicit so tests and
     /// command-line checks never touch the installed app's log.
     let url: URL
     /// Serializes create-vs-append so two concurrent first writes cannot
-    /// each take the atomic-create branch and clobber each other.
+    /// each invent the file and replace each other.
     private let lock = NSLock()
 
     init(url: URL) {
@@ -83,7 +83,9 @@ final class CleanupHistoryStore: @unchecked Sendable {
 
     // MARK: - Writing
 
-    /// Appends one record to the log.  Safe to call from any thread.
+    /// Appends one record to the log.  Safe to call from any thread: the lock
+    /// covers create-if-missing plus the append so the first two writers cannot
+    /// both replace an empty file.
     func append(_ record: CleanupHistoryRecord) {
         let parent = url.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -98,16 +100,18 @@ final class CleanupHistoryStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        // Always append.  Create an empty file first when missing so every
+        // writer takes the same FileHandle path — never a whole-file atomic
+        // replace that can clobber a peer's first record.
         if !FileManager.default.fileExists(atPath: url.path) {
-            try? line.write(to: url, options: [.atomic])
-            return
+            FileManager.default.createFile(atPath: url.path, contents: nil, attributes: nil)
         }
 
         do {
             let handle = try FileHandle(forWritingTo: url)
             defer { try? handle.close() }
-            try? handle.seekToEnd()
-            try? handle.write(contentsOf: line)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: line)
         } catch {
             // A failed append cannot be allowed to retry blindly — the file may
             // have been replaced underneath us.  Best we can do is drop the

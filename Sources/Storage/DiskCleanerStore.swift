@@ -66,7 +66,7 @@ final class DiskCleanerStore: ObservableObject {
     }
 
     let cleaner: DiskCleaner
-    /// Append-only log under `~/Library/Application Support/HogHunter/cleanup-history.jsonl`.
+    /// Append-only cleanup history under the stable app-support namespace.
     /// Refreshed on clean and on view appear so the hero header's "last cleanup" line is always fresh.
     let historyStore: CleanupHistoryStore
     @Published private(set) var lastCleanup: CleanupHistoryRecord?
@@ -345,12 +345,15 @@ final class DiskCleanerStore: ObservableObject {
                 // items removed) is not worth a history row -- the user did not
                 // actually reclaim anything.
                 if result.itemsRemoved > 0 {
+                    // History must mirror successes only: selected-but-failed
+                    // rows (thin failure, isSafeToDelete rejection, trashItem
+                    // throw) stay out of the "Last cleanup" summary.
                     let record = CleanupHistoryRecord(
                         bytesReclaimed: result.bytesReclaimed,
                         itemsRemoved: result.itemsRemoved,
                         tier: result.tier,
-                        categoryIds: self.lastRemovedCategoryIds(itemsToClean),
-                        itemTitles: self.lastRemovedItemTitles(itemsToClean),
+                        categoryIds: result.removedCategoryIds,
+                        itemTitles: Array(result.removedItemTitles.prefix(50)),
                         snapshotName: result.snapshotName,
                         cleanedAt: result.cleanedAt
                     )
@@ -359,30 +362,6 @@ final class DiskCleanerStore: ObservableObject {
                 }
             }
         }
-    }
-
-    /// Categories that actually contributed at least one removed item, in the
-    /// order they appeared in the run.  Preserves the order of the original
-    /// scan so the summary mirrors what the user saw in the panel.
-    private func lastRemovedCategoryIds(_ items: [CleanItem]) -> [String] {
-        var seen: Set<String> = []
-        var ordered: [String] = []
-        for item in items {
-            let id = item.category.rawValue
-            if seen.insert(id).inserted {
-                ordered.append(id)
-            }
-        }
-        return ordered
-    }
-
-    /// Titles of the items that were cleaned, in scan order.  Capped so a
-    /// 5,000-item clean does not put 5,000 strings into a history file the
-    /// user never looks at.  Includes Trash rows so a trash-only clean still
-    /// leaves an audit trail.
-    private func lastRemovedItemTitles(_ items: [CleanItem]) -> [String] {
-        let titles = items.map(\.title)
-        return Array(titles.prefix(50))
     }
 
     // MARK: - Finder Integration

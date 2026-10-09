@@ -131,4 +131,45 @@ final class CleanupHistoryStoreTests: XCTestCase {
         // HogFormat.memory rounds 1,500,000,000 bytes to "1.4 GB".
         XCTAssertEqual(record.formattedBytesReclaimed, "1.4 GB")
     }
+
+    func testConcurrentFirstAppendsDoNotClobber() {
+        // Two threads racing the missing-file branch must both survive; the
+        // lock + create-then-append path is the contract behind "Safe to call
+        // from any thread".
+        let group = DispatchGroup()
+        let count = 20
+        for i in 0..<count {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let record = CleanupHistoryRecord(
+                    bytesReclaimed: UInt64(i),
+                    itemsRemoved: 1,
+                    tier: .standard,
+                    categoryIds: ["userCaches"],
+                    itemTitles: ["t\(i)"],
+                    snapshotName: nil,
+                    cleanedAt: Date(timeIntervalSince1970: 1_760_000_000 + TimeInterval(i))
+                )
+                self.store.append(record)
+                group.leave()
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(store.allRecords().count, count)
+    }
+
+    func testLatestRecordReadsTailWithoutNeedingFullSort() {
+        for i in 0..<5 {
+            store.append(CleanupHistoryRecord(
+                bytesReclaimed: UInt64(i),
+                itemsRemoved: 1,
+                tier: .standard,
+                categoryIds: ["userCaches"],
+                itemTitles: ["t\(i)"],
+                snapshotName: nil,
+                cleanedAt: Date(timeIntervalSince1970: 1_760_000_000 + TimeInterval(i))
+            ))
+        }
+        XCTAssertEqual(store.latestRecord()?.bytesReclaimed, 4)
+    }
 }
