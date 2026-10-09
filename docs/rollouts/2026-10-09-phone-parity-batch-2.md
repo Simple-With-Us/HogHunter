@@ -1,12 +1,25 @@
 # Phone parity, batch 2 (2026-10-09)
 
-Board `32919186`.  Issues: #99 (A), #101 (B), #102 (C).  PRs: A #100 (this doc starts here), B (disk cleaner), C #103 (Robotic Vacuum).
+Board `32919186`.  Issues: #99 (A), #101 (B), #102 (C).  PRs: A #100 (this doc starts here), B #104 (disk cleaner), C #103 (Robotic Vacuum).
 
 ## Ruling
 
 Same as batch 1 (`docs/rollouts/2026-10-09-phone-parity-batch-1.md`): on 2026-10-09 the owner ruled that the iPhone app reaches parity with the desktop app, mutations included.  Batch 1 fixed the broken controls and built the safeguards (per-phone tokens, the 401 throttle, controls only from the local network or Tailscale, the edit opt-in).  Batch 2 adds the desktop features the phone still lacks.  Every new mutation goes through those safeguards, sits behind an opt-in that is off by default, and gets a confirmation on the phone when it is destructive.
 
 Mac-only by design, and staying that way: the Infisical credential and sync, the pairing and remote-control toggles themselves, Reveal in Finder, and Open Activity Monitor.
+
+## What the owner needs to do
+
+Nothing is required.  One new setting exists, and four existing ones now cover more:
+
+| Setting (Mac Settings > iPhone) | What changed |
+|---|---|
+| **Allow iPhone to Run Robotic Vacuum** (new, off by default, not in the pairing alert) | Turn it on only if you want Run Now and the step results on the phone.  A full run can retire old merged git worktrees and run maintenance on remote servers. |
+| Allow iPhone to Quit or Tame Apps & Processes | Also allows Sample for 3 Seconds. |
+| Allow iPhone to Change Exclusions & View | Also allows the CPU scale, the refresh interval, the alerts and the webhook. |
+| Allow iPhone to Run Disk Cleaner | Also allows scanning, choosing items, the Extreme tier (with the notice ticked on the phone) and reading the cleanup history. |
+
+Nobody is asked again, so an owner who had those on already has the new powers.  Thinning APFS local snapshots stays Mac-only, on purpose (see PR B).  The link is still plain HTTP (board `ca962984`), which matters a little more now that a webhook address can cross it; the phone refuses to send it outside the local network and Tailscale.
 
 ## PR A: scale, network, sparkline, settings, sample
 
