@@ -29,15 +29,15 @@ There is deliberately no new opt-in for either.  Settings are the same kind of c
 
 ### Request bodies
 
-Until now every phone request was query-only, because the server stopped reading at the first blank line (or 8 KB) and dropped a body that arrived in a later TCP segment.  The server now waits for `Content-Length` bytes (at most 16 KB, answered 413 beyond that), and a client has 15 seconds to deliver a whole request.  A test sends the headers and the body in two writes a moment apart over a real loopback listener.  The webhook URL travels in the body, never in a query string.
+Until now every phone request was query-only, because the server stopped reading at the first blank line (or 8 KB) and dropped a body that arrived in a later TCP segment.  The server now waits for `Content-Length` bytes (at most 16 KB, answered 413 beyond that), and a client has 15 seconds to deliver a whole request.  A connection that closes before the request is whole is dropped without routing it.  A test sends the headers and the body in two writes a moment apart over a real loopback listener.  The webhook URL travels in the body, never in a query string.
 
 ### The webhook is a secret
 
 `hoghunter.alertWebhookURL` is the one secret in `INFISICAL.md`.  So:
 
-- The snapshot carries only `webhookConfigured`, the host, and the last delivery status with the URL taken out of it.  The phone can replace or remove the webhook and send a test, never read it back.
-- The phone may set only an `https` address with a host.  The URL crosses an unencrypted link, so a plain `http` webhook is a Mac-only setting.  The link is still plain HTTP (TLS is board `ca962984`), which is why the phone says to set it at home or over Tailscale.
-- Send Test Webhook posts to the webhook the Mac already holds.  The phone never supplies a URL for a test.
+- The snapshot carries only `webhookConfigured`, the last two labels of the host ("…slack.com", because some services put the secret endpoint id in a subdomain), and the last delivery status with the URL taken out of it.  The phone can replace or remove the webhook and send a test, never read it back.
+- The phone may set only an `https` address with a host.  The URL crosses an unencrypted link, so a plain `http` webhook is a Mac-only setting.  The link is still plain HTTP (TLS is board `ca962984`), so the phone also refuses to send the address at all unless it reached the Mac over Bonjour, a private or Tailscale address, or a `.ts.net` or `.local` name.  The Mac refuses controls from outside the local network, but it has read the request by then.
+- Send Test Webhook posts to the webhook the Mac already holds.  The phone never supplies a URL for a test, a request that sets a URL and tests it at once is refused, and tests are spaced 15 seconds apart because they post to the owner's Slack or Discord.
 
 ### Settings write through like the Mac's
 
@@ -49,7 +49,7 @@ An owner who already allows Quit or Tame now also allows Sample for 3 Seconds.  
 
 ### Sample for 3 Seconds
 
-The Mac re-checks the row's processes against the live process table (the start time check Quit and Tame use) and samples the first live member it owns.  Hog Hunter itself, another user's process and pid 1 are refused.  The report is written where the Mac's own Sample writes it, `~/Library/Logs/HogHunter/`, and no window opens on the Mac.  The phone gets the file name, its size and up to twelve lines from the report's "Sort by top of stack" section.  The Mac reads only the last 256 KB of the report to find them.
+The Mac re-checks the row's processes against the live process table (the start time check Quit and Tame use) and samples the first live member it owns.  Hog Hunter itself, another user's process and pid 1 are refused.  One sample runs at a time (409 for a second), and a `sample` that outlives its time is stopped.  The phone asks for a confirmation first, like every other action.  The report is written where the Mac's own Sample writes it, `~/Library/Logs/HogHunter/`, and no window opens on the Mac.  The phone gets the file name, its size and up to twelve lines from the report's "Sort by top of stack" section.  The Mac reads only the last 256 KB of the report to find them.
 
 ## Verification
 

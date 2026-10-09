@@ -25,15 +25,16 @@ final class CompanionServer: @unchecked Sendable {
     static let defaultPort: UInt16 = 24240
     private(set) var activePort: UInt16 = defaultPort
 
-    /// `advertise` and `preferredPort` exist for tests, which listen on a
-    /// throwaway port without publishing a Bonjour service.  The app uses the
-    /// defaults.
+    /// `advertise`, `preferredPort` and `loopbackOnly` exist for tests, which
+    /// listen on a throwaway port, on loopback only, without publishing a
+    /// Bonjour service.  The app uses the defaults.
     func start(
         name: String,
         peerID: String,
         token: String,
         advertise: Bool = true,
         preferredPort: UInt16? = CompanionServer.defaultPort,
+        loopbackOnly: Bool = false,
         onStatus: @escaping @Sendable (String) -> Void
     ) {
         queue.async {
@@ -45,11 +46,13 @@ final class CompanionServer: @unchecked Sendable {
             }
             do {
                 let preferred = preferredPort.flatMap { NWEndpoint.Port(rawValue: $0) } ?? .any
+                let parameters = NWParameters.tcp
+                if loopbackOnly { parameters.requiredInterfaceType = .loopback }
                 let listener: NWListener
-                if let fixed = try? NWListener(using: .tcp, on: preferred) {
+                if let fixed = try? NWListener(using: parameters, on: preferred) {
                     listener = fixed
                 } else {
-                    listener = try NWListener(using: .tcp, on: .any)
+                    listener = try NWListener(using: parameters, on: .any)
                 }
                 if advertise {
                     var service = NWListener.Service(name: Self.serviceName(from: name), type: CompanionService.type)
@@ -233,6 +236,13 @@ final class CompanionServer: @unchecked Sendable {
                     return
                 }
                 waiting.value = false
+                // A connection that closed or failed before the request was
+                // whole is not a request.  Routing it would act on a body that
+                // never arrived, or raise the pairing alert for a half line.
+                if completeness == .needsMore {
+                    connection.cancel()
+                    return
+                }
                 if completeness == .tooLarge {
                     connection.send(content: CompanionHTTP.payloadTooLargeReply(), completion: .contentProcessed { _ in connection.cancel() })
                     return
@@ -521,6 +531,14 @@ final class CompanionLocked<Value>: @unchecked Sendable {
     var value: Value {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+
+    /// Reads and changes the value as one step, for a check-then-set that two
+    /// threads must not both win.
+    func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&stored)
     }
 }
 

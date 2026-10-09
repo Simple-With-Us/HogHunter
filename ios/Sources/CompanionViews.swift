@@ -399,6 +399,10 @@ struct DashboardView: View {
     @State private var newPathInput = ""
     @State private var showMacSettings = false
     @State private var sampleOutcome: SampleOutcome?
+    /// A sample that finished while the Mac Settings sheet was open; shown when it closes.
+    @State private var queuedSampleOutcome: SampleOutcome?
+    @State private var pendingSampleRow: CompanionRow?
+    @State private var showSampleConfirm = false
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
         pendingQuitRow = row
@@ -647,16 +651,44 @@ struct DashboardView: View {
         .sheet(isPresented: $showMacSettings) {
             MacSettingsView(snapshot: snapshot, model: model)
         }
+        .onChange(of: showMacSettings) { _, isOpen in
+            if !isOpen, let queued = queuedSampleOutcome {
+                queuedSampleOutcome = nil
+                sampleOutcome = queued
+            }
+        }
+        .confirmationDialog(
+            "Sample \(pendingSampleRow?.name ?? "App")?",
+            isPresented: $showSampleConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Sample for 3 Seconds") {
+                if let row = pendingSampleRow { runSample(row) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(snapshot.hostName) will watch \(pendingSampleRow?.name ?? "this app") for 3 seconds and save a report in Logs/HogHunter on the Mac.\u{00A0} Nothing is changed or closed.")
+        }
         .sheet(item: $sampleOutcome) { outcome in
             SampleResultView(response: outcome.response, hostName: snapshot.hostName)
                 .presentationDetents([.medium, .large])
         }
     }
 
+    private func confirmSample(_ row: CompanionRow) {
+        pendingSampleRow = row
+        showSampleConfirm = true
+    }
+
     private func runSample(_ row: CompanionRow) {
         Task {
             let response = await model.sampleProcess(row: row)
-            sampleOutcome = SampleOutcome(response: response)
+            // One sheet at a time: hold the result until Mac Settings closes.
+            if showMacSettings {
+                queuedSampleOutcome = SampleOutcome(response: response)
+            } else {
+                sampleOutcome = SampleOutcome(response: response)
+            }
         }
     }
 
@@ -914,7 +946,7 @@ struct DashboardView: View {
 
                         if controlsOn, row.pid != nil {
                             Button {
-                                runSample(row)
+                                confirmSample(row)
                             } label: {
                                 Label("Sample for 3 Seconds", systemImage: "waveform.path.ecg")
                             }
@@ -969,7 +1001,7 @@ struct DashboardView: View {
         Section {
             if snapshot.remoteQuitAllowed == true {
                 if snapshot.rows.contains(where: { $0.canQuit }) {
-                    Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press to quit, tame or sample it on \(snapshot.hostName).  You confirm each one.  System processes and tasks owned by other users are protected.")
+                    Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press to quit, tame or sample it on \(snapshot.hostName).\u{00A0} You confirm each one.\u{00A0} System processes and tasks owned by other users are protected.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else if sortedRows.isEmpty {
