@@ -123,7 +123,7 @@ final class ProcessIdentityTests: XCTestCase {
 
     func testAnEmptyRowSaysItIsOnlyInHistory() {
         let outcome = ProcessControl.quit(members: [], fallbackName: "Gone", force: false)
-        XCTAssertEqual(outcome.message, "That hog is only in history.  Switch to Now to act on a live process.")
+        XCTAssertEqual(outcome.message, "That hog is only in history.\u{00A0} Switch to Now to act on a live process.")
     }
 }
 

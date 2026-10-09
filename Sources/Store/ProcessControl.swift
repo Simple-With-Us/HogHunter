@@ -80,7 +80,7 @@ enum ProcessControl {
         /// A one-line explanation for the panel, or nil when everything worked.
         var message: String? {
             if results.isEmpty {
-                return "That hog is only in history.  Switch to Now to act on a live process."
+                return "That hog is only in history.\u{00A0} Switch to Now to act on a live process."
             }
             var reasons: [String] = []
             for result in results {
