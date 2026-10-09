@@ -1,6 +1,6 @@
 # Phone parity, batch 1 (2026-10-09)
 
-Board `eb0efb86`.  Issue #63.  PRs: A (broken controls) #96, B (hardening) #97, C (this doc and the other doc fixes).
+Board `eb0efb86`.  Issue #63.  PRs: A (broken controls) #96, B (hardening) #97, C (this doc and the other doc fixes) #98.
 
 ## Ruling
 
