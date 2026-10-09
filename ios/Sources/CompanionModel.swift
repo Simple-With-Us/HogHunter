@@ -36,6 +36,8 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
     case rejected(String)
     /// Too many wrong tries.  The Mac asks the phone to wait (429).
     case throttled(retryAfter: Int)
+    /// The Mac's copy of Hog Hunter predates per-phone tokens.
+    case tooOld
 
     /// What the person sees.  Without this a thrown error reads as
     /// "The operation couldn't be completed. (HogHunter.CompanionClientError error 1.)"
@@ -51,6 +53,8 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
             return reason
         case .busy:
             return "The Mac is already showing a pairing request."
+        case .tooOld:
+            return "This Mac's copy of Hog Hunter is older than this app.\u{00A0} Update it on the Mac."
         case .throttled(let seconds):
             return seconds > 0
                 ? "Too many tries.\u{00A0} Wait \(seconds) seconds, then try again."
@@ -155,16 +159,39 @@ final class CompanionModel {
         isSubmittingCode = true
         defer { isSubmittingCode = false }
         do {
-            let next = try await Self.fetch(endpoint: mac.endpoint, token: token)
-            saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
+            let credential = try await Self.credential(forCode: token, endpoint: mac.endpoint)
+            let next = try await Self.fetch(endpoint: mac.endpoint, token: credential)
+            saved = SavedMac(peerID: mac.id, name: mac.name, token: credential)
             persistSaved()
             snapshot = next
             codeError = nil
             phase = .live
-        } catch CompanionClientError.unauthorized {
-            codeError = "That code does not match this Mac."
         } catch {
-            codeError = "The Mac did not answer.  Check that Share With iPhone is on."
+            codeError = Self.codeMessage(for: error)
+        }
+    }
+
+    /// Trades the typed pairing code for this phone's own token, so the Mac
+    /// can list it and cut it off alone.  A Mac that predates tokens answers
+    /// 404; the code itself then stays the credential, as it always was.
+    private static func credential(forCode code: String, endpoint: NWEndpoint) async throws -> String {
+        let name = await deviceName()
+        do {
+            return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name)
+        } catch CompanionClientError.tooOld {
+            return code
+        }
+    }
+
+    /// What to tell the person when typing a code did not work.
+    private static func codeMessage(for error: Error) -> String {
+        switch error as? CompanionClientError {
+        case .unauthorized?:
+            return "That code does not match this Mac."
+        case .throttled?, .forbidden?, .rejected?, .tooOld?:
+            return describe(error)
+        default:
+            return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on."
         }
     }
 
@@ -221,6 +248,7 @@ final class CompanionModel {
         case .forbidden(let reason)?: return reason
         case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
         case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
+        case .throttled?, .tooOld?, .rejected?: return describe(error)
         default: return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
         }
     }
@@ -502,7 +530,7 @@ final class CompanionModel {
                 defer { isWaitingForApproval = false }
                 token = try await Self.approve(endpoint: endpoint)
             } else {
-                token = typed
+                token = try await Self.credential(forCode: typed, endpoint: endpoint)
             }
             guard !Task.isCancelled else { return }
             let fetched = try await Self.fetch(endpoint: endpoint, token: token)
@@ -549,8 +577,11 @@ final class CompanionModel {
             if let data = try? CompanionJSON.encode(fetched) {
                 UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
             }
+            Task { await upgradeToDeviceTokenIfNeeded() }
         } catch CompanionClientError.unauthorized {
-            codeError = "The code no longer matches.  Enter the code from Hog Hunter Settings on your Mac."
+            codeError = CompanionToken.isDeviceToken(saved.token)
+                ? "This iPhone is no longer paired with the Mac.\u{00A0} Enter the code from Hog Hunter Settings to pair it again."
+                : "The code no longer matches.\u{00A0} Enter the code from Hog Hunter Settings on your Mac."
             phase = .code(saved.peerID)
             snapshot = nil
         } catch {
@@ -558,6 +589,36 @@ final class CompanionModel {
                 phase = .offline
                 statusLine = saved.remoteHost != nil ? "The Mac at \(saved.remoteHost!) did not answer." : "The Mac did not answer."
             }
+        }
+    }
+
+    private var lastUpgradeAttempt = Date.distantPast
+    private var macPredatesTokens = false
+
+    /// A phone paired before per-phone tokens holds the shared code, which can
+    /// only read.  Trade it for a token of its own, quietly, so quit, tame,
+    /// clean and edit work again without pairing from scratch.  Tried at most
+    /// once a minute, and not at all against a Mac that does not know tokens.
+    private func upgradeToDeviceTokenIfNeeded() async {
+        guard let current = saved,
+              !isDemoMode,
+              !macPredatesTokens,
+              !CompanionToken.isDeviceToken(current.token),
+              Date().timeIntervalSince(lastUpgradeAttempt) >= 60,
+              let endpoint = activeEndpoint(for: current) else { return }
+        lastUpgradeAttempt = Date()
+        do {
+            let token = try await CompanionConnection.enroll(endpoint: endpoint, code: current.token, deviceName: await Self.deviceName())
+            // Pairing may have changed while the Mac answered.
+            guard var latest = saved, latest.peerID == current.peerID, latest.token == current.token else { return }
+            latest.token = token
+            saved = latest
+            persistSaved()
+        } catch CompanionClientError.tooOld {
+            macPredatesTokens = true
+        } catch {
+            // Wrong code, off the local network, throttled: stay as we are
+            // and try again later.
         }
     }
 

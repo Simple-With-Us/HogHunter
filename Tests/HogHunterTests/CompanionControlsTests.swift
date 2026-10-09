@@ -7,10 +7,13 @@ import XCTest
 /// and the Mac cannot undo each other.
 final class CompanionServerRoutingTests: XCTestCase {
     private let code = "ABCD2345"
+    /// The paired phone's own token, issued by whichever server a test builds.
+    private var deviceToken = ""
 
     private func makeServer(allowClean: Bool = true) -> CompanionServer {
         let server = CompanionServer()
         server.updateToken(code)
+        deviceToken = server.devices.issue(name: "Test iPhone").token
         server.allowRemoteClean = allowClean
         // `updateToken` is queued; this drains it.
         server.syncOnQueue {}
@@ -26,7 +29,7 @@ final class CompanionServerRoutingTests: XCTestCase {
         var handlerCalls = 0
         server.onRemoteClean = { _ in handlerCalls += 1 }
 
-        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: code)) }
+        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
 
         XCTAssertEqual(disposition, .startClean)
         XCTAssertEqual(handlerCalls, 0, "routing must not run the clean on the server queue")
@@ -38,7 +41,7 @@ final class CompanionServerRoutingTests: XCTestCase {
         server.onRemoteClean = { completion in finishClean = completion }
         server.update(snapshot: Self.minimalSnapshot())
 
-        let started = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: code)) }
+        let started = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
         XCTAssertEqual(started, .startClean)
         // The clean is "running": its completion has not been called.  A
         // snapshot poll on the same queue must still be served.
@@ -52,7 +55,7 @@ final class CompanionServerRoutingTests: XCTestCase {
         let server = makeServer(allowClean: false)
         server.onRemoteClean = { _ in XCTFail("must not start") }
 
-        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: code)) }
+        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
 
         guard case .reply(let response) = disposition else { return XCTFail("expected an inline refusal") }
         XCTAssertEqual(status(of: response), 403)
@@ -70,7 +73,7 @@ final class CompanionServerRoutingTests: XCTestCase {
 
     func testCleanWithNoHandlerIsNotImplemented() {
         let server = makeServer()
-        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: code)) }
+        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
         guard case .reply(let response) = disposition else { return XCTFail("expected an inline reply") }
         XCTAssertEqual(status(of: response), 501)
     }
@@ -85,7 +88,7 @@ final class CompanionServerRoutingTests: XCTestCase {
         XCTAssertEqual(served, 0)
         _ = server.syncOnQueue { server.disposition(for: CompanionHTTP.request(token: code)) }
         XCTAssertEqual(served, 1)
-        _ = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: code)) }
+        _ = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
         XCTAssertEqual(served, 1, "only snapshot fetches count")
     }
 

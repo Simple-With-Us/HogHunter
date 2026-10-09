@@ -11,6 +11,8 @@ enum CompanionService {
     static let exclusionsPath = "/v1/exclusions"
     static let viewPath = "/v1/view"
     static let pairPath = "/v1/pair"
+    /// Trades the shared pairing code for a token of the phone's own.
+    static let enrollPath = "/v1/enroll"
     static let version = 1
 }
 
@@ -119,6 +121,14 @@ struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
 enum CompanionToken {
     static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+
+    /// A phone's own token starts with this.  The 8 character pairing code
+    /// cannot, so the two are told apart at a glance.
+    static let devicePrefix = "hh1_"
+
+    static func isDeviceToken(_ token: String) -> Bool {
+        token.hasPrefix(devicePrefix) && token.count > devicePrefix.count
+    }
 
     static func make(length: Int = 8) -> String {
         String((0..<length).compactMap { _ in alphabet.randomElement() })

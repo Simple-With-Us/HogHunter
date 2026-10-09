@@ -206,11 +206,14 @@ final class CompanionTargetsTests: XCTestCase {
 
 final class CompanionProcessRoutingTests: XCTestCase {
     private let code = "ABCD2345"
+    /// The paired phone's own token, issued by whichever server a test builds.
+    private var deviceToken = ""
     private let chrome = [ProcessKey(pid: 100, startTime: 11), ProcessKey(pid: 101, startTime: 12)]
 
     private func server(quit: Bool = true) -> CompanionServer {
         let server = CompanionServer()
         server.updateToken(code)
+        deviceToken = server.devices.issue(name: "Test iPhone").token
         server.allowRemoteQuit = quit
         let row = HogRow(id: "a-app:com.google.Chrome", keys: chrome, name: "Chrome", detail: "", cpuPercent: 0, memoryBytes: 0, peakMemoryBytes: nil, presence: nil, icon: nil, path: nil, isApp: true, isGroup: true, canQuit: true, quitBlockReason: nil)
         server.update(snapshot: CompanionServerRoutingTests.minimalSnapshot(), targets: CompanionTargets.index([row]))
@@ -232,7 +235,7 @@ final class CompanionProcessRoutingTests: XCTestCase {
             forced = force
             return (200, Data("{}".utf8))
         }
-        let result = reply(server, CompanionHTTP.quitRequest(token: code, pid: 100, rowId: "a-app:com.google.Chrome", force: true))
+        let result = reply(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "a-app:com.google.Chrome", force: true))
         XCTAssertEqual(result?.status, 200)
         XCTAssertEqual(received?.members, chrome)
         XCTAssertEqual(forced, true)
@@ -241,7 +244,7 @@ final class CompanionProcessRoutingTests: XCTestCase {
     func testQuitOfAnUnknownRowNeverReachesTheHandler() throws {
         let server = server()
         server.onRemoteQuit = { _, _ in XCTFail("must not reach the handler"); return (200, Data()) }
-        let result = try XCTUnwrap(reply(server, CompanionHTTP.quitRequest(token: code, pid: 100, rowId: "p-100-99")))
+        let result = try XCTUnwrap(reply(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "p-100-99")))
         XCTAssertEqual(result.status, 400)
         let decoded = try JSONDecoder().decode(CompanionQuitResponse.self, from: result.body)
         XCTAssertEqual(decoded.status, "changed")
@@ -252,11 +255,11 @@ final class CompanionProcessRoutingTests: XCTestCase {
         let server = server()
         var received: CompanionTarget?
         server.onRemoteTame = { target, _ in received = target; return (200, Data("{}".utf8)) }
-        _ = reply(server, CompanionHTTP.tameRequest(token: code, pid: 101))
+        _ = reply(server, CompanionHTTP.tameRequest(token: deviceToken, pid: 101))
         XCTAssertEqual(received?.members, [chrome[1]])
 
         received = nil
-        let refused = try XCTUnwrap(reply(server, CompanionHTTP.tameRequest(token: code, pid: 4242)))
+        let refused = try XCTUnwrap(reply(server, CompanionHTTP.tameRequest(token: deviceToken, pid: 4242)))
         XCTAssertEqual(refused.status, 400)
         XCTAssertNil(received)
     }
@@ -264,21 +267,22 @@ final class CompanionProcessRoutingTests: XCTestCase {
     func testQuitIsRefusedWhenTheOwnerHasNotAllowedIt() {
         let server = server(quit: false)
         server.onRemoteQuit = { _, _ in XCTFail("must not reach the handler"); return (200, Data()) }
-        XCTAssertEqual(reply(server, CompanionHTTP.quitRequest(token: code, pid: 100, rowId: "a-app:com.google.Chrome"))?.status, 403)
+        XCTAssertEqual(reply(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "a-app:com.google.Chrome"))?.status, 403)
     }
 
     func testARequestThatNamesNothingIsBad() {
         let server = server()
         server.onRemoteQuit = { _, _ in XCTFail("must not reach the handler"); return (200, Data()) }
-        let bare = Data("POST /v1/quit HTTP/1.1\r\nAuthorization: Bearer ABCD2345\r\n\r\n".utf8)
+        let bare = Data("POST /v1/quit HTTP/1.1\r\nAuthorization: Bearer \(deviceToken)\r\n\r\n".utf8)
         XCTAssertEqual(reply(server, bare)?.status, 400)
     }
 
     func testRowIdWithColonsAndSpacesSurvivesTheRoundTrip() {
         let id = "a-app:com.example.My App"
-        let request = CompanionHTTP.quitRequest(token: code, pid: 7, rowId: id)
+        let request = CompanionHTTP.quitRequest(token: deviceToken, pid: 7, rowId: id)
         var seen: CompanionProcessRequest?
-        _ = CompanionHTTP.response(request: request, body: Data(), token: code, quitHandler: { req, _ in seen = req; return (200, Data()) })
+        let device = deviceToken
+        _ = CompanionHTTP.response(request: request, body: Data(), token: code, quitHandler: { req, _ in seen = req; return (200, Data()) }, deviceAuthenticator: { $0 == device })
         XCTAssertEqual(seen?.rowId, id)
         XCTAssertEqual(seen?.pid, 7)
     }

@@ -5,6 +5,8 @@ import Network
 /// Advertises Hog Hunter on the local network and serves companion telemetry
 /// and remote control routes.  The pairing code stays in the request header.
 final class CompanionServer: @unchecked Sendable {
+    /// The phones paired with this Mac, one token each.
+    let devices: CompanionDeviceRegistry
     private let queue = DispatchQueue(label: "hoghunter.companion")
     private var listener: NWListener?
     private var payload = Data()
@@ -13,6 +15,12 @@ final class CompanionServer: @unchecked Sendable {
     private var throttle = CompanionAuthThrottle()
     private var token = ""
     private var onStatus: (@Sendable (String) -> Void)?
+
+    /// `devices` defaults to an empty, memory-only registry, so a bare server
+    /// in a test starts with no paired phones and writes nothing to disk.
+    init(devices: CompanionDeviceRegistry? = nil) {
+        self.devices = devices ?? CompanionDeviceRegistry(defaults: nil)
+    }
 
     static let defaultPort: UInt16 = 24240
     private(set) var activePort: UInt16 = defaultPort
@@ -174,7 +182,8 @@ final class CompanionServer: @unchecked Sendable {
             self.queue.async {
                 self.pairPending = false
                 self.lastPairPromptAt = Date()
-                send(CompanionHTTP.pairResponse(approvedToken: approved ? self.token : nil))
+                // Each approved phone gets a token of its own, not the shared code.
+                send(CompanionHTTP.pairResponse(approvedToken: approved ? self.devices.issue(name: deviceName).token : nil))
             }
         }
     }
@@ -198,6 +207,11 @@ final class CompanionServer: @unchecked Sendable {
                 }
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
                     self.handlePair(connection, deviceName: deviceName, peer: peer)
+                    return
+                }
+                if let enrollment = CompanionHTTP.enrollParams(in: buffer) {
+                    let reply = self.enroll(code: enrollment.code, deviceName: enrollment.deviceName, peer: peer)
+                    connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
                     return
                 }
                 switch self.disposition(for: buffer, peer: peer) {
@@ -299,7 +313,8 @@ final class CompanionServer: @unchecked Sendable {
                 }
                 return (501, Data("{\"error\": \"View handler not configured\"}".utf8))
             },
-            peerTrusted: peer.isTrusted
+            peerTrusted: peer.isTrusted,
+            deviceAuthenticator: { [devices] presented in devices.authenticate(presented, now: now) }
         )
         // 401 is a wrong credential.  404 never got as far as checking one.
         // Anything else means the credential was accepted.
@@ -314,6 +329,26 @@ final class CompanionServer: @unchecked Sendable {
             onSnapshotServed?()
         }
         return .reply(response)
+    }
+
+    /// Trades the shared pairing code for a token of the phone's own.  Runs on
+    /// `queue`.  The code is the proof that someone read it off this Mac's
+    /// Settings, so a wrong one counts against the throttle like any other
+    /// wrong credential, and the route works only for local and Tailscale peers.
+    func enroll(code: String, deviceName: String, peer: CompanionPeer, now: Date = Date()) -> Data {
+        if let wait = throttle.retryAfter(for: peer.key, now: now) {
+            return CompanionHTTP.throttledReply(retryAfter: wait)
+        }
+        guard peer.isTrusted else {
+            return CompanionHTTP.untrustedNetworkReply()
+        }
+        guard CompanionToken.matches(code, token) else {
+            throttle.recordFailure(peer: peer.key, now: now)
+            return CompanionHTTP.enrollRejectedReply()
+        }
+        throttle.recordSuccess(peer: peer.key)
+        let issued = devices.issue(name: deviceName, now: now)
+        return CompanionHTTP.enrollResponse(token: issued.token, deviceId: issued.device.id)
     }
 
     /// The answer to an exclusions or view change while the owner has not

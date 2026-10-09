@@ -162,6 +162,8 @@ final class CompanionAuthThrottleTests: XCTestCase {
 
 final class CompanionServerHardeningTests: XCTestCase {
     private let code = "ABCD2345"
+    /// The paired phone's own token, issued by whichever server a test builds.
+    private var deviceToken = ""
     private let lan = CompanionPeer(key: "192.168.1.20", isTrusted: true)
     private let tailnet = CompanionPeer(key: "100.101.7.8", isTrusted: true)
     private let wan = CompanionPeer(key: "203.0.113.9", isTrusted: false)
@@ -170,6 +172,7 @@ final class CompanionServerHardeningTests: XCTestCase {
     private func makeServer() -> CompanionServer {
         let server = CompanionServer()
         server.updateToken(code)
+        deviceToken = server.devices.issue(name: "Test iPhone").token
         server.allowRemoteQuit = true
         server.allowRemoteClean = true
         server.allowRemoteEdit = true
@@ -197,11 +200,11 @@ final class CompanionServerHardeningTests: XCTestCase {
         server.onRemoteViewUpdate = { _ in (200, Data("{}".utf8)) }
         server.onRemoteClean = { _ in }
         for peer in [lan, tailnet] {
-            XCTAssertEqual(status(server, CompanionHTTP.quitRequest(token: code, pid: 100, rowId: "p-100-11"), from: peer), 200)
-            XCTAssertEqual(status(server, CompanionHTTP.tameRequest(token: code, pid: 100, rowId: "p-100-11"), from: peer), 200)
-            XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: code, toggleCategory: "trash"), from: peer), 200)
-            XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: code, window: "Now"), from: peer), 200)
-            XCTAssertEqual(status(server, CompanionHTTP.cleanRequest(token: code), from: peer), 202)
+            XCTAssertEqual(status(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: peer), 200)
+            XCTAssertEqual(status(server, CompanionHTTP.tameRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: peer), 200)
+            XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: deviceToken, toggleCategory: "trash"), from: peer), 200)
+            XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: deviceToken, window: "Now"), from: peer), 200)
+            XCTAssertEqual(status(server, CompanionHTTP.cleanRequest(token: deviceToken), from: peer), 202)
         }
     }
 
@@ -212,11 +215,11 @@ final class CompanionServerHardeningTests: XCTestCase {
         server.onRemoteExclusionsUpdate = { _ in XCTFail("exclusions must not run"); return (200, Data()) }
         server.onRemoteViewUpdate = { _ in XCTFail("view must not run"); return (200, Data()) }
         server.onRemoteClean = { _ in XCTFail("clean must not run") }
-        XCTAssertEqual(status(server, CompanionHTTP.quitRequest(token: code, pid: 100, rowId: "p-100-11"), from: wan), 403)
-        XCTAssertEqual(status(server, CompanionHTTP.tameRequest(token: code, pid: 100, rowId: "p-100-11"), from: wan), 403)
-        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: code, toggleCategory: "trash"), from: wan), 403)
-        XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: code, window: "Now"), from: wan), 403)
-        XCTAssertEqual(status(server, CompanionHTTP.cleanRequest(token: code), from: wan), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: wan), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.tameRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: wan), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: deviceToken, toggleCategory: "trash"), from: wan), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: deviceToken, window: "Now"), from: wan), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.cleanRequest(token: deviceToken), from: wan), 403)
     }
 
     func testReadingTheSnapshotStillWorksFromAnywhereWithAValidToken() {

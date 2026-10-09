@@ -45,6 +45,32 @@ enum CompanionConnection {
         }
     }
 
+    /// Trades the Mac's pairing code for a token of this phone's own.  A Mac
+    /// that predates per-phone tokens answers 404 (`tooOld`).
+    static func enroll(endpoint: NWEndpoint, code: String, deviceName: String) async throws -> String {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.enrollRequest(code: code, deviceName: deviceName),
+            timeout: defaultTimeout
+        )
+        let json = (try? JSONSerialization.jsonObject(with: reply.body)) as? [String: Any]
+        switch reply.status {
+        case 200:
+            if let token = json?["token"] as? String, CompanionToken.isDeviceToken(token) { return token }
+            throw CompanionClientError.badResponse
+        case 401:
+            throw CompanionClientError.unauthorized
+        case 403:
+            throw CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac did not allow this iPhone to pair.")
+        case 404:
+            throw CompanionClientError.tooOld
+        case 429:
+            throw CompanionClientError.throttled(retryAfter: (json?["retryAfter"] as? Int) ?? 0)
+        default:
+            throw CompanionClientError.badResponse
+        }
+    }
+
     static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
         let reply = try await exchange(
             endpoint: endpoint,

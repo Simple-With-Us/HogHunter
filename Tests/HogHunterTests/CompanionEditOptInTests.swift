@@ -6,10 +6,13 @@ import XCTest
 /// consistent with Quit and Clean.
 final class CompanionEditOptInTests: XCTestCase {
     private let code = "ABCD2345"
+    /// The paired phone's own token, issued by whichever server a test builds.
+    private var deviceToken = ""
 
     private func server(edit: Bool) -> CompanionServer {
         let server = CompanionServer()
         server.updateToken(code)
+        deviceToken = server.devices.issue(name: "Test iPhone").token
         server.allowRemoteEdit = edit
         server.syncOnQueue {}
         return server
@@ -23,18 +26,18 @@ final class CompanionEditOptInTests: XCTestCase {
     func testExclusionsAreRefusedUntilTheOwnerAllowsEdits() {
         let server = server(edit: false)
         server.onRemoteExclusionsUpdate = { _ in XCTFail("must not reach the handler"); return (200, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: code, toggleCategory: "trash")), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: deviceToken, toggleCategory: "trash")), 403)
     }
 
     func testViewChangesAreRefusedUntilTheOwnerAllowsEdits() {
         let server = server(edit: false)
         server.onRemoteViewUpdate = { _ in XCTFail("must not reach the handler"); return (200, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: code, window: "Past Hour")), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: deviceToken, window: "Past Hour")), 403)
     }
 
     func testTheRefusalNamesTheSettingToTurnOn() throws {
         let server = server(edit: false)
-        guard case .reply(let data) = server.syncOnQueue({ server.disposition(for: CompanionHTTP.viewRequest(token: code, grouping: "Processes")) }) else {
+        guard case .reply(let data) = server.syncOnQueue({ server.disposition(for: CompanionHTTP.viewRequest(token: deviceToken, grouping: "Processes")) }) else {
             return XCTFail("expected an inline refusal")
         }
         let body = try XCTUnwrap(CompanionHTTP.parseResponse(data)?.body)
@@ -49,8 +52,8 @@ final class CompanionEditOptInTests: XCTestCase {
         server.onRemoteExclusionsUpdate = { exclusions = $0; return (200, Data("{}".utf8)) }
         server.onRemoteViewUpdate = { view = $0; return (200, Data("{}".utf8)) }
 
-        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: code, addPath: "/Users/jay/Keep")), 200)
-        XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: code, window: "Now")), 200)
+        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: deviceToken, addPath: "/Users/jay/Keep")), 200)
+        XCTAssertEqual(status(server, CompanionHTTP.viewRequest(token: deviceToken, window: "Now")), 200)
         XCTAssertEqual(exclusions?.addPath, "/Users/jay/Keep")
         XCTAssertEqual(view?.window, "Now")
     }
@@ -60,7 +63,7 @@ final class CompanionEditOptInTests: XCTestCase {
         server.allowRemoteQuit = true
         server.allowRemoteClean = true
         server.onRemoteExclusionsUpdate = { _ in XCTFail("must not reach the handler"); return (200, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: code, toggleCategory: "trash")), 403)
+        XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: deviceToken, toggleCategory: "trash")), 403)
     }
 
     func testTheSnapshotCarriesTheOptIn() throws {

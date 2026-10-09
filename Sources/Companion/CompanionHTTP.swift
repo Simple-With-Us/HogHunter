@@ -12,7 +12,8 @@ enum CompanionHTTP {
         tameHandler: ((_ request: CompanionProcessRequest, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
         viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
-        peerTrusted: Bool = true
+        peerTrusted: Bool = true,
+        deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
         let text = String(data: request, encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
@@ -36,16 +37,27 @@ enum CompanionHTTP {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
+        // A phone presents either its own token (issued at pairing) or, if it
+        // paired before tokens existed, the shared pairing code.
         let presented = bearerToken(in: lines)
-        guard CompanionToken.matches(presented, token) else {
+        let isDeviceToken = deviceAuthenticator?(presented) ?? false
+        guard isDeviceToken || CompanionToken.matches(presented, token) else {
             return message(status: 401, reason: "Unauthorized", body: Data("Unauthorized".utf8))
         }
 
-        // Reading the snapshot is allowed from anywhere with a valid token.
-        // Everything that changes the Mac is not: the link is unencrypted, so
-        // it is accepted only from the local network or Tailscale.
-        if path != CompanionService.path, !peerTrusted {
-            return untrustedNetworkReply()
+        if path != CompanionService.path {
+            // Reading the snapshot is allowed from anywhere with a valid
+            // credential.  Everything that changes the Mac is not: the link is
+            // unencrypted, so it is accepted only from the local network or
+            // Tailscale.
+            if !peerTrusted {
+                return untrustedNetworkReply()
+            }
+            // And only with a phone's own token.  The shared code reads, and
+            // is traded for a token (the enroll route) before the phone acts.
+            if !isDeviceToken {
+                return sharedCodeCannotControlReply()
+            }
         }
 
         if path == CompanionService.path {
@@ -170,6 +182,60 @@ enum CompanionHTTP {
     static func untrustedNetworkReply() -> Data {
         let body = Data(#"{"status":"forbidden","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
         return jsonReply(status: 403, body: body)
+    }
+
+    /// The answer to a control request that carries only the shared pairing
+    /// code.  A current phone trades the code for its own token on launch;
+    /// this is what an older build sees.
+    static func sharedCodeCannotControlReply() -> Data {
+        let body = Data(#"{"status":"forbidden","error":"This iPhone is still paired with the shared code, which can only read.\u00a0 Open Hog Hunter on the iPhone to update it, or pair it again."}"#.utf8)
+        return jsonReply(status: 403, body: body)
+    }
+
+    // MARK: - Trading the code for a token
+
+    static func enrollRequest(code: String, deviceName: String) -> Data {
+        let lines = [
+            "POST \(CompanionService.enrollPath)?code=\(queryAllowedValue(code))&device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
+            "Host: hoghunter",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    /// The code and device name when `request` is a POST to the enroll route,
+    /// otherwise nil.  No bearer token: the code is the proof.
+    static func enrollParams(in request: Data) -> (code: String, deviceName: String)? {
+        let text = String(data: request.prefix(2_048), encoding: .isoLatin1) ?? ""
+        guard let requestLine = text.components(separatedBy: "\r\n").first else { return nil }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2, parts[0] == "POST" else { return nil }
+        let pieces = parts[1].split(separator: "?", maxSplits: 1)
+        guard pieces.first.map(String.init) == CompanionService.enrollPath else { return nil }
+        var code = ""
+        var name = ""
+        if pieces.count == 2 {
+            for pair in pieces[1].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                let value = String(kv[1]).removingPercentEncoding ?? ""
+                if kv[0] == "code" { code = value }
+                if kv[0] == "device" { name = value }
+            }
+        }
+        let clean = sanitizedDeviceName(name)
+        return (code, clean.isEmpty ? "An iPhone" : clean)
+    }
+
+    static func enrollResponse(token: String, deviceId: String) -> Data {
+        let body = (try? JSONSerialization.data(withJSONObject: ["token": token, "deviceId": deviceId])) ?? Data()
+        return jsonReply(status: 200, body: body)
+    }
+
+    static func enrollRejectedReply() -> Data {
+        jsonReply(status: 401, body: Data(#"{"status":"unauthorized","error":"That code does not match this Mac."}"#.utf8))
     }
 
     /// The answer to a client that has been guessing.  `Retry-After` is in seconds.

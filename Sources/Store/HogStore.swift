@@ -200,7 +200,12 @@ final class HogStore: ObservableObject {
         static let companionPeerID = "companionPeerID"
     }
 
-    private let companionServer = CompanionServer()
+    private let companionServer: CompanionServer
+    /// The phones paired with this Mac, one token each.
+    let companionDevices: CompanionDeviceRegistry
+    /// Paired phones, newest first, for Settings.  Refreshed when one pairs or
+    /// is revoked and whenever Settings opens.
+    @Published private(set) var pairedDevices: [CompanionDevice] = []
     private var companionPeerID = ""
 
     // MARK: - Machinery
@@ -253,6 +258,10 @@ final class HogStore: ObservableObject {
     ) {
         let infisical = infisical ?? InfisicalSettings.shared
         self.defaults = defaults
+        let devices = CompanionDeviceRegistry(defaults: defaults)
+        self.companionDevices = devices
+        self.companionServer = CompanionServer(devices: devices)
+        self.pairedDevices = devices.devices
         self.infisical = infisical
         let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
         self.history = history
@@ -1253,6 +1262,9 @@ final class HogStore: ObservableObject {
     // MARK: - Companion Handlers
 
     private func setupCompanionHandlers() {
+        companionDevices.onChange { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshPairedDevices() }
+        }
         companionServer.allowRemoteQuit = allowRemoteQuit
         companionServer.allowRemoteClean = allowRemoteClean
         companionServer.allowRemoteEdit = allowRemoteEdit
@@ -1344,7 +1356,7 @@ final class HogStore: ObservableObject {
     private func askToApprovePairing(deviceName: String) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Pair \(deviceName)?"
-        alert.informativeText = "\(deviceName) is asking to see Hog Hunter on this Mac.  Allow only a phone you own.  You can change these choices later in Settings > iPhone."
+        alert.informativeText = "\(deviceName) is asking to see Hog Hunter on this Mac.\u{00A0} Allow only a phone you own.\u{00A0} You can change these choices, or remove the phone, later in Settings > iPhone."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Don't Allow")
@@ -1687,6 +1699,22 @@ final class HogStore: ObservableObject {
     }
 
     // MARK: - iPhone companion
+
+    func refreshPairedDevices() {
+        pairedDevices = companionDevices.devices
+    }
+
+    /// Cuts off one phone.  Its token stops working at once; it falls back to
+    /// the pairing screen the next time it asks.
+    func revokeCompanionDevice(id: String) {
+        companionDevices.revoke(id: id)
+        refreshPairedDevices()
+    }
+
+    func revokeAllCompanionDevices() {
+        companionDevices.revokeAll()
+        refreshPairedDevices()
+    }
 
     func regenerateCompanionCode() {
         companionCode = CompanionToken.make()

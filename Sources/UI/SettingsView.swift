@@ -355,6 +355,14 @@ private struct CleanerSettingsTab: View {
 
 private struct IPhoneSettingsTab: View {
     @EnvironmentObject private var store: HogStore
+    @State private var confirmRevokeAll = false
+
+    static func deviceCaption(_ device: CompanionDevice) -> String {
+        let paired = device.pairedAt.formatted(date: .abbreviated, time: .shortened)
+        guard let seen = device.lastSeenAt else { return "Paired \(paired)" }
+        let relative = RelativeDateTimeFormatter().localizedString(for: seen, relativeTo: Date())
+        return "Paired \(paired), last seen \(relative)"
+    }
 
     var body: some View {
         Form {
@@ -377,6 +385,37 @@ private struct IPhoneSettingsTab: View {
                     HStack {
                         Button("Copy Code") { copyCompanionCode() }
                         Button("New Code") { store.regenerateCompanionCode() }
+                    }
+                    Text("The code pairs a new iPhone, which then keeps a token of its own.\u{00A0} A new code does not disconnect a phone that is already paired.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Section("Paired iPhones") {
+                if store.pairedDevices.isEmpty {
+                    Text("No iPhone has paired yet.\u{00A0} A phone that pairs is listed here, and you can remove it at any time.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(store.pairedDevices) { device in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.name)
+                                    .font(.system(size: 12, weight: .medium))
+                                Text(Self.deviceCaption(device))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Revoke") { store.revokeCompanionDevice(id: device.id) }
+                                .help("Cut this iPhone off.  It must pair again to reconnect.")
+                        }
+                    }
+                    if store.pairedDevices.count > 1 {
+                        Button("Revoke All") { confirmRevokeAll = true }
                     }
                 }
             }
@@ -433,6 +472,13 @@ private struct IPhoneSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(width: SettingsView.windowWidth - 80)
+        .onAppear { store.refreshPairedDevices() }
+        .alert("Revoke All iPhones?", isPresented: $confirmRevokeAll) {
+            Button("Revoke All", role: .destructive) { store.revokeAllCompanionDevices() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every paired iPhone is cut off and must pair again.")
+        }
     }
 
     private func spacedCode(_ code: String) -> String {
