@@ -1786,9 +1786,10 @@ final class HogStore: ObservableObject {
                 tier = plan.tier
                 itemsToClean = plan.items
             }
-            // A scan is good for one clean.  What it lists is gone or changing
-            // once the clean has run, so the next clean needs a new scan.
-            remoteScanState = .idle
+            // The scan is spent when the clean has removed something (below),
+            // not before: one that stops early (the safety snapshot failed, the
+            // connection dropped) touched nothing, and its scan still stands.
+            // Meanwhile `remoteCleanInFlight` refuses a second clean.
             needsScan = false
         } else {
             // An older phone: the Standard clean with the Mac's default selection.
@@ -1846,6 +1847,12 @@ final class HogStore: ObservableObject {
             exclusions: exclusions,
             progress: makeRemoteCleanReporter(runId: runId, totalItems: totalItems)
         )
+
+        // What the scan listed is gone or changing once a clean has removed
+        // something, so the next clean needs a new scan.
+        if request != nil, cleanResult.itemsRemoved > 0 {
+            discardRemoteScan()
+        }
 
         // The Mac's cleaner writes a row for every clean that removed
         // something; a clean the phone starts is no different.

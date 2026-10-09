@@ -79,7 +79,7 @@ The Mac re-checks the row's processes against the live process table (the start 
 
 ### The phone never names a path
 
-`CleanItem.id` is the item's path, so the phone is not allowed to send one.  The Mac holds the scan under an id (`RemoteCleanScan`), the report lists items with short references (`"3.12"` is the thirteenth item of the fourth category), and a clean sends the scan id and the references back.  `CompanionCleanerReport.plan` resolves them against the Mac's own scan and refuses the whole request on any of: no scan, a different scan id, a scan older than 30 minutes, a tier that does not match the scan, an unknown tier, an unknown reference, Extreme without the acknowledgement, or nothing selected.  A scan is spent by one clean.  `DiskCleaner.clean` then re-applies the current exclusions and `isSafeToDelete` to every item, as it does for the Mac.
+`CleanItem.id` is the item's path, so the phone is not allowed to send one.  The Mac holds the scan under an id (`RemoteCleanScan`), the report lists items with short references (`"3.12"` is the thirteenth item of the fourth category), and a clean sends the scan id and the references back.  `CompanionCleanerReport.plan` resolves them against the Mac's own scan and refuses the whole request on any of: no scan, a different scan id, a scan older than 30 minutes, a tier that does not match the scan, an unknown tier, an unknown reference, Extreme without the acknowledgement, or nothing selected.  A scan is spent by a clean that removes something.  `DiskCleaner.clean` then re-applies the current exclusions and `isSafeToDelete` to every item, as it does for the Mac.
 
 ### Choosing items has its own route
 
@@ -87,7 +87,7 @@ The Mac re-checks the row's processes against the live process table (the start 
 
 ### Snapshot thinning is Mac-only
 
-`DiskCleaner.clean` thins every APFS local snapshot in one call whichever row is ticked, and it does so before the safety snapshot is taken.  Ticking one snapshot row therefore removes the rollback point an earlier clean left, and the confirmation ("A snapshot is created first, and if that fails nothing is deleted") would be false.  The Mac has the same behavior, but a phone feature must not ship without its safeguards, so the phone neither lists nor accepts that category.  This is a deliberate gap in parity and is easy to lift once thinning is fixed to be per-item and to run after the safety snapshot.
+`DiskCleaner.clean` thins every APFS local snapshot in one call whichever row is ticked, and it does so before the safety snapshot is taken.  Ticking one snapshot row therefore removes the rollback point an earlier clean left, and the confirmation ("A snapshot is created first, and if that fails nothing is deleted") would be false.  The Mac has the same behavior, but a phone feature must not ship without its safeguards, so the phone neither lists nor accepts that category.  This is a deliberate gap in parity and is easy to lift once thinning is fixed to be per-item and to run after the safety snapshot.  The Mac-side defect is board `f6506a29`, issue #107.
 
 ### Extreme
 
@@ -103,7 +103,7 @@ The report lists at most 100 items per category, largest first, and says how man
 
 ### Existing opt-in gains a little
 
-An owner who already allows Run Disk Cleaner now also allows Extreme (with the phone's acknowledgement), item selection, and reading the scan and history.  The Settings description says so.  A bare `POST /v1/clean` from an older phone is unchanged: the Standard clean with the Mac's default selection, and now recorded in history.  A scan that never finishes is replaced by a new one after 15 minutes, and turning the cleaner opt-in off drops the held scan.
+An owner who already allows Run Disk Cleaner now also allows Extreme (with the phone's acknowledgement), item selection, and reading the scan and history.  The Settings description says so.  A bare `POST /v1/clean` from an older phone is unchanged: the Standard clean with the Mac's default selection, and now recorded in history.  A scan that never finishes is replaced by a new one after 15 minutes, and turning the cleaner opt-in off drops the held scan.  A clean that removes nothing (the safety snapshot failed, the connection dropped) does not spend the scan, so the person can retry; one that removes something does.
 
 ### Follow-ups
 

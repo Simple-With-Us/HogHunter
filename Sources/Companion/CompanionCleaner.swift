@@ -166,7 +166,9 @@ enum CompanionCleanerReport {
     /// The phone's view of one finished cleanup.
     static func record(_ record: CleanupHistoryRecord) -> CompanionCleanupRecord {
         CompanionCleanupRecord(
-            id: "\(Int(record.cleanedAt.timeIntervalSince1970 * 1000))-\(record.bytesReclaimed)",
+            // Unique enough that a list never confuses two rows: the time to the
+            // millisecond, and what the clean did and who started it.
+            id: "\(Int(record.cleanedAt.timeIntervalSince1970 * 1000))-\(record.bytesReclaimed)-\(record.itemsRemoved)-\(record.tier.rawValue)-\(record.source ?? "mac")",
             cleanedAt: record.cleanedAt,
             bytesReclaimed: record.bytesReclaimed,
             sizeText: HogFormat.memory(record.bytesReclaimed),

@@ -263,6 +263,16 @@ final class CompanionCleanerReportTests: XCTestCase {
         XCTAssertTrue(CleanerCopy.extremeBody.contains("git repositories and critical directories are strictly protected"))
     }
 
+    func testTwoCleansNeverShareARowId() {
+        let when = t0
+        let base = CleanupHistoryRecord(bytesReclaimed: 5, itemsRemoved: 1, tier: .standard, categoryIds: [], itemTitles: [], snapshotName: nil, cleanedAt: when)
+        let fromPhone = CleanupHistoryRecord(bytesReclaimed: 5, itemsRemoved: 1, tier: .standard, categoryIds: [], itemTitles: [], snapshotName: nil, source: "iPhone", cleanedAt: when)
+        let moreItems = CleanupHistoryRecord(bytesReclaimed: 5, itemsRemoved: 2, tier: .standard, categoryIds: [], itemTitles: [], snapshotName: nil, cleanedAt: when)
+        let extreme = CleanupHistoryRecord(bytesReclaimed: 5, itemsRemoved: 1, tier: .extreme, categoryIds: [], itemTitles: [], snapshotName: nil, cleanedAt: when)
+        let ids = [base, fromPhone, moreItems, extreme].map { CompanionCleanerReport.record($0).id }
+        XCTAssertEqual(Set(ids).count, 4, "\(ids)")
+    }
+
     func testTheHistoryRowTheMacWritesAndThePhoneReads() throws {
         let cleaned = CleanResult(
             bytesReclaimed: 5_010, itemsRemoved: 2, errors: [], cleanedAt: t0, snapshotName: "snap", tier: .standard,
@@ -612,6 +622,18 @@ final class CompanionCleanerStoreTests: XCTestCase {
         XCTAssertEqual(reply.status, 200)
         XCTAssertTrue(files.trashed.isEmpty)
         XCTAssertTrue(history.allRecords().isEmpty, "a clean that removed nothing leaves no row")
+
+        // It touched nothing, so the scan still stands and the person can retry
+        // without scanning again.
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "ready")
+        store.remoteCleanerFactory = { DiskCleaner(fileManager: files, makeSnapshot: { (true, "snap-retry") }) }
+        let retry = await store.runRemoteClean(request: request)
+        XCTAssertEqual(retry.status, 200)
+        XCTAssertEqual(files.trashed.count, 1)
+        // Now something was removed, so the scan is spent.
+        let again = await store.runRemoteClean(request: request)
+        XCTAssertEqual(again.status, 409)
+        XCTAssertEqual(files.trashed.count, 1)
     }
 
     func testACleanFromTheWrongOrAnUnknownScanTouchesNothing() async throws {

@@ -717,10 +717,10 @@ final class CompanionTrustedEndpointTests: XCTestCase {
     }
 
     func testOnlyMagicDnsAndLocalNamesAreTrusted() {
-        for name in ["my-mac.tailnet.ts.net", "MY-MAC.TAILNET.TS.NET.", "studio.local", "localhost"] {
+        for name in ["my-mac.tailnet.ts.net", "MY-MAC.TAILNET.TS.NET.", "studio.local", "studio.local.", "localhost", "localhost."] {
             XCTAssertTrue(CompanionPeer.isTrustedEndpoint(host(name)), name)
         }
-        for name in ["example.com", "ts.net.evil.com", "mac.jays.services", "notts.net"] {
+        for name in ["example.com", "ts.net.evil.com", "mac.jays.services", "notts.net", "local"] {
             XCTAssertFalse(CompanionPeer.isTrustedEndpoint(host(name)), name)
         }
     }
