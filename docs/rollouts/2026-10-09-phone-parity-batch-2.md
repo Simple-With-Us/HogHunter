@@ -51,6 +51,10 @@ An owner who already allows Quit or Tame now also allows Sample for 3 Seconds.  
 
 The Mac re-checks the row's processes against the live process table (the start time check Quit and Tame use) and samples the first live member it owns.  Hog Hunter itself, another user's process and pid 1 are refused.  One sample runs at a time (409 for a second), and a `sample` that outlives its time is stopped.  The phone asks for a confirmation first, like every other action.  The report is written where the Mac's own Sample writes it, `~/Library/Logs/HogHunter/`, and no window opens on the Mac.  The phone gets the file name, its size and up to twelve lines from the report's "Sort by top of stack" section.  The Mac reads only the last 256 KB of the report to find them.
 
+## Screenshots
+
+The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once on the 6.3 inch iPhone as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
+
 ## Verification
 
 - `xcodegen generate && xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.

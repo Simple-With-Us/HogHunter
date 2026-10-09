@@ -374,18 +374,7 @@ final class CompanionModel {
         defer { samplingRowId = nil }
         if isDemoMode {
             try? await Task.sleep(for: .seconds(1))
-            return CompanionSampleResponse(
-                status: "ok",
-                name: row.name,
-                message: "Sampled \(row.name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
-                fileName: "\(row.name)-\(row.pid ?? 0)-20261009-101500.txt",
-                bytes: 412_000,
-                summary: [
-                    "__psynch_cvwait  (in libsystem_kernel.dylib)        1840",
-                    "mach_msg2_trap  (in libsystem_kernel.dylib)        1212",
-                    "-[NSApplication run]  (in AppKit)        96",
-                ]
-            )
+            return Self.sampleSampleResponse(name: row.name, rowId: row.pid ?? 0)
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             return CompanionSampleResponse(status: "failed", name: row.name, error: "Not connected to Mac.")
@@ -395,6 +384,23 @@ final class CompanionModel {
         } catch {
             return CompanionSampleResponse(status: "failed", name: row.name, error: Self.describe(error))
         }
+    }
+
+    /// What a finished Sample for 3 Seconds looks like, for demo mode and the
+    /// screenshot lane.
+    static func sampleSampleResponse(name: String, rowId: Int32) -> CompanionSampleResponse {
+        CompanionSampleResponse(
+            status: "ok",
+            name: name,
+            message: "Sampled \(name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
+            fileName: "\(name)-\(rowId)-20261009-101500.txt",
+            bytes: 412_000,
+            summary: [
+                "__psynch_cvwait  (in libsystem_kernel.dylib)        1840",
+                "mach_msg2_trap  (in libsystem_kernel.dylib)        1212",
+                "-[NSApplication run]  (in AppKit)        96",
+            ]
+        )
     }
 
     /// Sends a settings change to the Mac.  The Mac checks every value; a

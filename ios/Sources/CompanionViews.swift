@@ -397,8 +397,12 @@ struct DashboardView: View {
     @State private var showTameResultAlert = false
     @State private var showAddPathAlert = false
     @State private var newPathInput = ""
-    @State private var showMacSettings = false
-    @State private var sampleOutcome: SampleOutcome?
+    // The screenshot lane launches the app with these flags to put each new
+    // surface on screen (scripts/capture-app-screenshots.sh); nothing else sets them.
+    @State private var showMacSettings = ProcessInfo.processInfo.arguments.contains("-HogHunterMacSettings")
+    @State private var sampleOutcome: SampleOutcome? = ProcessInfo.processInfo.arguments.contains("-HogHunterSampleResult")
+        ? SampleOutcome(response: CompanionModel.sampleSampleResponse(name: "Google Chrome", rowId: 1042))
+        : nil
     /// A sample that finished while the Mac Settings sheet was open; shown when it closes.
     @State private var queuedSampleOutcome: SampleOutcome?
     @State private var pendingSampleRow: CompanionRow?
