@@ -71,6 +71,39 @@ def launch_pid(udid):
     return app_pid_from_launch(result.stdout) if result.returncode == 0 else None
 
 
+# Extra screens, captured once on the 6.3 inch iPhone so each new surface is
+# seen by CI and not only the Activity tab.  A flag puts the screen on top of
+# the sample dashboard (see DashboardView).  These are best effort: a missing
+# one is a warning, because the five format frames above are the gate.
+EXTRA_SCREENS = [
+    ("network", ["-HogHunterNetwork"]),
+    ("storage", ["-HogHunterStorage"]),
+    ("mac-settings", ["-HogHunterMacSettings"]),
+    ("sample-result", ["-HogHunterSampleResult"]),
+]
+
+
+def capture_extras(udid, out_dir):
+    for name, flags in EXTRA_SCREENS:
+        out_file = f"{out_dir}/extra_{name}.png"
+        subprocess.run(["xcrun", "simctl", "terminate", udid, bundle_id], capture_output=True)
+        launch = subprocess.run(["xcrun", "simctl", "launch", udid, bundle_id, "-HogHunterSample", *flags], capture_output=True, text=True)
+        if launch.returncode != 0:
+            print(f"  WARN: extra screen {name}: launch failed: {launch.stderr.strip()}")
+            continue
+        time.sleep(5)
+        res = subprocess.run(["xcrun", "simctl", "io", udid, "screenshot", out_file], capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.isfile(out_file):
+            print(f"  WARN: extra screen {name}: screenshot failed")
+            continue
+        problem = screenshot_problem(out_file)
+        if problem:
+            print(f"  WARN: extra screen {name}: frame rejected: {problem}")
+            os.remove(out_file)
+            continue
+        print(f"  OK extra screen saved: {out_file}")
+
+
 def screenshot_problem(path):
     """Sanity-check the captured PNG itself.  Returns None when it looks like
     real UI, else why not.  Stdlib only: the PNG header must be valid and the
@@ -244,6 +277,8 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
                 failures += 1
                 continue
             print(f"  ✓ Saved {out_file}")
+            if fmt_key == "iphone-6.3-6.1":
+                capture_extras(udid, "screenshots/ios")
         else:
             print(f"[{fmt_key}] ERROR: screenshot failed: {res.stderr.strip() or 'no file written'}")
             failures += 1

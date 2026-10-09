@@ -205,7 +205,7 @@ final class CompanionServerHardeningTests: XCTestCase {
         let disposition = server.syncOnQueue { server.disposition(for: request, peer: peer, now: now ?? t0) }
         switch disposition {
         case .reply(let data): return CompanionHTTP.parseResponse(data)?.status
-        case .startClean: return 202
+        case .startClean, .startSample: return 202
         }
     }
 

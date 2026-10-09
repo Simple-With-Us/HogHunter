@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+iPhone companion, phone parity batch 2, PR A (board `32919186`, issue 99):
+
+- CPU scale picker on the phone: Per Core or Per Machine, with the same explanation Settings shows on the Mac.  It uses the existing view route, so it needs Allow iPhone to Change Exclusions & View.
+- The Network tab shows the Mac's download and upload speed now and its 24-hour peak, worded by the Mac so both screens agree.  The CPU card has the sparkline the menu bar draws, fed by the last 30 machine CPU readings.
+- New Mac Settings screen on the phone: refresh interval, alerts on or off, CPU threshold, sustained minutes, the webhook, and Send Test Webhook.  It needs Allow iPhone to Change Exclusions & View.  The Mac checks every value and applies none of a request with a bad one.  The webhook address is write-only from the phone (the Mac never sends it back, only the last two labels of its host), must be `https`, travels in the request body, and is sent only over the local network or Tailscale.  A test message goes to the webhook the Mac holds, not more than once every 15 seconds.  Changes go through the same properties the Settings window uses, including the Infisical write-through.
+- Sample for 3 Seconds from a row's long-press menu, behind Allow iPhone to Quit or Tame Apps & Processes.  The Mac re-checks the process against the live process table first, writes the report to `~/Library/Logs/HogHunter/` without opening a window, and the phone gets the file name, its size and the busiest call sites.
+- Fixed a crash: a request line ending in a bare `?` (for example `POST /v1/view?`) from a paired phone ended the Mac app.  The query parsers no longer index a piece that is not there.
+- The server now reads a request body by `Content-Length` (16 KB at most, 413 beyond) and gives a client 15 seconds to send a whole request.  Before, a body that arrived in a later TCP segment than its headers was dropped.
+- An owner who already allows Quit or Tame now also allows Sample, and an owner who already allows Change Exclusions & View now also allows the settings above.  Nothing asks again; the descriptions in Settings > iPhone say what each covers.
+
 iPhone companion, phone parity batch 1 (board `eb0efb86`, issue 63), hardening:
 
 - Quit and Tame check the live process before they act.  The phone names the row it is looking at, the Mac resolves it from the rows it last published with every member's start time, and a pid that now belongs to another process is skipped as changed instead of signalled.  Quitting or taming an app now acts on all of its processes, each checked on its own.  A pid-only request from an older phone is accepted only if the last snapshot listed that pid.  The pid-only entry points are gone, including the ones behind the Mac panel's Tame and Restore buttons.  A group with one protected helper now reads as TAMED.

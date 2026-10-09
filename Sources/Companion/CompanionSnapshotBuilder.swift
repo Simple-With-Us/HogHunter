@@ -20,7 +20,10 @@ enum CompanionSnapshotBuilder {
         cleanProgress: CompanionCleanProgress? = nil,
         remoteQuitAllowed: Bool? = nil,
         remoteCleanAllowed: Bool? = nil,
-        remoteEditAllowed: Bool? = nil
+        remoteEditAllowed: Bool? = nil,
+        bandwidth: CompanionBandwidth? = nil,
+        cpuHistory: [Double]? = nil,
+        settings: CompanionSettingsSummary? = nil
     ) -> CompanionSnapshot {
         let cores = max(1, pulse.coreCount)
         let pressure = Severity.forPressure(pulse.pressure)
@@ -37,6 +40,7 @@ enum CompanionSnapshotBuilder {
                 cpuText: hasBaseline ? HogFormat.percent(pulse.cpuPercent / 100) : "Measuring…",
                 cpuCaption: "of all \(cores) cores",
                 cpuSeverity: severityName(Severity.forMachineCpu(pulse.cpuPercent)),
+                coreCount: cores,
                 memoryPercent: pulse.memoryPercent,
                 memoryText: "\(gigabytes(pulse.memoryUsedBytes)) of \(gigabytes(pulse.totalMemoryBytes)) GB",
                 memoryCaption: "Memory in use",
@@ -75,7 +79,10 @@ enum CompanionSnapshotBuilder {
             remoteQuitAllowed: remoteQuitAllowed,
             remoteCleanAllowed: remoteCleanAllowed,
             remoteEditAllowed: remoteEditAllowed,
-            cleanProgress: cleanProgress
+            cleanProgress: cleanProgress,
+            bandwidth: bandwidth,
+            cpuHistory: cpuHistory,
+            settings: settings
         )
     }
 

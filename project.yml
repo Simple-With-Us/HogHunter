@@ -80,6 +80,11 @@ targets:
       - path: ios/Sources
       - path: Sources/Companion/CompanionSnapshot.swift
       - path: Sources/Companion/CompanionHTTP.swift
+      # Decides whether the Mac is on the local network or Tailscale, the same
+      # way the Mac decides it about the phone.
+      - path: Sources/Companion/CompanionPeer.swift
+      # The same sparkline the Mac menu bar draws, so the two cannot differ.
+      - path: Sources/UI/CpuSparklineView.swift
       - path: ios/Assets.xcassets
     dependencies:
       - target: HogHunterWidgets

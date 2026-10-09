@@ -25,7 +25,18 @@ final class CompanionServer: @unchecked Sendable {
     static let defaultPort: UInt16 = 24240
     private(set) var activePort: UInt16 = defaultPort
 
-    func start(name: String, peerID: String, token: String, onStatus: @escaping @Sendable (String) -> Void) {
+    /// `advertise`, `preferredPort` and `loopbackOnly` exist for tests, which
+    /// listen on a throwaway port, on loopback only, without publishing a
+    /// Bonjour service.  The app uses the defaults.
+    func start(
+        name: String,
+        peerID: String,
+        token: String,
+        advertise: Bool = true,
+        preferredPort: UInt16? = CompanionServer.defaultPort,
+        loopbackOnly: Bool = false,
+        onStatus: @escaping @Sendable (String) -> Void
+    ) {
         queue.async {
             self.token = token
             self.onStatus = onStatus
@@ -34,16 +45,20 @@ final class CompanionServer: @unchecked Sendable {
                 return
             }
             do {
-                let preferredPort = NWEndpoint.Port(rawValue: Self.defaultPort) ?? .any
+                let preferred = preferredPort.flatMap { NWEndpoint.Port(rawValue: $0) } ?? .any
+                let parameters = NWParameters.tcp
+                if loopbackOnly { parameters.requiredInterfaceType = .loopback }
                 let listener: NWListener
-                if let fixed = try? NWListener(using: .tcp, on: preferredPort) {
+                if let fixed = try? NWListener(using: parameters, on: preferred) {
                     listener = fixed
                 } else {
-                    listener = try NWListener(using: .tcp, on: .any)
+                    listener = try NWListener(using: parameters, on: .any)
                 }
-                var service = NWListener.Service(name: Self.serviceName(from: name), type: CompanionService.type)
-                service.txtRecordObject = NWTXTRecord(["ver": "1", "id": peerID])
-                listener.service = service
+                if advertise {
+                    var service = NWListener.Service(name: Self.serviceName(from: name), type: CompanionService.type)
+                    service.txtRecordObject = NWTXTRecord(["ver": "1", "id": peerID])
+                    listener.service = service
+                }
                 listener.stateUpdateHandler = { [weak self] state in
                     self?.queue.async {
                         switch state {
@@ -104,9 +119,17 @@ final class CompanionServer: @unchecked Sendable {
         return String(name.prefix(63))
     }
 
+    /// How long a client has to send a whole request.  A reply that is held
+    /// open on purpose (a clean, a sample) starts counting after this.
+    static let requestDeadline: TimeInterval = 15
+
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)
-        receive(connection, buffer: Data(), peer: CompanionPeer.from(connection.endpoint))
+        let waiting = CompanionLocked(true)
+        queue.asyncAfter(deadline: .now() + Self.requestDeadline) {
+            if waiting.value { connection.cancel() }
+        }
+        receive(connection, buffer: Data(), peer: CompanionPeer.from(connection.endpoint), waiting: waiting)
     }
 
     typealias Reply = (status: Int, body: Data)
@@ -144,6 +167,13 @@ final class CompanionServer: @unchecked Sendable {
     var onRemoteClean: ((_ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
     var onRemoteExclusionsUpdate: ((CompanionExclusionsUpdateRequest) -> Reply)? = nil
     var onRemoteViewUpdate: ((CompanionViewUpdateRequest) -> Reply)? = nil
+    /// Refresh interval, alerts and the webhook.  Called on the server queue
+    /// with values the router has not yet checked: the handler validates them.
+    var onRemoteSettings: ((CompanionSettingsUpdateRequest) -> Reply)? = nil
+    /// Sample for 3 Seconds takes longer than a request should hold the
+    /// server queue, so the handler starts it and calls `completion` once,
+    /// from any thread, when the report is written.
+    var onRemoteSample: ((_ target: CompanionTarget, _ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
     /// Called on the server queue each time a phone fetches the snapshot, so
     /// the host can refresh slow-to-gather data only while someone is looking.
     var onSnapshotServed: (() -> Void)? = nil
@@ -188,7 +218,7 @@ final class CompanionServer: @unchecked Sendable {
         }
     }
 
-    private func receive(_ connection: NWConnection, buffer: Data, peer: CompanionPeer) {
+    private func receive(_ connection: NWConnection, buffer: Data, peer: CompanionPeer, waiting: CompanionLocked<Bool>) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] data, _, isComplete, error in
             guard let self else {
                 connection.cancel()
@@ -197,12 +227,24 @@ final class CompanionServer: @unchecked Sendable {
             self.queue.async {
                 var buffer = buffer
                 if let data { buffer.append(data) }
-                let finished = buffer.range(of: Data("\r\n\r\n".utf8)) != nil
-                    || isComplete
-                    || error != nil
-                    || buffer.count >= 8_192
+                // A request with a body is not whole until the body is: the
+                // headers can arrive in one read and the body in the next.
+                let completeness = CompanionHTTP.completeness(of: buffer)
+                let finished = completeness != .needsMore || isComplete || error != nil
                 guard finished else {
-                    self.receive(connection, buffer: buffer, peer: peer)
+                    self.receive(connection, buffer: buffer, peer: peer, waiting: waiting)
+                    return
+                }
+                waiting.value = false
+                // A connection that closed or failed before the request was
+                // whole is not a request.  Routing it would act on a body that
+                // never arrived, or raise the pairing alert for a half line.
+                if completeness == .needsMore {
+                    connection.cancel()
+                    return
+                }
+                if completeness == .tooLarge {
+                    connection.send(content: CompanionHTTP.payloadTooLargeReply(), completion: .contentProcessed { _ in connection.cancel() })
                     return
                 }
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
@@ -221,6 +263,8 @@ final class CompanionServer: @unchecked Sendable {
                     })
                 case .startClean:
                     self.startClean(on: connection)
+                case .startSample(let target):
+                    self.startSample(target, on: connection)
                 }
             }
         }
@@ -239,6 +283,8 @@ final class CompanionServer: @unchecked Sendable {
     enum Disposition: Equatable {
         case reply(Data)
         case startClean
+        /// A sample takes at least its three seconds, so it is held the same way.
+        case startSample(CompanionTarget)
     }
 
     /// Routes one request.  Runs on `queue`; split out so tests can drive it
@@ -250,6 +296,7 @@ final class CompanionServer: @unchecked Sendable {
             return .reply(CompanionHTTP.throttledReply(retryAfter: wait))
         }
         var cleanRequested = false
+        var sampleRequested: CompanionTarget?
         let response = CompanionHTTP.response(
             request: buffer,
             body: payload,
@@ -313,6 +360,30 @@ final class CompanionServer: @unchecked Sendable {
                 }
                 return (501, Data("{\"error\": \"View handler not configured\"}".utf8))
             },
+            settingsHandler: { [weak self] req in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteEdit else { return Self.editRefusal }
+                if let handler = self.onRemoteSettings {
+                    return handler(req)
+                }
+                return (501, Data("{\"error\": \"Settings handler not configured\"}".utf8))
+            },
+            sampleHandler: { [weak self] request in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                // Sampling pauses and reads another process, so it sits behind
+                // the same opt-in as quit and tame.
+                guard self.allowRemoteQuit else { return Self.processControlRefusal }
+                guard self.onRemoteSample != nil else {
+                    return (501, Data("{\"error\": \"Sample handler not configured\"}".utf8))
+                }
+                guard let target = CompanionTargets.resolve(request, in: self.targets) else {
+                    let res = CompanionSampleResponse(status: "changed", name: "", message: nil, error: CompanionTargets.unresolvedMessage(for: request))
+                    return (400, (try? JSONEncoder().encode(res)) ?? Data())
+                }
+                sampleRequested = target
+                // Placeholder: never sent.  `startSample` answers later.
+                return (202, Data())
+            },
             peerTrusted: peer.isTrusted,
             deviceAuthenticator: { [devices] presented in devices.authenticate(presented, now: now) }
         )
@@ -325,6 +396,7 @@ final class CompanionServer: @unchecked Sendable {
             throttle.recordSuccess(peer: peer.key)
         }
         if cleanRequested { return .startClean }
+        if let sampleRequested { return .startSample(sampleRequested) }
         if CompanionHTTP.isSnapshotRequest(buffer), status == 200 {
             onSnapshotServed?()
         }
@@ -351,11 +423,39 @@ final class CompanionServer: @unchecked Sendable {
         return CompanionHTTP.enrollResponse(token: issued.token, deviceId: issued.device.id)
     }
 
-    /// The answer to an exclusions or view change while the owner has not
-    /// allowed phone edits.
+    /// The answer to an exclusions, view or settings change while the owner
+    /// has not allowed phone edits.
     static var editRefusal: Reply {
-        let res = ["status": "forbidden", "error": "Changing cleaner exclusions or the panel view from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on the Mac."]
+        let res = ["status": "forbidden", "error": "Changing cleaner exclusions, the panel view or Mac settings from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on the Mac."]
         return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+    }
+
+    /// The answer to a process action (sample) while the owner has not
+    /// allowed phone control of processes.
+    static var processControlRefusal: Reply {
+        let res = ["status": "forbidden", "error": "Acting on apps and processes from iPhone is off.\u{00A0} Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on the Mac."]
+        return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+    }
+
+    /// How long the connection of an unfinished sample is held.  The report
+    /// takes three seconds plus the time `sample` needs to symbolicate it.
+    static let sampleReplyDeadline: TimeInterval = 45
+
+    private func startSample(_ target: CompanionTarget, on connection: NWConnection) {
+        guard let begin = onRemoteSample else {
+            connection.send(content: CompanionHTTP.jsonReply(status: 501, body: Data("{\"error\": \"Sample handler not configured\"}".utf8)), completion: .contentProcessed { _ in connection.cancel() })
+            return
+        }
+        let once = CompanionOneShotReply { data in
+            connection.send(content: data, completion: .contentProcessed { _ in connection.cancel() })
+        }
+        queue.asyncAfter(deadline: .now() + Self.sampleReplyDeadline) {
+            let body = Data(#"{"status":"failed","name":"","error":"The sample took too long.\u00a0 Try again."}"#.utf8)
+            once.send(CompanionHTTP.jsonReply(status: 504, body: body))
+        }
+        begin(target) { reply in
+            once.send(CompanionHTTP.jsonReply(status: reply.status, body: reply.body))
+        }
     }
 
     /// How long the connection of an unfinished clean is held before the
@@ -431,6 +531,14 @@ final class CompanionLocked<Value>: @unchecked Sendable {
     var value: Value {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+
+    /// Reads and changes the value as one step, for a check-then-set that two
+    /// threads must not both win.
+    func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&stored)
     }
 }
 

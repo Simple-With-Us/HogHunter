@@ -86,6 +86,20 @@ final class CompanionModel {
     /// through, so the dashboard can say so instead of silently doing nothing.
     var controlError: String?
     var showCleanDialogRequested = false
+    /// The row a Sample for 3 Seconds is running on, so the row can say so and
+    /// a second tap does not start a second sample.
+    var samplingRowId: String?
+    /// How many settings changes are on their way to the Mac.  A count, not a
+    /// flag, so one finishing does not re-enable controls while another is out.
+    private(set) var settingsInFlight = 0
+    var isApplyingSettings: Bool { settingsInFlight > 0 }
+    /// What the Mac said about the last settings change that went through
+    /// ("A test message is on its way.").
+    var settingsNotice: String?
+    /// Why the last settings change did not go through.  Kept apart from
+    /// `controlError` because the settings screen is a sheet over the
+    /// dashboard, and two alerts on one error cannot both present.
+    var settingsError: String?
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
 
@@ -348,6 +362,96 @@ final class CompanionModel {
         } catch {
             return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: Self.describe(error))
         }
+    }
+
+    /// Runs Sample for 3 Seconds on the Mac for `row`.  The report stays on
+    /// the Mac; the reply names it and lists the busiest call sites.
+    func sampleProcess(row: CompanionRow) async -> CompanionSampleResponse {
+        guard samplingRowId == nil else {
+            return CompanionSampleResponse(status: "busy", name: row.name, error: "A sample is already running.\u{00A0} Wait for it to finish.")
+        }
+        samplingRowId = row.id
+        defer { samplingRowId = nil }
+        if isDemoMode {
+            try? await Task.sleep(for: .seconds(1))
+            return Self.sampleSampleResponse(name: row.name, rowId: row.pid ?? 0)
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            return CompanionSampleResponse(status: "failed", name: row.name, error: "Not connected to Mac.")
+        }
+        do {
+            return try await CompanionConnection.triggerSample(endpoint: endpoint, token: saved.token, rowId: row.id)
+        } catch {
+            return CompanionSampleResponse(status: "failed", name: row.name, error: Self.describe(error))
+        }
+    }
+
+    /// What a finished Sample for 3 Seconds looks like, for demo mode and the
+    /// screenshot lane.
+    static func sampleSampleResponse(name: String, rowId: Int32) -> CompanionSampleResponse {
+        CompanionSampleResponse(
+            status: "ok",
+            name: name,
+            message: "Sampled \(name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
+            fileName: "\(name)-\(rowId)-20261009-101500.txt",
+            bytes: 412_000,
+            summary: [
+                "__psynch_cvwait  (in libsystem_kernel.dylib)        1840",
+                "mach_msg2_trap  (in libsystem_kernel.dylib)        1212",
+                "-[NSApplication run]  (in AppKit)        96",
+            ]
+        )
+    }
+
+    /// Sends a settings change to the Mac.  The Mac checks every value; a
+    /// refusal lands in `settingsError` and a success in `settingsNotice`.
+    func updateSettings(_ update: CompanionSettingsUpdateRequest) async {
+        settingsNotice = nil
+        settingsError = nil
+        if isDemoMode {
+            guard var settings = snapshot?.settings else { return }
+            if let value = update.refreshInterval { settings.refreshInterval = value }
+            if let value = update.alertsEnabled { settings.alertsEnabled = value }
+            if let value = update.alertThresholdPercent { settings.alertThresholdPercent = value }
+            if let value = update.alertSustainedMinutes { settings.alertSustainedMinutes = value }
+            if let url = update.webhookURL {
+                settings.webhookConfigured = !url.isEmpty
+                settings.webhookHost = url.isEmpty ? nil : URL(string: url)?.host
+                if url.isEmpty { settings.webhookStatus = nil }
+            }
+            if update.testWebhook == true {
+                settings.webhookStatus = "Delivered (200) at 10:15:00 AM"
+                settingsNotice = "Settings updated.\u{00A0} A test message is on its way."
+            }
+            snapshot?.settings = settings
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            settingsError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        // The webhook address is a secret and this link is not encrypted.  The
+        // Mac would refuse a control from outside your network, but it has read
+        // the request by then, so the phone does not send it.
+        if let url = update.webhookURL, !url.isEmpty, !CompanionPeer.isTrustedEndpoint(endpoint) {
+            settingsError = "The webhook address is a secret, so this iPhone sends it only over your local network or Tailscale.\u{00A0} Connect that way, then try again."
+            return
+        }
+        settingsInFlight += 1
+        defer { settingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update)
+            if res.status == "ok" {
+                settingsNotice = res.message
+            } else {
+                settingsError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            settingsError = Self.describe(error)
+        }
+        // The Mac applies the change on its main thread just after it answers.
+        try? await Task.sleep(for: .milliseconds(400))
+        await refresh()
     }
 
     func toggleCategoryExclusion(id: String) async {
@@ -847,6 +951,7 @@ final class CompanionModel {
             cpuText: "37%",
             cpuCaption: "of all 10 cores",
             cpuSeverity: "calm",
+            coreCount: 10,
             memoryPercent: 72,
             memoryText: "11.5 of 16 GB",
             memoryCaption: "Memory in use",
@@ -911,6 +1016,31 @@ final class CompanionModel {
         // Demo mode shows every control, the way a Mac with all opt-ins on does.
         remoteQuitAllowed: true,
         remoteCleanAllowed: true,
-        remoteEditAllowed: true
+        remoteEditAllowed: true,
+        bandwidth: CompanionBandwidth(
+            isMeasured: true,
+            downBytesPerSecond: 2_411_520,
+            upBytesPerSecond: 183_296,
+            downText: "2.3 MB/s",
+            upText: "179 KB/s",
+            nowFootnote: "Last 25 s",
+            peakDownBytesPerSecond: 48_234_496,
+            peakUpBytesPerSecond: 6_291_456,
+            peakDownText: "46.0 MB/s",
+            peakUpText: "6.0 MB/s",
+            peakFootnote: "Sampled 23h 41m",
+            peakHelp: "The fastest sustained rate in the last 24 hours, reached at 2:14 AM."
+        ),
+        cpuHistory: [22, 24, 31, 28, 35, 42, 57, 61, 48, 39, 36, 33, 38, 44, 52, 66, 71, 58, 49, 41, 37, 35, 34, 38, 36, 35, 37, 39, 38, 37],
+        settings: CompanionSettingsSummary(
+            refreshInterval: 3,
+            alertsEnabled: true,
+            alertThresholdPercent: 300,
+            alertSustainedMinutes: 5,
+            webhookConfigured: true,
+            webhookHost: "hooks.example.com",
+            webhookStatus: "Delivered (200) at 9:41:07 AM",
+            notificationsDenied: false
+        )
     )
 }

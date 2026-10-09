@@ -293,6 +293,47 @@ enum HogActions {
 /// Runs `/usr/bin/sample` against one pid and writes the report where the user
 /// can find it again.  Everything but the completion runs off the main thread.
 enum SampleReport {
+    /// The busiest call sites in a finished report: the first lines of its
+    /// "Sort by top of stack" section, which is where `sample` lists them
+    /// heaviest first.  A dozen lines at most, each cut short, so a phone
+    /// can show them and the report itself stays on the Mac.
+    static func summary(of report: String, maxLines: Int = 12, maxLineLength: Int = 110) -> [String] {
+        var lines: [String] = []
+        var inSection = false
+        for raw in report.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if !inSection {
+                if line.hasPrefix("Sort by top of stack") { inSection = true }
+                continue
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                if lines.isEmpty { continue }
+                break
+            }
+            if trimmed.hasPrefix("Binary Images") || trimmed.hasPrefix("Total number in stack") { break }
+            lines.append(trimmed.count > maxLineLength ? String(trimmed.prefix(maxLineLength - 1)) + "…" : trimmed)
+            if lines.count >= maxLines { break }
+        }
+        return lines
+    }
+
+    /// The last `bytes` bytes of a report as text.  The call-site summary sits
+    /// at the end of the file, and a report can run to many megabytes.
+    static func tailText(of url: URL, bytes: UInt64 = 256 * 1024) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return "" }
+        try? handle.seek(toOffset: size > bytes ? size - bytes : 0)
+        let data = (try? handle.readToEnd()) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The size of a written report in bytes, or nil if it cannot be read.
+    static func byteCount(of url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue
+    }
+
     enum Outcome {
         case written(URL)
         case failed(String)
@@ -342,6 +383,11 @@ enum SampleReport {
             } catch {
                 finish(.failed("Could not run sample: \(error.localizedDescription)"))
                 return
+            }
+            // `sample` ends itself after `seconds`; a hung one is stopped here
+            // so it cannot keep a thread and a child process for good.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Double(seconds) + 30) {
+                if process.isRunning { process.terminate() }
             }
             let errorData = errors.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()

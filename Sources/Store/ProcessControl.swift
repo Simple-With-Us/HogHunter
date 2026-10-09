@@ -171,6 +171,44 @@ enum ProcessControl {
         return QuitOutcome(results: results, pastTense: pastTense)
     }
 
+    // MARK: - Sampling
+
+    /// Which member of a row Sample for 3 Seconds may be pointed at.
+    enum SampleChoice: Equatable {
+        /// This process still is what the Mac sampled and may be sampled.
+        case ready(ProcessKey, name: String)
+        /// Every member's pid now belongs to something else, or has gone.
+        case changed(name: String)
+        /// A member was found but may not be sampled (this app, another user's).
+        case blocked(name: String, reason: String)
+    }
+
+    /// The first member of `members` that is safe to sample.  Same live
+    /// identity check as quit and tame: a recycled pid is never sampled.  The
+    /// denylist is not applied, because sampling reads a process and does not
+    /// stop it; ownership and Hog Hunter itself are.
+    static func sampleChoice(members: [ProcessKey], fallbackName: String) -> SampleChoice {
+        var firstBlock: (name: String, reason: String)?
+        for member in members {
+            let name = currentName(member.pid) ?? fallbackName
+            guard identityMatches(member) else { continue }
+            if let reason = sampleBlockReason(pid: member.pid, uid: currentUid(member.pid) ?? uid_t.max) {
+                if firstBlock == nil { firstBlock = (name, reason) }
+                continue
+            }
+            return .ready(member, name: name)
+        }
+        if let firstBlock { return .blocked(name: firstBlock.name, reason: firstBlock.reason) }
+        return .changed(name: fallbackName)
+    }
+
+    static func sampleBlockReason(pid: pid_t, uid: uid_t) -> String? {
+        if pid == getpid() { return thisAppReason }
+        if pid <= 1 { return systemProcessReason }
+        if uid != getuid() { return otherUserReason }
+        return nil
+    }
+
     // MARK: - Live re-checks
 
     /// True when the pid still belongs to the process the key describes.  A key

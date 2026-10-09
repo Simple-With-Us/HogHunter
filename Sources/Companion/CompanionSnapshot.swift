@@ -10,6 +10,10 @@ enum CompanionService {
     static let tamePath = "/v1/tame"
     static let exclusionsPath = "/v1/exclusions"
     static let viewPath = "/v1/view"
+    /// Refresh interval, alerts and the webhook.  Behind the edit opt-in.
+    static let settingsPath = "/v1/settings"
+    /// Sample for 3 Seconds on one row.  Behind the process-control opt-in.
+    static let samplePath = "/v1/sample"
     static let pairPath = "/v1/pair"
     /// Trades the shared pairing code for a token of the phone's own.
     static let enrollPath = "/v1/enroll"
@@ -118,6 +122,98 @@ struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
     var message: String?
 }
 
+/// The values the Mac accepts for the settings a phone may change.  Shared so
+/// the phone's pickers offer exactly what the Mac will take; the Mac checks
+/// every value again, so a hand-built request gets no further.
+enum CompanionSettingsLimits {
+    /// The same choices as Settings > General > Refresh Every on the Mac.
+    static let refreshIntervals: [Double] = [2, 3, 5, 10, 15]
+    /// Per-core percent, the scale the alert compares against.
+    static let alertThresholdRange: ClosedRange<Double> = 100...1000
+    static let alertThresholdStep: Double = 50
+    static let alertSustainedMinutesRange: ClosedRange<Int> = 1...30
+    /// A webhook URL longer than this is not a webhook URL.
+    static let webhookMaxLength = 2_048
+}
+
+/// Download and upload speed on the Mac, formatted the way the Network tab on
+/// the Mac prints it.  The Mac does the formatting so both screens agree.
+struct CompanionBandwidth: Codable, Equatable, Sendable {
+    /// False until two counter readings far enough apart exist.
+    var isMeasured: Bool
+    var downBytesPerSecond: Double
+    var upBytesPerSecond: Double
+    var downText: String
+    var upText: String
+    /// "Measuring…" or "Last 25 s".
+    var nowFootnote: String
+    var peakDownBytesPerSecond: Double
+    var peakUpBytesPerSecond: Double
+    var peakDownText: String
+    var peakUpText: String
+    /// "No History Yet" or "Sampled 3h 12m".
+    var peakFootnote: String
+    /// When the 24-hour peak was reached, in words, or what the peak means.
+    var peakHelp: String
+    /// Set when the Mac could not read its interface counters.
+    var error: String? = nil
+}
+
+/// The settings the phone may read and, with the edit opt-in, change.  The
+/// webhook URL is the one secret among them, so it is never sent: the phone
+/// learns whether one is set and which host it points at, and can replace or
+/// clear it, but cannot read it back.
+struct CompanionSettingsSummary: Codable, Equatable, Sendable {
+    var refreshInterval: Double
+    var alertsEnabled: Bool
+    var alertThresholdPercent: Double
+    var alertSustainedMinutes: Int
+    var webhookConfigured: Bool
+    /// The host of the webhook ("hooks.slack.com"), never its path.
+    var webhookHost: String? = nil
+    /// The outcome of the last webhook delivery, as the Mac shows it.
+    var webhookStatus: String? = nil
+    /// True when macOS has refused Hog Hunter permission to notify.
+    var notificationsDenied: Bool? = nil
+}
+
+/// A change to the settings above.  Every field is optional; only the ones
+/// present are applied.  An empty `webhookURL` clears the webhook.
+struct CompanionSettingsUpdateRequest: Codable, Equatable, Sendable {
+    var refreshInterval: Double? = nil
+    var alertsEnabled: Bool? = nil
+    var alertThresholdPercent: Double? = nil
+    var alertSustainedMinutes: Int? = nil
+    var webhookURL: String? = nil
+    /// Sends one test message to the webhook the Mac holds after the other
+    /// fields are applied.
+    var testWebhook: Bool? = nil
+
+    var isEmpty: Bool {
+        refreshInterval == nil && alertsEnabled == nil && alertThresholdPercent == nil
+            && alertSustainedMinutes == nil && webhookURL == nil && testWebhook != true
+    }
+}
+
+struct CompanionSettingsUpdateResponse: Codable, Equatable, Sendable {
+    var status: String
+    var message: String?
+    var error: String?
+}
+
+/// Response to Sample for 3 Seconds.  The report stays on the Mac; the phone
+/// gets its name, its size and the busiest call sites.
+struct CompanionSampleResponse: Codable, Equatable, Sendable {
+    var status: String
+    var name: String
+    var message: String?
+    var error: String?
+    var fileName: String? = nil
+    var bytes: Int? = nil
+    /// The top of the report's "Sort by top of stack" section, a dozen lines at most.
+    var summary: [String]? = nil
+}
+
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
 enum CompanionToken {
     static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
@@ -171,6 +267,12 @@ struct CompanionSnapshot: Codable, Equatable {
     /// Whether the phone may change cleaner exclusions and the panel view.
     var remoteEditAllowed: Bool? = nil
     var cleanProgress: CompanionCleanProgress? = nil
+    /// Interface throughput and its 24-hour peak.  Nil from an older Mac.
+    var bandwidth: CompanionBandwidth? = nil
+    /// The last readings of machine CPU, 0 to 100, oldest first, for the sparkline.
+    var cpuHistory: [Double]? = nil
+    /// Refresh interval, alerts and the webhook as the Mac holds them.
+    var settings: CompanionSettingsSummary? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
@@ -179,6 +281,8 @@ struct CompanionPulse: Codable, Equatable {
     var cpuText: String
     var cpuCaption: String
     var cpuSeverity: String
+    /// Logical cores, which the Per Machine scale divides by.  Nil from an older Mac.
+    var coreCount: Int? = nil
     /// Memory used over physical memory, 0 to 100.
     var memoryPercent: Double
     var memoryText: String
