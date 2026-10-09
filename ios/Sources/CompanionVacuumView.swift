@@ -358,9 +358,11 @@ struct VacuumView: View {
 
     /// The last run leaves watch ticks out unless every run on record is one,
     /// so the second sentence is only true while the Mac reports another kind.
+    /// With no kind at all (runs on record but no status file yet) the Last
+    /// Run row is not on screen, and the sentence would point at nothing.
     private var recentRunsFooter: String {
         let note = "Newest first.\u{00A0} Watch is the quick disk and memory check that runs every few minutes."
-        guard vacuum?.lastRunTrigger != "watch" else { return note }
+        guard let trigger = vacuum?.lastRunTrigger, trigger != "watch" else { return note }
         return note + "\u{00A0} The last run above never counts it."
     }
 
