@@ -26,7 +26,7 @@ def fixtures():
     }
     return [
         {"CFBundleIdentifier": validator.BUNDLE_ID, "CFBundleVersion": "42",
-         "CFBundleShortVersionString": "1.0.4", "CFBundleSupportedPlatforms": ["iPhoneOS"],
+         "CFBundleShortVersionString": validator.MARKETING_VERSION, "CFBundleSupportedPlatforms": ["iPhoneOS"],
          "CFBundlePackageType": "APPL"},
         {"TeamIdentifier": [validator.TEAM_ID], "Platform": ["iOS"],
          "ExpirationDate": datetime.datetime.now() + datetime.timedelta(days=30),
@@ -36,6 +36,28 @@ def fixtures():
 
 
 class IdentityTests(unittest.TestCase):
+    def test_version_is_read_from_the_iphone_target_in_project_yml(self):
+        text = (
+            "targets:\n"
+            "  HogHunter:\n"
+            "    settings:\n"
+            "      base:\n"
+            "        MARKETING_VERSION: \"9.9.9\"\n"
+            "  HogHunterIOS:\n"
+            "    settings:\n"
+            "      base:\n"
+            "        PRODUCT_NAME: HogHunter\n"
+            "        MARKETING_VERSION: \"1.2.3\"\n"
+            "  HogHunterWidgets:\n"
+            "    settings:\n"
+            "      base:\n"
+            "        MARKETING_VERSION: \"8.8.8\"\n"
+        )
+        self.assertEqual(validator.project_marketing_version(text), "1.2.3")
+        with self.assertRaises(ValueError):
+            validator.project_marketing_version("targets:\n  HogHunter:\n    settings: {}\n")
+        self.assertRegex(validator.MARKETING_VERSION, r"^[0-9]+(\.[0-9]+)+$")
+
     def test_valid_archive_and_store_export(self):
         for distribution in (False, True):
             self.assertEqual(validator.validate(*fixtures(), "42", distribution)["build"], "42")
@@ -113,7 +135,7 @@ elif name == 'xcrun':
     assert option('--output-format') == 'xml'
     assert option('--apple-id') == '6816633156'
     assert option('--bundle-version') == os.environ['HH_BUILD_NUMBER']
-    assert option('--bundle-short-version-string') == '1.0.4'
+    assert option('--bundle-short-version-string') == os.environ['HH_EXPECTED_VERSION']
     assert option('--bundle-id') == 'com.simplewithus.hoghunter.ios'
     # Assert the export the release script claims is altool's key-discovery channel.
     keys_dir = pathlib.Path(os.environ['API_PRIVATE_KEYS_DIR'])
@@ -161,6 +183,7 @@ class ReleaseFlowTests(unittest.TestCase):
                        HH_TEST_UPLOAD_ZERO_EXIT=str(upload_zero_exit).lower(),
                        HH_TEST_UPLOAD_NO_MARKER=str(upload_no_marker).lower(),
                        HH_TEST_FIXTURES=str(root),
+                       HH_EXPECTED_VERSION=validator.MARKETING_VERSION,
                        RUNNER_TEMP=str(root), GITHUB_STEP_SUMMARY=str(root / "summary"))
             result = subprocess.run(["/bin/bash", str(ROOT / "scripts/ios-testflight-release.sh")],
                                     env=env, text=True, capture_output=True)

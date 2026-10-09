@@ -5,11 +5,32 @@ import argparse
 import datetime
 import json
 import plistlib
+import re
 from pathlib import Path
 
 BUNDLE_ID = "com.simplewithus.hoghunter.ios"
 TEAM_ID = "CC8UTF7ATG"
-MARKETING_VERSION = "1.0.4"
+PROJECT_YML = Path(__file__).resolve().parents[1] / "project.yml"
+
+
+def project_marketing_version(text):
+    """The iPhone target's MARKETING_VERSION, read from project.yml.
+
+    A literal here drifted from project.yml (1.0.4 while the app moved to
+    1.0.6), which made the release validation reject every build.  project.yml
+    is the single source, so read it.
+    """
+    match = re.search(
+        r"^  HogHunterIOS:\n(?:(?!^  \S).*\n)*?\s+MARKETING_VERSION:\s*\"?([0-9]+(?:\.[0-9]+)*)\"?",
+        text,
+        re.MULTILINE,
+    )
+    if not match:
+        raise ValueError("HogHunterIOS MARKETING_VERSION not found in project.yml")
+    return match.group(1)
+
+
+MARKETING_VERSION = project_marketing_version(PROJECT_YML.read_text())
 
 
 def validate(info, profile, entitlements, build_number, distribution=False):
