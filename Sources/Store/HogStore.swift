@@ -259,7 +259,7 @@ final class HogStore: ObservableObject {
     /// A sample pauses its target and writes a report that can be megabytes,
     /// so one runs at a time, whoever asked.
     private let sampleInFlight = CompanionLocked(false)
-    static let webhookTestCooldown: TimeInterval = 15
+    nonisolated static let webhookTestCooldown: TimeInterval = 15
     /// The phones paired with this Mac, one token each.
     let companionDevices: CompanionDeviceRegistry
     /// Paired phones, newest first, for Settings.  Refreshed when one pairs or

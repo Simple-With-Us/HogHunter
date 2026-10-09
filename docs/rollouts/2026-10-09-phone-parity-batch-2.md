@@ -111,7 +111,7 @@ Nothing beyond batch 1's list.  The rest of a category with more than 100 items 
 
 ## Screenshots
 
-The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once on the 6.3 inch iPhone as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet), `-HogHunterCleaner` and `-HogHunterCleanerExtreme` (a finished scan, the second with the Extreme notice ticked) and `-HogHunterVacuum` (the Robotic Vacuum screen).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
+The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once, on the first iPhone that boots, as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet), `-HogHunterCleaner` and `-HogHunterCleanerExtreme` (a finished scan, the second with the Extreme notice ticked) and `-HogHunterVacuum` (the Robotic Vacuum screen).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
 
 ## Verification
 

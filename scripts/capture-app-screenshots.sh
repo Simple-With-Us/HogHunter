@@ -21,7 +21,8 @@ if [[ -n "$ios_app" && -d "$ios_app" ]]; then
   bundle_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$ios_app/Info.plist" 2>/dev/null || echo "com.simplewithus.hoghunter.ios")"
   echo "Bundle ID: $bundle_id"
 
-  python3 - "$ios_app" "$bundle_id" <<'PYIOS' || failures=$((failures + 1))
+  # -u: unbuffered, so a run that the 8 minute cap kills still shows how far it got.
+  python3 -u - "$ios_app" "$bundle_id" <<'PYIOS' || failures=$((failures + 1))
 import json, os, re, subprocess, sys, time
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
@@ -71,7 +72,7 @@ def launch_pid(udid):
     return app_pid_from_launch(result.stdout) if result.returncode == 0 else None
 
 
-# Extra screens, captured once on the 6.3 inch iPhone so each new surface is
+# Extra screens, captured once on the first iPhone that boots so each new surface is
 # seen by CI and not only the Activity tab.  A flag puts the screen on top of
 # the sample dashboard (see DashboardView).  These are best effort: a missing
 # one is a warning, because the five format frames above are the gate.
@@ -146,6 +147,7 @@ FORMATS = {
 }
 
 failures = 0
+extras_done = False
 
 try:
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
@@ -280,7 +282,10 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
                 failures += 1
                 continue
             print(f"  ✓ Saved {out_file}")
-            if fmt_key == "iphone-6.3-6.1":
+            # On the first format that boots: a slow runner is most likely to be
+            # killed by the cap before it reaches the later ones.
+            if not extras_done:
+                extras_done = True
                 capture_extras(udid, "screenshots/ios")
         else:
             print(f"[{fmt_key}] ERROR: screenshot failed: {res.stderr.strip() or 'no file written'}")
