@@ -57,7 +57,7 @@ The Mac re-checks the row's processes against the live process table (the start 
 
 ## Screenshots
 
-The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once on the 6.3 inch iPhone as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
+The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once on the 6.3 inch iPhone as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet), `-HogHunterVacuum` (the Robotic Vacuum screen).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
 
 ## Verification
 
@@ -95,7 +95,7 @@ The gates run in this order: a valid credential (401), a trusted peer (403), a p
 
 ### The route answers at once
 
-A full run takes minutes.  A clean holds its connection until the Mac finishes, but the vacuum has nothing to hand back that the snapshot does not already carry, so the Mac answers `{"status":"started"}` (202) and the run proceeds there.  While one is going, the answer is 409 `{"status":"busy"}`.  The phone watches `vacuum.isRunning` in the snapshot, which goes true when the run starts and false when it ends, and it fetches a fresh snapshot a moment after the Mac answers.  Closing the app does not stop the run.
+A full run takes minutes.  A clean holds its connection until the Mac finishes, but the vacuum has nothing to hand back that the snapshot does not already carry, so the Mac answers `{"status":"started"}` (202) and the run proceeds there.  While one is going, the answer is 409 `{"status":"busy"}`.  The phone watches `vacuum.isRunning` in the snapshot, which goes true when a run this app started begins and false when it ends (a run the background job started is not seen: Run Now then answers "started", the engine finds its housekeeper lock held and skips, and the status shows that skip), and it fetches a fresh snapshot a moment after the Mac answers.  Closing the app does not stop the run.
 
 The router decides "busy" itself, on the server queue, from a `CompanionLocked<Bool>` the host keeps in line with `RoboticVacuumStore.isRunningNow` (a Combine sink on the store, so a run started from the Mac panel counts too).  Requests are handled one at a time on that queue, so the check and the set cannot interleave: two quick taps start one run, a test pins that.  After it asks the store to start, the host sets the flag back to what the store says, so a request that lost a race with the panel cannot leave it stuck true.
 
@@ -105,7 +105,7 @@ The router decides "busy" itself, on the server queue, from a `CompanionLocked<B
 
 ### The disclosure rule
 
-The coarse status is in the snapshot whenever the Mac has one: health, what the Mac prints for it, whether the background job is loaded, running or not, the last and next full clean, and the last run's end and bytes freed.  The per-step results are in it only while Allow iPhone to Run Robotic Vacuum is on.  A step's reason can name a lane folder or a server, and the snapshot is readable with the shared pairing code from anywhere, so detail sits behind the same opt-in as the power to run.  Reasons are cut to 120 characters and one line.  Turning the setting off takes the steps out of the next snapshot.
+The coarse status is in the snapshot whenever the Mac has one: health, what the Mac prints for it, whether the background job is loaded, running or not, the last and next full clean, and the last run's end and bytes freed.  The per-step results are in it only while Allow iPhone to Run Robotic Vacuum is on, and then only for a phone's own token on the local network or Tailscale.  A step's reason can name a lane folder or a server, and the snapshot is readable with the shared pairing code from anywhere, so the Mac builds two snapshots: the plain one (what the shared code and any outside address read) and, while the opt-in is on, a detailed one that only a phone's own token from a trusted address is served.  Detail sits behind the same opt-in as the power to run.  Reasons are cut to 120 characters and one line.  Turning the setting off takes the steps out of the next snapshot.
 
 Before the engine has written a `status.json`, a run in progress still shows as running (health `unknown`, "Waiting for first run").  A Mac with no status and no run sends no `vacuum`.  An older Mac sends neither `vacuum` nor `remoteVacuumAllowed`; the phone reads a missing `remoteVacuumAllowed` as "this Mac predates the feature" and says so, and a 404 from the route reads the same.
 

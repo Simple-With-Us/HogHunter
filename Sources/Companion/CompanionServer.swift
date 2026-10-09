@@ -10,6 +10,7 @@ final class CompanionServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "hoghunter.companion")
     private var listener: NWListener?
     private var payload = Data()
+    private var detailPayload: Data?
     private var targets: [String: CompanionTarget] = [:]
     /// Wrong-credential counts per client address.  Touched only on `queue`.
     private var throttle = CompanionAuthThrottle()
@@ -91,10 +92,16 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Stores the snapshot to serve and the processes behind its rows.  The
     /// phone names a row; these are what that name resolves to.
-    func update(snapshot: CompanionSnapshot, targets: [String: CompanionTarget] = [:]) {
+    /// `detailed`, when given, is what a phone's own token on the local network
+    /// or Tailscale reads in place of `snapshot`.  The shared pairing code, and
+    /// anyone arriving from outside, read `snapshot`, so anything that can name
+    /// a folder or a server belongs only in `detailed`.
+    func update(snapshot: CompanionSnapshot, detailed: CompanionSnapshot? = nil, targets: [String: CompanionTarget] = [:]) {
         guard let data = try? CompanionJSON.encode(snapshot) else { return }
+        let detail = detailed.flatMap { try? CompanionJSON.encode($0) }
         queue.async {
             self.payload = data
+            self.detailPayload = detail
             self.targets = targets
         }
     }
@@ -322,6 +329,7 @@ final class CompanionServer: @unchecked Sendable {
         let response = CompanionHTTP.response(
             request: buffer,
             body: payload,
+            detailBody: detailPayload,
             token: token,
             cleanHandler: { [weak self] _ in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }

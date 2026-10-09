@@ -6,6 +6,7 @@ enum CompanionHTTP {
     static func response(
         request: Data,
         body: Data,
+        detailBody: Data? = nil,
         token: String,
         cleanHandler: ((String) -> (status: Int, body: Data))? = nil,
         quitHandler: ((_ request: CompanionProcessRequest, _ force: Bool) -> (status: Int, body: Data))? = nil,
@@ -70,7 +71,11 @@ enum CompanionHTTP {
             guard method == "GET" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
             }
-            return message(status: 200, reason: "OK", body: body, type: "application/json; charset=utf-8")
+            // The fuller snapshot goes only to a phone's own token from the
+            // local network or Tailscale; the shared code and an outside address
+            // read the plain one.
+            let served = (isDeviceToken && peerTrusted ? detailBody : nil) ?? body
+            return message(status: 200, reason: "OK", body: served, type: "application/json; charset=utf-8")
         } else if path == CompanionService.cleanPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))

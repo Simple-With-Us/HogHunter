@@ -46,6 +46,10 @@ final class RoboticVacuumStore: ObservableObject {
 
     func startPolling() {
         stopPolling()
+        // The store may have been built hours ago (it is shared and lives with
+        // the app), so a view that opens reads the files now instead of
+        // showing launch-time status for the first half minute.
+        refresh()
         let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }

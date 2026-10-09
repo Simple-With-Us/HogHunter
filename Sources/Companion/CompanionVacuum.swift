@@ -71,8 +71,10 @@ enum CompanionVacuum {
 
     /// One line of at most `maxReasonLength` characters, ellipsis included.
     static func cappedReason(_ raw: String) -> String {
+        // Collapse ASCII whitespace only.  `.whitespacesAndNewlines` also holds
+        // U+00A0, which is the gap between sentences the phone shows.
         let line = raw
-            .components(separatedBy: .whitespacesAndNewlines)
+            .components(separatedBy: CharacterSet(charactersIn: " \t\n\r"))
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         guard line.count > maxReasonLength else { return line }

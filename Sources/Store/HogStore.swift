@@ -1934,6 +1934,11 @@ final class HogStore: ObservableObject {
     /// watches the snapshot.  The router has already checked the opt-in and
     /// that no run is going.
     nonisolated func performRemoteVacuumRun(kind: String) -> CompanionServer.Reply {
+        // The router checks this too.  The store runs whatever it is handed, so
+        // the last line before the script re-checks it.
+        guard CompanionService.vacuumRunKinds.contains(kind) else {
+            return (400, Data(#"{"status":"rejected","error":"That kind of run is not available from iPhone."}"#.utf8))
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.vacuum.runNow(kind)
@@ -1953,12 +1958,12 @@ final class HogStore: ObservableObject {
     /// lane folders and servers, and the snapshot is readable with the shared
     /// code from anywhere, so the steps travel only when the owner allowed
     /// the phone to run the vacuum.
-    func vacuumStatusForPhone() -> CompanionVacuumStatus? {
+    func vacuumStatusForPhone(detailed: Bool = false) -> CompanionVacuumStatus? {
         CompanionVacuum.status(
             from: vacuum.status,
             history: vacuum.history,
             isRunning: vacuum.isRunningNow,
-            includeSteps: allowRemoteVacuum
+            includeSteps: detailed && allowRemoteVacuum
         )
     }
 
@@ -2028,7 +2033,16 @@ final class HogStore: ObservableObject {
             remoteVacuumAllowed: allowRemoteVacuum,
             vacuum: vacuumStatusForPhone()
         )
-        companionServer.update(snapshot: snapshot, targets: CompanionTargets.index(rows))
+        // The plain snapshot is what the shared code reads.  A phone's own token
+        // on the local network or Tailscale also gets the vacuum's step detail,
+        // and only while the owner has allowed the phone to run the vacuum.
+        var detailed: CompanionSnapshot?
+        if allowRemoteVacuum {
+            var withSteps = snapshot
+            withSteps.vacuum = vacuumStatusForPhone(detailed: true)
+            detailed = withSteps
+        }
+        companionServer.update(snapshot: snapshot, detailed: detailed, targets: CompanionTargets.index(rows))
     }
 
     // MARK: - Staleness

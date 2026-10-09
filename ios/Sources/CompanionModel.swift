@@ -1084,7 +1084,8 @@ final class CompanionModel {
             notificationsDenied: false
         ),
         remoteVacuumAllowed: true,
-        vacuum: sampleVacuum(now: Date(timeIntervalSince1970: 1_758_000_000))
+        // Relative to launch, so the sample reads "3 hours ago", not a year ago.
+        vacuum: sampleVacuum(now: Date())
     )
 
     /// A healthy Robotic Vacuum whose last full run ended `endedSecondsAgo`

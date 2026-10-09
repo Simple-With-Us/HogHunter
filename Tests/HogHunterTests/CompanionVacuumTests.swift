@@ -8,6 +8,12 @@ import XCTest
 // launcher, and the default launcher refuses to start inside XCTest, so a test
 // that forgot a stub would fail instead of cleaning this Mac.
 
+/// A throwaway history database, so a store built in a test never opens the
+/// owner's real one.
+func isolatedHistoryURL() -> URL {
+    URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-test-history-\(UUID().uuidString).sqlite")
+}
+
 // MARK: - The route
 
 final class CompanionVacuumRouteTests: XCTestCase {
@@ -127,6 +133,18 @@ final class CompanionVacuumRouteTests: XCTestCase {
         XCTAssertEqual(kind.value, "full")
     }
 
+    func testABareQuestionMarkMeansFullAndDoesNotTrap() {
+        let server = server(vacuum: true)
+        let kind = CompanionLocked<String?>(nil)
+        server.onRemoteVacuumRun = { kind.value = $0; return (202, Data("{}".utf8)) }
+        for query in ["?", "?&", "?other=1"] {
+            kind.value = nil
+            server.vacuumRunning = false   // the router marks a run going when it accepts one
+            XCTAssertEqual(status(server, rawRequest(query: query)), 202, query)
+            XCTAssertEqual(kind.value, "full", query)
+        }
+    }
+
     func testAnEncodedFullIsStillFull() {
         let server = server(vacuum: true)
         let kind = CompanionLocked<String?>(nil)
@@ -228,12 +246,12 @@ final class CompanionVacuumOptInTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = try temporaryDirectory()
 
-        let first = HogStore(defaults: defaults, vacuum: vacuumStore(directory), startImmediately: false)
+        let first = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
         XCTAssertFalse(first.allowRemoteVacuum, "off until the owner turns it on")
         first.allowRemoteVacuum = true
         XCTAssertEqual(defaults.bool(forKey: "allowRemoteVacuum"), true)
 
-        let second = HogStore(defaults: defaults, vacuum: vacuumStore(directory), startImmediately: false)
+        let second = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
         XCTAssertTrue(second.allowRemoteVacuum)
     }
 
@@ -242,7 +260,7 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let suite = "hoghunter.tests.remotevacuum.independent.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(defaults: defaults, vacuum: vacuumStore(try temporaryDirectory()), startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(try temporaryDirectory()), startImmediately: false)
         store.allowRemoteQuit = true
         store.allowRemoteClean = true
         store.allowRemoteEdit = true
@@ -255,7 +273,7 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let suite = "hoghunter.tests.remotevacuum.defaults.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(defaults: defaults, vacuum: vacuumStore(try temporaryDirectory()), startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(try temporaryDirectory()), startImmediately: false)
         // Settings edits the same keys through @AppStorage in places.
         defaults.set(true, forKey: "allowRemoteVacuum")
         try await Self.wait { store.allowRemoteVacuum }
@@ -269,17 +287,20 @@ final class CompanionVacuumOptInTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = try temporaryDirectory()
         try CompanionVacuumFixtures.statusJSON.write(to: directory.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
-        let store = HogStore(defaults: defaults, vacuum: vacuumStore(directory), startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
 
-        let coarse = try XCTUnwrap(store.vacuumStatusForPhone())
+        // The plain snapshot never carries steps, whatever the setting says.
+        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone()).steps)
+        let coarse = try XCTUnwrap(store.vacuumStatusForPhone(detailed: true))
         XCTAssertEqual(coarse.health, "healthy")
         XCTAssertNil(coarse.steps, "step reasons can name folders and servers: not without the opt-in")
 
         store.allowRemoteVacuum = true
-        XCTAssertEqual(try XCTUnwrap(store.vacuumStatusForPhone()).steps?.count, 3)
+        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone()).steps, "the plain snapshot still has none")
+        XCTAssertEqual(try XCTUnwrap(store.vacuumStatusForPhone(detailed: true)).steps?.count, 3)
 
         store.allowRemoteVacuum = false
-        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone()).steps, "turning it off takes the detail back out")
+        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone(detailed: true)).steps, "turning it off takes the detail back out")
     }
 
     /// The handler answers at once and the run proceeds on the main actor,
@@ -297,7 +318,7 @@ final class CompanionVacuumOptInTests: XCTestCase {
             await gate.wait()
             return true
         }
-        let store = HogStore(defaults: defaults, vacuum: vacuum, startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuum, startImmediately: false)
 
         let started = store.performRemoteVacuumRun(kind: "full")
         XCTAssertEqual(started.status, 202, "the handler answers before the run is over")
@@ -541,6 +562,7 @@ final class CompanionVacuumStatusTests: XCTestCase {
         XCTAssertEqual(CompanionVacuum.cappedReason(String(repeating: "a", count: 121)).count, 120)
         XCTAssertEqual(CompanionVacuum.cappedReason("Retired two\nworktrees.   Kept one."), "Retired two worktrees. Kept one.")
         XCTAssertEqual(CompanionVacuum.cappedReason(""), "")
+        XCTAssertEqual(CompanionVacuum.cappedReason("Retired two.\u{00A0} Kept one."), "Retired two.\u{00A0} Kept one.", "the gap between sentences survives")
     }
 
     func testBytesNeverGoNegative() throws {
@@ -626,7 +648,7 @@ final class CompanionVacuumCopyTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         let vacuum = RoboticVacuumStore(supportDirectory: directory, repoRoot: directory) { _ in true }
-        let store = HogStore(defaults: defaults, vacuum: vacuum, startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuum, startImmediately: false)
         let started = store.performRemoteVacuumRun(kind: "full")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: started.body) as? [String: Any])
         assertGap(try XCTUnwrap(json["message"] as? String))
@@ -696,4 +718,53 @@ enum CompanionVacuumFixtures {
       "history_count": 1
     }
     """
+}
+
+/// Who reads the vacuum's step detail.  The shared pairing code can read the
+/// snapshot from anywhere, and a step's reason can name a folder or a server.
+final class CompanionVacuumDisclosureTests: XCTestCase {
+    private let code = "ABCD2345"
+    private let lan = CompanionPeer(key: "192.168.1.20", isTrusted: true)
+    private let wan = CompanionPeer(key: "203.0.113.9", isTrusted: false)
+
+    private func snapshot(steps: Bool) -> CompanionSnapshot {
+        var snapshot = CompanionServerRoutingTests.minimalSnapshot()
+        var status = CompanionVacuumStatus(health: "healthy", displayHealth: "On schedule", launchdLoaded: true, isRunning: false)
+        if steps {
+            status.steps = [CompanionVacuumStep(stepId: "janitor_worktree_retire", title: "Retire old merged git worktrees", statusLabel: "Done", reason: "Retired ~/apps/lanes/hoghunter/claude-secret-lane.", bytesFreed: 1)]
+        }
+        snapshot.vacuum = status
+        return snapshot
+    }
+
+    private func served(_ server: CompanionServer, token: String, from peer: CompanionPeer) throws -> CompanionSnapshot {
+        let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.request(token: token), peer: peer) }
+        guard case .reply(let data) = disposition, let parsed = CompanionHTTP.parseResponse(data), parsed.status == 200 else {
+            throw XCTSkip("the snapshot was not served")
+        }
+        return try CompanionJSON.decode(parsed.body)
+    }
+
+    func testOnlyAPhonesOwnTokenOnTheLocalNetworkReadsTheSteps() throws {
+        let server = CompanionServer()
+        server.updateToken(code)
+        let token = server.devices.issue(name: "Test iPhone").token
+        server.update(snapshot: snapshot(steps: false), detailed: snapshot(steps: true))
+        server.syncOnQueue {}
+
+        XCTAssertNotNil(try served(server, token: token, from: lan).vacuum?.steps, "a paired phone at home reads the detail")
+        XCTAssertNil(try served(server, token: token, from: wan).vacuum?.steps, "from outside the local network it reads the plain snapshot")
+        XCTAssertNil(try served(server, token: code, from: lan).vacuum?.steps, "the shared code never reads the detail")
+        XCTAssertNil(try served(server, token: code, from: wan).vacuum?.steps)
+        XCTAssertEqual(try served(server, token: code, from: wan).vacuum?.health, "healthy", "the coarse status is there for everyone")
+    }
+
+    func testWithoutADetailedSnapshotEveryoneReadsThePlainOne() throws {
+        let server = CompanionServer()
+        server.updateToken(code)
+        let token = server.devices.issue(name: "Test iPhone").token
+        server.update(snapshot: snapshot(steps: false))
+        server.syncOnQueue {}
+        XCTAssertNil(try served(server, token: token, from: lan).vacuum?.steps)
+    }
 }
