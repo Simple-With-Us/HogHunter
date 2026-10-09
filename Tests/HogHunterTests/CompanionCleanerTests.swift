@@ -457,7 +457,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
         suite = "hoghunter.tests.cleaner.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         history = CleanupHistoryStore(inMemory: true)
-        store = HogStore(defaults: defaults, cleanupHistory: history, startImmediately: false)
+        store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), cleanupHistory: history, startImmediately: false)
         store.remoteExclusions = { CleanerExclusions() }
     }
 

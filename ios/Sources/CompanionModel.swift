@@ -99,6 +99,9 @@ final class CompanionModel {
     /// The person's confirmation of the Extreme notice; asked again each launch.
     var extremeAcknowledged = false
     var isStartingScan = false
+    /// True while the phone is polling the Mac's scan.  The scan itself keeps
+    /// running on the Mac whether or not the phone is looking.
+    var isFollowingScan = false
     var isCleaningSelection = false
     /// Why the last scan or clean did not go, shown inside the cleaner screen.
     var cleanerError: String?

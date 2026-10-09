@@ -20,8 +20,10 @@ extension CompanionModel {
         selectedCleanItems.reduce(0) { $0 &+ $1.bytes }
     }
 
+    /// Whether this phone has a scan in flight: starting one or following one.
+    /// Not the report's state alone, which can be stale if a poll ended early.
     var cleanScanIsRunning: Bool {
-        isStartingScan || cleanReport?.state == "scanning"
+        isStartingScan || isFollowingScan
     }
 
     func toggleCleanItem(_ id: String) {
@@ -125,7 +127,9 @@ extension CompanionModel {
     /// and can take a minute or two; the limit keeps a stuck Mac from holding
     /// the screen on a spinner for good.
     private func followScan(endpoint: NWEndpoint, token: String) async {
-        cleanReportPoll?.cancel()
+        guard !isFollowingScan else { return }
+        isFollowingScan = true
+        defer { isFollowingScan = false }
         let started = Date()
         while !Task.isCancelled, Date().timeIntervalSince(started) < 10 * 60 {
             do {
@@ -202,13 +206,13 @@ extension CompanionModel {
     // MARK: - Demo mode
 
     private func demoScan() async {
-        isStartingScan = true
+        isFollowingScan = true
+        defer { isFollowingScan = false }
         cleanReport = CompanionCleanReport(state: "scanning", scanId: "demo", tier: cleanTier, scanningCategory: "User Caches")
         try? await Task.sleep(for: .milliseconds(900))
         cleanReport?.scanningCategory = "Developer Junk"
         try? await Task.sleep(for: .milliseconds(900))
         applyCleanReport(Self.sampleCleanReport(state: "ready", tier: cleanTier, scanId: "demo-\(UUID().uuidString.prefix(6))"))
-        isStartingScan = false
     }
 
     private func demoClean(report: CompanionCleanReport) async {

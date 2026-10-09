@@ -1,6 +1,6 @@
 # Phone parity, batch 2 (2026-10-09)
 
-Board `32919186`.  Issues: #99 (A).  PRs: A (this doc starts here), B (disk cleaner), C (Robotic Vacuum).
+Board `32919186`.  Issues: #99 (A), #101 (B), #102 (C).  PRs: A #100 (this doc starts here), B (disk cleaner), C #103 (Robotic Vacuum).
 
 ## Ruling
 
@@ -50,6 +50,39 @@ An owner who already allows Quit or Tame now also allows Sample for 3 Seconds.  
 ### Sample for 3 Seconds
 
 The Mac re-checks the row's processes against the live process table (the start time check Quit and Tame use) and samples the first live member it owns.  Hog Hunter itself, another user's process and pid 1 are refused.  One sample runs at a time (409 for a second), and a `sample` that outlives its time is stopped.  The phone asks for a confirmation first, like every other action.  The report is written where the Mac's own Sample writes it, `~/Library/Logs/HogHunter/`, and no window opens on the Mac.  The phone gets the file name, its size and up to twelve lines from the report's "Sort by top of stack" section.  The Mac reads only the last 256 KB of the report to find them.
+
+## PR B: disk cleaner
+
+| Feature | Where it lives | Gate |
+|---|---|---|
+| Scan for the Standard or Extreme tier | `POST /v1/clean/scan?tier=standard\|extreme[&ack=1]` | Allow iPhone to Run Disk Cleaner |
+| Preview the scan, pick items, read cleanup history | `GET /v1/clean/report` | Allow iPhone to Run Disk Cleaner |
+| Clean the picked items | `POST /v1/clean` with a JSON body (`scanId`, `tier`, `items`, `acknowledgedExtreme`) | Allow iPhone to Run Disk Cleaner |
+| Record phone cleans in cleanup history | the same code path as the Mac's cleaner | n/a |
+
+### The phone never names a path
+
+`CleanItem.id` is the item's path, so the phone is not allowed to send one.  The Mac holds the scan under an id (`RemoteCleanScan`), the report lists items with short references (`"3.12"` is the thirteenth item of the fourth category), and a clean sends the scan id and the references back.  `CompanionCleanerReport.plan` resolves them against the Mac's own scan and refuses the whole request on any of: no scan, a different scan id, a scan older than 30 minutes, a tier that does not match the scan, an unknown tier, an unknown reference, Extreme without the acknowledgement, or nothing selected.  A scan is spent by one clean.  `DiskCleaner.clean` then re-applies the current exclusions and `isSafeToDelete` to every item, as it does for the Mac.
+
+### Extreme
+
+The notice is one string in `CleanerCopy` (`CompanionSnapshot.swift`), used by the Mac's cleaner view and the phone, so the two cannot drift.  The phone shows it and needs it ticked before a scan; the Mac refuses an Extreme scan (`ack=1`) or clean (`acknowledgedExtreme`) without it, so a phone that forgets cannot run Extreme by accident.  The phone confirms every clean with the Mac's own confirmation wording.
+
+### History
+
+The Mac's cleaner built its history row inside `DiskCleanerStore`; the phone's clean wrote none.  The row is now built by `CleanupHistoryRecord.record(from:source:)`, which both call, and a phone clean is marked `"iPhone"`.  The log's append lock is now shared by every instance (it was per instance, and the Mac cleaner and the phone each own one).  `recentRecords(limit:)` reads a bounded tail, and the report carries the last ten.
+
+### Size and shape
+
+The report lists at most 100 items per category, largest first, and says how many there really are.  Nothing in a category beyond the listed items is selectable from the phone.  A report is fetched when the cleaner screen opens and while a scan runs; it is not part of the snapshot, so the 3 second poll stays small.  A full set of references fits well inside the 16 KB body cap.
+
+### Existing opt-in gains a little
+
+An owner who already allows Run Disk Cleaner now also allows Extreme (with the phone's acknowledgement), item selection, and reading the scan and history.  The Settings description says so.  A bare `POST /v1/clean` from an older phone is unchanged: the Standard clean with the Mac's default selection, and now recorded in history.
+
+### Follow-ups
+
+Nothing beyond batch 1's list.  The rest of a category with more than 100 items cannot be chosen from the phone.
 
 ## Verification
 

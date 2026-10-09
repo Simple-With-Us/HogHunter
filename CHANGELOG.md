@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+iPhone companion, phone parity batch 2, PR B (board `32919186`, issue 101), disk cleaner:
+
+- The phone can scan the Mac for the Standard or the Extreme tier, see the categories and items the Mac found (largest first, at most 100 per category, with the true counts and sizes), tick what to clean starting from the Mac's own default selection, confirm with the same words the Mac uses, and clean.  Behind Allow iPhone to Run Disk Cleaner, as before.
+- The phone never names a path.  The Mac keeps the scan under an id and the report gives short references into it; a stale or unknown scan, a tier that does not match, an unknown reference, or Extreme without the acknowledgement cleans nothing.  The Mac re-applies the current exclusions and its own safety checks before it deletes, and a scan is good for one clean for 30 minutes.
+- Extreme shows the notice the Mac shows (one shared string now) and needs it ticked on the phone; the Mac refuses an Extreme scan or clean that does not say so.
+- A clean the phone starts is now written to the cleanup history, which it was not before, and the history rows say when a clean came from the iPhone.  The phone shows the last ten.  Appends from the Mac's cleaner and the phone's can no longer interleave.
+- A bare `POST /v1/clean` from an older phone still runs the Standard clean with the Mac's default selection.
+- New routes `POST /v1/clean/scan` and `GET /v1/clean/report`.  An owner who already allows the cleaner now also allows Extreme, item selection and reading the scan; nothing asks again.
+
 iPhone companion, phone parity batch 2, PR A (board `32919186`, issue 99):
 
 - CPU scale picker on the phone: Per Core or Per Machine, with the same explanation Settings shows on the Mac.  It uses the existing view route, so it needs Allow iPhone to Change Exclusions & View.

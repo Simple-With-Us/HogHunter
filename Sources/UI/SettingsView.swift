@@ -428,7 +428,7 @@ private struct IPhoneSettingsTab: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Toggle("Allow iPhone to Run Disk Cleaner", isOn: $store.allowRemoteClean)
-                    Text("When enabled, the paired iPhone can start a Standard clean.  A local snapshot is taken first and items go to the Trash.")
+                    Text("When enabled, the paired iPhone can scan this Mac, choose which items to clean, and run a Standard or an Extreme clean (after you tick the Extreme notice on the phone).\u{00A0} A local snapshot is taken first and items go to the Trash.\u{00A0} Every clean is added to the cleanup history.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
