@@ -371,9 +371,35 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
     var nextFullRunAt: Date? = nil
     var lastRunBytesFreed: Int? = nil
     var lastRunEndedAt: Date? = nil
-    /// The last result of each step.  Nil unless the owner allowed the phone
-    /// to run the vacuum.
+    /// What kind of run the three `lastRun` fields and `steps` describe:
+    /// "janitor", "full", "manual" or "pressure".  It is never "watch" unless
+    /// every run on record is a watch tick, because a watch tick is only the
+    /// five minute disk and memory check and says nothing about cleaning.
+    var lastRunTrigger: String? = nil
+    /// What the last run did, step by step.  Nil unless the owner allowed the
+    /// phone to run the vacuum.
     var steps: [CompanionVacuumStep]? = nil
+    /// The Mac's recent runs, newest first, watch ticks included, the way the
+    /// Mac lists them.  A run carries no step text, so unlike `steps` this
+    /// travels with the plain snapshot.  Nil from a Mac that predates the
+    /// field (empty means the Mac has recorded no runs).
+    var recentRuns: [CompanionVacuumRun]? = nil
+}
+
+/// One finished Robotic Vacuum run in the Recent Runs list.  Only what can be
+/// said without naming a folder or a server.
+struct CompanionVacuumRun: Codable, Equatable, Identifiable, Sendable {
+    var runId: String
+    /// "watch", "janitor", "full", "manual" or "pressure", as the engine records it.
+    var trigger: String
+    var endedAt: Date? = nil
+    var bytesFreed: Int
+    /// Zero when the run finished cleanly.
+    var exitCode: Int
+    var durationSeconds: Int
+
+    var id: String { runId }
+    var succeeded: Bool { exitCode == 0 }
 }
 
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.

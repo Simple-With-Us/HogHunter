@@ -44,6 +44,22 @@ private enum VacuumFormat {
     static func bytes(_ count: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(max(0, count)), countStyle: .file)
     }
+
+    private static let spans: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.maximumUnitCount = 2
+        formatter.zeroFormattingBehavior = .dropAll
+        return formatter
+    }()
+
+    /// "20m" or "1h 3m".  Nil for a run that took under a second, which a
+    /// watch tick usually does.
+    static func took(_ seconds: Int) -> String? {
+        guard seconds > 0 else { return nil }
+        return spans.string(from: TimeInterval(seconds))
+    }
 }
 
 /// The row on the Storage tab that leads to the Robotic Vacuum screen.
@@ -79,6 +95,42 @@ struct VacuumSummaryRow: View {
     }
 }
 
+/// One line of the Recent Runs list, the way the Mac lists a run (what kind,
+/// what it freed, when it ended), with how long it took and whether it failed.
+private struct VacuumRunRow: View {
+    let run: CompanionVacuumRun
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(run.trigger.capitalized)
+                    .font(.body.weight(.medium))
+                if !run.succeeded {
+                    Text("Failed")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                }
+                Spacer()
+                Text(run.bytesFreed > 0 ? "Freed \(VacuumFormat.bytes(run.bytesFreed))" : "Nothing freed")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// "3 hours ago, took 20m".
+    private var detail: String {
+        let ended = run.endedAt.map { VacuumFormat.relative.localizedString(for: $0, relativeTo: Date()) }
+        let parts = [ended, VacuumFormat.took(run.durationSeconds).map { "took \($0)" }].compactMap { $0 }
+        return parts.isEmpty ? "No end time recorded" : parts.joined(separator: ", ")
+    }
+}
+
 /// Robotic Vacuum on the Mac: whether it is on schedule, what its last run
 /// did, and a Run Now button.
 ///
@@ -100,12 +152,14 @@ struct VacuumView: View {
 
     static let offNote = "Running the Robotic Vacuum from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Robotic Vacuum in Hog Hunter Settings > iPhone on your Mac."
     static let tooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share the Robotic Vacuum.\u{00A0} Update it on the Mac."
+    static let runsTooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share its recent runs.\u{00A0} Update it on the Mac."
 
     var body: some View {
         List {
             statusSection
             runSection
             stepsSection
+            recentRunsSection
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Robotic Vacuum")
@@ -165,6 +219,10 @@ struct VacuumView: View {
                 // Before the first run there is no status to read this from.
                 if vacuum.health != "unknown" {
                     LabeledContent("Background Job", value: vacuum.launchdLoaded ? "Loaded" : "Not loaded")
+                }
+                // Which kind of run the next two rows and the steps below describe.
+                if let trigger = vacuum.lastRunTrigger {
+                    LabeledContent("Last Run", value: trigger.capitalized)
                 }
                 if let freed = vacuum.lastRunBytesFreed {
                     LabeledContent("Last Run Freed", value: VacuumFormat.bytes(freed))
@@ -263,6 +321,37 @@ struct VacuumView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("What the Last Run Did")
+            }
+        }
+    }
+
+    /// The Mac's Recent Runs list.  Watch ticks are listed, as on the Mac.  A
+    /// run carries no step text, so this needs no opt-in.
+    @ViewBuilder
+    private var recentRunsSection: some View {
+        if isAvailable, let vacuum {
+            Section {
+                if let runs = vacuum.recentRuns {
+                    if runs.isEmpty {
+                        Text("No runs recorded yet.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(runs) { run in
+                            VacuumRunRow(run: run)
+                        }
+                    }
+                } else {
+                    Text(Self.runsTooOldNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Recent Runs")
+            } footer: {
+                if vacuum.recentRuns?.isEmpty == false {
+                    Text("Newest first.\u{00A0} Watch is the quick disk and memory check that runs every few minutes.\u{00A0} The last run above never counts it.")
+                }
             }
         }
     }

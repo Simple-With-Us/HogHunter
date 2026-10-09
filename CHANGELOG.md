@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+iPhone companion, Robotic Vacuum recent runs (board `5acbcff4`, issue 110):
+
+- The Robotic Vacuum screen on the phone has a Recent Runs list like the Mac's: what kind of run it was, what it freed, when it ended, how long it took, and a Failed mark when it exited with an error.  Watch ticks are listed, as on the Mac.  It shows up to 20 runs, newest first.
+- The phone's last run (bytes freed, when it ended, what each step did) is now the newest run that is not a watch tick, and the screen says which kind it was.  Before, it was the very last run, which is almost always the five minute watch tick, so the step list showed only the disk and memory check.
+- The Mac's Cleaning steps list had the same flaw, because `build_status` took every step result from the last history record only.  Each step now shows its most recent result from any run.  It takes effect when the Vacuum next publishes its status.
+- The snapshot's `vacuum` gains `recentRuns` and `lastRunTrigger`.  A run in the list carries no step text, so the list is not behind Allow iPhone to Run Robotic Vacuum.  An older Mac sends neither field and the phone says that Mac does not share its recent runs; an older phone ignores both.
+
 iPhone companion, phone parity batch 2, review follow-ups (issue 108):
 
 - A phone clean that stops before it removes anything (the safety snapshot failed, the connection dropped) no longer spends the scan the person chose from, so they can retry without scanning again.  One that removes something still does.

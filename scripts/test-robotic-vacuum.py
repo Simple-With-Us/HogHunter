@@ -438,6 +438,93 @@ class TestHealth(unittest.TestCase):
             self.assertFalse(status["launchd_loaded"])
 
 
+class TestStatusStepResults(unittest.TestCase):
+    """step_last_results holds each step's latest result, not just what the last record ran.  The Mac's Cleaning
+    steps list reads it, and the last record is almost always a five minute watch tick."""
+
+    @staticmethod
+    def _record(trigger: TriggerKind, started: float, steps: list[StepResult], exit_code: int = 0) -> RunRecord:
+        record = RunRecord(f"{trigger.value}-{int(started)}", trigger, started_at=started)
+        record.steps.extend(steps)
+        record.ended_at = started + 5
+        record.exit_code = exit_code
+        return record
+
+    def _status(self, records: list[RunRecord]) -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data = home / "rv"
+            data.mkdir(parents=True)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(data)
+            store = VacuumStore(cfg, home=home)
+            for record in records:
+                store.append_run(record)
+            with patch("vacuum.alerts.launchd_loaded", return_value=False):
+                return build_status(store, cfg, now=records[-1].ended_at + 1)
+
+    def test_a_watch_tick_after_a_janitor_run_keeps_the_janitor_steps(self):
+        t = 1_760_000_000.0
+        janitor_run = self._record(
+            TriggerKind.JANITOR,
+            t,
+            [
+                StepResult("pm2_logs", "Cap oversized PM2 logs", StepStatus.RAN, reason="No log is over the limit."),
+                StepResult("npm_cache", "Trim npm download cache", StepStatus.RAN, reason="Trimmed.", bytes_freed=400),
+            ],
+        )
+        watch_tick = self._record(
+            TriggerKind.WATCH, t + 300, [StepResult("resource_sample", "Check disk and memory", StepStatus.RAN)]
+        )
+        status = self._status([janitor_run, watch_tick])
+        self.assertEqual(set(status["step_last_results"]), {"pm2_logs", "npm_cache", "resource_sample"})
+        self.assertEqual(status["step_last_results"]["npm_cache"]["bytes_freed"], 400)
+        self.assertEqual(status["step_last_results"]["pm2_logs"]["reason"], "No log is over the limit.")
+        # Everything else about the status still describes the very last record.
+        self.assertEqual(status["last_run"]["run_id"], watch_tick.run_id)
+        self.assertEqual(status["history_count"], 2)
+
+    def test_the_newest_result_of_a_step_wins(self):
+        t = 1_760_000_000.0
+        older = self._record(
+            TriggerKind.JANITOR, t, [StepResult("pm2_logs", "Cap oversized PM2 logs", StepStatus.FAILED, reason="old")]
+        )
+        newer = self._record(
+            TriggerKind.FULL, t + 3600, [StepResult("pm2_logs", "Cap oversized PM2 logs", StepStatus.RAN, reason="new")]
+        )
+        watch_tick = self._record(
+            TriggerKind.WATCH, t + 3900, [StepResult("resource_sample", "Check disk and memory", StepStatus.RAN)]
+        )
+        status = self._status([older, newer, watch_tick])
+        self.assertEqual(status["step_last_results"]["pm2_logs"]["reason"], "new")
+        self.assertEqual(status["step_last_results"]["pm2_logs"]["status"], "ran")
+
+    def test_health_still_follows_the_last_record_alone(self):
+        t = 1_760_000_000.0
+        good = self._record(TriggerKind.FULL, t, [StepResult("pm2_logs", "Cap oversized PM2 logs", StepStatus.RAN)])
+        failed_tick = self._record(
+            TriggerKind.WATCH, t + 60, [StepResult("resource_sample", "Check disk and memory", StepStatus.FAILED)], exit_code=1
+        )
+        self.assertEqual(self._status([good, failed_tick])["health"], "failed")
+        recovered_tick = self._record(
+            TriggerKind.WATCH, t + 120, [StepResult("resource_sample", "Check disk and memory", StepStatus.RAN)]
+        )
+        self.assertEqual(self._status([failed_tick, recovered_tick])["health"], "healthy")
+
+    def test_no_history_means_no_step_results(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data = home / "rv"
+            data.mkdir(parents=True)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(data)
+            store = VacuumStore(cfg, home=home)
+            with patch("vacuum.alerts.launchd_loaded", return_value=False):
+                status = build_status(store, cfg, now=time.time())
+        self.assertEqual(status["step_last_results"], {})
+        self.assertIsNone(status["last_run"])
+
+
 def load_tests(loader, tests, pattern):
     """CI runs only this file, so load the lane doctor tests beside the others."""
     import importlib.util
