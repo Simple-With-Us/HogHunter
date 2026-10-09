@@ -220,42 +220,41 @@ struct CleanerView: View {
         let allSelected = model.isCleanCategoryFullySelected(category)
         return Section {
             HStack(spacing: 12) {
-                Button {
-                    if isOpen { expanded.remove(category.id) } else { expanded.insert(category.id) }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: category.icon)
-                            .frame(width: 24)
-                            .foregroundStyle(Color.accentColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(category.title)
-                                    .font(.body.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                if category.isExtremeOnly {
-                                    Text("EXTREME ONLY")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.purple)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.purple.opacity(0.12)))
-                                }
+                // Not a Button: a button in a List row tints its whole label, and
+                // the title and count must read as ordinary text, like the Mac's
+                // rows.  A tap gesture with the button trait behaves the same.
+                HStack(spacing: 10) {
+                    Image(systemName: category.icon)
+                        .frame(width: 24)
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(category.title)
+                                .font(.body.weight(.medium))
+                            if category.isExtremeOnly {
+                                Text("EXTREME ONLY")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.purple)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.purple.opacity(0.12)))
                             }
-                            Text("\(category.totalText) in \(category.itemCount) \(category.itemCount == 1 ? "item" : "items")\(selectedCount > 0 ? ", \(selectedCount) selected" : "")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
-                        Spacer(minLength: 4)
-                        Image(systemName: isOpen ? "chevron.down" : "chevron.right")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.tertiary)
+                        Text("\(category.totalText) in \(category.itemCount) \(category.itemCount == 1 ? "item" : "items")\(selectedCount > 0 ? ", \(selectedCount) selected" : "")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .contentShape(Rectangle())
-                    // A borderless button tints its label; the title and the
-                    // count read as ordinary text, like the Mac's rows.
-                    .foregroundStyle(.primary)
+                    Spacer(minLength: 4)
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.borderless)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if isOpen { expanded.remove(category.id) } else { expanded.insert(category.id) }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("\(category.title), \(category.totalText)")
                 .accessibilityHint(isOpen ? "Hide items" : "Show items")
 
