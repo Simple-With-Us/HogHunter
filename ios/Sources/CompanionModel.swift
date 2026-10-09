@@ -836,6 +836,9 @@ final class CompanionModel {
                 uniqueRemoteHosts: 3,
                 sampleRemoteHosts: ["54.230.97.10:443", "3.220.12.91:443"]
             )
-        ]
+        ],
+        // Demo mode shows every control, the way a Mac with all opt-ins on does.
+        remoteQuitAllowed: true,
+        remoteCleanAllowed: true
     )
 }
