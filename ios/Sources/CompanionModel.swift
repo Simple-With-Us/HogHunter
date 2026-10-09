@@ -102,6 +102,9 @@ final class CompanionModel {
     /// True while the phone is polling the Mac's scan.  The scan itself keeps
     /// running on the Mac whether or not the phone is looking.
     var isFollowingScan = false
+    /// Set by the screenshot lane's launch flags: the cleaner shows a canned
+    /// scan and never asks a Mac for one.
+    var isScreenshotMode = false
     var isCleaningSelection = false
     /// Why the last scan or clean did not go, shown inside the cleaner screen.
     var cleanerError: String?
@@ -163,6 +166,7 @@ final class CompanionModel {
             snapshot = Self.sample
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
+            seedScreenshotCleaner()
             return
         }
         saved = loadSaved()

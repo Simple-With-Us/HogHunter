@@ -54,6 +54,7 @@ extension CompanionModel {
     /// Shows what the Mac already holds: a scan from a moment ago, one still
     /// running, and the cleanup history.  Called when the cleaner opens.
     func refreshCleanReport() async {
+        if isScreenshotMode { return }
         if isDemoMode {
             if cleanReport == nil { cleanReport = Self.sampleCleanReport(state: "idle", tier: cleanTier) }
             return
@@ -201,6 +202,20 @@ extension CompanionModel {
         selectedCleanRefs = []
         seededScanId = nil
         await refreshCleanReport()
+    }
+
+    // MARK: - Screenshot lane
+
+    /// `-HogHunterCleaner` and `-HogHunterCleanerExtreme` put a finished scan
+    /// on screen for the hosted screenshot lane.
+    func seedScreenshotCleaner() {
+        let arguments = ProcessInfo.processInfo.arguments
+        let extreme = arguments.contains("-HogHunterCleanerExtreme")
+        guard extreme || arguments.contains("-HogHunterCleaner") else { return }
+        isScreenshotMode = true
+        cleanTier = extreme ? "extreme" : "standard"
+        extremeAcknowledged = extreme
+        applyCleanReport(Self.sampleCleanReport(state: "ready", tier: cleanTier))
     }
 
     // MARK: - Demo mode
