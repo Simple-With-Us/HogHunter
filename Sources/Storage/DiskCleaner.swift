@@ -408,11 +408,16 @@ final class DiskCleaner: @unchecked Sendable {
     private let fileManager: FileManager
     /// Tests substitute a closure that does not call `tmutil`.
     private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
+    /// Tests inject a temp home so scan-level behavior is verifiable without
+    /// touching the real home directory.
+    private let homeDirectory: URL?
 
     init(fileManager: FileManager = .default,
-         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() }) {
+         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
+         homeDirectory: URL? = nil) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
+        self.homeDirectory = homeDirectory
     }
 
     // MARK: - Full Scan
@@ -779,7 +784,10 @@ final class DiskCleaner: @unchecked Sendable {
                     if Task.isCancelled { break }
                     let name = url.lastPathComponent
                     if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
+                    if Self.isSharedVendorContainer(name) { continue }
                     if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
+                    let childNames = (try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.map(\.lastPathComponent) ?? []
+                    if Self.holdsInstalledProduct(childNames: childNames, knownBundleIds: knownBundleIds, knownNames: knownNames) { continue }
 
                     let stats = directoryStats(at: url)
                     guard stats.bytes > 0 else { continue }
@@ -1364,7 +1372,9 @@ final class DiskCleaner: @unchecked Sendable {
     /// Validates whether a file or directory is safe to clean.
     func isSafeToDelete(url: URL, category: CleanCategory) -> Bool {
         let path = (url.path as NSString).standardizingPath
-        let home = (NSHomeDirectory() as NSString).standardizingPath
+        // Same resolved home as userHomeURL so injected-home tests (and any
+        // future alternate home) keep scan + safety on one path.
+        let home = (userHomeURL.path as NSString).standardizingPath
 
         // Disallow root or critical system directories
         let prohibitedPrefixes = [
@@ -1382,8 +1392,10 @@ final class DiskCleaner: @unchecked Sendable {
             return false
         }
 
-        // Never touch Hog Hunter itself
-        if isHogHunterIdentifier(path) {
+        // Never touch Hog Hunter's own namespaces (bundle caches, Application
+        // Support, Logs).  Use path markers — not a raw "hoghunter" substring —
+        // so a temp folder named HogHunterTest_* cannot poison the allowlist.
+        if isHogHunterProtectedPath(path) {
             return false
         }
 
@@ -1546,12 +1558,63 @@ final class DiskCleaner: @unchecked Sendable {
     // MARK: - Internal Helpers
 
     private var userHomeURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     }
 
+    /// True for a folder or bundle-id *name* that belongs to Hog Hunter
+    /// (used when scanning Containers / Application Support entries).
     private func isHogHunterIdentifier(_ string: String) -> Bool {
         let lower = string.lowercased()
         return lower.contains("hoghunter") || lower.contains("simplewithus.hoghunter") || lower.contains("jayservices.hoghunter")
+    }
+
+    /// True for a full filesystem path that is one of Hog Hunter's protected
+    /// namespaces.  Deliberately narrower than `isHogHunterIdentifier`: a path
+    /// component like `HogHunterTest_*` must not block orphan allowlisting.
+    private func isHogHunterProtectedPath(_ path: String) -> Bool {
+        let lower = (path as NSString).standardizingPath.lowercased()
+        let markers = [
+            "/library/application support/hoghunter",
+            "/library/logs/hoghunter",
+            "/library/caches/com.simplewithus.hoghunter",
+            "/library/caches/com.jayservices.hoghunter",
+            "/library/containers/com.simplewithus.hoghunter",
+            "/library/containers/com.jayservices.hoghunter",
+            "/library/saved application state/com.simplewithus.hoghunter",
+            "/library/saved application state/com.jayservices.hoghunter"
+        ]
+        return markers.contains { lower.contains($0) }
+    }
+
+    /// Shared vendor folders hold several live products.  They are not one uninstalled app.
+    static func isSharedVendorContainer(_ name: String) -> Bool {
+        let shared: Set<String> = [
+            "google", "mozilla", "microsoft", "mobilesync", "crashreporter"
+        ]
+        return shared.contains(name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    /// True when a folder still contains a product that is installed.
+    static func holdsInstalledProduct(childNames: [String], knownBundleIds: Set<String>, knownNames: Set<String>) -> Bool {
+        func normalize(_ value: String) -> String {
+            String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+        }
+        // Normalized compare so a version-suffixed child ("IntelliJIdea2024.2")
+        // still matches the installed "IntelliJ IDEA", and a product folder
+        // ("Brave-Browser") still matches the display name "Brave Browser",
+        // instead of being listed as an orphan and deleted.  Tokens of 2 or
+        // fewer characters are too generic to decide on, so they are dropped.
+        // `hasSuffix` covers product folders that embed a longer identifier
+        // (e.g. bravebrowser ends with browser) without requiring an exact Set hit.
+        let wanted = (knownBundleIds.union(knownNames)).map(normalize).filter { $0.count > 2 }
+        for child in childNames {
+            let c = normalize(child)
+            guard !c.isEmpty else { continue }
+            if wanted.contains(where: { token in
+                token == c || c.hasPrefix(token) || (token.count >= 6 && c.hasSuffix(token))
+            }) { return true }
+        }
+        return false
     }
 
     private func isAppleOrSystemFolder(_ name: String) -> Bool {
