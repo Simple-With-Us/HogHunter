@@ -270,13 +270,15 @@ struct MacSettingsView: View {
         let mine = sendGeneration
         pendingSend = Task {
             try? await Task.sleep(for: .milliseconds(600))
-            guard !Task.isCancelled else { return }
+            // A newer tap owns the stepper now: only the last value is sent.
+            guard !Task.isCancelled, sendGeneration == mine else { return }
             await model.updateSettings(update)
-            // A newer tap owns `pendingSend` now; leave it alone.
             guard sendGeneration == mine else { return }
             pendingSend = nil
-            // If the Mac did not take the change, show what it holds.
-            syncDrafts()
+            // A change the Mac took reaches the draft through the snapshot's own
+            // change.  One it refused leaves the snapshot as it was, so show
+            // what the Mac holds.
+            if model.settingsError != nil { syncDrafts() }
         }
     }
 
