@@ -4,6 +4,7 @@ import Observation
 #if canImport(UIKit)
 import UIKit
 #endif
+import WidgetKit
 
 struct SavedMac: Codable, Equatable {
     var peerID: String
@@ -486,9 +487,7 @@ final class CompanionModel {
             phase = .live
             statusLine = "\(displayName) (Remote)"
             isRemoteSheetPresented = false
-            if let data = try? CompanionJSON.encode(fetched) {
-                UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
-            }
+            storeSnapshotForWidgets(fetched)
         } catch CompanionClientError.unauthorized {
             remoteConnectError = "Pairing Code does not match this Mac."
         } catch let error as CompanionClientError where error != .badResponse {
@@ -497,6 +496,17 @@ final class CompanionModel {
             guard !Task.isCancelled else { return }
             remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
         }
+    }
+
+    private func storeSnapshotForWidgets(_ fetched: CompanionSnapshot) {
+        // Reloading every poll would burn WidgetKit's reload budget (~20/min)
+        // re-rendering unchanged data, and is pure waste while the App Group
+        // entitlement is missing (the write below is then a silent no-op).
+        guard let defaults = UserDefaults(suiteName: appGroupSuite),
+              let data = try? CompanionJSON.encode(fetched),
+              defaults.data(forKey: "last_snapshot") != data else { return }
+        defaults.set(data, forKey: "last_snapshot")
+        WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 
     private func refresh() async {
@@ -515,10 +525,7 @@ final class CompanionModel {
             snapshot = fetched
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
-            // Persist for iOS WidgetKit extension
-            if let data = try? CompanionJSON.encode(fetched) {
-                UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
-            }
+            storeSnapshotForWidgets(fetched)
         } catch CompanionClientError.unauthorized {
             codeError = "The code no longer matches.  Enter the code from Hog Hunter Settings on your Mac."
             phase = .code(saved.peerID)
