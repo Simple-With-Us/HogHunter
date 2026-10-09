@@ -8,6 +8,7 @@ enum CompanionHTTP {
         body: Data,
         token: String,
         cleanHandler: ((CompanionCleanRequest?) -> (status: Int, body: Data))? = nil,
+        cleanRunHandler: ((CompanionCleanRequest) -> (status: Int, body: Data))? = nil,
         cleanScanHandler: ((CompanionCleanScanRequest) -> (status: Int, body: Data))? = nil,
         cleanReportHandler: (() -> (status: Int, body: Data))? = nil,
         quitHandler: ((_ request: CompanionProcessRequest, _ force: Bool) -> (status: Int, body: Data))? = nil,
@@ -34,6 +35,7 @@ enum CompanionHTTP {
         let path = fullPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
         guard path == CompanionService.path
             || path == CompanionService.cleanPath
+            || path == CompanionService.cleanRunPath
             || path == CompanionService.cleanScanPath
             || path == CompanionService.cleanReportPath
             || path == CompanionService.quitPath
@@ -78,21 +80,26 @@ enum CompanionHTTP {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
             }
             if let cleanHandler {
-                // No body is the older phone's plain Standard clean.  A body
-                // that is present but unreadable is refused, never guessed at.
-                var cleanRequest: CompanionCleanRequest?
-                let body = bodyData(of: request)
-                if !body.isEmpty {
-                    guard let decoded = try? JSONDecoder().decode(CompanionCleanRequest.self, from: body) else {
-                        return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The clean request could not be read."}"#.utf8), type: "application/json; charset=utf-8")
-                    }
-                    cleanRequest = decoded
-                }
-                let (code, resBody) = cleanHandler(cleanRequest)
+                // Always the Standard clean with the Mac's default selection,
+                // whatever a body says: choosing items is `/v1/clean/run`.
+                let (code, resBody) = cleanHandler(nil)
                 return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
             } else {
                 return message(status: 501, reason: "Not Implemented", body: Data("Clean Not Configured".utf8))
             }
+        } else if path == CompanionService.cleanRunPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let cleanRunHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Clean Not Configured".utf8))
+            }
+            // A body that is missing or unreadable is refused, never guessed at.
+            guard let runRequest = try? JSONDecoder().decode(CompanionCleanRequest.self, from: bodyData(of: request)) else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The clean request could not be read."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = cleanRunHandler(runRequest)
+            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.cleanScanPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -102,7 +109,7 @@ enum CompanionHTTP {
             }
             var scanRequest = CompanionCleanScanRequest(tier: "standard")
             if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                let query = queryString(of: fullPath)
                 for param in query.split(separator: "&") {
                     let kv = param.split(separator: "=", maxSplits: 1)
                     guard kv.count == 2 else { continue }
@@ -531,7 +538,7 @@ enum CompanionHTTP {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = (try? encoder.encode(request)) ?? Data("{}".utf8)
-        return jsonPostRequest(path: CompanionService.cleanPath, token: token, body: body)
+        return jsonPostRequest(path: CompanionService.cleanRunPath, token: token, body: body)
     }
 
     static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool) -> Data {

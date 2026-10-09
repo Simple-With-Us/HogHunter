@@ -327,6 +327,15 @@ final class CompanionServer: @unchecked Sendable {
                 // Placeholder: never sent.  `startClean` answers later.
                 return (202, Data())
             },
+            cleanRunHandler: { [weak self] request in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
+                guard self.onRemoteClean != nil else {
+                    return (501, Data("{\"error\": \"Clean handler not configured\"}".utf8))
+                }
+                cleanRequested = .some(request)
+                return (202, Data())
+            },
             cleanScanHandler: { [weak self] request in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
                 guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
@@ -482,8 +491,9 @@ final class CompanionServer: @unchecked Sendable {
     static let sampleReplyDeadline: TimeInterval = 45
 
     /// How long a scan start or a report fetch may take to be answered.  Both
-    /// are answered from the main actor in a moment.
-    static let quickReplyDeadline: TimeInterval = 10
+    /// are answered from the main actor in a moment.  Shorter than the phone's
+    /// own 8 second limit, so the Mac's answer is the one it hears.
+    static let quickReplyDeadline: TimeInterval = 6
 
     /// How long the connection of an unfinished clean is held before the
     /// phone is told to watch the progress instead.

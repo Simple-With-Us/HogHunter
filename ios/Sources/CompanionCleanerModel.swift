@@ -70,13 +70,61 @@ extension CompanionModel {
                 await followScan(endpoint: endpoint, token: saved.token)
             }
         } catch {
-            cleanerError = Self.describe(error)
+            reportCleanerFailure(error)
         }
+    }
+
+    /// Says why a cleaner call failed, unless the person just left the screen.
+    /// A Mac that no longer vouches for the scan (an older one, or the opt-in
+    /// turned off) takes the scan on screen with it: it must not stay on
+    /// screen to be cleaned from.
+    private func reportCleanerFailure(_ error: Error) {
+        if error is CancellationError || Task.isCancelled { return }
+        switch error as? CompanionClientError {
+        case .tooOld?, .forbidden?, .unauthorized?:
+            resetCleaner()
+        default:
+            break
+        }
+        cleanerError = Self.describe(error)
+    }
+
+    /// Forgets everything the cleaner screen holds.  Called when the Mac
+    /// changes (forget, demo mode) or stops vouching for the scan.
+    func resetCleaner() {
+        cleanScanTask?.cancel()
+        cleanScanTask = nil
+        cleanReport = nil
+        selectedCleanRefs = []
+        seededScanId = nil
+        cleanerError = nil
+        extremeAcknowledged = false
+        isStartingScan = false
+        isFollowingScan = false
+        isScreenshotMode = false
+    }
+
+    /// Starts a scan as work the screen can stop: leaving the screen cancels it.
+    func beginCleanScan() {
+        cleanScanTask?.cancel()
+        cleanScanTask = Task { await startCleanScan() }
+    }
+
+    func cancelCleanerPolling() {
+        cleanScanTask?.cancel()
+        cleanScanTask = nil
     }
 
     private func applyCleanReport(_ report: CompanionCleanReport) {
         cleanReport = report
-        guard report.state == "ready", let scanId = report.scanId, scanId != seededScanId else { return }
+        // Ticks belong to a ready scan.  With no scan on the Mac there is
+        // nothing to have ticked.
+        if report.state != "ready" {
+            selectedCleanRefs = []
+            seededScanId = nil
+            return
+        }
+        guard let scanId = report.scanId, scanId != seededScanId else { return }
         seededScanId = scanId
         selectedCleanRefs = Set(report.categories.flatMap { $0.items }.filter(\.isSelected).map(\.id))
         if let tier = report.tier { cleanTier = tier }
@@ -120,7 +168,7 @@ extension CompanionModel {
             }
         } catch {
             isStartingScan = false
-            cleanerError = Self.describe(error)
+            reportCleanerFailure(error)
         }
     }
 
@@ -138,12 +186,12 @@ extension CompanionModel {
                 applyCleanReport(report)
                 if report.state != "scanning" { return }
             } catch {
-                cleanerError = Self.describe(error)
+                reportCleanerFailure(error)
                 return
             }
             try? await Task.sleep(for: .milliseconds(1_200))
         }
-        if cleanReport?.state == "scanning" {
+        if !Task.isCancelled, cleanReport?.state == "scanning" {
             cleanerError = "The scan is taking a long time.\u{00A0} It keeps running on the Mac; come back to this screen to see it."
         }
     }
@@ -185,9 +233,19 @@ extension CompanionModel {
             lastCleanResult = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, request: request)
             await refresh()
         } catch CompanionClientError.forbidden(let reason) {
+            // Refused before anything ran: the scan and the person's ticks stand.
             cleanerError = reason
+            return
         } catch CompanionClientError.rejected(let reason) {
             cleanerError = reason
+            // The Mac may have dropped the scan (stale, busy).  Show what it holds.
+            await refreshCleanReport()
+            return
+        } catch CompanionClientError.tooOld {
+            // An older Mac has no choose-and-clean route; nothing ran.
+            resetCleaner()
+            cleanerError = CompanionClientError.tooOld.errorDescription
+            return
         } catch {
             // The reply can be lost while the Mac keeps cleaning.  Look
             // before calling it a failure.
@@ -198,9 +256,8 @@ extension CompanionModel {
                 cleanerError = "Could not finish the clean.\u{00A0} \(Self.describe(error))"
             }
         }
-        // The scan is spent: what it listed is gone or changing.
-        selectedCleanRefs = []
-        seededScanId = nil
+        // The Mac ran it (or may have): the scan is spent, what it listed is
+        // gone or changing.  The refreshed report says idle and clears the ticks.
         await refreshCleanReport()
     }
 

@@ -141,6 +141,9 @@ final class HogStore: ObservableObject {
         didSet {
             persist()
             companionServer.allowRemoteClean = allowRemoteClean
+            // Turning the cleaner off takes the held scan with it: turning it
+            // back on within the scan's lifetime must not revive a clean.
+            if !allowRemoteClean { discardRemoteScan() }
             if !loadingSettings { publishCompanion() }
         }
     }
@@ -173,10 +176,13 @@ final class HogStore: ObservableObject {
     }
     private(set) var remoteScanState: RemoteScanState = .idle
     private var remoteScanTask: Task<Void, Never>?
+    private var remoteScanStartedAt: Date?
+    /// How long a scan may run before a new one is allowed to replace it.
+    var remoteScanWatchdog: TimeInterval = 15 * 60
     /// What a phone-started scan runs.  Tests replace it so no real folder is
     /// walked; the app scans exactly as the Mac's own cleaner does.
-    var remoteScanner: (CleanTier, @escaping (String) -> Void) async -> CleanScanReport = { tier, progress in
-        await DiskCleaner().scan(tier: tier, exclusions: CleanerExclusions.load(), progress: progress)
+    var remoteScanner: (CleanTier, CleanerExclusions, @escaping (String) -> Void) async -> CleanScanReport = { tier, exclusions, progress in
+        await DiskCleaner().scan(tier: tier, exclusions: exclusions, progress: progress)
     }
     /// The cleaner a phone-started clean uses.  Tests replace it with one that
     /// touches no files.
@@ -1778,7 +1784,7 @@ final class HogStore: ObservableObject {
                 error: nil
             )
             publishCompanion()
-            let scanReport = await remoteScanner(tier) { _ in }
+            let scanReport = await remoteScanner(tier, exclusions) { _ in }
             itemsToClean = CompanionCleanerReport.defaultSelection(of: scanReport)
         }
         let totalItems = max(1, itemsToClean.count)
@@ -1869,8 +1875,14 @@ final class HogStore: ObservableObject {
             return refusal
         }
         if case .scanning = remoteScanState {
-            let body = #"{"status":"busy","error":"A scan is already running on this Mac.\u00a0 Watch its progress in the app."}"#
-            return (409, Data(body.utf8))
+            // A scan that never finishes (a folder that will not answer) must
+            // not shut the cleaner for good.
+            if let started = remoteScanStartedAt, Date().timeIntervalSince(started) > remoteScanWatchdog {
+                discardRemoteScan()
+            } else {
+                let body = #"{"status":"busy","error":"A scan is already running on this Mac.\u00a0 Watch its progress in the app."}"#
+                return (409, Data(body.utf8))
+            }
         }
         let id = UUID().uuidString
         remoteScanState = .scanning(id: id, tier: tier, category: "Starting \(tier.title) scan…")
@@ -1878,8 +1890,10 @@ final class HogStore: ObservableObject {
         // The same call the Mac's own cleaner makes, so the phone previews
         // exactly what the Mac would find.
         let scanner = remoteScanner
+        let exclusions = remoteExclusions()
+        remoteScanStartedAt = Date()
         remoteScanTask = Task.detached(priority: .utility) { [weak self] in
-            let report = await scanner(tier) { category in
+            let report = await scanner(tier, exclusions) { category in
                 Task { @MainActor [weak self] in self?.noteRemoteScanProgress(id: id, category: category) }
             }
             guard !Task.isCancelled else { return }
@@ -1888,6 +1902,16 @@ final class HogStore: ObservableObject {
         }
         let response = CompanionCleanScanResponse(status: "scanning", scanId: id, tier: tier.rawValue, message: "Scanning \(tier.title).")
         return (202, (try? JSONEncoder().encode(response)) ?? Data())
+    }
+
+    /// Forgets the scan, running or finished.  A scan lists paths on this Mac,
+    /// so it goes when sharing or the cleaner opt-in does.
+    @MainActor
+    func discardRemoteScan() {
+        remoteScanTask?.cancel()
+        remoteScanTask = nil
+        remoteScanStartedAt = nil
+        remoteScanState = .idle
     }
 
     @MainActor
@@ -2009,9 +2033,7 @@ final class HogStore: ObservableObject {
             companionTopAppsRefreshTask = nil
             CompanionNetworkCache.shared.reset()
             // A scan lists paths on this Mac, so it goes when sharing does.
-            remoteScanTask?.cancel()
-            remoteScanTask = nil
-            remoteScanState = .idle
+            discardRemoteScan()
             return
         }
         companionStatus = "Starting"

@@ -191,6 +191,32 @@ final class CompanionCleanerReportTests: XCTestCase {
         }
     }
 
+    func testSnapshotThinningStaysOnTheMac() throws {
+        let snapshots = CleanItem(
+            category: .apfsSnapshots, title: "com.apple.TimeMachine.2026-10-09-091200.local", subtitle: "Time Machine Local Snapshot",
+            url: URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.2026-10-09-091200.local"), bytes: 9_000_000_000, fileCount: 1,
+            lastModified: nil, isSelected: true, detail: nil
+        )
+        let report = CleanerFixtures.report([
+            (.userCaches, [CleanerFixtures.item(.userCaches, "TestCacheBig", bytes: 5_000)]),
+            (.apfsSnapshots, [snapshots]),
+        ])
+        let built = CompanionCleanerReport.build(from: report, id: "s")
+        XCTAssertEqual(built.categories.map(\.id), ["userCaches"], "the phone is not offered snapshot thinning")
+        XCTAssertEqual(built.refs.count, 1)
+        XCTAssertEqual(built.totalItems, 1)
+        XCTAssertEqual(built.totalBytes, 5_000, "the headline total excludes what the phone cannot clean")
+        XCTAssertTrue(CompanionCleanerReport.defaultSelection(of: report).allSatisfy { $0.category != .apfsSnapshots })
+
+        // Defense in depth: even if a reference somehow pointed at one, the plan refuses it.
+        var tampered = built
+        tampered.refs["9.9"] = snapshots
+        guard case .failure(let refusal) = CompanionCleanerReport.plan(for: CompanionCleanRequest(scanId: "s", tier: "standard", items: ["9.9"]), scan: tampered, now: tampered.scannedAt) else {
+            return XCTFail("a snapshot item was accepted")
+        }
+        XCTAssertEqual(refusal.status, 400)
+    }
+
     func testTheTierMustMatchTheScan() {
         let extremeScan = scan(tier: .extreme)
         let mismatched = CompanionCleanRequest(scanId: "scan-1", tier: "standard", items: ["0.0"], acknowledgedExtreme: true)
@@ -410,6 +436,28 @@ final class CompanionCleanerRouteTests: XCTestCase {
         XCTAssertEqual(disposition(server, CompanionHTTP.cleanRequest(token: deviceToken)), .startClean(nil))
     }
 
+    func testTheBareCleanRouteIgnoresAnyBodyAndNeverChoosesItems() {
+        let server = server(clean: true)
+        server.onRemoteClean = { _, _ in }
+        // An older Mac would read this the same way: no body is ever consulted,
+        // so a phone that sent items here would get the default clean, which is
+        // why choosing items has a route of its own.
+        var request = CompanionHTTP.cleanRequest(token: deviceToken)
+        let body = Data(#"{"scanId":"s","items":["0.0"]}"#.utf8)
+        request = request.prefix(request.count - 2) + Data("Content-Length: \(body.count)\r\n\r\n".utf8) + body
+        XCTAssertEqual(disposition(server, request), .startClean(nil))
+    }
+
+    func testChoosingItemsIsItsOwnRouteSoAnOlderMacAnswers404() throws {
+        let request = CompanionHTTP.cleanRequest(token: deviceToken, request: CompanionCleanRequest(scanId: "s", items: ["0.0"]))
+        let text = String(data: request, encoding: .utf8) ?? ""
+        XCTAssertTrue(text.hasPrefix("POST /v1/clean/run HTTP/1.1"), text)
+        // The route is not in an older Mac's table, so it answers 404 before any handler.
+        XCTAssertEqual(CompanionService.cleanRunPath, "/v1/clean/run")
+        let missing = Data("GET /v1/clean/runx HTTP/1.1\r\nHost: x\r\n\r\n".utf8)
+        XCTAssertEqual(CompanionHTTP.statusCode(of: CompanionHTTP.response(request: missing, body: Data(), token: code)), 404)
+    }
+
     func testAnUnreadableCleanBodyIsRefusedNotGuessedAt() {
         let server = server(clean: true)
         server.onRemoteClean = { _, _ in XCTFail("must not start") }
@@ -480,7 +528,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
     }
 
     private func scanReady(tier: String = "standard", acknowledged: Bool = false) async throws -> CompanionCleanReport {
-        store.remoteScanner = { tier, progress in
+        store.remoteScanner = { tier, _, progress in
             progress("User Caches")
             return CleanerFixtures.sampleReport(tier: tier)
         }
@@ -502,7 +550,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
     }
 
     func testASecondScanIsRefusedWhileOneRuns() async throws {
-        store.remoteScanner = { tier, _ in
+        store.remoteScanner = { tier, _, _ in
             try? await Task.sleep(nanoseconds: 400_000_000)
             return CleanerFixtures.sampleReport(tier: tier)
         }
@@ -515,7 +563,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
     }
 
     func testExtremeIsNotScannedWithoutTheAcknowledgement() throws {
-        store.remoteScanner = { _, _ in XCTFail("must not scan"); return CleanerFixtures.sampleReport() }
+        store.remoteScanner = { _, _, _ in XCTFail("must not scan"); return CleanerFixtures.sampleReport() }
         let refused = store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "extreme", acknowledgedExtreme: false))
         XCTAssertEqual(refused.status, 400)
         XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
@@ -598,7 +646,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
 
     func testAnOlderPhonesBareCleanIsStillTheStandardCleanAndIsRecordedToo() async throws {
         let files = RecordingFileManager()
-        store.remoteScanner = { tier, _ in
+        store.remoteScanner = { tier, _, _ in
             XCTAssertEqual(tier, .standard)
             return CleanerFixtures.sampleReport(tier: tier)
         }
@@ -625,5 +673,39 @@ final class CompanionCleanerStoreTests: XCTestCase {
         _ = try await scanReady()
         let later = Date().addingTimeInterval(CompanionCleanerReport.scanLifetime + 5)
         XCTAssertEqual(try report(of: store.remoteCleanReportReply(now: later)).state, "idle")
+    }
+
+    func testTurningTheCleanerOffForgetsTheHeldScan() async throws {
+        _ = try await scanReady()
+        store.allowRemoteClean = false
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle", "turning it back on must not revive a clean")
+    }
+
+    func testAScanThatNeverFinishesDoesNotShutTheCleanerForGood() async throws {
+        store.remoteScanWatchdog = 0.05
+        store.remoteScanner = { tier, _, _ in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            return CleanerFixtures.sampleReport(tier: tier)
+        }
+        XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202)
+        XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 409, "a young scan is still running")
+        try await Task.sleep(nanoseconds: 120_000_000)
+        store.remoteScanner = { tier, _, _ in CleanerFixtures.sampleReport(tier: tier) }
+        XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202, "an old one is replaced")
+        try await waitForScan()
+    }
+
+    func testTheScanHonorsTheExclusionsTheMacHolds() async throws {
+        let seen = CompanionLocked<CleanerExclusions?>(nil)
+        var exclusions = CleanerExclusions()
+        exclusions.excludedPaths = ["/Users/someone/Keep"]
+        store.remoteExclusions = { exclusions }
+        store.remoteScanner = { tier, given, _ in
+            seen.value = given
+            return CleanerFixtures.sampleReport(tier: tier)
+        }
+        XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202)
+        try await waitForScan()
+        XCTAssertEqual(seen.value?.excludedPaths, ["/Users/someone/Keep"])
     }
 }

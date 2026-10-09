@@ -6,6 +6,10 @@ enum CompanionService {
     static let type = "_hoghunter._tcp"
     static let path = "/v1/snapshot"
     static let cleanPath = "/v1/clean"
+    /// Cleans the items chosen from a scan the Mac holds.  Its own path, so a Mac
+    /// that predates it answers 404 and the phone says so, instead of reading the
+    /// body-less route and running its default clean in place of the chosen one.
+    static let cleanRunPath = "/v1/clean/run"
     /// Starts a scan of the Mac's clutter for the Standard or Extreme tier.
     static let cleanScanPath = "/v1/clean/scan"
     /// The last scan (categories and items), the scan's progress and recent cleanup history.
@@ -112,9 +116,9 @@ struct CompanionCleanReport: Codable, Equatable, Sendable {
     var history: [CompanionCleanupRecord] = []
 }
 
-/// A request to clean, from a scan the Mac is holding.  A body-less
-/// `POST /v1/clean` from an older phone is the Standard clean with the Mac's
-/// default selection.
+/// A request to clean, from a scan the Mac is holding, sent to
+/// `POST /v1/clean/run`.  The older `POST /v1/clean` takes no body: it is always
+/// the Standard clean with the Mac's default selection.
 struct CompanionCleanRequest: Codable, Equatable, Sendable {
     var scanId: String? = nil
     /// `standard` or `extreme`.  Must match the scan's tier.

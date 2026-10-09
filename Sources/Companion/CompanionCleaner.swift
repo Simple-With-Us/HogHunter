@@ -26,6 +26,16 @@ struct RemoteCleanScan: Sendable {
 /// Turns a scan into the phone's report, and a phone's request into the items
 /// to clean.  Pure, so every rule is a unit test.
 enum CompanionCleanerReport {
+    /// Thinning APFS local snapshots stays a Mac-only choice.  `DiskCleaner`
+    /// thins every local snapshot in one call whichever row is ticked, and it
+    /// does so before the safety snapshot is taken, so it removes the rollback
+    /// point an earlier clean left and the confirmation ("a snapshot is created
+    /// first, and if that fails nothing is deleted") would not be true.  The
+    /// phone neither lists nor accepts them.
+    static func phoneMayClean(_ category: CleanCategory) -> Bool {
+        category != .apfsSnapshots
+    }
+
     /// The most items one category lists.  The rest are counted, not sent.
     static let itemsPerCategory = 100
 
@@ -38,7 +48,8 @@ enum CompanionCleanerReport {
     static func build(from report: CleanScanReport, id: String, now: Date = Date()) -> RemoteCleanScan {
         var categories: [CompanionCleanCategory] = []
         var refs: [String: CleanItem] = [:]
-        for (categoryIndex, categoryReport) in report.categories.enumerated() {
+        let included = report.categories.filter { phoneMayClean($0.category) }
+        for (categoryIndex, categoryReport) in included.enumerated() {
             let ordered = categoryReport.items.sorted { $0.bytes > $1.bytes }.prefix(itemsPerCategory)
             var items: [CompanionCleanItem] = []
             for (itemIndex, item) in ordered.enumerated() {
@@ -73,15 +84,15 @@ enum CompanionCleanerReport {
             scannedAt: report.scannedAt,
             categories: categories,
             refs: refs,
-            totalBytes: report.totalBytes,
-            totalItems: report.categories.reduce(0) { $0 + $1.itemCount }
+            totalBytes: included.reduce(0) { $0 + $1.totalBytes },
+            totalItems: included.reduce(0) { $0 + $1.itemCount }
         )
     }
 
     /// The items the Mac's own cleaner would start with ticked, from a fresh scan.
     static func defaultSelection(of report: CleanScanReport) -> [CleanItem] {
         report.categories.flatMap { categoryReport in
-            categoryReport.category.defaultSelected ? categoryReport.items.filter(\.isSelected) : []
+            categoryReport.category.defaultSelected && phoneMayClean(categoryReport.category) ? categoryReport.items.filter(\.isSelected) : []
         }
     }
 
@@ -131,7 +142,7 @@ enum CompanionCleanerReport {
         }
         var chosen: [String: CleanItem] = [:]
         for reference in references {
-            guard let item = scan.refs[reference] else {
+            guard let item = scan.refs[reference], phoneMayClean(item.category) else {
                 return .failure(Refusal(status: 400, message: "The iPhone named an item this scan does not have.\u{00A0} Scan again."))
             }
             chosen[reference] = item

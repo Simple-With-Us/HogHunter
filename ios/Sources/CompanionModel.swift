@@ -102,6 +102,8 @@ final class CompanionModel {
     /// True while the phone is polling the Mac's scan.  The scan itself keeps
     /// running on the Mac whether or not the phone is looking.
     var isFollowingScan = false
+    /// The scan the Scan button started, so leaving the screen can stop following it.
+    var cleanScanTask: Task<Void, Never>?
     /// Set by the screenshot lane's launch flags: the cleaner shows a canned
     /// scan and never asks a Mac for one.
     var isScreenshotMode = false
@@ -311,6 +313,7 @@ final class CompanionModel {
     }
 
     func forget() {
+        resetCleaner()
         saved = nil
         snapshot = nil
         codeDraft = ""
@@ -320,12 +323,14 @@ final class CompanionModel {
     }
 
     func enterDemoMode() {
+        resetCleaner()
         isDemoMode = true
         snapshot = Self.sample
         phase = .live
     }
 
     func exitDemoMode() {
+        resetCleaner()
         isDemoMode = false
         snapshot = nil
         reconcile()

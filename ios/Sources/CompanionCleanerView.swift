@@ -44,7 +44,11 @@ struct CleanerView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Disk Cleaner")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await model.refreshCleanReport() }
+        .task {
+            model.cleanerError = nil
+            await model.refreshCleanReport()
+        }
+        .onDisappear { model.cancelCleanerPolling() }
         .safeAreaInset(edge: .bottom) {
             if scanMatchesTier { actionBar }
         }
@@ -170,7 +174,7 @@ struct CleanerView: View {
             }
 
             Button {
-                Task { await model.startCleanScan() }
+                model.beginCleanScan()
             } label: {
                 HStack {
                     Spacer()
