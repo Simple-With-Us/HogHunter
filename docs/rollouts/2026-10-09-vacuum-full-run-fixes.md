@@ -48,7 +48,7 @@ Until now the cleaner never got past the markers, so nothing after them in the l
 
 ## Verification And Its Limits
 
-- `python3 scripts/test-hoghunter-clean.py` (23 tests) and `python3 scripts/test-robotic-vacuum.py` (216 tests, the lane doctor suite included).  The new tests failed against deliberately broken copies (file-counting chunks, a fail-open pgrep).
+- `python3 scripts/test-hoghunter-clean.py` (24 tests) and `python3 scripts/test-robotic-vacuum.py` (216 tests, the lane doctor suite included).  The new tests failed against deliberately broken copies (file-counting chunks, a fail-open pgrep).
 - The real cleaner ran `--scan --json --budget-sec=120` on this Mac: 1,710 actionable candidates, the new keys present, 50 s.
 - `--dry-run` skips both `hoghunter_reclaim` and `spotlight_journals`, and `--scan` does not exercise pacing, and nothing here ran `--clean` by hand, so the end-to-end proof is the next scheduled run: its `history.json` entry should show `hoghunter_reclaim` as `ran` with a byte count and `spotlight_journals` as a skip.
 

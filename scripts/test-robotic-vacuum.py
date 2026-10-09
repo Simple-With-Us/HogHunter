@@ -753,6 +753,33 @@ class TestRunInOwnGroup(unittest.TestCase):
             self.fail("the grandchild outlived its killed parent")
 
 
+class TestRunInOwnGroupErrors(unittest.TestCase):
+    def test_an_error_while_waiting_kills_the_group_and_is_raised(self):
+        """Not reported as a budget overrun, and the child and its helpers do not outlive the failed wait."""
+        from vacuum.engine import _run_in_own_group
+
+        proc = Mock()
+        proc.pid = 4242
+        proc.communicate.side_effect = [OSError(errno.EIO, "Input/output error"), ("", "")]
+        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch("vacuum.engine.os.killpg") as killpg:
+            with self.assertRaises(OSError):
+                _run_in_own_group(["/bin/true"], 5)
+        killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+    def test_a_missing_group_falls_back_to_killing_the_child(self):
+        from vacuum.engine import _run_in_own_group
+
+        proc = Mock()
+        proc.pid = 4242
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("partial", "")]
+        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch(
+            "vacuum.engine.os.killpg", side_effect=ProcessLookupError
+        ):
+            code, out, _err, timed_out = _run_in_own_group(["/bin/true"], 1)
+        proc.kill.assert_called_once()
+        self.assertEqual((code, out, timed_out), (-1, "partial", True))
+
+
 class TestSpotlightStep(_EngineHome):
     def setUp(self) -> None:
         super().setUp()

@@ -400,6 +400,17 @@ def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh)
     assert report["budget_exhausted"] is True
 
 
+def test_truncate_keep_size_is_read_once_from_the_detail(hh):
+    """apply_candidate parsed `keep last 16M` with two searches; one compiled pattern does it, and a detail with
+    no size falls back to 16."""
+    seen = []
+    with mock.patch.object(hh, "apply_truncate", side_effect=lambda path, keep_mib: seen.append(keep_mib) or (0, "")):
+        for detail in ("keep last 32M", "", "no size here"):
+            hh.apply_candidate(hh.Candidate(category="logs", path="/x/a.log", bytes=1, reason="r",
+                                            op="truncate", detail=detail))
+    assert seen == [32, 16, 16], seen
+
+
 def completed(code, out=""):
     return subprocess.CompletedProcess([], code, out, "")
 

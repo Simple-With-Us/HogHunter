@@ -53,23 +53,39 @@ def _subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProces
 
 def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bool]:
     """Run cmd in its own process group and return (exit code, stdout, stderr, timed_out).  On a timeout the whole
-    group is killed, so the find, lsof or du the child started cannot outlive it and keep the disk busy."""
+    group is killed, so the find, lsof or du the child started cannot outlive it and keep the disk busy.  Any other
+    error while waiting (a broken pipe, an interrupt) kills the group too and is raised, so nothing is leaked and
+    the step reports the real error instead of a budget overrun."""
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
     )
+
+    def kill_group() -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+
     try:
         out, err = proc.communicate(timeout=timeout)
         return proc.returncode, out or "", err or "", False
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
+        kill_group()
         try:
             out, err = proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             out, err = "", ""
         return -1, out or "", err or "", True
+    except BaseException:
+        kill_group()
+        try:
+            proc.communicate(timeout=15)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise
 
 
 class VacuumEngine:

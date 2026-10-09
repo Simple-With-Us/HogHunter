@@ -1180,6 +1180,9 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
     return out
 
 
+_KEEP_MIB_RE = re.compile(r"(\d+)M")
+
+
 def apply_candidate(c: Candidate) -> None:
     if c.tier == "ask-first" or c.op == "report":
         return
@@ -1187,7 +1190,8 @@ def apply_candidate(c: Candidate) -> None:
         if c.op == "delete":
             freed, err = apply_delete(c.path, known_bytes=c.bytes)
         elif c.op == "truncate":
-            freed, err = apply_truncate(c.path, keep_mib=int(re.search(r"(\d+)M", c.detail).group(1)) if re.search(r"(\d+)M", c.detail) else 16)
+            keep = _KEEP_MIB_RE.search(c.detail or "")
+            freed, err = apply_truncate(c.path, keep_mib=int(keep.group(1)) if keep else 16)
         elif c.op == "wal-checkpoint":
             freed, err = apply_wal_checkpoint(c.path)
         elif c.op == "snapshot-delete":
