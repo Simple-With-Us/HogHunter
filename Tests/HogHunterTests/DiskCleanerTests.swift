@@ -30,6 +30,18 @@ final class DiskCleanerTests: XCTestCase {
             knownBundleIds: ["com.google.chrome"],
             knownNames: ["chrome", "google chrome"]
         ))
+        // Vendor/product layout: JetBrains/IntelliJIdea2024.2 and
+        // BraveSoftware/Brave-Browser must match after normalization.
+        XCTAssertTrue(DiskCleaner.holdsInstalledProduct(
+            childNames: ["IntelliJIdea2024.2"],
+            knownBundleIds: ["com.jetbrains.intellij"],
+            knownNames: ["intellij", "intellij idea"]
+        ))
+        XCTAssertTrue(DiskCleaner.holdsInstalledProduct(
+            childNames: ["Brave-Browser"],
+            knownBundleIds: ["com.brave.Browser"],
+            knownNames: ["browser", "brave browser"]
+        ))
         XCTAssertFalse(DiskCleaner.holdsInstalledProduct(
             childNames: ["OldProduct"],
             knownBundleIds: ["com.google.chrome"],

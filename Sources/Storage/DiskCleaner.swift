@@ -1578,14 +1578,19 @@ final class DiskCleaner: @unchecked Sendable {
             String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
         }
         // Normalized compare so a version-suffixed child ("IntelliJIdea2024.2")
-        // still matches the installed "IntelliJ IDEA" instead of being listed
-        // as an orphan and deleted.  Tokens of 2 or fewer characters are too
-        // generic to decide on, so they are dropped.
+        // still matches the installed "IntelliJ IDEA", and a product folder
+        // ("Brave-Browser") still matches the display name "Brave Browser",
+        // instead of being listed as an orphan and deleted.  Tokens of 2 or
+        // fewer characters are too generic to decide on, so they are dropped.
+        // `hasSuffix` covers product folders that embed a longer identifier
+        // (e.g. bravebrowser ends with browser) without requiring an exact Set hit.
         let wanted = (knownBundleIds.union(knownNames)).map(normalize).filter { $0.count > 2 }
         for child in childNames {
             let c = normalize(child)
             guard !c.isEmpty else { continue }
-            if wanted.contains(where: { $0 == c || c.hasPrefix($0) }) { return true }
+            if wanted.contains(where: { token in
+                token == c || c.hasPrefix(token) || (token.count >= 6 && c.hasSuffix(token))
+            }) { return true }
         }
         return false
     }
