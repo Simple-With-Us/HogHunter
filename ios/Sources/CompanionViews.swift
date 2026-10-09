@@ -403,6 +403,11 @@ struct DashboardView: View {
         showTameConfirm = true
     }
 
+    /// Exclusion and view changes exist only when the Mac owner turned them on.
+    private var canEdit: Bool { snapshot.remoteEditAllowed == true }
+
+    private static let editOffNote = "Changing exclusions and the Mac's view from iPhone is off.\u{00A0} Turn on Allow iPhone to Change Exclusions & View in Hog Hunter Settings > iPhone on your Mac."
+
     private var sortedRows: [CompanionRow] {
         let sorted = snapshot.rows.sorted(by: { a, b in
             switch sortOrder {
@@ -504,9 +509,9 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button(isForceQuit ? "Force Quit" : "Quit", role: .destructive) {
-                if let row = pendingQuitRow, let pid = row.pid {
+                if let row = pendingQuitRow, row.pid != nil {
                     Task {
-                        let res = await model.quitProcess(pid: pid, force: isForceQuit)
+                        let res = await model.quitProcess(row: row, force: isForceQuit)
                         lastQuitResult = res
                         showQuitResultAlert = true
                     }
@@ -524,10 +529,10 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
-                if let row = pendingTameRow, let pid = row.pid {
+                if let row = pendingTameRow, row.pid != nil {
                     let action = pendingTameAction
                     Task {
-                        let res = await model.tameProcess(pid: pid, action: action)
+                        let res = await model.tameProcess(row: row, action: action)
                         lastTameOutcome = (action, res)
                         showTameResultAlert = true
                     }
@@ -580,6 +585,17 @@ struct DashboardView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Enter a folder path on \(snapshot.hostName) to exclude from all disk cleaning.")
+        }
+        .alert(
+            "The Mac Did Not Accept That",
+            isPresented: Binding(
+                get: { model.controlError != nil },
+                set: { if !$0 { model.controlError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { model.controlError = nil }
+        } message: {
+            Text(model.controlError ?? "")
         }
         .onChange(of: model.showCleanDialogRequested) { _, requested in
             if requested {
@@ -698,6 +714,12 @@ struct DashboardView: View {
                 }
             }
             .padding(.vertical, 2)
+            .disabled(!canEdit)
+            if !canEdit {
+                Text(Self.editOffNote)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
 
         Section {
@@ -705,6 +727,10 @@ struct DashboardView: View {
                 Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
                     .foregroundStyle(.secondary)
             } else {
+                // Quit and Tame exist only when the Mac owner turned them on.
+                // Without this the swipe and long-press actions showed on
+                // every row and answered 403 when used.
+                let controlsOn = snapshot.remoteQuitAllowed == true
                 ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
                     let rank = index + 1
                     HStack(spacing: 10) {
@@ -755,7 +781,7 @@ struct DashboardView: View {
                     }
                     .accessibilityElement(children: .combine)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        if row.canQuit && row.pid != nil {
+                        if controlsOn && row.canQuit && row.pid != nil {
                             Button(role: .destructive) {
                                 confirmQuit(row: row, force: false)
                             } label: {
@@ -764,7 +790,7 @@ struct DashboardView: View {
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        if row.canTame != false, row.pid != nil {
+                        if controlsOn, row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
                                     confirmTame(row: row, action: "untame")
@@ -783,7 +809,11 @@ struct DashboardView: View {
                         }
                     }
                     .contextMenu {
-                        if row.canTame != false, row.pid != nil {
+                        if !controlsOn {
+                            Text("Quit and Tame are off for \(snapshot.hostName).")
+                            Text("Turn them on in Hog Hunter Settings > iPhone.")
+                        }
+                        if controlsOn, row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
                                 Button {
                                     confirmTame(row: row, action: "untame")
@@ -799,7 +829,7 @@ struct DashboardView: View {
                             }
                         }
 
-                        if row.canQuit && row.pid != nil {
+                        if controlsOn && row.canQuit && row.pid != nil {
                             Button {
                                 confirmQuit(row: row, force: false)
                             } label: {
@@ -810,7 +840,7 @@ struct DashboardView: View {
                             } label: {
                                 Label("Force Quit \(row.name)", systemImage: "bolt.horizontal.circle")
                             }
-                        } else if let reason = row.quitBlockReason {
+                        } else if controlsOn, let reason = row.quitBlockReason {
                             Text("Protected: \(reason)")
                         }
                     }
@@ -1146,6 +1176,7 @@ struct DashboardView: View {
                                 }
                             ))
                             .labelsHidden()
+                            .disabled(!canEdit)
                         }
                         .padding(.vertical, 2)
                     }
@@ -1187,6 +1218,7 @@ struct DashboardView: View {
                                     .foregroundStyle(.red)
                             }
                             .buttonStyle(.borderless)
+                            .disabled(!canEdit)
                         }
                     }
                     .onDelete { indices in
@@ -1195,6 +1227,7 @@ struct DashboardView: View {
                             Task { await model.removeExcludedPath(path) }
                         }
                     }
+                    .deleteDisabled(!canEdit)
                 }
 
                 Button {
@@ -1203,6 +1236,13 @@ struct DashboardView: View {
                 } label: {
                     Label("Exclude Folder…", systemImage: "plus.circle")
                         .font(.subheadline.weight(.semibold))
+                }
+                .disabled(!canEdit)
+
+                if !canEdit {
+                    Text(Self.editOffNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -1249,9 +1289,10 @@ struct DashboardView: View {
                     Image(systemName: "network.slash")
                         .font(.title2)
                         .foregroundStyle(.secondary)
-                    Text("No high-bandwidth connections detected on \(snapshot.hostName).")
+                    Text(snapshot.networkNote ?? "No high-bandwidth connections detected on \(snapshot.hostName).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)

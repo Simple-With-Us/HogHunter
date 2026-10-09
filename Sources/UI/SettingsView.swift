@@ -267,12 +267,15 @@ private struct CleanerSettingsTab: View {
                     Toggle(isOn: Binding(
                         get: { exclusions.isCategoryExcluded(category) },
                         set: { isExcluded in
-                            if isExcluded {
-                                exclusions.excludedCategories.insert(category.rawValue)
-                            } else {
-                                exclusions.excludedCategories.remove(category.rawValue)
+                            // Edit the stored value, not this view's copy, so a
+                            // change made from the iPhone in the meantime survives.
+                            exclusions = CleanerExclusions.update { current in
+                                if isExcluded {
+                                    current.excludedCategories.insert(category.rawValue)
+                                } else {
+                                    current.excludedCategories.remove(category.rawValue)
+                                }
                             }
-                            exclusions.save()
                         }
                     )) {
                         HStack(spacing: 8) {
@@ -313,8 +316,7 @@ private struct CleanerSettingsTab: View {
                                 .truncationMode(.middle)
                             Spacer()
                             Button {
-                                exclusions.excludedPaths.removeAll { $0 == path }
-                                exclusions.save()
+                                exclusions = CleanerExclusions.update { $0.removePath(path) }
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 11))
@@ -334,9 +336,8 @@ private struct CleanerSettingsTab: View {
                     panel.prompt = "Exclude Folder"
                     if panel.runModal() == .OK, let url = panel.url {
                         let path = (url.path as NSString).standardizingPath
-                        if !exclusions.excludedPaths.contains(path) {
-                            exclusions.excludedPaths.append(path)
-                            exclusions.save()
+                        exclusions = CleanerExclusions.update { current in
+                            if !current.excludedPaths.contains(path) { current.excludedPaths.append(path) }
                         }
                     }
                 }
@@ -354,12 +355,20 @@ private struct CleanerSettingsTab: View {
 
 private struct IPhoneSettingsTab: View {
     @EnvironmentObject private var store: HogStore
+    @State private var confirmRevokeAll = false
+
+    static func deviceCaption(_ device: CompanionDevice) -> String {
+        let paired = device.pairedAt.formatted(date: .abbreviated, time: .shortened)
+        guard let seen = device.lastSeenAt else { return "Paired \(paired)" }
+        let relative = RelativeDateTimeFormatter().localizedString(for: seen, relativeTo: Date())
+        return "Paired \(paired), last seen \(relative)"
+    }
 
     var body: some View {
         Form {
             Section("iPhone") {
                 Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
-                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi, or from anywhere over Tailscale.  Quitting, taming, and cleaning each need the opt-ins below.  Turn this off on a network you do not trust.")
+                Text("The Hog Hunter iPhone app can see this list on the same Wi-Fi or over Tailscale.\u{00A0} With the opt-ins below it can also act on this Mac: quit or tame apps, run the cleaner, and change cleaner exclusions and the panel view.\u{00A0} Each opt-in is off until you turn it on, and controls are accepted only from your local network or Tailscale.\u{00A0} Turn Share With iPhone off on a network you do not trust.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -377,6 +386,37 @@ private struct IPhoneSettingsTab: View {
                         Button("Copy Code") { copyCompanionCode() }
                         Button("New Code") { store.regenerateCompanionCode() }
                     }
+                    Text("The code pairs a new iPhone, which then keeps a token of its own.\u{00A0} A new code does not disconnect a phone that is already paired.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Section("Paired iPhones") {
+                if store.pairedDevices.isEmpty {
+                    Text("No iPhone has paired yet.\u{00A0} A phone that pairs is listed here, and you can remove it at any time.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(store.pairedDevices) { device in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.name)
+                                    .font(.system(size: 12, weight: .medium))
+                                Text(Self.deviceCaption(device))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Revoke") { store.revokeCompanionDevice(id: device.id) }
+                                .help("Cut this iPhone off.  It must pair again to reconnect.")
+                        }
+                    }
+                    if store.pairedDevices.count > 1 {
+                        Button("Revoke All") { confirmRevokeAll = true }
+                    }
                 }
             }
 
@@ -392,13 +432,18 @@ private struct IPhoneSettingsTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("A phone without the code can ask to pair.  This Mac then shows an alert where you can allow it and pick these same two choices.")
+                    Toggle("Allow iPhone to Change Exclusions & View", isOn: $store.allowRemoteEdit)
+                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, and switch this panel's lookback, grouping, and CPU scale.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick these same three choices.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Section("Remote Access (Tailscale / Domain)") {
+                Section("Remote Access (Tailscale)") {
                     let addresses = CompanionServer.detectHostAddresses()
                     LabeledContent("Port") {
                         Text("\(store.companionPort)")
@@ -419,7 +464,7 @@ private struct IPhoneSettingsTab: View {
                                 .textSelection(.enabled)
                         }
                     }
-                    Text("Away from this Wi-Fi: Connect via Tailscale using your Tailscale IP or MagicDNS hostname, or forward port \(store.companionPort) on your domain.")
+                    Text("Away from this Wi-Fi, connect over Tailscale using your Tailscale IP or MagicDNS name.\u{00A0} Do not forward port \(store.companionPort) from your router.\u{00A0} The connection is not encrypted, so quit, tame, clean, and edit commands are accepted only from your local network or Tailscale.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -427,6 +472,13 @@ private struct IPhoneSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(width: SettingsView.windowWidth - 80)
+        .onAppear { store.refreshPairedDevices() }
+        .alert("Revoke All iPhones?", isPresented: $confirmRevokeAll) {
+            Button("Revoke All", role: .destructive) { store.revokeAllCompanionDevices() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every paired iPhone is cut off and must pair again.")
+        }
     }
 
     private func spacedCode(_ code: String) -> String {

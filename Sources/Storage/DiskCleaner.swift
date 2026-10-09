@@ -196,7 +196,10 @@ struct CleanerExclusions: Codable, Equatable, Sendable {
     }
 
     static func load() -> CleanerExclusions {
-        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        load(from: sharedDefaults)
+    }
+
+    static func load(from defaults: UserDefaults) -> CleanerExclusions {
         guard let data = defaults.data(forKey: defaultsKey),
               let decoded = try? JSONDecoder().decode(CleanerExclusions.self, from: data) else {
             return CleanerExclusions()
@@ -205,10 +208,37 @@ struct CleanerExclusions: Codable, Equatable, Sendable {
     }
 
     func save() {
-        let defaults = UserDefaults(suiteName: CleanerExclusions.suiteName) ?? .standard
+        save(to: CleanerExclusions.sharedDefaults)
+    }
+
+    func save(to defaults: UserDefaults) {
         if let data = try? JSONEncoder().encode(self) {
             defaults.set(data, forKey: CleanerExclusions.defaultsKey)
         }
+    }
+
+    static var sharedDefaults: UserDefaults {
+        UserDefaults(suiteName: suiteName) ?? .standard
+    }
+
+    /// Serializes every read-modify-write of the stored exclusions.  The Mac
+    /// panel, the Settings window and the phone's `/v1/exclusions` route all
+    /// edit the same stored value from different threads.  Each used to load
+    /// once and later save its own copy, so the last writer silently undid an
+    /// edit made elsewhere in the meantime.
+    private static let updateLock = NSLock()
+
+    /// Loads the stored value, applies `mutate`, saves, and returns the result.
+    /// Always edit through this, never through a copy held from an earlier load.
+    @discardableResult
+    static func update(in defaults: UserDefaults? = nil, _ mutate: (inout CleanerExclusions) -> Void) -> CleanerExclusions {
+        updateLock.lock()
+        defer { updateLock.unlock() }
+        let target = defaults ?? sharedDefaults
+        var current = load(from: target)
+        mutate(&current)
+        current.save(to: target)
+        return current
     }
 }
 

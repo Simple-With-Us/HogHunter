@@ -16,9 +16,11 @@ enum CompanionSnapshotBuilder {
         rows: [HogRow],
         storage: CompanionStorageSummary? = nil,
         network: [CompanionNetworkRow]? = nil,
+        networkNote: String? = nil,
         cleanProgress: CompanionCleanProgress? = nil,
         remoteQuitAllowed: Bool? = nil,
-        remoteCleanAllowed: Bool? = nil
+        remoteCleanAllowed: Bool? = nil,
+        remoteEditAllowed: Bool? = nil
     ) -> CompanionSnapshot {
         let cores = max(1, pulse.coreCount)
         let pressure = Severity.forPressure(pulse.pressure)
@@ -69,8 +71,10 @@ enum CompanionSnapshotBuilder {
             },
             storage: storage ?? currentStorageSummary(),
             network: network,
+            networkNote: networkNote,
             remoteQuitAllowed: remoteQuitAllowed,
             remoteCleanAllowed: remoteCleanAllowed,
+            remoteEditAllowed: remoteEditAllowed,
             cleanProgress: cleanProgress
         )
     }
@@ -113,30 +117,6 @@ enum CompanionSnapshotBuilder {
             topApps: Self.cachedTopApps(),
             topAppsScannedAt: Self.topAppsCache?.at
         )
-    }
-
-    static func currentNetworkRows(limit: Int = 10) -> [CompanionNetworkRow]? {
-        let scanner = NetworkScanner()
-        let snapshot = scanner.snapshot { pid in
-            #if canImport(AppKit)
-            if let app = NSRunningApplication(processIdentifier: pid) {
-                return (bundleId: app.bundleIdentifier, name: app.localizedName ?? "PID \(pid)")
-            }
-            #endif
-            return (bundleId: nil, name: "PID \(pid)")
-        }
-        guard case let .snapshot(_, usages) = snapshot else { return nil }
-        let top = usages.sorted { $0.establishedSockets > $1.establishedSockets }.prefix(limit)
-        return top.map { usage in
-            CompanionNetworkRow(
-                id: "\(usage.pid)",
-                name: usage.name,
-                pid: usage.pid,
-                establishedCount: usage.establishedSockets,
-                uniqueRemoteHosts: usage.remoteHostCount,
-                sampleRemoteHosts: usage.topRemoteHosts
-            )
-        }
     }
 
     private static func displayedCPU(_ perCore: Double, scale: CpuScale, coreCount: Int) -> Double {

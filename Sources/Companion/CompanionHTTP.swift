@@ -8,10 +8,12 @@ enum CompanionHTTP {
         body: Data,
         token: String,
         cleanHandler: ((String) -> (status: Int, body: Data))? = nil,
-        quitHandler: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil,
-        tameHandler: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil,
+        quitHandler: ((_ request: CompanionProcessRequest, _ force: Bool) -> (status: Int, body: Data))? = nil,
+        tameHandler: ((_ request: CompanionProcessRequest, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
-        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
+        viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
+        peerTrusted: Bool = true,
+        deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
         let text = String(data: request, encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
@@ -35,9 +37,27 @@ enum CompanionHTTP {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
+        // A phone presents either its own token (issued at pairing) or, if it
+        // paired before tokens existed, the shared pairing code.
         let presented = bearerToken(in: lines)
-        guard CompanionToken.matches(presented, token) else {
+        let isDeviceToken = deviceAuthenticator?(presented) ?? false
+        guard isDeviceToken || CompanionToken.matches(presented, token) else {
             return message(status: 401, reason: "Unauthorized", body: Data("Unauthorized".utf8))
+        }
+
+        if path != CompanionService.path {
+            // Reading the snapshot is allowed from anywhere with a valid
+            // credential.  Everything that changes the Mac is not: the link is
+            // unencrypted, so it is accepted only from the local network or
+            // Tailscale.
+            if !peerTrusted {
+                return untrustedNetworkReply()
+            }
+            // And only with a phone's own token.  The shared code reads, and
+            // is traded for a token (the enroll route) before the phone acts.
+            if !isDeviceToken {
+                return sharedCodeCannotControlReply()
+            }
         }
 
         if path == CompanionService.path {
@@ -62,33 +82,17 @@ enum CompanionHTTP {
             guard let quitHandler else {
                 return message(status: 501, reason: "Not Implemented", body: Data("Quit Not Configured".utf8))
             }
-            var targetPid: pid_t? = nil
             var isForce = false
-            if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
-                for param in query.split(separator: "&") {
-                    let kv = param.split(separator: "=", maxSplits: 1)
-                    if kv.count == 2 {
-                        let k = String(kv[0])
-                        let v = String(kv[1])
-                        if k == "pid", let p = Int32(v) { targetPid = p }
-                        if k == "force" { isForce = (v.lowercased() == "true" || v == "1") }
-                    }
-                }
+            let processRequest = parseProcessRequest(fullPath: fullPath, request: request) { key, value in
+                if key == "force" { isForce = (value.lowercased() == "true" || value == "1") }
+            } bodyField: { json in
+                if let f = json["force"] as? Bool { isForce = f }
             }
-            if targetPid == nil, let range = request.range(of: Data("\r\n\r\n".utf8)) {
-                let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
-                if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                    if let p = json["pid"] as? Int { targetPid = Int32(p) }
-                    else if let p = json["pid"] as? Int32 { targetPid = p }
-                    if let f = json["force"] as? Bool { isForce = f }
-                }
+            guard processRequest.isAddressed else {
+                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing row or pid parameter\"}".utf8), type: "application/json; charset=utf-8")
             }
-            guard let pid = targetPid else {
-                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing pid parameter\"}".utf8), type: "application/json; charset=utf-8")
-            }
-            let (code, resBody) = quitHandler(pid, isForce)
-            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+            let (code, resBody) = quitHandler(processRequest, isForce)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.tamePath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -96,33 +100,17 @@ enum CompanionHTTP {
             guard let tameHandler else {
                 return message(status: 501, reason: "Not Implemented", body: Data("Tame Not Configured".utf8))
             }
-            var targetPid: pid_t? = nil
             var action = "tame"
-            if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
-                for param in query.split(separator: "&") {
-                    let kv = param.split(separator: "=", maxSplits: 1)
-                    if kv.count == 2 {
-                        let k = String(kv[0])
-                        let v = String(kv[1])
-                        if k == "pid", let p = Int32(v) { targetPid = p }
-                        if k == "action" { action = v }
-                    }
-                }
+            let processRequest = parseProcessRequest(fullPath: fullPath, request: request) { key, value in
+                if key == "action" { action = value }
+            } bodyField: { json in
+                if let a = json["action"] as? String { action = a }
             }
-            if targetPid == nil, let range = request.range(of: Data("\r\n\r\n".utf8)) {
-                let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
-                if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                    if let p = json["pid"] as? Int { targetPid = Int32(p) }
-                    else if let p = json["pid"] as? Int32 { targetPid = p }
-                    if let a = json["action"] as? String { action = a }
-                }
+            guard processRequest.isAddressed else {
+                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing row or pid parameter\"}".utf8), type: "application/json; charset=utf-8")
             }
-            guard let pid = targetPid else {
-                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing pid parameter\"}".utf8), type: "application/json; charset=utf-8")
-            }
-            let (code, resBody) = tameHandler(pid, action)
-            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+            let (code, resBody) = tameHandler(processRequest, action)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.exclusionsPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -187,6 +175,115 @@ enum CompanionHTTP {
             return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
         }
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
+    }
+
+    /// The answer to a control request from an address outside the local
+    /// network and Tailscale.
+    static func untrustedNetworkReply() -> Data {
+        let body = Data(#"{"status":"forbidden","reason":"untrusted-network","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
+        return jsonReply(status: 403, body: body)
+    }
+
+    /// The answer to a control request that carries only the shared pairing
+    /// code.  A current phone trades the code for its own token on launch;
+    /// this is what an older build sees.
+    static func sharedCodeCannotControlReply() -> Data {
+        let body = Data(#"{"status":"forbidden","error":"This iPhone is still paired with the shared code, which can only read.\u00a0 Open Hog Hunter on the iPhone to update it, or pair it again."}"#.utf8)
+        return jsonReply(status: 403, body: body)
+    }
+
+    // MARK: - Trading the code for a token
+
+    static func enrollRequest(code: String, deviceName: String) -> Data {
+        let lines = [
+            "POST \(CompanionService.enrollPath)?code=\(queryAllowedValue(code))&device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
+            "Host: hoghunter",
+            "Accept: application/json",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    /// The code and device name when `request` is a POST to the enroll route,
+    /// otherwise nil.  No bearer token: the code is the proof.
+    static func enrollParams(in request: Data) -> (code: String, deviceName: String)? {
+        let text = String(data: request.prefix(2_048), encoding: .isoLatin1) ?? ""
+        guard let requestLine = text.components(separatedBy: "\r\n").first else { return nil }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2, parts[0] == "POST" else { return nil }
+        let pieces = parts[1].split(separator: "?", maxSplits: 1)
+        guard pieces.first.map(String.init) == CompanionService.enrollPath else { return nil }
+        var code = ""
+        var name = ""
+        if pieces.count == 2 {
+            for pair in pieces[1].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                let value = String(kv[1]).removingPercentEncoding ?? ""
+                if kv[0] == "code" { code = value }
+                if kv[0] == "device" { name = value }
+            }
+        }
+        let clean = sanitizedDeviceName(name)
+        return (code, clean.isEmpty ? "An iPhone" : clean)
+    }
+
+    static func enrollResponse(token: String, deviceId: String) -> Data {
+        let body = (try? JSONSerialization.data(withJSONObject: ["token": token, "deviceId": deviceId])) ?? Data()
+        return jsonReply(status: 200, body: body)
+    }
+
+    static func enrollRejectedReply() -> Data {
+        jsonReply(status: 401, body: Data(#"{"status":"unauthorized","error":"That code does not match this Mac."}"#.utf8))
+    }
+
+    /// The answer to a client that has been guessing.  `Retry-After` is in seconds.
+    static func throttledReply(retryAfter: Int) -> Data {
+        let body = (try? JSONSerialization.data(withJSONObject: [
+            "status": "throttled",
+            "error": "Too many wrong tries.\u{00A0} Wait \(retryAfter) seconds, then try again.",
+            "retryAfter": retryAfter,
+        ] as [String: Any])) ?? Data()
+        return message(status: 429, reason: "Too Many Requests", body: body, type: "application/json; charset=utf-8", extraHeaders: ["Retry-After: \(retryAfter)"])
+    }
+
+    /// The status code of a complete reply, without parsing its body.
+    static func statusCode(of response: Data) -> Int? {
+        guard let line = String(data: response.prefix(32), encoding: .isoLatin1)?.components(separatedBy: "\r\n").first else { return nil }
+        let parts = line.split(separator: " ")
+        return parts.count >= 2 ? Int(parts[1]) : nil
+    }
+
+    /// A JSON reply built outside the router, for answers that come later
+    /// (a finished clean) rather than inline.
+    static func jsonReply(status: Int, body: Data) -> Data {
+        message(status: status, reason: reason(for: status), body: body, type: "application/json; charset=utf-8")
+    }
+
+    static func reason(for status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 202: return "Accepted"
+        case 400: return "Bad Request"
+        case 401: return "Unauthorized"
+        case 403: return "Forbidden"
+        case 404: return "Not Found"
+        case 409: return "Conflict"
+        case 429: return "Too Many Requests"
+        case 501: return "Not Implemented"
+        case 504: return "Gateway Timeout"
+        default: return status >= 500 ? "Server Error" : "Error"
+        }
+    }
+
+    /// True for `GET /v1/snapshot`, whatever its auth outcome.
+    static func isSnapshotRequest(_ request: Data) -> Bool {
+        let text = String(data: request.prefix(512), encoding: .isoLatin1) ?? ""
+        guard let line = text.components(separatedBy: "\r\n").first else { return false }
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2, parts[0] == "GET" else { return false }
+        return parts[1].split(separator: "?", maxSplits: 1).first.map(String.init) == CompanionService.path
     }
 
     static func request(token: String) -> Data {
@@ -280,9 +377,44 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func quitRequest(token: String, pid: Int32, force: Bool = false) -> Data {
+    /// Reads which process or app a quit or tame request addresses, from the
+    /// query string first and the JSON body second.  `extraQuery` and
+    /// `bodyField` let each route pick up its own parameters in the same pass.
+    private static func parseProcessRequest(
+        fullPath: String,
+        request: Data,
+        extraQuery: (_ key: String, _ value: String) -> Void,
+        bodyField: (_ json: [String: Any]) -> Void
+    ) -> CompanionProcessRequest {
+        var result = CompanionProcessRequest()
+        if fullPath.contains("?") {
+            let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+            for param in query.split(separator: "&") {
+                let kv = param.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                let k = String(kv[0])
+                let v = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                if k == "pid", let p = Int32(v) { result.pid = p }
+                if k == "row" { result.rowId = v }
+                extraQuery(k, v)
+            }
+        }
+        if !result.isAddressed, let range = request.range(of: Data("\r\n\r\n".utf8)) {
+            let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
+            if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                if let p = json["pid"] as? Int { result.pid = Int32(truncatingIfNeeded: p) }
+                if let r = json["row"] as? String { result.rowId = r }
+                bodyField(json)
+            }
+        }
+        if result.rowId?.isEmpty == true { result.rowId = nil }
+        return result
+    }
+
+    static func quitRequest(token: String, pid: Int32, rowId: String? = nil, force: Bool = false) -> Data {
+        let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
-            "POST \(CompanionService.quitPath)?pid=\(pid)&force=\(force) HTTP/1.1",
+            "POST \(CompanionService.quitPath)?pid=\(pid)\(rowParam)&force=\(force) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",
@@ -292,9 +424,10 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func tameRequest(token: String, pid: Int32, action: String = "tame") -> Data {
+    static func tameRequest(token: String, pid: Int32, rowId: String? = nil, action: String = "tame") -> Data {
+        let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
-            "POST \(CompanionService.tamePath)?pid=\(pid)&action=\(action) HTTP/1.1",
+            "POST \(CompanionService.tamePath)?pid=\(pid)\(rowParam)&action=\(queryAllowedValue(action)) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",
@@ -392,15 +525,16 @@ enum CompanionHTTP {
         return ""
     }
 
-    private static func message(status: Int, reason: String, body: Data, type: String = "text/plain; charset=utf-8") -> Data {
-        let header = [
-            "HTTP/1.1 \(status) \(reason)",
-            "Content-Type: \(type)",
-            "Content-Length: \(body.count)",
-            "Connection: close",
-            "Cache-Control: no-store",
-            "",
-        ].joined(separator: "\r\n") + "\r\n"
+    private static func message(status: Int, reason: String, body: Data, type: String = "text/plain; charset=utf-8", extraHeaders: [String] = []) -> Data {
+        let header = (
+            [
+                "HTTP/1.1 \(status) \(reason)",
+                "Content-Type: \(type)",
+                "Content-Length: \(body.count)",
+                "Connection: close",
+                "Cache-Control: no-store",
+            ] + extraHeaders + [""]
+        ).joined(separator: "\r\n") + "\r\n"
         var data = Data(header.utf8)
         data.append(body)
         return data

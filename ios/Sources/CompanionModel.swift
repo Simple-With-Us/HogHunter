@@ -23,7 +23,7 @@ struct DiscoveredMac: Identifiable, Equatable, Sendable {
     }
 }
 
-enum CompanionClientError: Error, Equatable {
+enum CompanionClientError: Error, Equatable, LocalizedError {
     case unauthorized
     case badResponse
     case timedOut
@@ -31,6 +31,41 @@ enum CompanionClientError: Error, Equatable {
     case forbidden(String)
     /// The Mac is already showing another pairing alert (429).
     case busy
+    /// The Mac understood and refused, with a reason worth showing (409 and
+    /// other typed refusals).
+    case rejected(String)
+    /// Too many wrong tries.  The Mac asks the phone to wait (429).
+    case throttled(retryAfter: Int)
+    /// The Mac's copy of Hog Hunter predates per-phone tokens.
+    case tooOld
+    /// This connection comes from outside the local network and Tailscale,
+    /// where the Mac shows data but accepts no controls and no new pairing.
+    case untrustedNetwork
+
+    /// What the person sees.  Without this a thrown error reads as
+    /// "The operation couldn't be completed. (HogHunter.CompanionClientError error 1.)"
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized:
+            return "The Mac no longer recognizes this iPhone.\u{00A0} Pair it again from the Mac's Settings."
+        case .badResponse:
+            return "The Mac sent a reply this app could not read.\u{00A0} Update Hog Hunter on both devices."
+        case .timedOut:
+            return "The Mac did not answer in time.\u{00A0} Check that Hog Hunter is open and the connection is up."
+        case .forbidden(let reason), .rejected(let reason):
+            return reason
+        case .busy:
+            return "The Mac is already showing a pairing request."
+        case .untrustedNetwork:
+            return "Quit, tame, clean, and edit work only on your local network or over Tailscale.\u{00A0} This iPhone can still watch the Mac from here."
+        case .tooOld:
+            return "This Mac's copy of Hog Hunter is older than this app.\u{00A0} Update it on the Mac."
+        case .throttled(let seconds):
+            return seconds > 0
+                ? "Too many tries.\u{00A0} Wait \(seconds) seconds, then try again."
+                : "Too many tries.\u{00A0} Wait a moment, then try again."
+        }
+    }
 }
 
 /// Finds Hog Hunter on the Wi-Fi or connects remotely via Tailscale / Domain.
@@ -47,6 +82,9 @@ final class CompanionModel {
     var isCleaning = false
     var lastCleanResult: CompanionCleanResponse?
     var cleanError: String?
+    /// Set when a control call (exclusions, view, quit, tame) did not go
+    /// through, so the dashboard can say so instead of silently doing nothing.
+    var controlError: String?
     var showCleanDialogRequested = false
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
@@ -126,16 +164,44 @@ final class CompanionModel {
         isSubmittingCode = true
         defer { isSubmittingCode = false }
         do {
-            let next = try await Self.fetch(endpoint: mac.endpoint, token: token)
-            saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
+            let credential = try await Self.credential(forCode: token, endpoint: mac.endpoint)
+            let next = try await Self.fetch(endpoint: mac.endpoint, token: credential)
+            saved = SavedMac(peerID: mac.id, name: mac.name, token: credential)
             persistSaved()
             snapshot = next
             codeError = nil
             phase = .live
-        } catch CompanionClientError.unauthorized {
-            codeError = "That code does not match this Mac."
         } catch {
-            codeError = "The Mac did not answer.  Check that Share With iPhone is on."
+            codeError = Self.codeMessage(for: error)
+        }
+    }
+
+    /// Trades the typed pairing code for this phone's own token, so the Mac
+    /// can list it and cut it off alone.  A Mac that predates tokens answers
+    /// 404; the code itself then stays the credential, as it always was.
+    private static func credential(forCode code: String, endpoint: NWEndpoint) async throws -> String {
+        let name = await deviceName()
+        do {
+            return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name)
+        } catch CompanionClientError.tooOld {
+            return code
+        } catch CompanionClientError.untrustedNetwork {
+            // Off the local network and Tailscale the Mac will not hand out a
+            // token, but it still shows data to the code.  Keep the code; the
+            // quiet upgrade finishes once the phone is somewhere trusted.
+            return code
+        }
+    }
+
+    /// What to tell the person when typing a code did not work.
+    private static func codeMessage(for error: Error) -> String {
+        switch error as? CompanionClientError {
+        case .unauthorized?:
+            return "That code does not match this Mac."
+        case .throttled?, .forbidden?, .rejected?, .tooOld?, .untrustedNetwork?:
+            return describe(error)
+        default:
+            return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on."
         }
     }
 
@@ -192,6 +258,7 @@ final class CompanionModel {
         case .forbidden(let reason)?: return reason
         case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
         case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
+        case .throttled?, .tooOld?, .rejected?, .untrustedNetwork?: return describe(error)
         default: return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
         }
     }
@@ -227,82 +294,59 @@ final class CompanionModel {
         reconcile()
     }
 
-    func quitProcess(pid: Int32, force: Bool = false) async -> CompanionQuitResponse {
+    /// Quits the app or process in `row`.  The Mac acts on the whole row, so
+    /// quitting an app closes all of its processes, each after a live check
+    /// that the pid still belongs to the process the Mac showed.
+    func quitProcess(row: CompanionRow, force: Bool = false) async -> CompanionQuitResponse {
+        let pid = row.pid ?? 0
         if isDemoMode {
-            let targetName = snapshot?.rows.first(where: { $0.pid == pid })?.name ?? "Process"
-            if let index = snapshot?.rows.firstIndex(where: { $0.pid == pid }) {
+            if let index = snapshot?.rows.firstIndex(where: { $0.id == row.id }) {
                 snapshot?.rows.remove(at: index)
             }
             return CompanionQuitResponse(
                 status: force ? "forced" : "asked",
                 pid: pid,
-                name: targetName,
+                name: row.name,
                 message: "\(force ? "Force quit" : "Quit") command delivered to Mac.",
                 error: nil
             )
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
-            return CompanionQuitResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                message: nil,
-                error: "Not connected to Mac."
-            )
+            return CompanionQuitResponse(status: "failed", pid: pid, name: row.name, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, force: force)
+            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, force: force)
             Task { await refresh() }
             return resp
         } catch {
-            return CompanionQuitResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                message: nil,
-                error: error.localizedDescription
-            )
+            return CompanionQuitResponse(status: "failed", pid: pid, name: row.name, message: nil, error: Self.describe(error))
         }
     }
 
-    func tameProcess(pid: Int32, action: String = "tame") async -> CompanionTameResponse {
+    func tameProcess(row: CompanionRow, action: String = "tame") async -> CompanionTameResponse {
+        let pid = row.pid ?? 0
         if isDemoMode {
-            let targetName = snapshot?.rows.first(where: { $0.pid == pid })?.name ?? "Process"
-            if let index = snapshot?.rows.firstIndex(where: { $0.pid == pid }) {
+            if let index = snapshot?.rows.firstIndex(where: { $0.id == row.id }) {
                 snapshot?.rows[index].isTamed = (action == "tame")
             }
             return CompanionTameResponse(
                 status: "success",
                 pid: pid,
-                name: targetName,
+                name: row.name,
                 isTamed: action == "tame",
                 message: action == "tame" ? "Process priority lowered to background QoS." : "Process priority restored to normal.",
                 error: nil
             )
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
-            return CompanionTameResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                isTamed: false,
-                message: nil,
-                error: "Not connected to Mac."
-            )
+            return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, action: action)
+            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, action: action)
             Task { await refresh() }
             return resp
         } catch {
-            return CompanionTameResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                isTamed: false,
-                message: nil,
-                error: error.localizedDescription
-            )
+            return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: Self.describe(error))
         }
     }
 
@@ -325,11 +369,10 @@ final class CompanionModel {
             }
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, toggleCategory: id)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, toggleCategory: id)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func addExcludedPath(_ path: String) async {
@@ -346,11 +389,10 @@ final class CompanionModel {
             }
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, addPath: trimmed)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, addPath: trimmed)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func removeExcludedPath(_ path: String) async {
@@ -363,11 +405,10 @@ final class CompanionModel {
             snapshot?.storage = storage
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, removePath: path)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, removePath: path)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func switchWindow(_ window: String) async {
@@ -375,11 +416,10 @@ final class CompanionModel {
             snapshot?.window = window
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, window: window)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, window: window)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func switchGrouping(_ grouping: String) async {
@@ -387,11 +427,10 @@ final class CompanionModel {
             snapshot?.grouping = grouping
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, grouping: grouping)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, grouping: grouping)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func switchCpuScale(_ scale: String) async {
@@ -399,11 +438,40 @@ final class CompanionModel {
             snapshot?.cpuScale = scale
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale)
+            return (res.status == "ok", res.message)
+        }
+    }
+
+    /// Runs one edit on the Mac and refreshes.  A failure lands in
+    /// `controlError` for the dashboard to show, never in a silent catch.
+    private func sendControl(_ call: (_ endpoint: NWEndpoint, _ token: String) async throws -> (ok: Bool, message: String?)) async {
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            controlError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
         do {
-            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, cpuScale: scale)
+            let outcome = try await call(endpoint, saved.token)
+            if !outcome.ok {
+                controlError = outcome.message ?? "The Mac did not accept that change."
+            }
             await refresh()
-        } catch {}
+        } catch {
+            controlError = Self.describe(error)
+            await refresh()
+        }
+    }
+
+    /// A sentence for any error a control call can throw.
+    static func describe(_ error: Error) -> String {
+        if let known = error as? CompanionClientError, let text = known.errorDescription {
+            return text
+        }
+        if error is CancellationError {
+            return "The request was cancelled."
+        }
+        return "Could not reach the Mac.\u{00A0} Check that Hog Hunter is open and Share With iPhone is on."
     }
 
     func mac(for peerID: String) -> DiscoveredMac? {
@@ -472,7 +540,7 @@ final class CompanionModel {
                 defer { isWaitingForApproval = false }
                 token = try await Self.approve(endpoint: endpoint)
             } else {
-                token = typed
+                token = try await Self.credential(forCode: typed, endpoint: endpoint)
             }
             guard !Task.isCancelled else { return }
             let fetched = try await Self.fetch(endpoint: endpoint, token: token)
@@ -519,8 +587,11 @@ final class CompanionModel {
             if let data = try? CompanionJSON.encode(fetched) {
                 UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
             }
+            Task { await upgradeToDeviceTokenIfNeeded() }
         } catch CompanionClientError.unauthorized {
-            codeError = "The code no longer matches.  Enter the code from Hog Hunter Settings on your Mac."
+            codeError = CompanionToken.isDeviceToken(saved.token)
+                ? "This iPhone is no longer paired with the Mac.\u{00A0} Enter the code from Hog Hunter Settings to pair it again."
+                : "The code no longer matches.\u{00A0} Enter the code from Hog Hunter Settings on your Mac."
             phase = .code(saved.peerID)
             snapshot = nil
         } catch {
@@ -528,6 +599,36 @@ final class CompanionModel {
                 phase = .offline
                 statusLine = saved.remoteHost != nil ? "The Mac at \(saved.remoteHost!) did not answer." : "The Mac did not answer."
             }
+        }
+    }
+
+    private var lastUpgradeAttempt = Date.distantPast
+    private var macPredatesTokens = false
+
+    /// A phone paired before per-phone tokens holds the shared code, which can
+    /// only read.  Trade it for a token of its own, quietly, so quit, tame,
+    /// clean and edit work again without pairing from scratch.  Tried at most
+    /// once a minute, and not at all against a Mac that does not know tokens.
+    private func upgradeToDeviceTokenIfNeeded() async {
+        guard let current = saved,
+              !isDemoMode,
+              !macPredatesTokens,
+              !CompanionToken.isDeviceToken(current.token),
+              Date().timeIntervalSince(lastUpgradeAttempt) >= 60,
+              let endpoint = activeEndpoint(for: current) else { return }
+        lastUpgradeAttempt = Date()
+        do {
+            let token = try await CompanionConnection.enroll(endpoint: endpoint, code: current.token, deviceName: await Self.deviceName())
+            // Pairing may have changed while the Mac answered.
+            guard var latest = saved, latest.peerID == current.peerID, latest.token == current.token else { return }
+            latest.token = token
+            saved = latest
+            persistSaved()
+        } catch CompanionClientError.tooOld {
+            macPredatesTokens = true
+        } catch {
+            // Wrong code, off the local network, throttled: stay as we are
+            // and try again later.
         }
     }
 
@@ -620,9 +721,21 @@ final class CompanionModel {
         } catch CompanionClientError.forbidden(let reason) {
             cleanError = reason
             defaults?.set("Clean not allowed", forKey: "clean_status")
+        } catch CompanionClientError.rejected(let reason) {
+            // The Mac is already cleaning (409).  Its progress is on screen.
+            cleanError = reason
+            defaults?.set("Clean busy", forKey: "clean_status")
         } catch {
-            cleanError = "Could not start safe clean.  The Mac may be busy or unreachable."
-            defaults?.set("Clean failed", forKey: "clean_status")
+            // The reply can be lost while the Mac keeps cleaning: the phone
+            // slept, or the Wi-Fi blinked.  Look before calling it a failure.
+            await refresh()
+            if snapshot?.cleanProgress?.isCleaning == true {
+                cleanError = "Lost the connection while the Mac was cleaning.\u{00A0} It is still running; its progress shows here."
+                defaults?.set("Cleaning…", forKey: "clean_status")
+            } else {
+                cleanError = "Could not finish the clean.\u{00A0} \(Self.describe(error))"
+                defaults?.set("Clean failed", forKey: "clean_status")
+            }
         }
     }
 
@@ -794,6 +907,10 @@ final class CompanionModel {
                 uniqueRemoteHosts: 3,
                 sampleRemoteHosts: ["54.230.97.10:443", "3.220.12.91:443"]
             )
-        ]
+        ],
+        // Demo mode shows every control, the way a Mac with all opt-ins on does.
+        remoteQuitAllowed: true,
+        remoteCleanAllowed: true,
+        remoteEditAllowed: true
     )
 }
