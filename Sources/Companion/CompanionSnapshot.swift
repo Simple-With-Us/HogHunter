@@ -135,6 +135,9 @@ struct CompanionSnapshot: Codable, Equatable {
     var rows: [CompanionRow]
     var storage: CompanionStorageSummary? = nil
     var network: [CompanionNetworkRow]? = nil
+    /// Why `network` is empty ("still looking", "lsof denied"), so the phone
+    /// can say so instead of claiming the Mac has no connections.
+    var networkNote: String? = nil
     /// What the Mac owner has allowed the phone to do.  Optional so an older
     /// Mac that does not send them decodes as "unknown" rather than failing.
     var remoteQuitAllowed: Bool? = nil

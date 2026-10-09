@@ -267,12 +267,15 @@ private struct CleanerSettingsTab: View {
                     Toggle(isOn: Binding(
                         get: { exclusions.isCategoryExcluded(category) },
                         set: { isExcluded in
-                            if isExcluded {
-                                exclusions.excludedCategories.insert(category.rawValue)
-                            } else {
-                                exclusions.excludedCategories.remove(category.rawValue)
+                            // Edit the stored value, not this view's copy, so a
+                            // change made from the iPhone in the meantime survives.
+                            exclusions = CleanerExclusions.update { current in
+                                if isExcluded {
+                                    current.excludedCategories.insert(category.rawValue)
+                                } else {
+                                    current.excludedCategories.remove(category.rawValue)
+                                }
                             }
-                            exclusions.save()
                         }
                     )) {
                         HStack(spacing: 8) {
@@ -313,8 +316,7 @@ private struct CleanerSettingsTab: View {
                                 .truncationMode(.middle)
                             Spacer()
                             Button {
-                                exclusions.excludedPaths.removeAll { $0 == path }
-                                exclusions.save()
+                                exclusions = CleanerExclusions.update { $0.removePath(path) }
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 11))
@@ -334,9 +336,8 @@ private struct CleanerSettingsTab: View {
                     panel.prompt = "Exclude Folder"
                     if panel.runModal() == .OK, let url = panel.url {
                         let path = (url.path as NSString).standardizingPath
-                        if !exclusions.excludedPaths.contains(path) {
-                            exclusions.excludedPaths.append(path)
-                            exclusions.save()
+                        exclusions = CleanerExclusions.update { current in
+                            if !current.excludedPaths.contains(path) { current.excludedPaths.append(path) }
                         }
                     }
                 }

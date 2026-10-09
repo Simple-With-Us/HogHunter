@@ -20,6 +20,8 @@ struct DiskCleanerView: View {
             bottomBar
         }
         .onAppear {
+            // An iPhone can edit the exclusions while this view is closed.
+            store.reloadExclusions()
             if isTabActive, case .idle = store.state {
                 store.scan()
             }
