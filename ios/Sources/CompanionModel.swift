@@ -89,8 +89,10 @@ final class CompanionModel {
     /// The row a Sample for 3 Seconds is running on, so the row can say so and
     /// a second tap does not start a second sample.
     var samplingRowId: String?
-    /// True while a settings change is on its way to the Mac.
-    var isApplyingSettings = false
+    /// How many settings changes are on their way to the Mac.  A count, not a
+    /// flag, so one finishing does not re-enable controls while another is out.
+    private(set) var settingsInFlight = 0
+    var isApplyingSettings: Bool { settingsInFlight > 0 }
     /// What the Mac said about the last settings change that went through
     /// ("A test message is on its way.").
     var settingsNotice: String?
@@ -382,18 +384,7 @@ final class CompanionModel {
         defer { samplingRowId = nil }
         if isDemoMode {
             try? await Task.sleep(for: .seconds(1))
-            return CompanionSampleResponse(
-                status: "ok",
-                name: row.name,
-                message: "Sampled \(row.name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
-                fileName: "\(row.name)-\(row.pid ?? 0)-20261009-101500.txt",
-                bytes: 412_000,
-                summary: [
-                    "__psynch_cvwait  (in libsystem_kernel.dylib)        1840",
-                    "mach_msg2_trap  (in libsystem_kernel.dylib)        1212",
-                    "-[NSApplication run]  (in AppKit)        96",
-                ]
-            )
+            return Self.sampleSampleResponse(name: row.name, rowId: row.pid ?? 0)
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             return CompanionSampleResponse(status: "failed", name: row.name, error: "Not connected to Mac.")
@@ -436,6 +427,23 @@ final class CompanionModel {
         await refresh()
     }
 
+    /// What a finished Sample for 3 Seconds looks like, for demo mode and the
+    /// screenshot lane.
+    static func sampleSampleResponse(name: String, rowId: Int32) -> CompanionSampleResponse {
+        CompanionSampleResponse(
+            status: "ok",
+            name: name,
+            message: "Sampled \(name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
+            fileName: "\(name)-\(rowId)-20261009-101500.txt",
+            bytes: 412_000,
+            summary: [
+                "__psynch_cvwait  (in libsystem_kernel.dylib)        1840",
+                "mach_msg2_trap  (in libsystem_kernel.dylib)        1212",
+                "-[NSApplication run]  (in AppKit)        96",
+            ]
+        )
+    }
+
     /// Sends a settings change to the Mac.  The Mac checks every value; a
     /// refusal lands in `settingsError` and a success in `settingsNotice`.
     func updateSettings(_ update: CompanionSettingsUpdateRequest) async {
@@ -463,8 +471,15 @@ final class CompanionModel {
             settingsError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
             return
         }
-        isApplyingSettings = true
-        defer { isApplyingSettings = false }
+        // The webhook address is a secret and this link is not encrypted.  The
+        // Mac would refuse a control from outside your network, but it has read
+        // the request by then, so the phone does not send it.
+        if let url = update.webhookURL, !url.isEmpty, !CompanionPeer.isTrustedEndpoint(endpoint) {
+            settingsError = "The webhook address is a secret, so this iPhone sends it only over your local network or Tailscale.\u{00A0} Connect that way, then try again."
+            return
+        }
+        settingsInFlight += 1
+        defer { settingsInFlight -= 1 }
         do {
             let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update)
             if res.status == "ok" {

@@ -28,6 +28,9 @@ enum CompanionSettingsValidator {
             }
             validated.refreshInterval = interval
         }
+        if request.testWebhook == true, request.webhookURL != nil {
+            return .failure(.init("Save the webhook first, then send a test."))
+        }
         if let enabled = request.alertsEnabled {
             validated.alertsEnabled = enabled
         }
@@ -68,7 +71,9 @@ enum CompanionSettingsValidator {
               let host = url.host, !host.isEmpty else {
             return .failure(.init("The webhook must be an https address.\u{00A0} Set an http one on the Mac."))
         }
-        return .success(trimmed)
+        // The alert sender compares the scheme as typed, so "HTTPS://" would
+        // pass here and then fail there.  Store it in the form it expects.
+        return .success("https" + trimmed.dropFirst("https".count))
     }
 }
 
@@ -108,10 +113,20 @@ extension CompanionSnapshotBuilder {
             alertThresholdPercent: alertThresholdPercent,
             alertSustainedMinutes: alertSustainedMinutes,
             webhookConfigured: configured,
-            webhookHost: configured ? URL(string: trimmed)?.host : nil,
+            webhookHost: configured ? URL(string: trimmed)?.host.map(maskedWebhookHost) : nil,
             webhookStatus: status,
             notificationsDenied: notificationsDenied
         )
+    }
+
+    /// Enough of the host to recognise the service, not enough to be a
+    /// credential.  Some services put the secret endpoint id in a subdomain
+    /// ("abc123.m.pipedream.net"), and the snapshot is readable with the shared
+    /// code, so only the last two labels are shown: "...pipedream.net".
+    static func maskedWebhookHost(_ host: String) -> String {
+        let labels = host.split(separator: ".").map(String.init)
+        guard labels.count > 2 else { return host }
+        return "…" + labels.suffix(2).joined(separator: ".")
     }
 
     /// Throughput and 24-hour peak, formatted with the same words the Network

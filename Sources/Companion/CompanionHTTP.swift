@@ -126,7 +126,7 @@ enum CompanionHTTP {
             }
             var updateReq = CompanionExclusionsUpdateRequest()
             if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                let query = queryString(of: fullPath)
                 for param in query.split(separator: "&") {
                     let kv = param.split(separator: "=", maxSplits: 1)
                     if kv.count == 2 {
@@ -157,7 +157,7 @@ enum CompanionHTTP {
             }
             var updateReq = CompanionViewUpdateRequest()
             if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                let query = queryString(of: fullPath)
                 for param in query.split(separator: "&") {
                     let kv = param.split(separator: "=", maxSplits: 1)
                     if kv.count == 2 {
@@ -237,7 +237,7 @@ enum CompanionHTTP {
     static func vacuumRunKind(fullPath: String) -> String? {
         var kinds: [String] = []
         if fullPath.contains("?") {
-            let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+            let query = queryString(of: fullPath)
             for param in query.split(separator: "&", omittingEmptySubsequences: true) {
                 let kv = param.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
                 guard kv.first.map(String.init) == "kind" else { continue }
@@ -247,6 +247,15 @@ enum CompanionHTTP {
         }
         if kinds.isEmpty { return "full" }
         return kinds.allSatisfy { CompanionService.vacuumRunKinds.contains($0) } ? kinds[0] : nil
+    }
+
+    /// Everything after the first `?`, or empty.  `split(separator: "?")` on a
+    /// path that ends in the mark yields one piece, so indexing its second
+    /// element traps; a request line like `POST /v1/view? HTTP/1.1` from any
+    /// paired phone would have ended the Mac app.
+    static func queryString(of fullPath: String) -> String {
+        guard let mark = fullPath.firstIndex(of: "?") else { return "" }
+        return String(fullPath[fullPath.index(after: mark)...])
     }
 
     // MARK: - Reading a whole request
@@ -520,7 +529,7 @@ enum CompanionHTTP {
     ) -> CompanionProcessRequest {
         var result = CompanionProcessRequest()
         if fullPath.contains("?") {
-            let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+            let query = queryString(of: fullPath)
             for param in query.split(separator: "&") {
                 let kv = param.split(separator: "=", maxSplits: 1)
                 guard kv.count == 2 else { continue }

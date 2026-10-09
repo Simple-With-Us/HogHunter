@@ -223,6 +223,13 @@ final class HogStore: ObservableObject {
     /// itself is main-actor state and a secret; the router only needs to know
     /// whether a test message has anywhere to go.
     private let webhookConfiguredMirror = CompanionLocked(false)
+    /// When a phone last asked for a test message.  A test posts to the owner's
+    /// Slack or Discord, so they are spaced out.
+    private let lastWebhookTestAt = CompanionLocked(Date.distantPast)
+    /// A sample pauses its target and writes a report that can be megabytes,
+    /// so one runs at a time, whoever asked.
+    private let sampleInFlight = CompanionLocked(false)
+    static let webhookTestCooldown: TimeInterval = 15
     /// The phones paired with this Mac, one token each.
     let companionDevices: CompanionDeviceRegistry
     /// Paired phones, newest first, for Settings.  Refreshed when one pairs or
@@ -1201,6 +1208,7 @@ final class HogStore: ObservableObject {
     //  the "Pair this iPhone?" alert uses without a modal in the test process.
 
     func setLoadingSettingsForTest(_ value: Bool) { loadingSettings = value }
+    func setSampleInFlightForTest(_ value: Bool) { sampleInFlight.value = value }
     func persistForTest() { persist() }
 
     /// Asks for notification permission the moment alerts are switched on, and
@@ -1528,10 +1536,19 @@ final class HogStore: ObservableObject {
             return (400, (try? encoder.encode(CompanionSettingsUpdateResponse.rejected(rejection.message))) ?? Data())
         case .success(let validated):
             if validated.testWebhook {
-                let willHaveWebhook = validated.webhookURL.map { !$0.isEmpty } ?? webhookConfiguredMirror.value
-                guard willHaveWebhook else {
+                guard webhookConfiguredMirror.value else {
                     let none = CompanionSettingsUpdateResponse.rejected("No webhook is set.\u{00A0} Add one first.")
                     return (400, (try? encoder.encode(none)) ?? Data())
+                }
+                let now = Date()
+                let allowed = lastWebhookTestAt.withLock { last -> Bool in
+                    guard now.timeIntervalSince(last) >= Self.webhookTestCooldown else { return false }
+                    last = now
+                    return true
+                }
+                guard allowed else {
+                    let wait = CompanionSettingsUpdateResponse.rejected("A test message was just sent.\u{00A0} Wait a few seconds, then try again.")
+                    return (429, (try? encoder.encode(wait)) ?? Data())
                 }
             }
             Task { @MainActor [weak self] in self?.applyRemoteSettings(validated) }
@@ -1562,20 +1579,36 @@ final class HogStore: ObservableObject {
         func reply(_ status: Int, _ response: CompanionSampleResponse) -> CompanionServer.Reply {
             (status, (try? JSONEncoder().encode(response)) ?? Data())
         }
+        // One sample at a time.  Every path below ends in `completion`, and
+        // `finish` clears the flag before it is called.
+        let inFlight = sampleInFlight
+        let started = inFlight.withLock { busy -> Bool in
+            if busy { return false }
+            busy = true
+            return true
+        }
+        guard started else {
+            completion(reply(409, CompanionSampleResponse(status: "busy", name: target.name, error: "A sample is already running on this Mac.\u{00A0} Wait for it to finish.")))
+            return
+        }
+        let finish: @Sendable (CompanionServer.Reply) -> Void = { result in
+            inFlight.value = false
+            completion(result)
+        }
         switch ProcessControl.sampleChoice(members: target.members, fallbackName: target.name) {
         case .changed(let name):
-            completion(reply(400, CompanionSampleResponse(status: "changed", name: name, error: CompanionTargets.unresolvedMessage(for: CompanionProcessRequest(rowId: target.rowId, pid: nil)))))
+            finish(reply(400, CompanionSampleResponse(status: "changed", name: name, error: CompanionTargets.unresolvedMessage(for: CompanionProcessRequest(rowId: target.rowId, pid: nil)))))
         case .blocked(let name, let reason):
-            completion(reply(400, CompanionSampleResponse(status: "blocked", name: name, error: "\(name) is \(reason).\u{00A0} Hog Hunter will not sample it.")))
+            finish(reply(400, CompanionSampleResponse(status: "blocked", name: name, error: "\(name) is \(reason).\u{00A0} Hog Hunter will not sample it.")))
         case .ready(let key, let name):
             SampleReport.run(name: name, pid: key.pid) { outcome in
                 switch outcome {
                 case .failed(let message):
-                    completion(reply(400, CompanionSampleResponse(status: "failed", name: name, error: message)))
+                    finish(reply(400, CompanionSampleResponse(status: "failed", name: name, error: message)))
                 case .written(let url):
                     DispatchQueue.global(qos: .utility).async {
                         let summary = SampleReport.summary(of: SampleReport.tailText(of: url))
-                        completion(reply(200, CompanionSampleResponse(
+                        finish(reply(200, CompanionSampleResponse(
                             status: "ok",
                             name: name,
                             message: "Sampled \(name) for 3 seconds.\u{00A0} The report is on the Mac in Logs/HogHunter.",
