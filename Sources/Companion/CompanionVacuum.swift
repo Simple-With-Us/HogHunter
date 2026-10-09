@@ -94,7 +94,9 @@ enum CompanionVacuum {
     }
 
     /// What the last run did.  The run's own steps, or, for a run that
-    /// recorded none, what the status holds for each step.
+    /// recorded none, what the status holds for each step.  `lastRun` is the
+    /// run `headlineRun` chose, so it is a watch tick only when every run on
+    /// record is one (a watch tick's steps are then the honest answer).
     static func steps(from status: RoboticVacuumStatus, lastRun: RoboticVacuumRun?) -> [CompanionVacuumStep] {
         guard let lastRun, !lastRun.steps.isEmpty else { return steps(from: status.stepLastResults) }
         return steps(from: Dictionary(lastRun.steps.map { ($0.stepId, $0) }, uniquingKeysWith: { _, newer in newer }))

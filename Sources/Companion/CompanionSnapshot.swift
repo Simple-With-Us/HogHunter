@@ -371,7 +371,7 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
     var nextFullRunAt: Date? = nil
     var lastRunBytesFreed: Int? = nil
     var lastRunEndedAt: Date? = nil
-    /// What kind of run the three `lastRun` fields and `steps` describe:
+    /// What kind of run `lastRunBytesFreed`, `lastRunEndedAt` and `steps` describe:
     /// "janitor", "full", "manual" or "pressure".  It is never "watch" unless
     /// every run on record is a watch tick, because a watch tick is only the
     /// five minute disk and memory check and says nothing about cleaning.

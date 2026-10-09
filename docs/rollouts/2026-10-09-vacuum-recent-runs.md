@@ -26,7 +26,7 @@ Both new fields are optional on the wire.  An older Mac sends neither: the phone
 
 ## Where Each Half Takes Effect
 
-The Mac app reads the Python's output; the background job runs the Python.  The `com.simplewithus.hoghunter.robotic-vacuum` LaunchAgent runs `/usr/bin/python3 /Users/jay/Code/HogHunter/scripts/robotic-vacuum.py --tick scheduler` every 300 seconds, so the `build_status` change reaches the Mac's Cleaning steps once that checkout is on this change and the next tick publishes `status.json`.  The Swift half (the phone's last run and the list) needs `scripts/install.sh` on the Mac and a new phone build.
+The Mac app reads the Python's output; the background job runs the Python.  The Robotic Vacuum LaunchAgent runs `scripts/robotic-vacuum.py --tick scheduler` every 300 seconds from the integration checkout of this repo, so the `build_status` change reaches the Mac's Cleaning steps once that checkout is on this change and the next tick publishes `status.json`.  The Swift half (the phone's last run and the list) needs `scripts/install.sh` on the Mac and a new phone build.
 
 ## Not Done
 
