@@ -96,7 +96,8 @@ struct VacuumSummaryRow: View {
 }
 
 /// One line of the Recent Runs list, the way the Mac lists a run (what kind,
-/// what it freed, when it ended), with how long it took and whether it failed.
+/// what it freed, when it ended), with how long it took and whether it failed
+/// or only partly worked.
 private struct VacuumRunRow: View {
     let run: CompanionVacuumRun
 
@@ -105,10 +106,10 @@ private struct VacuumRunRow: View {
             HStack {
                 Text(run.trigger.capitalized)
                     .font(.body.weight(.medium))
-                if !run.succeeded {
-                    Text("Failed")
+                if let mark = run.result.markLabel {
+                    Text(mark)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
                 }
                 Spacer()
                 Text(run.bytesFreed > 0 ? "Freed \(VacuumFormat.bytes(run.bytesFreed))" : "Nothing freed")
@@ -325,15 +326,21 @@ struct VacuumView: View {
         }
     }
 
-    /// The Mac's Recent Runs list.  Watch ticks are listed, as on the Mac.  A
-    /// run carries no step text, so this needs no opt-in.
+    /// The Mac's Recent Runs list: the cleaning runs, with one line above them
+    /// for the five minute checks.  A run carries no step text, and neither
+    /// does the summary, so this needs no opt-in.
     @ViewBuilder
     private var recentRunsSection: some View {
         if isAvailable, let vacuum {
             Section {
-                if let runs = vacuum.recentRuns {
+                if let runs = vacuum.cleaningRuns {
+                    if let watch = vacuum.watch {
+                        Text(watch.summary(now: Date()))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     if runs.isEmpty {
-                        Text("No runs recorded yet.")
+                        Text("No cleaning runs recorded yet.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     } else {
@@ -349,22 +356,17 @@ struct VacuumView: View {
             } header: {
                 Text("Recent Runs")
             } footer: {
-                if vacuum.recentRuns?.isEmpty == false {
-                    Text(recentRunsFooter)
+                if vacuum.cleaningRuns?.isEmpty == false {
+                    Text(vacuum.watch == nil ? Self.recentRunsFooter : Self.recentRunsFooter + "\u{00A0} " + Self.watchFooterNote)
                 }
             }
         }
     }
 
-    /// The last run leaves watch ticks out unless every run on record is one,
-    /// so the second sentence is only true while the Mac reports another kind.
-    /// With no kind at all (runs on record but no status file yet) the Last
-    /// Run row is not on screen, and the sentence would point at nothing.
-    private var recentRunsFooter: String {
-        let note = "Newest first.\u{00A0} Watch is the quick disk and memory check that runs every few minutes."
-        guard let trigger = vacuum?.lastRunTrigger, trigger != "watch" else { return note }
-        return note + "\u{00A0} The last run above never counts it."
-    }
+    /// What the list is and what Partial means.
+    static let recentRunsFooter = "Newest first.\u{00A0} Partial means a step failed and the other steps still did their work."
+    /// Why the list holds no disk and memory checks, said only while the line that counts them is on screen.
+    static let watchFooterNote = "The quick disk and memory check that runs every few minutes is counted above, not listed."
 
     private static func color(forStatus label: String) -> Color {
         switch label {

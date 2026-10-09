@@ -379,11 +379,55 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
     /// What the last run did, step by step.  Nil unless the owner allowed the
     /// phone to run the vacuum.
     var steps: [CompanionVacuumStep]? = nil
-    /// The Mac's recent runs, newest first, watch ticks included, the way the
-    /// Mac lists them.  A run carries no step text, so unlike `steps` this
-    /// travels with the plain snapshot.  Nil from a Mac that predates the
-    /// field (empty means the Mac has recorded no runs).
+    /// The Mac's recent cleaning runs, newest first, the way the Mac lists
+    /// them: janitor, full, manual and pressure runs, and nothing for the
+    /// quiet five minute checks, which `watch` sums up instead.  A run carries
+    /// no step text, so unlike `steps` this travels with the plain snapshot.
+    /// Nil from a Mac that predates the field (empty means the Mac has
+    /// recorded no cleaning runs).  A Mac that predates the cleaning-only list
+    /// still sends watch ticks in it, so read it through `cleaningRuns`.
     var recentRuns: [CompanionVacuumRun]? = nil
+    /// The five minute disk and memory checks, summed up: when the last one
+    /// ran and how many ran today.  Nil from a Mac that predates the field,
+    /// and from a Mac that has recorded no check.  Carries no step text.
+    var watch: CompanionVacuumWatch? = nil
+
+    /// `recentRuns` without any watch tick, so an older Mac that still lists
+    /// them reads the same as a newer one.  Nil when the Mac sent no list.
+    var cleaningRuns: [CompanionVacuumRun]? {
+        recentRuns?.filter { $0.trigger != CompanionVacuumRun.watchTrigger }
+    }
+}
+
+/// How a Robotic Vacuum run ended, for the mark on its row.
+enum CompanionVacuumRunResult: String, Equatable, Sendable {
+    case ok
+    /// A step failed and another one did its work.  The run exits 0, which is
+    /// why the exit code alone cannot show it.
+    case partial
+    case failed
+
+    /// The one rule for both screens.  A non-zero exit is always failed, as in
+    /// the engine.  Otherwise the run's recorded outcome decides, and a run
+    /// with no outcome (an older Mac or an older history row) or one this
+    /// build does not know is judged by its exit code, which is zero here.
+    static func resolve(exitCode: Int, outcome: String?) -> CompanionVacuumRunResult {
+        if exitCode != 0 { return .failed }
+        switch outcome {
+        case "partial": return .partial
+        case "failed": return .failed
+        default: return .ok
+        }
+    }
+
+    /// The word on the run's row, or nil for a run with nothing to flag.
+    var markLabel: String? {
+        switch self {
+        case .ok: return nil
+        case .partial: return "Partial"
+        case .failed: return "Failed"
+        }
+    }
 }
 
 /// One finished Robotic Vacuum run in the Recent Runs list.  Only what can be
@@ -394,12 +438,95 @@ struct CompanionVacuumRun: Codable, Equatable, Identifiable, Sendable {
     var trigger: String
     var endedAt: Date? = nil
     var bytesFreed: Int
-    /// Zero when the run finished cleanly.
+    /// Zero when the run finished cleanly.  A partial run is zero too.
     var exitCode: Int
     var durationSeconds: Int
+    /// "ok", "partial" or "failed", as the Mac resolved it from the run's
+    /// recorded outcome.  Nil from a Mac that predates the field: the exit code
+    /// then decides, and a partial run cannot be told from a clean one.
+    var outcome: String? = nil
+
+    /// The trigger of the five minute disk and memory check.
+    static let watchTrigger = "watch"
 
     var id: String { runId }
-    var succeeded: Bool { exitCode == 0 }
+    var result: CompanionVacuumRunResult { .resolve(exitCode: exitCode, outcome: outcome) }
+    /// True when the run has nothing to flag: not failed and not partial.
+    var succeeded: Bool { result == .ok }
+}
+
+/// The five minute disk and memory checks in one line's worth of numbers.  The
+/// checks are left out of the list of runs because there are hundreds a day.
+struct CompanionVacuumWatch: Codable, Equatable, Sendable {
+    /// When the newest check ran.
+    var lastCheckAt: Date?
+    /// How many ran since the start of today on the Mac's clock.
+    var checksToday: Int
+    /// Set only when the Mac's history does not reach back to the start of
+    /// today, so the count covers just the time since this moment.  Then the
+    /// line must not say "today".
+    var countedSince: Date?
+
+    init(lastCheckAt: Date? = nil, checksToday: Int = 0, countedSince: Date? = nil) {
+        self.lastCheckAt = lastCheckAt
+        self.checksToday = checksToday
+        self.countedSince = countedSince
+    }
+
+    /// Every field has a default, so a payload missing any of them still reads.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lastCheckAt = try container.decodeIfPresent(Date.self, forKey: .lastCheckAt)
+        checksToday = try container.decodeIfPresent(Int.self, forKey: .checksToday) ?? 0
+        countedSince = try container.decodeIfPresent(Date.self, forKey: .countedSince)
+    }
+
+    /// "Last check 5:40pm · 23 checks today".  Twelve-hour time with am or pm
+    /// and no zone, in the calendar's time zone.  A check from an earlier day
+    /// says which day, and a count that covers only part of today says since
+    /// when.  Shared by the Mac and the phone, so the two read alike.
+    func summary(now: Date, calendar: Calendar = .current) -> String {
+        let last: String
+        if let lastCheckAt {
+            last = "Last check \(Self.describe(lastCheckAt, now: now, calendar: calendar))"
+        } else {
+            last = "No checks recorded yet"
+        }
+        let noun = checksToday == 1 ? "check" : "checks"
+        let count: String
+        if let countedSince {
+            count = "\(checksToday) \(noun) since \(Self.clock(countedSince, calendar: calendar))"
+        } else {
+            count = "\(checksToday) \(noun) today"
+        }
+        return last + " \u{00B7} " + count
+    }
+
+    private static func describe(_ date: Date, now: Date, calendar: Calendar) -> String {
+        let time = clock(date, calendar: calendar)
+        if calendar.isDate(date, inSameDayAs: now) { return time }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) {
+            return "yesterday \(time)"
+        }
+        return "\(format("MMM d", date, calendar: calendar)) \(time)"
+    }
+
+    /// "5:40pm".  A fixed format on purpose: the owner reads a 12-hour clock
+    /// with lower-case am and pm whatever the phone's own setting is.
+    static func clock(_ date: Date, calendar: Calendar) -> String {
+        format("h:mma", date, calendar: calendar)
+    }
+
+    private static func format(_ pattern: String, _ date: Date, calendar: Calendar) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.amSymbol = "am"
+        formatter.pmSymbol = "pm"
+        formatter.dateFormat = pattern
+        return formatter.string(from: date)
+    }
 }
 
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.

@@ -7,12 +7,13 @@ enum CompanionVacuum {
     /// The most a step's reason may carry, ellipsis included.
     static let maxReasonLength = 120
 
-    /// The most runs the phone is sent in `recentRuns`.
+    /// The most cleaning runs the Mac lists and the phone is sent in `recentRuns`.
     static let maxRecentRuns = 20
 
-    /// A watch tick is the five minute disk and memory check.  It is listed
-    /// with the other runs but is never the "last run" the phone leads with.
-    static let watchTrigger = "watch"
+    /// A watch tick is the five minute disk and memory check.  It is not a
+    /// cleaning run: it is summed up in `watch` instead of listed, and it is
+    /// never the "last run" the phone leads with.
+    static let watchTrigger = CompanionVacuumRun.watchTrigger
 
     /// The status for the phone, or nil when there is nothing to say.
     ///
@@ -26,18 +27,23 @@ enum CompanionVacuum {
     /// first run) still gets a minimal status, so the phone shows it running.
     ///
     /// `history` is newest first.  The run the phone leads with (bytes freed,
-    /// when it ended, what each step did) is the newest run that is not a
-    /// watch tick: the engine ticks every five minutes, so the very last run
-    /// is almost always a watch tick whose only step is the disk and memory
-    /// check.  `recentRuns` lists everything, watch ticks included, as the Mac
-    /// does, and carries no step text, so it is not behind the opt-in.
+    /// when it ended, what each step did) is the newest cleaning run: the
+    /// engine ticks every five minutes, so the very last run is almost always
+    /// a watch tick whose only step is the disk and memory check.  `recentRuns`
+    /// lists the cleaning runs only, as the Mac does, and `watch` sums up the
+    /// ticks.  Neither carries step text, so neither is behind the opt-in.
+    ///
+    /// `now` and `calendar` say what "today" is for the watch count.
     static func status(
         from status: RoboticVacuumStatus?,
         history: [RoboticVacuumRun],
         isRunning: Bool,
-        includeSteps: Bool
+        includeSteps: Bool,
+        now: Date = Date(),
+        calendar: Calendar = .current
     ) -> CompanionVacuumStatus? {
         let recent = recentRuns(from: history)
+        let watchSummary = watch(from: history, now: now, calendar: calendar)
         guard let status else {
             guard isRunning else { return nil }
             return CompanionVacuumStatus(
@@ -45,7 +51,8 @@ enum CompanionVacuum {
                 displayHealth: "Waiting for first run",
                 launchdLoaded: false,
                 isRunning: true,
-                recentRuns: recent
+                recentRuns: recent,
+                watch: watchSummary
             )
         }
         let lastRun = headlineRun(status: status, history: history)
@@ -58,32 +65,63 @@ enum CompanionVacuum {
             nextFullRunAt: date(status.nextRunAt["full"]),
             lastRunBytesFreed: lastRun.map { max(0, $0.bytesFreed) },
             lastRunEndedAt: date(lastRun?.endedAt),
-            lastRunTrigger: lastRun?.trigger,
+            lastRunTrigger: lastRun?.displayTrigger,
             steps: includeSteps ? steps(from: status, lastRun: lastRun) : nil,
-            recentRuns: recent
+            recentRuns: recent,
+            watch: watchSummary
         )
     }
 
-    /// The run the phone leads with: the newest that is not a watch tick (so
-    /// janitor, full, manual and pressure runs all count), or the newest run
-    /// of any kind when every run on record is a watch tick.  The status's own
-    /// last run is only a fallback for a history that could not be read.
+    /// The run the phone leads with: the newest cleaning run (so janitor,
+    /// full, manual and pressure runs all count, and so does a watch tick that
+    /// went on to clean), or the newest run of any kind when every run on
+    /// record is a quiet tick.  The status's own last run is only a fallback
+    /// for a history that could not be read.
     static func headlineRun(status: RoboticVacuumStatus, history: [RoboticVacuumRun]) -> RoboticVacuumRun? {
-        history.first { $0.trigger != watchTrigger } ?? history.first ?? status.lastRun
+        history.first { $0.isCleaningRun } ?? history.first ?? status.lastRun
     }
 
-    /// The newest `maxRecentRuns` runs, newest first.
+    /// The newest `maxRecentRuns` cleaning runs, newest first.  The Mac's list
+    /// and the phone's payload both come from here, so they list the same runs
+    /// and mark them the same way.
+    ///
+    /// A quiet watch tick is left out.  One that found the disk or memory in
+    /// trouble and cleaned is a run like any other and stays in, listed as
+    /// "pressure" because that is what its steps ran as.
     static func recentRuns(from history: [RoboticVacuumRun]) -> [CompanionVacuumRun] {
-        history.prefix(maxRecentRuns).map { run in
+        history.filter(\.isCleaningRun).prefix(maxRecentRuns).map { run in
             CompanionVacuumRun(
                 runId: run.runId,
-                trigger: run.trigger,
+                trigger: run.displayTrigger,
                 endedAt: date(run.endedAt),
                 bytesFreed: max(0, run.bytesFreed),
                 exitCode: run.exitCode,
-                durationSeconds: duration(from: run.startedAt, to: run.endedAt)
+                durationSeconds: duration(from: run.startedAt, to: run.endedAt),
+                outcome: run.resolvedOutcome
             )
         }
+    }
+
+    /// When the last check ran and how many ran today, or nil with no check on
+    /// record.  "Today" starts at the calendar's midnight.
+    ///
+    /// The engine keeps a bounded history, so it may not reach back to
+    /// midnight (a long day, or an engine that keeps fewer runs).  Then the
+    /// count would be low and "today" a false word, so `countedSince` says
+    /// where the history starts and the line says "since" instead.
+    static func watch(from history: [RoboticVacuumRun], now: Date, calendar: Calendar = .current) -> CompanionVacuumWatch? {
+        let checkTimes = history.filter(\.isCheck).compactMap(\.finishedOrStartedAt)
+        guard let last = checkTimes.max() else { return nil }
+        let midnight = calendar.startOfDay(for: now)
+        let oldest = history.compactMap { run -> Date? in
+            let epoch = run.startedAt > 0 ? run.startedAt : run.endedAt
+            return epoch > 0 ? Date(timeIntervalSince1970: epoch) : nil
+        }.min()
+        return CompanionVacuumWatch(
+            lastCheckAt: last,
+            checksToday: checkTimes.filter { $0 >= midnight }.count,
+            countedSince: oldest.flatMap { $0 > midnight ? $0 : nil }
+        )
     }
 
     /// Whole seconds between two epoch times, never negative.  A run that

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Robotic Vacuum recent runs, cleaning runs only (board `f13bbbe7`, issue 115):
+
+- The Recent Runs list on the Mac and on the phone shows cleaning runs only: janitor, full, manual and pressure, the newest 20.  The five minute disk and memory check is no longer in it, because 20 of them covered about 100 minutes and pushed every cleaning run off the list within hours.  One line above the list sums the checks up, for example "Last check 5:40pm · 23 checks today".
+- A watch tick that found the disk or memory in trouble and cleaned is a cleaning run.  It is listed as Pressure, with its own result.
+- A run where one step failed and the others still did their work shows a Partial mark, apart from Failed.  The mark follows the run's recorded outcome, since a partial run exits 0.  The Mac's list had no mark of any kind before.
+- The engine now keeps 500 runs of history (it kept 200, about 14 hours) so the count can say "today".  Where the history does not reach back to midnight the line says "since" and a time instead.
+- The snapshot's `vacuum` gains `watch`, and each run in `recentRuns` gains `outcome`.  Both are optional on the wire, carry no step text, and decode with defaults.  An older Mac keeps working with the new phone, which leaves its watch ticks out of the list itself.
+
 iPhone companion, Robotic Vacuum recent runs (board `5acbcff4`, issue 110):
 
 - The Robotic Vacuum screen on the phone has a Recent Runs list like the Mac's: what kind of run it was, what it freed, when it ended, how long it took, and a Failed mark when it exited with an error.  Watch ticks are listed, as on the Mac.  It shows up to 20 runs, newest first.

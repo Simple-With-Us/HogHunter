@@ -16,6 +16,11 @@ final class RoboticVacuumStore: ObservableObject {
     typealias Launcher = @Sendable (_ scriptArguments: [String]) async throws -> Bool
 
     @Published private(set) var status: RoboticVacuumStatus?
+    /// The engine's recent runs, newest first, every kind: the quiet five
+    /// minute checks too, which the Mac's Recent Runs line sums up and the
+    /// list leaves out (see `CompanionVacuum.recentRuns` and `.watch`).  The
+    /// checks are most of the file, so reading only the newest few would push
+    /// the cleaning runs out of the list within hours.
     @Published private(set) var history: [RoboticVacuumRun] = []
     @Published private(set) var stepToggles: [String: Bool] = [:]
     @Published private(set) var isRunningNow = false
@@ -192,8 +197,13 @@ final class RoboticVacuumStore: ObservableObject {
         return raw.compactMap { dict in
             guard let d = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
             return try? decoder.decode(RoboticVacuumRun.self, from: d)
-        }.reversed().prefix(30).map { $0 }
+        }.reversed().prefix(Self.maxHistoryRuns).map { $0 }
     }
+
+    /// The most runs read from the engine's history file.  The engine keeps
+    /// 500 by default (`history_max_runs`, a bit over a day of five minute
+    /// checks), so this reads all of them with room to spare.
+    nonisolated static let maxHistoryRuns = 600
 
     private func loadStepToggles() -> [String: Bool] {
         var toggles: [String: Bool] = [:]
