@@ -14,6 +14,12 @@ enum CompanionService {
     static let settingsPath = "/v1/settings"
     /// Sample for 3 Seconds on one row.  Behind the process-control opt-in.
     static let samplePath = "/v1/sample"
+    /// Starts a Robotic Vacuum run.  Behind its own opt-in: a run can retire
+    /// old git worktrees and run maintenance on remote servers.
+    static let vacuumRunPath = "/v1/vacuum/run"
+    /// The only run the phone may start.  The Mac's script also knows
+    /// cheaper cadences and a pressure run; none of them is reachable from here.
+    static let vacuumRunKinds = ["full"]
     static let pairPath = "/v1/pair"
     /// Trades the shared pairing code for a token of the phone's own.
     static let enrollPath = "/v1/enroll"
@@ -214,6 +220,49 @@ struct CompanionSampleResponse: Codable, Equatable, Sendable {
     var summary: [String]? = nil
 }
 
+/// Response to a Robotic Vacuum run request.  The Mac answers at once: the run
+/// carries on there and the phone watches the snapshot for its progress.
+struct CompanionVacuumRunResponse: Codable, Equatable, Sendable {
+    /// "started" or "busy" (a run is already going).
+    var status: String
+    var message: String? = nil
+    var error: String? = nil
+}
+
+/// One step of the last Robotic Vacuum run.  Reasons can name lane folders and
+/// servers, so the Mac sends steps only when the owner allowed the phone to
+/// run the vacuum.
+struct CompanionVacuumStep: Codable, Equatable, Identifiable, Sendable {
+    var stepId: String
+    var title: String
+    /// "Done", "Skipped" or "Failed", as the Mac shows it.
+    var statusLabel: String
+    /// At most 120 characters.
+    var reason: String
+    var bytesFreed: Int
+
+    var id: String { stepId }
+}
+
+/// Where the Robotic Vacuum stands: when it last ran and will next run, whether
+/// its background job is loaded, and whether a run is going now.
+struct CompanionVacuumStatus: Codable, Equatable, Sendable {
+    /// The engine's own word: healthy, overdue, failed or unloaded.  "unknown"
+    /// while the first run has not written a status yet.
+    var health: String
+    /// What the Mac prints for `health`.
+    var displayHealth: String
+    var launchdLoaded: Bool
+    var isRunning: Bool
+    var lastFullRunAt: Date? = nil
+    var nextFullRunAt: Date? = nil
+    var lastRunBytesFreed: Int? = nil
+    var lastRunEndedAt: Date? = nil
+    /// The last result of each step.  Nil unless the owner allowed the phone
+    /// to run the vacuum.
+    var steps: [CompanionVacuumStep]? = nil
+}
+
 /// Eight characters, no look-alike glyphs.  Shown on the Mac and typed on the iPhone.
 enum CompanionToken {
     static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
@@ -273,6 +322,12 @@ struct CompanionSnapshot: Codable, Equatable {
     var cpuHistory: [Double]? = nil
     /// Refresh interval, alerts and the webhook as the Mac holds them.
     var settings: CompanionSettingsSummary? = nil
+    /// Whether the phone may start a Robotic Vacuum run.  Nil from an older
+    /// Mac, which has no such route.
+    var remoteVacuumAllowed: Bool? = nil
+    /// Robotic Vacuum status.  Nil from an older Mac, and on a Mac that has
+    /// never run it.
+    var vacuum: CompanionVacuumStatus? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {

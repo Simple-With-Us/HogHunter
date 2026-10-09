@@ -84,7 +84,7 @@ struct RoboticVacuumStepResult: Codable, Equatable, Identifiable {
     }
 }
 
-struct RoboticVacuumStepCatalogEntry: Identifiable {
+struct RoboticVacuumStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
 }

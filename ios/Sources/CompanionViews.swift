@@ -1229,6 +1229,14 @@ struct DashboardView: View {
             .padding(.vertical, 4)
         }
 
+        Section("Robotic Vacuum") {
+            NavigationLink {
+                VacuumView(snapshot: snapshot, model: model)
+            } label: {
+                VacuumSummaryRow(snapshot: snapshot)
+            }
+        }
+
         if let storage = snapshot.storage {
             Section("Cleanable Categories") {
                 if let breakdown = storage.categoryBreakdown, !breakdown.isEmpty {

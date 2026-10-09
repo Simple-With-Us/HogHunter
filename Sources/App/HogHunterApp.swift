@@ -111,7 +111,7 @@ struct HogHunterApp: App {
         // Storage and Network are tabs of the menu bar panel.  These scenes stay
         // for the Window menu's benefit; nothing in the UI points at them.
         Window("Storage", id: "hoghunter.storage") {
-            StorageView { store.runningBundleIdsSnapshot() }
+            StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, vacuumStore: store.vacuum)
         }
         .defaultSize(width: 560, height: 680)
 

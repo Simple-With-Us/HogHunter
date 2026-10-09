@@ -154,6 +154,17 @@ final class HogStore: ObservableObject {
             if !loadingSettings { publishCompanion() }
         }
     }
+    /// Off until the owner turns it on in Mac Settings.  Deliberately not in
+    /// the pairing alert: a Robotic Vacuum run can retire old git worktrees
+    /// and run maintenance on remote servers, so it is granted on purpose.
+    /// Gates the phone's Run Now button, and the step detail in the snapshot.
+    @Published var allowRemoteVacuum = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteVacuum = allowRemoteVacuum
+            if !loadingSettings { publishCompanion() }
+        }
+    }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
@@ -178,6 +189,11 @@ final class HogStore: ObservableObject {
     /// peak -- keeps running whether or not anyone is looking.
     let bandwidth: BandwidthStore
 
+    /// The one Robotic Vacuum store.  The Mac's Storage tab and the iPhone
+    /// route both use it, so a run started from either is the only run.
+    let vacuum: RoboticVacuumStore
+    private var vacuumObservers = Set<AnyCancellable>()
+
     /// UserDefaults keys, shared with any `@AppStorage` view that edits them.
     enum Key {
         static let window = "window"
@@ -197,6 +213,7 @@ final class HogStore: ObservableObject {
         static let allowRemoteQuit = "allowRemoteQuit"
         static let allowRemoteClean = "allowRemoteClean"
         static let allowRemoteEdit = "allowRemoteEdit"
+        static let allowRemoteVacuum = "allowRemoteVacuum"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
     }
@@ -259,6 +276,7 @@ final class HogStore: ObservableObject {
         historyURL: URL? = nil,
         defaults: UserDefaults = .standard,
         infisical: InfisicalSettings? = nil,
+        vacuum: RoboticVacuumStore? = nil,
         startImmediately: Bool = true
     ) {
         let infisical = infisical ?? InfisicalSettings.shared
@@ -271,8 +289,10 @@ final class HogStore: ObservableObject {
         let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
         self.history = history
         self.bandwidth = BandwidthStore(history: history)
+        self.vacuum = vacuum ?? RoboticVacuumStore()
         loadSettings()
         setupCompanionHandlers()
+        observeVacuum()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(defaultsChanged),
@@ -1065,6 +1085,7 @@ final class HogStore: ObservableObject {
         allowRemoteQuit = defaults.object(forKey: Key.allowRemoteQuit) as? Bool ?? false
         allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
         allowRemoteEdit = defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
+        allowRemoteVacuum = defaults.object(forKey: Key.allowRemoteVacuum) as? Bool ?? false
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -1172,6 +1193,7 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteQuit, forKey: Key.allowRemoteQuit)
         defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
         defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
+        defaults.set(allowRemoteVacuum, forKey: Key.allowRemoteVacuum)
     }
 
     // MARK: - Test hooks
@@ -1261,6 +1283,10 @@ final class HogStore: ObservableObject {
             if remoteEdit != self.allowRemoteEdit {
                 self.allowRemoteEdit = remoteEdit
             }
+            let remoteVacuum = self.defaults.object(forKey: Key.allowRemoteVacuum) as? Bool ?? false
+            if remoteVacuum != self.allowRemoteVacuum {
+                self.allowRemoteVacuum = remoteVacuum
+            }
         }
     }
 
@@ -1273,6 +1299,7 @@ final class HogStore: ObservableObject {
         companionServer.allowRemoteQuit = allowRemoteQuit
         companionServer.allowRemoteClean = allowRemoteClean
         companionServer.allowRemoteEdit = allowRemoteEdit
+        companionServer.allowRemoteVacuum = allowRemoteVacuum
         companionServer.onRemotePair = { [weak self] deviceName, reply in
             Task { @MainActor in
                 guard let self else { return reply(false) }
@@ -1300,6 +1327,13 @@ final class HogStore: ObservableObject {
         }
         companionServer.onSnapshotServed = { [weak self] in
             self?.refreshCompanionNetworkIfStale()
+            self?.refreshCompanionVacuumIfStale()
+        }
+        companionServer.onRemoteVacuumRun = { [weak self] kind in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteVacuumRun(kind: kind)
         }
         companionServer.onRemoteExclusionsUpdate = { [weak self] req in
             guard let self else {
@@ -1855,6 +1889,70 @@ final class HogStore: ObservableObject {
 
     private var companionTopAppsRefreshTask: Task<Void, Never>?
 
+    /// Reads the Robotic Vacuum's files when the copy in memory is more than
+    /// 30 seconds old.  Called on the server queue each time a phone fetches a
+    /// snapshot, so the files are read only while someone is looking.
+    nonisolated private func refreshCompanionVacuumIfStale() {
+        Task { @MainActor [weak self] in self?.vacuum.refreshIfStale(maxAge: 30) }
+    }
+
+    /// Starts a full Robotic Vacuum run and answers at once.  Runs on the
+    /// server queue; the run itself proceeds on the main actor and the phone
+    /// watches the snapshot.  The router has already checked the opt-in and
+    /// that no run is going.
+    nonisolated func performRemoteVacuumRun(kind: String) -> CompanionServer.Reply {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.vacuum.runNow(kind)
+            // The router set its flag when it accepted the request.  Bring it
+            // back in line with the store whatever happened: if the Mac
+            // panel's own run got there first, the store is already running.
+            self.companionServer.vacuumRunning = self.vacuum.isRunningNow
+        }
+        let body: [String: String] = [
+            "status": "started",
+            "message": "A full Robotic Vacuum run has started on this Mac.\u{00A0} It can take several minutes.\u{00A0} Watch its progress in the app.",
+        ]
+        return (202, (try? JSONSerialization.data(withJSONObject: body)) ?? Data())
+    }
+
+    /// The Robotic Vacuum part of the phone snapshot.  Step detail can name
+    /// lane folders and servers, and the snapshot is readable with the shared
+    /// code from anywhere, so the steps travel only when the owner allowed
+    /// the phone to run the vacuum.
+    func vacuumStatusForPhone() -> CompanionVacuumStatus? {
+        CompanionVacuum.status(
+            from: vacuum.status,
+            history: vacuum.history,
+            isRunning: vacuum.isRunningNow,
+            includeSteps: allowRemoteVacuum
+        )
+    }
+
+    /// Keeps the router's "a run is going" flag current and the phone's
+    /// snapshot fresh as the shared store changes.
+    private func observeVacuum() {
+        let server = companionServer
+        // `@Published` publishes before it stores, so the value handed to the
+        // sink is the new one while the property still holds the old one.
+        vacuum.$isRunningNow
+            .removeDuplicates()
+            .sink { running in server.vacuumRunning = running }
+            .store(in: &vacuumObservers)
+        // Publishing reads the properties themselves, so it hops to the main
+        // actor's next turn, after the change has landed.
+        vacuum.$isRunningNow
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishCompanion() } }
+            .store(in: &vacuumObservers)
+        vacuum.$status
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishCompanion() } }
+            .store(in: &vacuumObservers)
+    }
+
     /// Asks the network cache for a fresh scan when its copy is stale.  Called
     /// on the server queue each time a phone fetches a snapshot, so `lsof`
     /// runs only while someone is looking at the Network tab's data.
@@ -1893,7 +1991,9 @@ final class HogStore: ObservableObject {
                 webhookURL: alertWebhookURL,
                 webhookStatus: alerts.lastWebhookStatus,
                 notificationsDenied: alerts.authorizationDenied
-            )
+            ),
+            remoteVacuumAllowed: allowRemoteVacuum,
+            vacuum: vacuumStatusForPhone()
         )
         companionServer.update(snapshot: snapshot, targets: CompanionTargets.index(rows))
     }
