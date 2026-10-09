@@ -167,7 +167,7 @@ enum CompanionHTTP {
             }
             var updateReq = CompanionExclusionsUpdateRequest()
             if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                let query = queryString(of: fullPath)
                 for param in query.split(separator: "&") {
                     let kv = param.split(separator: "=", maxSplits: 1)
                     if kv.count == 2 {
@@ -198,7 +198,7 @@ enum CompanionHTTP {
             }
             var updateReq = CompanionViewUpdateRequest()
             if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+                let query = queryString(of: fullPath)
                 for param in query.split(separator: "&") {
                     let kv = param.split(separator: "=", maxSplits: 1)
                     if kv.count == 2 {
@@ -254,6 +254,15 @@ enum CompanionHTTP {
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         }
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
+    }
+
+    /// Everything after the first `?`, or empty.  `split(separator: "?")` on a
+    /// path that ends in the mark yields one piece, so indexing its second
+    /// element traps; a request line like `POST /v1/view? HTTP/1.1` from any
+    /// paired phone would have ended the Mac app.
+    static func queryString(of fullPath: String) -> String {
+        guard let mark = fullPath.firstIndex(of: "?") else { return "" }
+        return String(fullPath[fullPath.index(after: mark)...])
     }
 
     // MARK: - Reading a whole request
@@ -561,7 +570,7 @@ enum CompanionHTTP {
     ) -> CompanionProcessRequest {
         var result = CompanionProcessRequest()
         if fullPath.contains("?") {
-            let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+            let query = queryString(of: fullPath)
             for param in query.split(separator: "&") {
                 let kv = param.split(separator: "=", maxSplits: 1)
                 guard kv.count == 2 else { continue }
