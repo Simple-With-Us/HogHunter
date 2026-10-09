@@ -15,7 +15,10 @@ struct MacSettingsView: View {
     @State private var thresholdDraft: Double = 300
     @State private var minutesDraft: Int = 5
     @State private var isEditingThreshold = false
+    /// The stepper's debounced send.  Only the stepper's own setter schedules
+    /// one, so putting the Mac's value back into the draft cannot send anything.
     @State private var pendingSend: Task<Void, Never>?
+    @State private var sendGeneration = 0
     @State private var showWebhookEditor = false
     @State private var webhookDraft = ""
     @State private var webhookDraftError: String?
@@ -137,14 +140,19 @@ struct MacSettingsView: View {
             }
             .disabled(!canEdit || !settings.alertsEnabled)
 
-            Stepper(value: $minutesDraft, in: CompanionSettingsLimits.alertSustainedMinutesRange) {
+            Stepper(
+                value: Binding(
+                    get: { minutesDraft },
+                    set: { next in
+                        minutesDraft = next
+                        schedule(CompanionSettingsUpdateRequest(alertSustainedMinutes: next))
+                    }
+                ),
+                in: CompanionSettingsLimits.alertSustainedMinutesRange
+            ) {
                 Text("For \(minutesDraft) \(minutesDraft == 1 ? "minute" : "minutes")")
             }
-            .onChange(of: minutesDraft) { _, next in
-                guard next != settings.alertSustainedMinutes else { return }
-                schedule(CompanionSettingsUpdateRequest(alertSustainedMinutes: next))
-            }
-            .disabled(!canEdit || !settings.alertsEnabled)
+            .disabled(!canEdit || !settings.alertsEnabled || model.isApplyingSettings)
 
             if settings.alertsEnabled, settings.notificationsDenied == true {
                 Text("Notifications are off for Hog Hunter in System Settings on \(snapshot.hostName).")
@@ -258,18 +266,23 @@ struct MacSettingsView: View {
     /// last value instead of one request per tap.
     private func schedule(_ update: CompanionSettingsUpdateRequest) {
         pendingSend?.cancel()
+        sendGeneration += 1
+        let mine = sendGeneration
         pendingSend = Task {
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
             await model.updateSettings(update)
+            // A newer tap owns `pendingSend` now; leave it alone.
+            guard sendGeneration == mine else { return }
             pendingSend = nil
+            // If the Mac did not take the change, show what it holds.
             syncDrafts()
         }
     }
 
     /// Brings the drafts back to what the Mac holds, unless a finger is on the slider.
     private func syncDrafts() {
-        guard let settings = snapshot.settings else { return }
+        guard let settings = model.snapshot?.settings ?? snapshot.settings else { return }
         if !isEditingThreshold { thresholdDraft = settings.alertThresholdPercent }
         if pendingSend == nil { minutesDraft = settings.alertSustainedMinutes }
     }

@@ -38,6 +38,28 @@ struct CompanionPeer: Equatable, Sendable {
         }
     }
 
+    /// Whether the phone should treat the Mac it is about to send a secret to
+    /// as being on the local network or Tailscale.  A Bonjour service was found
+    /// on the local link; an address is judged like a peer's; a name is trusted
+    /// only if it is a MagicDNS or `.local` name, because any other name can
+    /// point anywhere.  The Mac refuses controls from outside regardless, but
+    /// it reads a request before it can refuse it, so a secret must not be sent
+    /// to a Mac that is only reachable over the public internet.
+    static func isTrustedEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        switch endpoint {
+        case .service:
+            return true
+        case .hostPort(let host, _):
+            if case .name(let name, _) = host {
+                let lowered = name.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                return lowered.hasSuffix(".ts.net") || lowered.hasSuffix(".local") || lowered == "localhost"
+            }
+            return from(endpoint).isTrusted
+        default:
+            return false
+        }
+    }
+
     static func make(ipv4 bytes: [UInt8]) -> CompanionPeer {
         guard bytes.count == 4 else { return .unknown }
         return CompanionPeer(key: bytes.map(String.init).joined(separator: "."), isTrusted: isTrustedIPv4(bytes))

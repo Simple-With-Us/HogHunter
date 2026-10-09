@@ -384,6 +384,11 @@ enum SampleReport {
                 finish(.failed("Could not run sample: \(error.localizedDescription)"))
                 return
             }
+            // `sample` ends itself after `seconds`; a hung one is stopped here
+            // so it cannot keep a thread and a child process for good.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Double(seconds) + 30) {
+                if process.isRunning { process.terminate() }
+            }
             let errorData = errors.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
 

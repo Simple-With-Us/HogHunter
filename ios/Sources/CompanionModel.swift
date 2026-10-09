@@ -105,8 +105,10 @@ final class CompanionModel {
     /// The scan whose defaults `selectedCleanRefs` was last seeded from.
     var seededScanId: String?
     var cleanReportPoll: Task<Void, Never>?
-    /// True while a settings change is on its way to the Mac.
-    var isApplyingSettings = false
+    /// How many settings changes are on their way to the Mac.  A count, not a
+    /// flag, so one finishing does not re-enable controls while another is out.
+    private(set) var settingsInFlight = 0
+    var isApplyingSettings: Bool { settingsInFlight > 0 }
     /// What the Mac said about the last settings change that went through
     /// ("A test message is on its way.").
     var settingsNotice: String?
@@ -443,8 +445,15 @@ final class CompanionModel {
             settingsError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
             return
         }
-        isApplyingSettings = true
-        defer { isApplyingSettings = false }
+        // The webhook address is a secret and this link is not encrypted.  The
+        // Mac would refuse a control from outside your network, but it has read
+        // the request by then, so the phone does not send it.
+        if let url = update.webhookURL, !url.isEmpty, !CompanionPeer.isTrustedEndpoint(endpoint) {
+            settingsError = "The webhook address is a secret, so this iPhone sends it only over your local network or Tailscale.\u{00A0} Connect that way, then try again."
+            return
+        }
+        settingsInFlight += 1
+        defer { settingsInFlight -= 1 }
         do {
             let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update)
             if res.status == "ok" {

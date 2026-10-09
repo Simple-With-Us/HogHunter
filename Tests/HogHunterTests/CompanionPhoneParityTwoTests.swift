@@ -74,7 +74,7 @@ final class CompanionRequestBodyTests: XCTestCase {
         }
         let listening = expectation(description: "listening")
         let port = CompanionLocked<UInt16>(0)
-        server.start(name: "test", peerID: "test", token: code, advertise: false, preferredPort: nil) { status in
+        server.start(name: "test", peerID: "test", token: code, advertise: false, preferredPort: nil, loopbackOnly: true) { status in
             if status.hasPrefix("Sharing on port "), let value = UInt16(status.dropFirst("Sharing on port ".count)) {
                 port.value = value
                 listening.fulfill()
@@ -167,6 +167,20 @@ final class CompanionSettingsValidatorTests: XCTestCase {
         }
     }
 
+    func testSavingAWebhookAndTestingItAreSeparateRequests() {
+        guard case .failure(let rejection) = validate(.init(webhookURL: "https://hooks.example.com/x", testWebhook: true)) else {
+            return XCTFail("a request that sets a URL and tests it at once makes the Mac a probe of any https host")
+        }
+        XCTAssertTrue(rejection.message.contains("Save the webhook first"))
+        XCTAssertNoThrow(try validate(.init(testWebhook: true)).get())
+    }
+
+    func testAnUppercaseSchemeIsStoredInTheFormTheAlertSenderExpects() throws {
+        XCTAssertEqual(try validate(.init(webhookURL: "HTTPS://Hooks.Example.com/Path")).get().webhookURL, "https://Hooks.Example.com/Path")
+        let stored = try XCTUnwrap(URL(string: try validate(.init(webhookURL: "HtTpS://example.com/x")).get().webhookURL ?? ""))
+        XCTAssertEqual(stored.scheme, "https", "Alerts compares the scheme case-sensitively")
+    }
+
     func testAnAbsentWebhookLeavesTheStoredOneAlone() throws {
         XCTAssertNil(try validate(.init(alertsEnabled: false)).get().webhookURL)
     }
@@ -182,6 +196,17 @@ final class CompanionSettingsValidatorTests: XCTestCase {
         XCTAssertTrue(CompanionSettingsUpdateRequest(testWebhook: false).isEmpty)
         XCTAssertFalse(CompanionSettingsUpdateRequest(testWebhook: true).isEmpty)
         XCTAssertFalse(CompanionSettingsUpdateRequest(webhookURL: "").isEmpty, "clearing the webhook is a change")
+    }
+}
+
+/// A settings source that cannot reach the owner's real Infisical project.
+/// The test host is the real app, and `InfisicalSettings.shared` may hold the
+/// owner's Keychain credential, so a store that writes a setting through it
+/// would change the real project.
+@MainActor
+enum IsolatedInfisical {
+    static func make() -> InfisicalSettings {
+        InfisicalSettings(store: InfisicalStore(), credentialProvider: { nil })
     }
 }
 
@@ -278,7 +303,7 @@ final class CompanionSettingsRouteTests: XCTestCase {
         let suite = "hoghunter.tests.remotesettings.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(defaults: defaults, startImmediately: false)
+        let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
 
         store.applyRemoteSettings(.init(refreshInterval: 10, alertsEnabled: nil, alertThresholdPercent: 450, alertSustainedMinutes: 12, webhookURL: "https://hooks.example.com/x", testWebhook: false))
 
@@ -299,17 +324,25 @@ final class CompanionSettingsRouteTests: XCTestCase {
         let suite = "hoghunter.tests.remotesettings.test.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(defaults: defaults, startImmediately: false)
+        let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
 
         let refused = store.performRemoteSettings(.init(testWebhook: true))
         XCTAssertEqual(refused.status, 400)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: refused.body) as? [String: Any])
         XCTAssertTrue((json["error"] as? String)?.contains("No webhook is set.") ?? false)
 
-        // The same request that also sets a webhook has somewhere to go.
+        // Saving a webhook and testing it are separate requests.
+        let combined = store.performRemoteSettings(.init(webhookURL: "https://hooks.invalid/x", testWebhook: true))
+        XCTAssertEqual(combined.status, 400)
+
+        // With a webhook set, a test goes through once, and not again at once.
         // `.invalid` never resolves, so the test message goes nowhere.
-        let withUrl = store.performRemoteSettings(.init(webhookURL: "https://hooks.invalid/x", testWebhook: true))
-        XCTAssertEqual(withUrl.status, 200)
+        store.alertWebhookURL = "https://hooks.invalid/x"
+        XCTAssertEqual(store.performRemoteSettings(.init(testWebhook: true)).status, 200)
+        let tooSoon = store.performRemoteSettings(.init(testWebhook: true))
+        XCTAssertEqual(tooSoon.status, 429)
+        let waitBody = try XCTUnwrap(JSONSerialization.jsonObject(with: tooSoon.body) as? [String: Any])
+        XCTAssertTrue((waitBody["error"] as? String)?.contains("\u{00A0}") ?? false)
     }
 
     @MainActor
@@ -317,7 +350,7 @@ final class CompanionSettingsRouteTests: XCTestCase {
         let suite = "hoghunter.tests.remotesettings.bad.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(defaults: defaults, startImmediately: false)
+        let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
 
         let refused = store.performRemoteSettings(.init(refreshInterval: 7))
         XCTAssertEqual(refused.status, 400)
@@ -338,11 +371,21 @@ final class CompanionSnapshotParityTwoTests: XCTestCase {
             webhookURL: secret, webhookStatus: "Failed: could not reach \(secret)", notificationsDenied: false
         )
         XCTAssertTrue(summary.webhookConfigured)
-        XCTAssertEqual(summary.webhookHost, "hooks.slack.com")
+        XCTAssertEqual(summary.webhookHost, "…slack.com")
         let json = try XCTUnwrap(String(data: JSONEncoder().encode(summary), encoding: .utf8))
         XCTAssertFalse(json.contains("s3cr3tt0k3n"), json)
         XCTAssertFalse(json.contains("/services/"), json)
         XCTAssertTrue(summary.webhookStatus?.contains("the webhook") ?? false)
+    }
+
+    func testOnlyTheLastTwoLabelsOfTheHostAreShown() {
+        for (host, shown) in [("hooks.slack.com", "…slack.com"), ("abc123def.m.pipedream.net", "…pipedream.net"), ("discord.com", "discord.com"), ("localhost", "localhost")] {
+            let summary = CompanionSnapshotBuilder.settingsSummary(
+                refreshInterval: 3, alertsEnabled: true, alertThresholdPercent: 300, alertSustainedMinutes: 5,
+                webhookURL: "https://\(host)/secret", webhookStatus: nil, notificationsDenied: false
+            )
+            XCTAssertEqual(summary.webhookHost, shown)
+        }
     }
 
     func testNoWebhookReadsAsNotConfigured() {
@@ -613,5 +656,107 @@ final class SampleChoiceTests: XCTestCase {
         XCTAssertEqual(ProcessControl.sampleBlockReason(pid: 4242, uid: getuid() &+ 1), ProcessControl.otherUserReason)
         XCTAssertEqual(ProcessControl.sampleBlockReason(pid: 1, uid: 0), ProcessControl.systemProcessReason)
         XCTAssertNil(ProcessControl.sampleBlockReason(pid: 4242, uid: getuid()))
+    }
+}
+
+
+final class CompanionIncompleteRequestTests: XCTestCase {
+    /// A client that closes its side before the body arrived has not sent a
+    /// request.  The handler must not run.
+    func testAConnectionThatClosesMidBodyNeverReachesTheHandler() throws {
+        let code = "ABCD2345"
+        let server = CompanionServer()
+        server.updateToken(code)
+        let token = server.devices.issue(name: "Test iPhone").token
+        server.allowRemoteEdit = true
+        let called = CompanionLocked(false)
+        server.onRemoteSettings = { _ in called.value = true; return (200, Data("{}".utf8)) }
+        let listening = expectation(description: "listening")
+        let port = CompanionLocked<UInt16>(0)
+        server.start(name: "test", peerID: "test", token: code, advertise: false, preferredPort: nil, loopbackOnly: true) { status in
+            if status.hasPrefix("Sharing on port "), let value = UInt16(status.dropFirst("Sharing on port ".count)) {
+                port.value = value
+                listening.fulfill()
+            }
+        }
+        wait(for: [listening], timeout: 5)
+        defer { server.stop() }
+
+        let whole = CompanionHTTP.settingsRequest(token: token, update: CompanionSettingsUpdateRequest(alertsEnabled: true))
+        let cutShort = whole.prefix(whole.count - 4)
+        let queue = DispatchQueue(label: "hoghunter.tests.cutshort")
+        let client = NWConnection(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port.value)), using: .tcp)
+        let sent = expectation(description: "sent")
+        client.stateUpdateHandler = { state in
+            guard case .ready = state else { return }
+            client.send(content: Data(cutShort), contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in sent.fulfill() })
+        }
+        client.start(queue: queue)
+        wait(for: [sent], timeout: 5)
+        Thread.sleep(forTimeInterval: 0.7)
+        client.cancel()
+        XCTAssertFalse(called.value, "a request whose body never finished arriving must not be acted on")
+    }
+}
+
+final class CompanionTrustedEndpointTests: XCTestCase {
+    private func host(_ text: String, port: UInt16 = 24240) -> NWEndpoint {
+        .hostPort(host: NWEndpoint.Host(text), port: NWEndpoint.Port(rawValue: port)!)
+    }
+
+    func testAddressesOnTheLocalNetworkAndTailscaleAreTrusted() {
+        for address in ["192.168.1.20", "10.0.0.5", "172.20.3.4", "169.254.9.9", "127.0.0.1", "100.101.7.8", "fd7a:115c:a1e0::1", "fe80::1", "::1"] {
+            XCTAssertTrue(CompanionPeer.isTrustedEndpoint(host(address)), address)
+        }
+    }
+
+    func testPublicAddressesAreNot() {
+        for address in ["8.8.8.8", "203.0.113.9", "100.63.0.1", "100.128.0.1", "2001:db8::1"] {
+            XCTAssertFalse(CompanionPeer.isTrustedEndpoint(host(address)), address)
+        }
+    }
+
+    func testOnlyMagicDnsAndLocalNamesAreTrusted() {
+        for name in ["my-mac.tailnet.ts.net", "MY-MAC.TAILNET.TS.NET.", "studio.local", "localhost"] {
+            XCTAssertTrue(CompanionPeer.isTrustedEndpoint(host(name)), name)
+        }
+        for name in ["example.com", "ts.net.evil.com", "mac.jays.services", "notts.net"] {
+            XCTAssertFalse(CompanionPeer.isTrustedEndpoint(host(name)), name)
+        }
+    }
+
+    func testABonjourServiceWasFoundOnTheLocalLink() {
+        XCTAssertTrue(CompanionPeer.isTrustedEndpoint(.service(name: "Studio", type: "_hoghunter._tcp", domain: "local.", interface: nil)))
+    }
+}
+
+@MainActor
+final class CompanionSampleGuardTests: XCTestCase {
+    func testOnlyOneSampleRunsAtATimeAndTheGuardIsReleased() throws {
+        let suite = "hoghunter.tests.sampleguard.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
+        // A target whose pid and start time match nothing alive: it ends at the
+        // identity check without running `sample` or writing a report.
+        let stale = CompanionTarget(rowId: "p-999999-1", name: "gone", members: [ProcessKey(pid: 999_999, startTime: 1)])
+
+        store.setSampleInFlightForTest(true)
+        let busy = XCTestExpectation(description: "busy")
+        store.performRemoteSample(target: stale) { reply in
+            XCTAssertEqual(reply.status, 409)
+            busy.fulfill()
+        }
+        wait(for: [busy], timeout: 2)
+
+        store.setSampleInFlightForTest(false)
+        for _ in 0..<2 {
+            let done = XCTestExpectation(description: "refused at the identity check")
+            store.performRemoteSample(target: stale) { reply in
+                XCTAssertEqual(reply.status, 400, "the guard must be released after a refusal, or the second call would read 409")
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
+        }
     }
 }
