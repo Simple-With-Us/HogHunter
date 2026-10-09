@@ -111,7 +111,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
 }
 
 /// Degrees of disk cleaning supported by Hog Hunter.
-enum CleanTier: String, CaseIterable, Identifiable, Sendable {
+enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Safe major clutter removal: caches, logs, trash, developer junk, and stale temp files.
     /// Preserves full recoverability via APFS snapshot & Trash Put-Back.
     case standard
@@ -251,13 +251,17 @@ enum SnapshotSafety {
         process.standardError = pipe
         do {
             try process.run()
+            // Drain before waiting and close the read end: a full ~64 KB pipe
+            // buffer blocks the child on write(2), and an unclosed handle leaks.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
             process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             return output.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { $0.hasPrefix("com.apple.TimeMachine.") }
         } catch {
+            try? pipe.fileHandleForReading.close()
             return []
         }
     }
@@ -298,9 +302,11 @@ enum SnapshotSafety {
                 thinProcessLock.unlock()
             }
             try process.run()
-            // Drain before waiting: a child that fills the 64 KB pipe buffer
-            // blocks on write and never exits, deadlocking waitUntilExit().
+            // Drain before waiting and close the read end: a child that fills
+            // the ~64 KB pipe buffer blocks on write(2), and an unclosed handle
+            // leaks across every thin call.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
             process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             let thinned = output.components(separatedBy: .newlines)
@@ -308,8 +314,45 @@ enum SnapshotSafety {
             // SIGTERM from cancelActiveThin yields a non-zero status; treat as cancelled failure.
             return (process.terminationStatus == 0, process.terminationStatus == 0 ? max(1, thinned.count) : thinned.count)
         } catch {
+            try? pipe.fileHandleForReading.close()
             return (false, 0)
         }
+    }
+
+    /// Parse the `tmutil listlocalsnapshots` line format.
+    ///
+    /// Real output looks like:
+    ///     com.apple.TimeMachine.2026-10-05-062128.local
+    /// Older snapshots and test fixtures sometimes drop the trailing `.local`.
+    /// The header line `Snapshots for disk /` is filtered by the call site, but
+    /// we still defend against it here so tests can hand us raw output.
+    static func parseSnapshotNames(_ output: String) -> [String] {
+        output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("Snapshots for") }
+    }
+
+    /// The bytes that APFS counts as purgeable on the startup disk.
+    ///
+    /// `volumeAvailableCapacity` is what the Finder shows as free and *does not*
+    /// include purgeable space; `volumeAvailableCapacityForImportantUsage`
+    /// counts purgeable as available, which is the same number the panel's
+    /// Storage card uses (`DiskSpace.current()` in `Models.swift`).  The
+    /// difference is the high-water figure we can show next to a list of
+    /// snapshots — we never thin more than the volume can reclaim, and we
+    /// never claim a snapshot holds more bytes than the volume has free.
+    static func purgeableBytes(at mount: String = "/") -> UInt64 {
+        let url = URL(fileURLWithPath: mount)
+        guard let values = try? url.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey
+        ]) else { return 0 }
+        let free = UInt64(max(0, values.volumeAvailableCapacity ?? 0))
+        let important = UInt64(max(0, values.volumeAvailableCapacityForImportantUsage ?? 0))
+        // purgeable >= 0 is the only constraint here: APFS never reports the
+        // "important" number as smaller than the literal free number, but if
+        // something exotic ever makes it so, clamp rather than wrap.
+        return important >= free ? important - free : 0
     }
 }
 
@@ -388,14 +431,29 @@ struct CleanResult: Sendable {
     var cleanedAt: Date
     var snapshotName: String?
     var tier: CleanTier
+    /// Titles of items that actually succeeded (not merely selected).  Caps
+    /// at 50 in the history writer; the engine keeps the full success list so
+    /// a partial clean cannot credit untouched rows in the "Last cleanup" line.
+    var removedItemTitles: [String]
+    /// Category ids that had at least one successful removal, in first-success order.
+    var removedCategoryIds: [String]
 
-    init(bytesReclaimed: UInt64, itemsRemoved: Int, errors: [String], cleanedAt: Date, snapshotName: String? = nil, tier: CleanTier = .standard) {
+    init(bytesReclaimed: UInt64,
+         itemsRemoved: Int,
+         errors: [String],
+         cleanedAt: Date,
+         snapshotName: String? = nil,
+         tier: CleanTier = .standard,
+         removedItemTitles: [String] = [],
+         removedCategoryIds: [String] = []) {
         self.bytesReclaimed = bytesReclaimed
         self.itemsRemoved = itemsRemoved
         self.errors = errors
         self.cleanedAt = cleanedAt
         self.snapshotName = snapshotName
         self.tier = tier
+        self.removedItemTitles = removedItemTitles
+        self.removedCategoryIds = removedCategoryIds
     }
 
     var formattedBytesReclaimed: String {
@@ -408,11 +466,19 @@ final class DiskCleaner: @unchecked Sendable {
     private let fileManager: FileManager
     /// Tests substitute a closure that does not call `tmutil`.
     private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
+    /// Tests substitute a closure that does not call `tmutil`.
+    private let listSnapshots: (_ mount: String) -> [String]?
+    /// Tests substitute a closure that does not call `URL.resourceValues`.
+    private let purgeableProvider: (_ mount: String) -> UInt64
 
     init(fileManager: FileManager = .default,
-         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() }) {
+         makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
+         listSnapshots: @escaping (String) -> [String]? = { _ in SnapshotSafety.listLocalSnapshots() },
+         purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) }) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
+        self.listSnapshots = listSnapshots
+        self.purgeableProvider = purgeableProvider
     }
 
     // MARK: - Full Scan
@@ -484,19 +550,42 @@ final class DiskCleaner: @unchecked Sendable {
     }
 
     /// Scans for active APFS Time Machine local snapshots pinning deleted storage blocks.
+    /// Per-snapshot sizes are not exposed by `tmutil`, so the bytes for each row
+    /// come from the volume's purgeable high-water mark divided by the snapshot
+    /// count.  When listing fails or returns empty, a single placeholder row is
+    /// emitted carrying the full purgeable figure so the panel still has
+    /// something to show and the clean can still thin.
     func scanAPFSSnapshots() -> [CleanItem] {
-        let snapshots = SnapshotSafety.listLocalSnapshots()
-        return snapshots.map { snap in
+        let snapshotNames = listSnapshots("/") ?? SnapshotSafety.listLocalSnapshots()
+        let purgeable = purgeableProvider("/")
+
+        if snapshotNames.isEmpty {
+            guard purgeable > 0 else { return [] }
+            return [CleanItem(
+                category: .apfsSnapshots,
+                title: "Local Time Machine Snapshots",
+                subtitle: "Thin purgeable space on /",
+                url: URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.aggregate"),
+                bytes: purgeable,
+                fileCount: 0,
+                lastModified: nil,
+                isSelected: CleanCategory.apfsSnapshots.defaultSelected,
+                detail: "Purgeable space held by local snapshots"
+            )]
+        }
+
+        let bytesPer = purgeable / UInt64(snapshotNames.count)
+        return snapshotNames.map { name in
             CleanItem(
                 category: .apfsSnapshots,
-                title: snap,
+                title: name,
                 subtitle: "Time Machine Local Snapshot",
-                url: URL(fileURLWithPath: "/.snapshots/\(snap)"),
-                bytes: 0,
+                url: URL(fileURLWithPath: "/.snapshots/\(name)"),
+                bytes: bytesPer,
                 fileCount: 1,
                 lastModified: nil,
                 isSelected: CleanCategory.apfsSnapshots.defaultSelected,
-                detail: "Pins deleted data blocks on APFS container. Pruning releases purgeable storage."
+                detail: "Local Time Machine snapshot — thinning is safe"
             )
         }
     }
@@ -712,6 +801,55 @@ final class DiskCleaner: @unchecked Sendable {
                 isSelected: CleanCategory.developer.defaultSelected,
                 detail: target.detail
             ))
+        }
+
+        if !Task.isCancelled {
+            // iOS Simulator Devices — every installed simulator + runtime.  Opt-in
+            // only: other users may actively develop for iOS, and an auto-clean
+            // would force a full re-download of every runtime on next boot.
+            let simDevicesURL = userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: simDevicesURL.path, isDirectory: &isDir) {
+                let stats = directoryStats(at: simDevicesURL)
+                if stats.bytes > 0 {
+                    items.append(CleanItem(
+                        category: .developer,
+                        title: "iOS Simulator Devices",
+                        subtitle: "~/Library/Developer/CoreSimulator/Devices",
+                        url: simDevicesURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
+                    ))
+                }
+            }
+        }
+
+        if !Task.isCancelled {
+            // Xcode Connected-Device Support — symbols pulled down when an iOS
+            // device is plugged in.  Opt-in: re-downloads when a device is next
+            // connected, which is a no-op for anyone who isn't actively
+            // developing on physical hardware.
+            let coreDeviceURL = userHomeURL.appendingPathComponent("Library/Developer/CoreDevice", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: coreDeviceURL.path, isDirectory: &isDir) {
+                let stats = directoryStats(at: coreDeviceURL)
+                if stats.bytes > 0 {
+                    items.append(CleanItem(
+                        category: .developer,
+                        title: "Xcode Connected-Device Support",
+                        subtitle: "~/Library/Developer/CoreDevice",
+                        url: coreDeviceURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        lastModified: stats.lastModified,
+                        isSelected: false,
+                        detail: "Symbols and support files from connected iOS devices.  Re-downloads when a device is connected."
+                    ))
+                }
+            }
         }
 
         return items.sorted { $0.bytes > $1.bytes }
@@ -1205,6 +1343,7 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+
     // MARK: - Cleaning Execution
 
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
@@ -1221,9 +1360,34 @@ final class DiskCleaner: @unchecked Sendable {
         var removedCount = 0
         var errors: [String] = []
         var snapshotCreatedName: String?
+        var removedTitles: [String] = []
+        var removedCategoryIds: [String] = []
+        var seenCategories: Set<String> = []
+
+        func noteSuccess(_ item: CleanItem) {
+            removedTitles.append(item.title)
+            let cat = item.category.rawValue
+            if seenCategories.insert(cat).inserted {
+                removedCategoryIds.append(cat)
+            }
+        }
+
+        func resultSoFar(bytes: UInt64 = 0, removed: Int, snapshot: String? = nil) -> CleanResult {
+            CleanResult(
+                bytesReclaimed: bytes,
+                itemsRemoved: removed,
+                errors: errors,
+                cleanedAt: Date(),
+                snapshotName: snapshot,
+                tier: tier,
+                removedItemTitles: removedTitles,
+                removedCategoryIds: removedCategoryIds
+            )
+        }
 
         let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
-        let hasSnapshotItems = activeItems.contains { $0.category == .apfsSnapshots }
+        let snapshotItems = activeItems.filter { $0.category == .apfsSnapshots }
+        let hasSnapshotItems = !snapshotItems.isEmpty
 
         // Track thinning completed before the safety snapshot so a failed
         // localsnapshot still reports any irreversible thin accurately.
@@ -1232,14 +1396,7 @@ final class DiskCleaner: @unchecked Sendable {
         if hasSnapshotItems {
             guard !Task.isCancelled else {
                 errors.append("Cleanup cancelled")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: 0,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: 0)
             }
             progress?(0.0, "Thinning APFS local snapshots…")
             // Offload the blocking tmutil wait to a utility task, but wire
@@ -1255,31 +1412,20 @@ final class DiskCleaner: @unchecked Sendable {
             if thinned {
                 thinnedCount = count
                 removedCount += count
+                for item in snapshotItems {
+                    noteSuccess(item)
+                }
             } else if Task.isCancelled {
                 errors.append("Cleanup cancelled")
                 progress?(1.0, "Stopped")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: thinnedCount,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: thinnedCount)
             } else {
                 errors.append("Failed to thin APFS local snapshots")
             }
             if Task.isCancelled {
                 errors.append("Cleanup cancelled")
                 progress?(1.0, "Stopped")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: removedCount,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: removedCount)
             }
         }
 
@@ -1295,14 +1441,7 @@ final class DiskCleaner: @unchecked Sendable {
                     ? "APFS snapshot failed.  APFS local snapshots were already thinned; no other data was deleted."
                     : "APFS snapshot failed.  Nothing was deleted.")
                 progress?(1.0, "Stopped")
-                return CleanResult(
-                    bytesReclaimed: 0,
-                    itemsRemoved: thinnedCount,
-                    errors: errors,
-                    cleanedAt: Date(),
-                    snapshotName: nil,
-                    tier: tier
-                )
+                return resultSoFar(removed: thinnedCount)
             }
         }
 
@@ -1335,12 +1474,14 @@ final class DiskCleaner: @unchecked Sendable {
                     try fileManager.removeItem(at: item.url)
                     reclaimed &+= item.bytes
                     removedCount += 1
+                    noteSuccess(item)
                 } else {
                     // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
                     try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
                     reclaimed &+= item.bytes
                     removedCount += 1
+                    noteSuccess(item)
                 }
             } catch {
                 errors.append("Failed to clean \(item.title): \(error.localizedDescription)")
@@ -1349,14 +1490,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         progress?(1.0, "Complete")
 
-        return CleanResult(
-            bytesReclaimed: reclaimed,
-            itemsRemoved: removedCount,
-            errors: errors,
-            cleanedAt: Date(),
-            snapshotName: snapshotCreatedName,
-            tier: tier
-        )
+        return resultSoFar(bytes: reclaimed, removed: removedCount, snapshot: snapshotCreatedName)
     }
 
     // MARK: - Safety Guard
@@ -1382,8 +1516,10 @@ final class DiskCleaner: @unchecked Sendable {
             return false
         }
 
-        // Never touch Hog Hunter itself
-        if isHogHunterIdentifier(path) {
+        // Never touch Hog Hunter's own namespaces (bundle caches, Application
+        // Support, Logs).  Use path markers — not a raw "hoghunter" substring —
+        // so a temp folder named HogHunterTest_* cannot poison the allowlist.
+        if isHogHunterProtectedPath(path) {
             return false
         }
 
@@ -1416,6 +1552,8 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Library/Developer/Xcode/Archives",
                 home + "/Library/Developer/Xcode/iOS DeviceSupport",
                 home + "/Library/Developer/CoreSimulator/Caches",
+                home + "/Library/Developer/CoreSimulator/Devices",
+                home + "/Library/Developer/CoreDevice",
                 home + "/Library/Caches/Homebrew",
                 home + "/.npm/_cacache",
                 home + "/Library/Caches/Yarn",
@@ -1549,9 +1687,29 @@ final class DiskCleaner: @unchecked Sendable {
         URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     }
 
+    /// True for a folder or bundle-id *name* that belongs to Hog Hunter
+    /// (used when scanning Containers / Application Support entries).
     private func isHogHunterIdentifier(_ string: String) -> Bool {
         let lower = string.lowercased()
         return lower.contains("hoghunter") || lower.contains("simplewithus.hoghunter") || lower.contains("jayservices.hoghunter")
+    }
+
+    /// True for a full filesystem path that is one of Hog Hunter's protected
+    /// namespaces.  Deliberately narrower than `isHogHunterIdentifier`: a path
+    /// component like `HogHunterTest_*` must not block orphan allowlisting.
+    private func isHogHunterProtectedPath(_ path: String) -> Bool {
+        let lower = (path as NSString).standardizingPath.lowercased()
+        let markers = [
+            "/library/application support/hoghunter",
+            "/library/logs/hoghunter",
+            "/library/caches/com.simplewithus.hoghunter",
+            "/library/caches/com.jayservices.hoghunter",
+            "/library/containers/com.simplewithus.hoghunter",
+            "/library/containers/com.jayservices.hoghunter",
+            "/library/saved application state/com.simplewithus.hoghunter",
+            "/library/saved application state/com.jayservices.hoghunter"
+        ]
+        return markers.contains { lower.contains($0) }
     }
 
     private func isAppleOrSystemFolder(_ name: String) -> Bool {

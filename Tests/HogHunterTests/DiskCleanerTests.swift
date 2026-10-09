@@ -88,12 +88,36 @@ final class DiskCleanerTests: XCTestCase {
         for path in criticalPaths {
             let url = URL(fileURLWithPath: path)
             for category in CleanCategory.allCases {
+                // Root and other critical paths stay denied for every category,
+                // including apfsSnapshots.  Thinning hardcodes the mount inside
+                // SnapshotSafety; isSafeToDelete must never widen "/" into a
+                // pass-through for a future caller that trashes the CleanItem URL.
                 XCTAssertFalse(
                     cleaner.isSafeToDelete(url: url, category: category),
                     "Path \(path) must NOT be safe to delete under \(category)"
                 )
             }
         }
+    }
+
+    /// APFS snapshot rows use synthetic `/.snapshots/<name>` URLs.  Root and
+    /// foreign volumes stay denied; only the synthetic snapshot path passes.
+    func testAPFSSnapshotSafetyAcceptsOnlySyntheticSnapshotPaths() {
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/"), category: .apfsSnapshots),
+            "startup volume root must stay denied"
+        )
+        for volume in ["/Volumes/Backup", "/Volumes/External"] {
+            XCTAssertFalse(
+                cleaner.isSafeToDelete(url: URL(fileURLWithPath: volume), category: .apfsSnapshots),
+                "a thin must never be redirected at \(volume)"
+            )
+        }
+        let synthetic = URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.2026-10-05-062128.local")
+        XCTAssertTrue(
+            cleaner.isSafeToDelete(url: synthetic, category: .apfsSnapshots),
+            "synthetic snapshot URLs are the only apfsSnapshots allowlist entries"
+        )
     }
 
     func testIsSafeToDeleteDisallowsHogHunterPaths() {
@@ -282,4 +306,135 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: cacheFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
+
+    // MARK: - APFS / Time Machine Snapshot Category Tests
+
+    func testAPFSSnapshotsCategoryMetadata() {
+        let cat = CleanCategory.apfsSnapshots
+        XCTAssertEqual(cat.id, "apfsSnapshots")
+        XCTAssertEqual(cat.title, "APFS Local Snapshots")
+        XCTAssertFalse(cat.description.isEmpty)
+        XCTAssertFalse(cat.icon.isEmpty)
+        XCTAssertEqual(cat.sortOrder, 8, "Must sort after Large & Old Files")
+        XCTAssertFalse(cat.isExtremeOnly, "Snapshot thinning is standard-tier safe")
+        XCTAssertFalse(cat.defaultSelected, "APFS local snapshots must require explicit user review")
+    }
+
+    func testStandardTierIncludesAPFSSnapshots() {
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.apfsSnapshots))
+        XCTAssertTrue(CleanTier.extreme.isCategoryIncluded(.apfsSnapshots))
+    }
+
+    func testParseSnapshotNamesStripsHeaderAndWhitespace() {
+        let output = """
+        Snapshots for disk /:
+        com.apple.TimeMachine.2026-10-05-062128.local
+        com.apple.TimeMachine.2026-10-04-180002.local
+
+        \t  com.apple.TimeMachine.2026-10-03-221044.local
+
+        """
+        let names = SnapshotSafety.parseSnapshotNames(output)
+        XCTAssertEqual(names, [
+            "com.apple.TimeMachine.2026-10-05-062128.local",
+            "com.apple.TimeMachine.2026-10-04-180002.local",
+            "com.apple.TimeMachine.2026-10-03-221044.local"
+        ])
+    }
+
+    func testParseSnapshotNamesToleratesBareInput() {
+        XCTAssertEqual(SnapshotSafety.parseSnapshotNames(""), [])
+        XCTAssertEqual(SnapshotSafety.parseSnapshotNames("only.one.local"), ["only.one.local"])
+    }
+
+    func testScanAPFSSnapshotsSplitsPurgeableEvenly() {
+        // 3 snapshots, 60 GB purgeable → 20 GB per row.  Equal split keeps every
+        // row honest about the same ceiling -- the UI never claims more bytes
+        // than APFS would hand back.
+        let cleaner = DiskCleaner(
+            listSnapshots: { _ in [
+                "com.apple.TimeMachine.2026-10-05-062128.local",
+                "com.apple.TimeMachine.2026-10-04-180002.local",
+                "com.apple.TimeMachine.2026-10-03-221044.local"
+            ] },
+            purgeableProvider: { _ in 60 * 1024 * 1024 * 1024 }
+        )
+        let items = cleaner.scanAPFSSnapshots()
+        XCTAssertEqual(items.count, 3)
+        XCTAssertTrue(items.allSatisfy { $0.category == .apfsSnapshots })
+        XCTAssertTrue(items.allSatisfy { !$0.isSelected }, "APFS snapshots require explicit review")
+        XCTAssertEqual(items.map(\.bytes), Array(repeating: 20 * 1024 * 1024 * 1024 as UInt64, count: 3))
+        XCTAssertEqual(items.first?.title, "com.apple.TimeMachine.2026-10-05-062128.local")
+        XCTAssertEqual(items.first?.subtitle, "Time Machine Local Snapshot")
+        XCTAssertTrue(items.first?.url.path.hasPrefix("/.snapshots/") ?? false)
+    }
+
+    func testScanAPFSSnapshotsFallsBackToAggregateWhenListFails() {
+        // nil return means the tmutil call could not start (or the runner is a
+        // stub that could not, captured in tests).  A single placeholder row
+        // carrying the full purgeable figure keeps the clean actionable.
+        let cleaner = DiskCleaner(
+            listSnapshots: { _ in nil },
+            purgeableProvider: { _ in 47 * 1024 * 1024 * 1024 }
+        )
+        let items = cleaner.scanAPFSSnapshots()
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.bytes, 47 * 1024 * 1024 * 1024)
+        XCTAssertEqual(items.first?.title, "Local Time Machine Snapshots")
+        XCTAssertFalse(items.first?.isSelected ?? true)
+    }
+
+    func testScanAPFSSnapshotsReturnsEmptyWhenNoSnapshotsAndNoPurgeable() {
+        let cleaner = DiskCleaner(
+            listSnapshots: { _ in [] },
+            purgeableProvider: { _ in 0 }
+        )
+        XCTAssertTrue(cleaner.scanAPFSSnapshots().isEmpty)
+    }
+
+    func testIsSafeToDeleteAcceptsSnapshotPathsForAPFSSnapshots() {
+        let cleaner = DiskCleaner()
+        let url = URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.2026-10-05-062128.local")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: url, category: .apfsSnapshots))
+    }
+
+    func testIsSafeToDeleteRejectsOtherMountsForAPFSSnapshots() {
+        let cleaner = DiskCleaner()
+        XCTAssertFalse(cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/Volumes/External"), category: .apfsSnapshots))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: URL(fileURLWithPath: NSHomeDirectory()), category: .apfsSnapshots))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/"), category: .apfsSnapshots))
+    }
+
+    // MARK: - Developer Target Tests
+
+    func testSimulatorDevicesAndCoreDeviceAreAllowedDevelopers() {
+        let home = NSHomeDirectory()
+        let validPaths = [
+            "\(home)/Library/Developer/CoreSimulator/Devices/ABCD1234-DEAD-BEEF-0000-000000000000",
+            "\(home)/Library/Developer/CoreDevice/iOS 17.0"
+        ]
+        for path in validPaths {
+            XCTAssertTrue(
+                cleaner.isSafeToDelete(url: URL(fileURLWithPath: path), category: .developer),
+                "Developer path \(path) must be permitted now that CoreSimulator/Devices and CoreDevice are inventoried"
+            )
+        }
+    }
+
+    func testSimulatorAndCoreDeviceItemsAreUnselectedByDefault() {
+        // Opt-in only: other users may actively develop for iOS.  An auto-clean
+        // would force a full re-download of every simulator runtime next launch.
+        XCTAssertTrue(CleanCategory.developer.defaultSelected, "Developer category stays default-selected; only Simulator/CoreDevice rows are opt-in")
+        let developer = cleaner.scanDeveloper()
+        for item in developer where item.title == "iOS Simulator Devices" || item.title == "Xcode Connected-Device Support" {
+            XCTAssertFalse(item.isSelected, "Simulator/CoreDevice items must require explicit opt-in")
+            XCTAssertEqual(item.category, .developer)
+            XCTAssertGreaterThan(item.bytes, 0)
+        }
+        // Existing selected-by-default developer targets must stay selected.
+        for item in developer where item.title == "Xcode DerivedData" {
+            XCTAssertTrue(item.isSelected)
+        }
+    }
 }
+

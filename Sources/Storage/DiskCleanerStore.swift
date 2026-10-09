@@ -66,14 +66,21 @@ final class DiskCleanerStore: ObservableObject {
     }
 
     let cleaner: DiskCleaner
+    /// Append-only cleanup history under the stable app-support namespace.
+    /// Refreshed on clean and on view appear so the hero header's "last cleanup" line is always fresh.
+    let historyStore: CleanupHistoryStore
+    @Published private(set) var lastCleanup: CleanupHistoryRecord?
     private var isScanInFlight = false
     private var scanTask: Task<Void, Never>?
     private var cleanTask: Task<Void, Never>?
     private var currentScanId: UUID?
     private var currentCleanId: UUID?
 
-    init(cleaner: DiskCleaner = DiskCleaner()) {
+    init(cleaner: DiskCleaner = DiskCleaner(),
+         historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false)) {
         self.cleaner = cleaner
+        self.historyStore = historyStore
+        self.lastCleanup = historyStore.latestRecord()
     }
 
     deinit {
@@ -333,6 +340,26 @@ final class DiskCleanerStore: ObservableObject {
                 )
                 let completedUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: completedProg)
                 NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedUpdate)
+
+                // Persist only after the user is happy.  A failed clean (no
+                // items removed) is not worth a history row -- the user did not
+                // actually reclaim anything.
+                if result.itemsRemoved > 0 {
+                    // History must mirror successes only: selected-but-failed
+                    // rows (thin failure, isSafeToDelete rejection, trashItem
+                    // throw) stay out of the "Last cleanup" summary.
+                    let record = CleanupHistoryRecord(
+                        bytesReclaimed: result.bytesReclaimed,
+                        itemsRemoved: result.itemsRemoved,
+                        tier: result.tier,
+                        categoryIds: result.removedCategoryIds,
+                        itemTitles: Array(result.removedItemTitles.prefix(50)),
+                        snapshotName: result.snapshotName,
+                        cleanedAt: result.cleanedAt
+                    )
+                    self.historyStore.append(record)
+                    self.lastCleanup = record
+                }
             }
         }
     }
@@ -342,5 +369,14 @@ final class DiskCleanerStore: ObservableObject {
     func revealInFinder(url: URL) {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - Cleanup History
+
+    /// Re-reads the latest cleanup history record from disk.  Called by the view
+    /// on appear so a record written by an earlier launch (or an external
+    /// `cleanup-history.jsonl` edit) is visible without restarting the panel.
+    func refreshLastCleanup() {
+        lastCleanup = historyStore.latestRecord()
     }
 }
