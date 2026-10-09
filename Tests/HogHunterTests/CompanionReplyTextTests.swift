@@ -56,6 +56,33 @@ final class CompanionReplyTextTests: XCTestCase {
         assertGap(try message(of: try XCTUnwrap(CompanionHTTP.parseResponse(data)).body))
     }
 
+    func testTheVacuumRefusalNamesTheSettingAndKeepsItsGap() throws {
+        let text = try message(of: CompanionServer.vacuumRefusal.body)
+        XCTAssertTrue(text.contains("Allow iPhone to Run Robotic Vacuum"), text)
+        assertGap(text)
+    }
+
+    func testTheVacuumBusyReplyKeepsItsGap() throws {
+        let busy = CompanionServer.vacuumBusyReply
+        XCTAssertEqual(busy.status, 409)
+        assertGap(try message(of: busy.body))
+    }
+
+    func testTheVacuumBadKindReplyKeepsItsGap() throws {
+        let server = CompanionServer()
+        server.updateToken("ABCD2345")
+        server.allowRemoteVacuum = true
+        let token = server.devices.issue(name: "Test iPhone").token
+        server.syncOnQueue {}
+        let disposition = server.syncOnQueue {
+            server.disposition(for: CompanionHTTP.vacuumRunRequest(token: token, kind: "janitor"), peer: CompanionPeer(key: "192.168.1.20", isTrusted: true))
+        }
+        guard case .reply(let data) = disposition else { return XCTFail("expected an inline refusal") }
+        let parsed = try XCTUnwrap(CompanionHTTP.parseResponse(data))
+        XCTAssertEqual(parsed.status, 400)
+        assertGap(try message(of: parsed.body))
+    }
+
     func testTheNetworkTabNoteKeepsItsGap() {
         // A missing lsof is the failure the note exists for.
         let scan = CompanionSnapshotBuilder.currentNetworkScan(scanner: NetworkScanner(binaryPath: "/nonexistent/lsof"))

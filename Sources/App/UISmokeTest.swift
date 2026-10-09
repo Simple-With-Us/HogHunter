@@ -87,7 +87,7 @@ final class UISmokeTest {
         // own appetite for width, which is not what ships and would make this
         // test fail forever.
         checkTabFits("Storage") { store in
-            StorageView(runningBundleIds: { [] }, embeddedInPanel: true, isTabActive: true)
+            StorageView(runningBundleIds: { [] }, vacuumStore: RoboticVacuumStore(), embeddedInPanel: true, isTabActive: true)
                 .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
                 .clipped()
         }

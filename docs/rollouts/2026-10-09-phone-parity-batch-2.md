@@ -1,12 +1,25 @@
 # Phone parity, batch 2 (2026-10-09)
 
-Board `32919186`.  Issues: #99 (A), #101 (B), #102 (C).  PRs: A #100 (this doc starts here), B (disk cleaner), C #103 (Robotic Vacuum).
+Board `32919186`.  Issues: #99 (A), #101 (B), #102 (C).  PRs: A #100 (this doc starts here), B #104 (disk cleaner), C #103 (Robotic Vacuum).
 
 ## Ruling
 
 Same as batch 1 (`docs/rollouts/2026-10-09-phone-parity-batch-1.md`): on 2026-10-09 the owner ruled that the iPhone app reaches parity with the desktop app, mutations included.  Batch 1 fixed the broken controls and built the safeguards (per-phone tokens, the 401 throttle, controls only from the local network or Tailscale, the edit opt-in).  Batch 2 adds the desktop features the phone still lacks.  Every new mutation goes through those safeguards, sits behind an opt-in that is off by default, and gets a confirmation on the phone when it is destructive.
 
 Mac-only by design, and staying that way: the Infisical credential and sync, the pairing and remote-control toggles themselves, Reveal in Finder, and Open Activity Monitor.
+
+## What the owner needs to do
+
+Nothing is required.  One new setting exists, and four existing ones now cover more:
+
+| Setting (Mac Settings > iPhone) | What changed |
+|---|---|
+| **Allow iPhone to Run Robotic Vacuum** (new, off by default, not in the pairing alert) | Turn it on only if you want Run Now and the step results on the phone.  A full run can retire old merged git worktrees and run maintenance on remote servers. |
+| Allow iPhone to Quit or Tame Apps & Processes | Also allows Sample for 3 Seconds. |
+| Allow iPhone to Change Exclusions & View | Also allows the CPU scale, the refresh interval, the alerts and the webhook. |
+| Allow iPhone to Run Disk Cleaner | Also allows scanning, choosing items, the Extreme tier (with the notice ticked on the phone) and reading the cleanup history. |
+
+Nobody is asked again, so an owner who had those on already has the new powers.  Thinning APFS local snapshots stays Mac-only, on purpose (see PR B).  The link is still plain HTTP (board `ca962984`), which matters a little more now that a webhook address can cross it; the phone refuses to send it outside the local network and Tailscale.
 
 ## PR A: scale, network, sparkline, settings, sample
 
@@ -98,7 +111,7 @@ Nothing beyond batch 1's list.  The rest of a category with more than 100 items 
 
 ## Screenshots
 
-The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once on the 6.3 inch iPhone as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet), `-HogHunterCleaner` and `-HogHunterCleanerExtreme` (a finished scan, the second with the Extreme notice ticked).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
+The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once, on the first iPhone that boots, as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet), `-HogHunterCleaner` and `-HogHunterCleanerExtreme` (a finished scan, the second with the Extreme notice ticked) and `-HogHunterVacuum` (the Robotic Vacuum screen).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
 
 ## Verification
 
@@ -115,3 +128,68 @@ PR A reverts on its own.  A phone built after it that talks to a Mac without it 
 |---|---|
 | TLS on the companion link (also protects the webhook URL in transit) | `ca962984` |
 | Move the phone's token into the Keychain | `5afb6e7f` |
+
+## PR C: Robotic Vacuum
+
+Issue #102.  The iPhone shows the Robotic Vacuum's status and can start a full run, on the same terms as every other mutation: an opt-in that is off by default, a confirmation on the phone, and the same network and credential checks.
+
+| Feature | Where it lives | Gate |
+|---|---|---|
+| Status: health, last and next full clean, background job loaded, running now, bytes the last run freed | `vacuum` in the snapshot; Storage tab > Robotic Vacuum | read-only, like the snapshot |
+| What each step of the last run did | `vacuum.steps` in the snapshot; the same screen | Allow iPhone to Run Robotic Vacuum |
+| Run Now | `POST /v1/vacuum/run`; the same screen, after a confirmation | Allow iPhone to Run Robotic Vacuum |
+
+### Route
+
+| Route | Credential | Opt-in | Peer must be | Notes |
+|---|---|---|---|---|
+| `POST /v1/vacuum/run` | a phone's own token | Allow iPhone to Run Robotic Vacuum | local network or Tailscale | Query `kind=full`.  Absent means full; anything else is 400. |
+
+The gates run in this order: a valid credential (401), a trusted peer (403), a phone's own token rather than the shared code (403), the method (405 unless POST), the `kind` (400), the opt-in (403, naming "Allow iPhone to Run Robotic Vacuum"), a handler (501), a run already going (409), and then the start (202).  The `kind` is checked before the opt-in, as the row id is for Sample, so a malformed request is told so whatever the setting.  `scripts/robotic-vacuum.py` also accepts `janitor`, `watch` and `pressure`; none is reachable from the phone, and every `kind` in a repeated query must be `full`.
+
+### The route answers at once
+
+A full run takes minutes.  A clean holds its connection until the Mac finishes, but the vacuum has nothing to hand back that the snapshot does not already carry, so the Mac answers `{"status":"started"}` (202) and the run proceeds there.  While one is going, the answer is 409 `{"status":"busy"}`.  The phone watches `vacuum.isRunning` in the snapshot, which goes true when a run this app started begins and false when it ends (a run the background job started is not seen: Run Now then answers "started", the engine finds its housekeeper lock held and skips, and the status shows that skip), and it fetches a fresh snapshot a moment after the Mac answers.  Closing the app does not stop the run.
+
+The router decides "busy" itself, on the server queue, from a `CompanionLocked<Bool>` the host keeps in line with `RoboticVacuumStore.isRunningNow` (a Combine sink on the store, so a run started from the Mac panel counts too).  Requests are handled one at a time on that queue, so the check and the set cannot interleave: two quick taps start one run, a test pins that.  After it asks the store to start, the host sets the flag back to what the store says, so a request that lost a race with the panel cannot leave it stuck true.
+
+### One store, so one run
+
+`HogStore` owns a single `RoboticVacuumStore` (`let vacuum`).  The Storage tab, the separate Storage window and the phone route all use it.  Before, the tab built its own, so a phone run and a panel run could overlap.  The Python engine also takes a housekeeper lock (`scripts/vacuum/lock.py`), so a race that slipped past would at worst skip a run.  The store reads its files (`status.json`, `history.json`, `config.json`) when it is built, every 30 seconds while the tab is open, and, for the phone, at most every 30 seconds and only when a phone fetches the snapshot (`refreshIfStale`).  The 3 second publish never reads a file.
+
+### The disclosure rule
+
+The coarse status is in the snapshot whenever the Mac has one: health, what the Mac prints for it, whether the background job is loaded, running or not, the last and next full clean, and the last run's end and bytes freed.  The per-step results are in it only while Allow iPhone to Run Robotic Vacuum is on, and then only for a phone's own token on the local network or Tailscale.  A step's reason can name a lane folder or a server, and the snapshot is readable with the shared pairing code from anywhere, so the Mac builds two snapshots: the plain one (what the shared code and any outside address read) and, while the opt-in is on, a detailed one that only a phone's own token from a trusted address is served.  Detail sits behind the same opt-in as the power to run.  Reasons are cut to 120 characters and one line.  Turning the setting off takes the steps out of the next snapshot.
+
+Before the engine has written a `status.json`, a run in progress still shows as running (health `unknown`, "Waiting for first run").  A Mac with no status and no run sends no `vacuum`.  An older Mac sends neither `vacuum` nor `remoteVacuumAllowed`; the phone reads a missing `remoteVacuumAllowed` as "this Mac predates the feature" and says so, and a 404 from the route reads the same.
+
+### Why it has its own opt-in, and is not in the pairing alert
+
+A full run is the widest thing the phone can ask for.  It can retire old merged git worktrees, trim caches and build folders, and run maintenance on remote servers.  None of the existing three switches describes that, and folding it into Change Exclusions & View or the disk cleaner would grant it to every owner who already said yes to something narrower.  So it is a fourth switch, `allowRemoteVacuum` in UserDefaults (a consent toggle, not an Infisical setting), wired everywhere the other three are.  It is left out of the "Pair this iPhone?" alert on purpose: that alert is answered in a moment, for a phone that has only just asked, while a power this wide should be granted deliberately and in Settings.  The description under the switches in Settings now says the alert offers the first three choices only.
+
+### Existing owners
+
+Nothing is granted automatically.  An owner who wants Run Now on the phone turns on Allow iPhone to Run Robotic Vacuum once, in Settings > iPhone > Remote Control.  Until then the phone shows the vacuum's status, greys out Run Now, and says which setting to turn on.
+
+### Tests never run the real vacuum
+
+A real `--run-now full` deletes things on the machine it runs on.  `RoboticVacuumStore` takes a launcher closure; every test passes a stub, and the default launcher throws instead of starting the script when it finds itself inside XCTest.  The tests cover the route's refusal matrix (opt-in off, untrusted address, shared code, wrong token, wrong method, bad kinds), the handler never being reached by a refusal, 409 while running, two quick taps, the opt-in's default and its survival of a restart, the disclosure rule on the wire and in `HogStore`, the status builder, the 30 second read limit, and the gaps in the Mac's replies and the phone screen's strings.  The script was not run, beyond reading its argument list.
+
+### Verification
+
+- `xcodegen generate && xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.
+- iOS: no simulator and no local `xcodebuild`, by owner rule.  `swiftc -typecheck` against the iOS 17 simulator SDK passes for the app target and the widget.  The hosted iOS build in CI is the real check.  Nothing here has been run on a phone yet, and no one has pressed Run Now against a real Mac.
+
+### Rollback
+
+PR C reverts on its own.  A phone built after it that talks to a Mac without it sees no `remoteVacuumAllowed`, shows "not available on this Mac", and gets 404 from the route, which it reads as an older Mac.  A Mac that has it and a phone that does not simply never uses it.  `allowRemoteVacuum` stays in UserDefaults and is ignored.
+
+### Not done
+
+| Item | Note |
+|---|---|
+| Starting the cheaper cadences (`janitor`, `watch`) from the phone | Deliberately absent.  The whitelist is one entry, in `CompanionService.vacuumRunKinds`. |
+| Toggling a step from the phone | The step list is read-only.  Steps are switched at the Mac. |
+| Stopping a run from the phone | The script has no cancel. |
+| One polling timer for two views | The Storage tab and the separate Storage window share the one store, so closing either stops its 30 second refresh for the other.  The phone's refresh is unaffected: it uses `refreshIfStale`. |
+| Surfacing `RoboticVacuumStore.lastError` to the phone | A run that fails to start or exits non-zero shows on the Mac; the phone sees it as a run that ended and a changed health word. |

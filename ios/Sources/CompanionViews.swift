@@ -400,6 +400,7 @@ struct DashboardView: View {
     // The screenshot lane launches the app with these flags to put each new
     // surface on screen (scripts/capture-app-screenshots.sh); nothing else sets them.
     @State private var showMacSettings = ProcessInfo.processInfo.arguments.contains("-HogHunterMacSettings")
+    @State private var showVacuum = ProcessInfo.processInfo.arguments.contains("-HogHunterVacuum")
     @State private var showCleaner = ProcessInfo.processInfo.arguments.contains("-HogHunterCleaner")
         || ProcessInfo.processInfo.arguments.contains("-HogHunterCleanerExtreme")
     @State private var sampleOutcome: SampleOutcome? = ProcessInfo.processInfo.arguments.contains("-HogHunterSampleResult")
@@ -656,6 +657,9 @@ struct DashboardView: View {
         }
         .sheet(isPresented: $showMacSettings) {
             MacSettingsView(snapshot: snapshot, model: model)
+        }
+        .navigationDestination(isPresented: $showVacuum) {
+            VacuumView(snapshot: snapshot, model: model)
         }
         .navigationDestination(isPresented: $showCleaner) {
             CleanerView(model: model)
@@ -1279,6 +1283,14 @@ struct DashboardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+        }
+
+        Section("Robotic Vacuum") {
+            NavigationLink {
+                VacuumView(snapshot: snapshot, model: model)
+            } label: {
+                VacuumSummaryRow(snapshot: snapshot)
             }
         }
 

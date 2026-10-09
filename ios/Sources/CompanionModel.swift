@@ -124,6 +124,14 @@ final class CompanionModel {
     /// `controlError` because the settings screen is a sheet over the
     /// dashboard, and two alerts on one error cannot both present.
     var settingsError: String?
+    /// True from the tap on Run Robotic Vacuum until the Mac has answered, and a
+    /// moment longer while the snapshot catches up, so the button cannot be
+    /// tapped twice.
+    var isStartingVacuum = false
+    /// Why the last Robotic Vacuum run did not start.  Kept apart from
+    /// `controlError`: the vacuum screen is pushed over the dashboard, and two
+    /// alerts on one error cannot both present.
+    var vacuumError: String?
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
 
@@ -326,6 +334,8 @@ final class CompanionModel {
         resetCleaner()
         isDemoMode = true
         snapshot = Self.sample
+        // The sample's dates are fixed; the demo shows runs that look recent.
+        snapshot?.vacuum = Self.sampleVacuum(now: Date())
         phase = .live
     }
 
@@ -412,6 +422,37 @@ final class CompanionModel {
         } catch {
             return CompanionSampleResponse(status: "failed", name: row.name, error: Self.describe(error))
         }
+    }
+
+    /// Asks the Mac to start a full Robotic Vacuum run.  The Mac answers at once
+    /// and runs it by itself, so this returns when the run has started; the
+    /// snapshot then shows it running.  A refusal lands in `vacuumError`.
+    func runVacuum() async {
+        guard !isStartingVacuum else { return }
+        vacuumError = nil
+        isStartingVacuum = true
+        defer { isStartingVacuum = false }
+        if isDemoMode {
+            snapshot?.vacuum?.isRunning = true
+            try? await Task.sleep(for: .seconds(4))
+            snapshot?.vacuum = Self.sampleVacuum(now: Date(), endedSecondsAgo: 0)
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            vacuumError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        do {
+            let res = try await CompanionConnection.triggerVacuumRun(endpoint: endpoint, token: saved.token)
+            if res.status != "started" {
+                vacuumError = res.error ?? res.message ?? "The Mac did not start a run."
+            }
+        } catch {
+            vacuumError = Self.describe(error)
+        }
+        // The Mac marks the run as going just after it answers.
+        try? await Task.sleep(for: .milliseconds(600))
+        await refresh()
     }
 
     /// Demo mode only: shows clean progress on the dashboard without a Mac.
@@ -1074,6 +1115,36 @@ final class CompanionModel {
             webhookHost: "hooks.example.com",
             webhookStatus: "Delivered (200) at 9:41:07 AM",
             notificationsDenied: false
-        )
+        ),
+        remoteVacuumAllowed: true,
+        // Relative to launch, so the sample reads "3 hours ago", not a year ago.
+        vacuum: sampleVacuum(now: Date())
     )
+
+    /// A healthy Robotic Vacuum whose last full run ended `endedSecondsAgo`
+    /// before `now`, for the sample snapshot and Demo Mode.
+    static func sampleVacuum(now: Date, endedSecondsAgo: TimeInterval = 3 * 3600) -> CompanionVacuumStatus {
+        let ended = now.addingTimeInterval(-endedSecondsAgo)
+        return CompanionVacuumStatus(
+            health: "healthy",
+            displayHealth: "On schedule",
+            launchdLoaded: true,
+            isRunning: false,
+            lastFullRunAt: ended,
+            nextFullRunAt: ended.addingTimeInterval(24 * 3600),
+            lastRunBytesFreed: 3_400_000_000,
+            lastRunEndedAt: ended,
+            steps: [
+                CompanionVacuumStep(stepId: "resource_sample", title: "Check disk and memory", statusLabel: "Done", reason: "Disk 76% used.\u{00A0} Memory pressure normal.", bytesFreed: 0),
+                CompanionVacuumStep(stepId: "hoghunter_reclaim", title: "Hog Hunter disk reclaim", statusLabel: "Done", reason: "Standard clean reclaimed 1.1 GB.", bytesFreed: 1_100_000_000),
+                CompanionVacuumStep(stepId: "janitor_worktree_retire", title: "Retire old merged git worktrees", statusLabel: "Done", reason: "Retired 2 merged worktrees.", bytesFreed: 1_900_000_000),
+                CompanionVacuumStep(stepId: "janitor_cache_reclaim", title: "Reclaim caches when disk is low", statusLabel: "Skipped", reason: "The disk has plenty of free space.", bytesFreed: 0),
+                CompanionVacuumStep(stepId: "pm2_logs", title: "Cap oversized PM2 logs", statusLabel: "Done", reason: "No log is over the limit.", bytesFreed: 0),
+                CompanionVacuumStep(stepId: "npm_cache", title: "Trim npm download cache", statusLabel: "Done", reason: "Trimmed the download cache.", bytesFreed: 400_000_000),
+                CompanionVacuumStep(stepId: "xcode_derived_data", title: "Clear Xcode build cache", statusLabel: "Skipped", reason: "Xcode is open.", bytesFreed: 0),
+                CompanionVacuumStep(stepId: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", statusLabel: "Done", reason: "Nothing to remove.", bytesFreed: 0),
+                CompanionVacuumStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
+            ]
+        )
+    }
 }

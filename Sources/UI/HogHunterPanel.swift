@@ -37,7 +37,7 @@ struct HogHunterPanel: View {
                 .accessibilityHidden(selectedTab != .activity)
 
                 if hasVisitedStorage {
-                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, embeddedInPanel: true, isTabActive: selectedTab == .storage)
+                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, vacuumStore: store.vacuum, embeddedInPanel: true, isTabActive: selectedTab == .storage)
                         .frame(width: Self.contentWidth, alignment: .leading)
                         .clipped()
                         .opacity(selectedTab == .storage ? 1 : 0)

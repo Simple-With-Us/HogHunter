@@ -19,7 +19,9 @@ enum StorageTab: String, CaseIterable, Identifiable {
 struct StorageView: View {
     @StateObject private var store: StorageStore
     @StateObject private var cleanerStore = DiskCleanerStore()
-    @StateObject private var vacuumStore = RoboticVacuumStore()
+    /// Owned by `HogStore`, which the iPhone route also uses, so the Mac and
+    /// the phone cannot start a second run over each other.
+    @ObservedObject private var vacuumStore: RoboticVacuumStore
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
     @State private var sortAscending: Bool = false
@@ -29,8 +31,9 @@ struct StorageView: View {
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
 
-    init(runningBundleIds: @escaping () -> Set<String>, embeddedInPanel: Bool = false, isTabActive: Bool = true) {
+    init(runningBundleIds: @escaping () -> Set<String>, vacuumStore: RoboticVacuumStore, embeddedInPanel: Bool = false, isTabActive: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+        self.vacuumStore = vacuumStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
     }
