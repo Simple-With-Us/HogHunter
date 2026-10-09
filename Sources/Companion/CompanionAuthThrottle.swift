@@ -6,8 +6,8 @@ import Foundation
 /// guessed.  Each client address gets a few free misses, then a lockout that
 /// doubles per miss up to 15 minutes.  A client that stays quiet is forgiven,
 /// and a good request clears its slate.  A separate global cap covers an
-/// attacker who rotates addresses.  Not thread safe: the server uses it only
-/// on its own queue.
+/// outside attacker who rotates addresses.  Not thread safe: the server uses
+/// it only on its own queue.
 struct CompanionAuthThrottle {
     struct Policy: Equatable {
         /// Misses allowed before the first lockout.
@@ -35,19 +35,28 @@ struct CompanionAuthThrottle {
     private var recentFailures: [Date] = []
 
     /// Seconds the client must wait, rounded up, or nil if it may try now.
-    func retryAfter(for peer: String, now: Date) -> Int? {
+    ///
+    /// The global cap is for addresses outside the local network and
+    /// Tailscale (`appliesGlobal`), where a guesser can rotate addresses and
+    /// where anyone on the internet can reach a forwarded port.  It does not
+    /// lock the phone on the home Wi-Fi out because strangers are guessing.
+    func retryAfter(for peer: String, now: Date, appliesGlobal: Bool = true) -> Int? {
         var wait: TimeInterval = 0
         if let entry = entries[peer], now.timeIntervalSince(entry.lastFailure) < policy.forgetAfter {
             wait = max(wait, entry.lockedUntil.timeIntervalSince(now))
         }
-        let window = recentFailures.filter { now.timeIntervalSince($0) < policy.globalWindow }
-        if window.count >= policy.globalLimit, let oldest = window.min() {
-            wait = max(wait, policy.globalWindow - now.timeIntervalSince(oldest))
+        if appliesGlobal {
+            let window = recentFailures.filter { now.timeIntervalSince($0) < policy.globalWindow }
+            if window.count >= policy.globalLimit, let oldest = window.min() {
+                wait = max(wait, policy.globalWindow - now.timeIntervalSince(oldest))
+            }
         }
         return wait > 0 ? Int(wait.rounded(.up)) : nil
     }
 
-    mutating func recordFailure(peer: String, now: Date) {
+    /// `countsTowardGlobal` is false for trusted-network clients, so their
+    /// misses never feed the cap that locks out the outside world.
+    mutating func recordFailure(peer: String, now: Date, countsTowardGlobal: Bool = true) {
         var entry = entries[peer] ?? Entry(failures: 0, lastFailure: now, lockedUntil: .distantPast)
         if now.timeIntervalSince(entry.lastFailure) >= policy.forgetAfter {
             entry.failures = 0
@@ -61,7 +70,9 @@ struct CompanionAuthThrottle {
         }
         entries[peer] = entry
 
-        recentFailures.append(now)
+        if countsTowardGlobal {
+            recentFailures.append(now)
+        }
         recentFailures.removeAll { now.timeIntervalSince($0) >= policy.globalWindow }
         evictIfNeeded(now: now)
     }

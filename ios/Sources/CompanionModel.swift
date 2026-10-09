@@ -38,6 +38,9 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
     case throttled(retryAfter: Int)
     /// The Mac's copy of Hog Hunter predates per-phone tokens.
     case tooOld
+    /// This connection comes from outside the local network and Tailscale,
+    /// where the Mac shows data but accepts no controls and no new pairing.
+    case untrustedNetwork
 
     /// What the person sees.  Without this a thrown error reads as
     /// "The operation couldn't be completed. (HogHunter.CompanionClientError error 1.)"
@@ -53,6 +56,8 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
             return reason
         case .busy:
             return "The Mac is already showing a pairing request."
+        case .untrustedNetwork:
+            return "Quit, tame, clean, and edit work only on your local network or over Tailscale.\u{00A0} This iPhone can still watch the Mac from here."
         case .tooOld:
             return "This Mac's copy of Hog Hunter is older than this app.\u{00A0} Update it on the Mac."
         case .throttled(let seconds):
@@ -180,6 +185,11 @@ final class CompanionModel {
             return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name)
         } catch CompanionClientError.tooOld {
             return code
+        } catch CompanionClientError.untrustedNetwork {
+            // Off the local network and Tailscale the Mac will not hand out a
+            // token, but it still shows data to the code.  Keep the code; the
+            // quiet upgrade finishes once the phone is somewhere trusted.
+            return code
         }
     }
 
@@ -188,7 +198,7 @@ final class CompanionModel {
         switch error as? CompanionClientError {
         case .unauthorized?:
             return "That code does not match this Mac."
-        case .throttled?, .forbidden?, .rejected?, .tooOld?:
+        case .throttled?, .forbidden?, .rejected?, .tooOld?, .untrustedNetwork?:
             return describe(error)
         default:
             return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on."
@@ -248,7 +258,7 @@ final class CompanionModel {
         case .forbidden(let reason)?: return reason
         case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
         case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
-        case .throttled?, .tooOld?, .rejected?: return describe(error)
+        case .throttled?, .tooOld?, .rejected?, .untrustedNetwork?: return describe(error)
         default: return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
         }
     }

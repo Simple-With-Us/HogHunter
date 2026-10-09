@@ -246,7 +246,7 @@ final class CompanionServer: @unchecked Sendable {
     func disposition(for buffer: Data, peer: CompanionPeer, now: Date = Date()) -> Disposition {
         // A client that keeps presenting wrong credentials is told to wait
         // before anything about the request is looked at.
-        if let wait = throttle.retryAfter(for: peer.key, now: now) {
+        if let wait = throttle.retryAfter(for: peer.key, now: now, appliesGlobal: !peer.isTrusted) {
             return .reply(CompanionHTTP.throttledReply(retryAfter: wait))
         }
         var cleanRequested = false
@@ -320,7 +320,7 @@ final class CompanionServer: @unchecked Sendable {
         // Anything else means the credential was accepted.
         let status = CompanionHTTP.statusCode(of: response)
         if status == 401 {
-            throttle.recordFailure(peer: peer.key, now: now)
+            throttle.recordFailure(peer: peer.key, now: now, countsTowardGlobal: !peer.isTrusted)
         } else if status != 404 {
             throttle.recordSuccess(peer: peer.key)
         }
@@ -336,14 +336,14 @@ final class CompanionServer: @unchecked Sendable {
     /// Settings, so a wrong one counts against the throttle like any other
     /// wrong credential, and the route works only for local and Tailscale peers.
     func enroll(code: String, deviceName: String, peer: CompanionPeer, now: Date = Date()) -> Data {
-        if let wait = throttle.retryAfter(for: peer.key, now: now) {
+        if let wait = throttle.retryAfter(for: peer.key, now: now, appliesGlobal: !peer.isTrusted) {
             return CompanionHTTP.throttledReply(retryAfter: wait)
         }
         guard peer.isTrusted else {
             return CompanionHTTP.untrustedNetworkReply()
         }
         guard CompanionToken.matches(code, token) else {
-            throttle.recordFailure(peer: peer.key, now: now)
+            throttle.recordFailure(peer: peer.key, now: now, countsTowardGlobal: !peer.isTrusted)
             return CompanionHTTP.enrollRejectedReply()
         }
         throttle.recordSuccess(peer: peer.key)

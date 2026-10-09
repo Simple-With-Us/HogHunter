@@ -149,14 +149,33 @@ final class CompanionAuthThrottleTests: XCTestCase {
         XCTAssertNotNil(throttle.retryAfter(for: "peer-49", now: t0.addingTimeInterval(60)))
     }
 
-    func testRotatingAddressesStillHitTheGlobalCap() {
+    func testRotatingOutsideAddressesStillHitTheGlobalCap() {
         var throttle = CompanionAuthThrottle()
         throttle.policy.globalLimit = 20
         for index in 0..<20 {
             throttle.recordFailure(peer: "fresh-\(index)", now: t0)
         }
-        XCTAssertNotNil(throttle.retryAfter(for: "someone-new", now: t0), "every client waits once the whole Mac is under attack")
+        XCTAssertNotNil(throttle.retryAfter(for: "someone-new", now: t0), "every outside client waits once the Mac is under attack")
         XCTAssertNil(throttle.retryAfter(for: "someone-new", now: t0.addingTimeInterval(61)))
+    }
+
+    func testTheGlobalCapNeverLocksOutAPhoneOnTheLocalNetwork() {
+        var throttle = CompanionAuthThrottle()
+        throttle.policy.globalLimit = 20
+        for index in 0..<40 {
+            throttle.recordFailure(peer: "stranger-\(index)", now: t0)
+        }
+        XCTAssertNotNil(throttle.retryAfter(for: "stranger-new", now: t0))
+        XCTAssertNil(throttle.retryAfter(for: "192.168.1.20", now: t0, appliesGlobal: false), "strangers guessing through a forwarded port must not shut out the home phone")
+    }
+
+    func testMissesFromTheLocalNetworkDoNotFeedTheGlobalCap() {
+        var throttle = CompanionAuthThrottle()
+        throttle.policy.globalLimit = 5
+        for index in 0..<30 {
+            throttle.recordFailure(peer: "192.168.1.\(index)", now: t0, countsTowardGlobal: false)
+        }
+        XCTAssertNil(throttle.retryAfter(for: "outsider", now: t0), "a noisy LAN client must not lock the outside world's counter")
     }
 }
 
@@ -233,6 +252,17 @@ final class CompanionServerHardeningTests: XCTestCase {
         XCTAssertEqual(parsed.status, 403)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: parsed.body) as? [String: String])
         XCTAssertTrue(json["error"]?.contains("local network or Tailscale") ?? false)
+        // The phone keys off this, not the wording, to keep read-only access.
+        XCTAssertEqual(json["reason"], "untrusted-network")
+    }
+
+    func testAnOutsideClientGuessingIsLockedPerAddressAndTheLocalPhoneIsNotAffected() {
+        let server = makeServer()
+        for index in 0..<200 {
+            let stranger = CompanionPeer(key: "203.0.113.\(index % 250)", isTrusted: false)
+            _ = status(server, CompanionHTTP.request(token: "WRONG234"), from: stranger)
+        }
+        XCTAssertEqual(status(server, CompanionHTTP.request(token: deviceToken), from: lan), 200)
     }
 
     // MARK: Throttle

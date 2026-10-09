@@ -61,6 +61,9 @@ enum CompanionConnection {
         case 401:
             throw CompanionClientError.unauthorized
         case 403:
+            if json?["reason"] as? String == "untrusted-network" {
+                throw CompanionClientError.untrustedNetwork
+            }
             throw CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac did not allow this iPhone to pair.")
         case 404:
             throw CompanionClientError.tooOld

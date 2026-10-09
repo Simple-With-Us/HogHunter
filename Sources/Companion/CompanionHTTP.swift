@@ -180,7 +180,7 @@ enum CompanionHTTP {
     /// The answer to a control request from an address outside the local
     /// network and Tailscale.
     static func untrustedNetworkReply() -> Data {
-        let body = Data(#"{"status":"forbidden","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
+        let body = Data(#"{"status":"forbidden","reason":"untrusted-network","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
         return jsonReply(status: 403, body: body)
     }
 
