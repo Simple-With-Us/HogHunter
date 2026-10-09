@@ -239,14 +239,15 @@ def _normalize_name(value):
 def holds_installed_product(child_names, installed_ids, installed_names):
     """Mirror of DiskCleaner.holdsInstalledProduct: True when a folder still
     contains a product that is installed.  Normalized compare so a
-    version-suffixed child ("IntelliJIdea2024.2") matches "IntelliJ IDEA"."""
+    version-suffixed child ("IntelliJIdea2024.2") matches "IntelliJ IDEA",
+    and a product folder ("Brave-Browser") matches "Brave Browser"."""
     wanted = {_normalize_name(v) for v in installed_ids | installed_names}
     wanted = {w for w in wanted if len(w) > 2}
     for child in child_names:
         c = _normalize_name(child)
         if not c:
             continue
-        if any(w == c or c.startswith(w) for w in wanted):
+        if any(w == c or c.startswith(w) or (len(w) >= 6 and c.endswith(w)) for w in wanted):
             return True
     return False
 
