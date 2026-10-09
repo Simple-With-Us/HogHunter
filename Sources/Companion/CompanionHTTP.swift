@@ -189,6 +189,37 @@ enum CompanionHTTP {
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
     }
 
+    /// A JSON reply built outside the router, for answers that come later
+    /// (a finished clean) rather than inline.
+    static func jsonReply(status: Int, body: Data) -> Data {
+        message(status: status, reason: reason(for: status), body: body, type: "application/json; charset=utf-8")
+    }
+
+    static func reason(for status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 202: return "Accepted"
+        case 400: return "Bad Request"
+        case 401: return "Unauthorized"
+        case 403: return "Forbidden"
+        case 404: return "Not Found"
+        case 409: return "Conflict"
+        case 429: return "Too Many Requests"
+        case 501: return "Not Implemented"
+        case 504: return "Gateway Timeout"
+        default: return status >= 500 ? "Server Error" : "Error"
+        }
+    }
+
+    /// True for `GET /v1/snapshot`, whatever its auth outcome.
+    static func isSnapshotRequest(_ request: Data) -> Bool {
+        let text = String(data: request.prefix(512), encoding: .isoLatin1) ?? ""
+        guard let line = text.components(separatedBy: "\r\n").first else { return false }
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2, parts[0] == "GET" else { return false }
+        return parts[1].split(separator: "?", maxSplits: 1).first.map(String.init) == CompanionService.path
+    }
+
     static func request(token: String) -> Data {
         let lines = [
             "GET \(CompanionService.path) HTTP/1.1",

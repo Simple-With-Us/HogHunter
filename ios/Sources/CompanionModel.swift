@@ -23,7 +23,7 @@ struct DiscoveredMac: Identifiable, Equatable, Sendable {
     }
 }
 
-enum CompanionClientError: Error, Equatable {
+enum CompanionClientError: Error, Equatable, LocalizedError {
     case unauthorized
     case badResponse
     case timedOut
@@ -31,6 +31,32 @@ enum CompanionClientError: Error, Equatable {
     case forbidden(String)
     /// The Mac is already showing another pairing alert (429).
     case busy
+    /// The Mac understood and refused, with a reason worth showing (409 and
+    /// other typed refusals).
+    case rejected(String)
+    /// Too many wrong tries.  The Mac asks the phone to wait (429).
+    case throttled(retryAfter: Int)
+
+    /// What the person sees.  Without this a thrown error reads as
+    /// "The operation couldn't be completed. (HogHunter.CompanionClientError error 1.)"
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized:
+            return "The Mac no longer recognizes this iPhone.\u{00A0} Pair it again from the Mac's Settings."
+        case .badResponse:
+            return "The Mac sent a reply this app could not read.\u{00A0} Update Hog Hunter on both devices."
+        case .timedOut:
+            return "The Mac did not answer in time.\u{00A0} Check that Hog Hunter is open and the connection is up."
+        case .forbidden(let reason), .rejected(let reason):
+            return reason
+        case .busy:
+            return "The Mac is already showing a pairing request."
+        case .throttled(let seconds):
+            return seconds > 0
+                ? "Too many tries.\u{00A0} Wait \(seconds) seconds, then try again."
+                : "Too many tries.\u{00A0} Wait a moment, then try again."
+        }
+    }
 }
 
 /// Finds Hog Hunter on the Wi-Fi or connects remotely via Tailscale / Domain.
@@ -47,6 +73,9 @@ final class CompanionModel {
     var isCleaning = false
     var lastCleanResult: CompanionCleanResponse?
     var cleanError: String?
+    /// Set when a control call (exclusions, view, quit, tame) did not go
+    /// through, so the dashboard can say so instead of silently doing nothing.
+    var controlError: String?
     var showCleanDialogRequested = false
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
@@ -325,11 +354,10 @@ final class CompanionModel {
             }
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, toggleCategory: id)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, toggleCategory: id)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func addExcludedPath(_ path: String) async {
@@ -346,11 +374,10 @@ final class CompanionModel {
             }
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, addPath: trimmed)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, addPath: trimmed)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func removeExcludedPath(_ path: String) async {
@@ -363,11 +390,10 @@ final class CompanionModel {
             snapshot?.storage = storage
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: saved.token, removePath: path)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, removePath: path)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func switchWindow(_ window: String) async {
@@ -375,11 +401,10 @@ final class CompanionModel {
             snapshot?.window = window
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, window: window)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, window: window)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func switchGrouping(_ grouping: String) async {
@@ -387,11 +412,10 @@ final class CompanionModel {
             snapshot?.grouping = grouping
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
-        do {
-            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, grouping: grouping)
-            await refresh()
-        } catch {}
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, grouping: grouping)
+            return (res.status == "ok", res.message)
+        }
     }
 
     func switchCpuScale(_ scale: String) async {
@@ -399,11 +423,40 @@ final class CompanionModel {
             snapshot?.cpuScale = scale
             return
         }
-        guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
+        await sendControl { endpoint, token in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale)
+            return (res.status == "ok", res.message)
+        }
+    }
+
+    /// Runs one edit on the Mac and refreshes.  A failure lands in
+    /// `controlError` for the dashboard to show, never in a silent catch.
+    private func sendControl(_ call: (_ endpoint: NWEndpoint, _ token: String) async throws -> (ok: Bool, message: String?)) async {
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            controlError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
         do {
-            _ = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: saved.token, cpuScale: scale)
+            let outcome = try await call(endpoint, saved.token)
+            if !outcome.ok {
+                controlError = outcome.message ?? "The Mac did not accept that change."
+            }
             await refresh()
-        } catch {}
+        } catch {
+            controlError = Self.describe(error)
+            await refresh()
+        }
+    }
+
+    /// A sentence for any error a control call can throw.
+    static func describe(_ error: Error) -> String {
+        if let known = error as? CompanionClientError, let text = known.errorDescription {
+            return text
+        }
+        if error is CancellationError {
+            return "The request was cancelled."
+        }
+        return "Could not reach the Mac.\u{00A0} Check that Hog Hunter is open and Share With iPhone is on."
     }
 
     func mac(for peerID: String) -> DiscoveredMac? {
@@ -620,9 +673,21 @@ final class CompanionModel {
         } catch CompanionClientError.forbidden(let reason) {
             cleanError = reason
             defaults?.set("Clean not allowed", forKey: "clean_status")
+        } catch CompanionClientError.rejected(let reason) {
+            // The Mac is already cleaning (409).  Its progress is on screen.
+            cleanError = reason
+            defaults?.set("Clean busy", forKey: "clean_status")
         } catch {
-            cleanError = "Could not start safe clean.  The Mac may be busy or unreachable."
-            defaults?.set("Clean failed", forKey: "clean_status")
+            // The reply can be lost while the Mac keeps cleaning: the phone
+            // slept, or the Wi-Fi blinked.  Look before calling it a failure.
+            await refresh()
+            if snapshot?.cleanProgress?.isCleaning == true {
+                cleanError = "Lost the connection while the Mac was cleaning.\u{00A0} It is still running; its progress shows here."
+                defaults?.set("Cleaning…", forKey: "clean_status")
+            } else {
+                cleanError = "Could not finish the clean.\u{00A0} \(Self.describe(error))"
+                defaults?.set("Clean failed", forKey: "clean_status")
+            }
         }
     }
 
@@ -794,6 +859,9 @@ final class CompanionModel {
                 uniqueRemoteHosts: 3,
                 sampleRemoteHosts: ["54.230.97.10:443", "3.220.12.91:443"]
             )
-        ]
+        ],
+        // Demo mode shows every control, the way a Mac with all opt-ins on does.
+        remoteQuitAllowed: true,
+        remoteCleanAllowed: true
     )
 }

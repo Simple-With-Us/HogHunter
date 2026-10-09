@@ -34,35 +34,41 @@ final class DiskCleanerStore: ObservableObject {
     @Published var showConfirmation: Bool = false
     @Published var selectedTier: CleanTier = .standard
     @Published var acknowledgedExtremeDisclaimer: Bool = false
-    @Published var exclusions: CleanerExclusions = CleanerExclusions.load()
+    @Published var exclusions: CleanerExclusions
+    /// Where exclusions live.  Tests pass a throwaway suite.
+    private let exclusionsDefaults: UserDefaults
+    /// A scan follows every exclusion edit.  Tests turn that off so they do
+    /// not walk the real disk.
+    private let rescanAfterExclusionChange: Bool
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
         return false
     }
 
+    /// Re-reads the stored exclusions.  The phone and the Settings window edit
+    /// the same value, so a copy loaded at launch goes stale.
+    func reloadExclusions() {
+        exclusions = CleanerExclusions.load(from: exclusionsDefaults)
+    }
+
     func toggleCategoryExclusion(_ category: CleanCategory) {
-        if exclusions.isCategoryExcluded(category) {
-            exclusions.excludedCategories.remove(category.rawValue)
-        } else {
-            exclusions.excludedCategories.insert(category.rawValue)
-        }
-        exclusions.save()
-        scan()
+        exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.toggleCategory(category) }
+        if rescanAfterExclusionChange { scan() }
     }
 
     func addExcludedPath(_ path: String) {
         let normalized = (path as NSString).standardizingPath
-        guard !normalized.isEmpty, !exclusions.excludedPaths.contains(normalized) else { return }
-        exclusions.excludedPaths.append(normalized)
-        exclusions.save()
-        scan()
+        guard !normalized.isEmpty else { return }
+        exclusions = CleanerExclusions.update(in: exclusionsDefaults) { current in
+            if !current.excludedPaths.contains(normalized) { current.excludedPaths.append(normalized) }
+        }
+        if rescanAfterExclusionChange { scan() }
     }
 
     func removeExcludedPath(_ path: String) {
-        exclusions.excludedPaths.removeAll { $0 == path }
-        exclusions.save()
-        scan()
+        exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.removePath(path) }
+        if rescanAfterExclusionChange { scan() }
     }
 
     let cleaner: DiskCleaner
@@ -77,9 +83,14 @@ final class DiskCleanerStore: ObservableObject {
     private var currentCleanId: UUID?
 
     init(cleaner: DiskCleaner = DiskCleaner(),
-         historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false)) {
+         historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
+         exclusionsDefaults: UserDefaults = CleanerExclusions.sharedDefaults,
+         rescanAfterExclusionChange: Bool = true) {
         self.cleaner = cleaner
         self.historyStore = historyStore
+        self.exclusionsDefaults = exclusionsDefaults
+        self.rescanAfterExclusionChange = rescanAfterExclusionChange
+        self.exclusions = CleanerExclusions.load(from: exclusionsDefaults)
         self.lastCleanup = historyStore.latestRecord()
     }
 
@@ -122,6 +133,7 @@ final class DiskCleanerStore: ObservableObject {
     /// Initiates a full disk clutter scan for the active tier.
     func scan() {
         cancelScan()
+        reloadExclusions()
         isScanInFlight = true
         let scanId = UUID()
         currentScanId = scanId
@@ -267,6 +279,10 @@ final class DiskCleanerStore: ObservableObject {
         currentCleanId = cleanId
 
         let currentTier = selectedTier
+        // The scan that produced these items may be older than an edit made
+        // from the phone or Settings.  `clean` re-filters against whatever it
+        // is handed, so hand it the stored value, not the launch-time copy.
+        reloadExclusions()
         let activeExclusions = exclusions
         let totalItems = max(1, itemsToClean.count)
         state = .cleaning(progress: 0, currentItem: "Preparing…")

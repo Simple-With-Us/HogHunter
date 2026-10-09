@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+iPhone companion, phone parity batch 1 (board `eb0efb86`), broken controls:
+
+- Quit and Tame show on a row only when the Mac owner has allowed them.  Before, the swipe and long-press actions appeared on every row and answered 403.  A long-press now says the controls are off.
+- The Network tab shows the Mac's busiest connections.  It was always empty because nothing fed it.  The Mac scans with `lsof` at most every 20 seconds, and only while a phone is polling.  When the scan cannot run, the tab says why instead of claiming there are no connections.
+- Every phone call to the Mac now ends.  Quit, tame, exclusions, and lookback or grouping changes give up after 8 seconds, and a connection stuck waiting for a route no longer hangs.  A change the Mac does not accept shows an alert instead of failing silently.  Error text reads as a sentence.
+- Cleaner exclusions are edited as one locked read-modify-write against the stored value, by the Mac panel, the Settings window, and the phone alike.  The panel used to keep a copy from launch and save it back, which undid an exclusion added from the phone.  It also reloads before it scans and before it cleans.
+- A phone-started clean no longer blocks the Mac's server queue for up to three minutes, so the phone's snapshot polls and the clean's progress keep flowing.  A second clean, from the phone or the Mac, is refused with a clear message.  The phone waits up to 16 minutes for the final reply and checks progress before calling a dropped connection a failure.
+- A blocked or failed tame answers 400 with the reason.  It answered 200, so the phone said "Priority Updated".
+
 Robotic Vacuum (Python and docs only; the Vacuum is not loaded on this Mac and nothing here installs it):
 
 - Worktree retirement and idle-lane build-folder cleanup now act on the fleet lane doctor's report instead of the old heuristics.  A lane is removed only when the doctor lists it as a cleaner candidate (merged PR matched by head sha, idle 7 days or more) and the Vacuum's own live re-check agrees right before removal.  HEAD must match the report.  No ignored entry other than regenerable build output may be present, and no ignored folder may hold a nested git repository.  No skip-worktree or assume-unchanged flag may be set, and no process may be inside.  There must be no keep marker.  Commits missing from every remote are accepted only on the reported branch, where the merged or closed PR covers that HEAD, and never on a detached HEAD.  Removal is `git worktree remove` without force.

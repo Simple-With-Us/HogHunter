@@ -149,6 +149,9 @@ final class HogStore: ObservableObject {
     @Published private(set) var activeCleanProgress: CompanionCleanProgress? = nil
     /// Unique run token identifying the current active clean operation.
     @Published private(set) var activeCleanRunId: UUID? = nil
+    /// True while a phone-requested clean is running, so a second request is
+    /// refused instead of starting a second clean.
+    private var remoteCleanInFlight = false
 
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
@@ -1252,11 +1255,15 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteTame(pid: pid, action: action)
         }
-        companionServer.onRemoteClean = { [weak self] in
+        companionServer.onRemoteClean = { [weak self] completion in
             guard let self else {
-                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+                completion((500, Data("{\"error\": \"Store unavailable\"}".utf8)))
+                return
             }
-            return self.performRemoteClean()
+            self.performRemoteClean(completion: completion)
+        }
+        companionServer.onSnapshotServed = { [weak self] in
+            self?.refreshCompanionNetworkIfStale()
         }
         companionServer.onRemoteExclusionsUpdate = { [weak self] req in
             guard let self else {
@@ -1357,17 +1364,20 @@ final class HogStore: ObservableObject {
     }
 
     private func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {
-        var current = CleanerExclusions.load()
-        if let catId = req.toggleCategory, let cat = CleanCategory(rawValue: catId) {
-            current.toggleCategory(cat)
+        // One locked read-modify-write against the stored value.  The Mac
+        // panel and Settings edit the same value, so a copy loaded earlier
+        // would undo their changes when saved.
+        let current = CleanerExclusions.update { current in
+            if let catId = req.toggleCategory, let cat = CleanCategory(rawValue: catId) {
+                current.toggleCategory(cat)
+            }
+            if let path = req.addPath, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                current.addPath(path)
+            }
+            if let path = req.removePath {
+                current.removePath(path)
+            }
         }
-        if let path = req.addPath, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            current.addPath(path)
-        }
-        if let path = req.removePath {
-            current.removePath(path)
-        }
-        current.save()
         DispatchQueue.main.async { [weak self] in
             self?.publishCompanion()
         }
@@ -1430,23 +1440,37 @@ final class HogStore: ObservableObject {
         return (200, data)
     }
 
-    private func performRemoteTame(pid: pid_t, action: String) -> (status: Int, body: Data) {
+    func performRemoteTame(pid: pid_t, action: String) -> (status: Int, body: Data) {
         let isTame = action.lowercased() == "tame"
         let result = isTame ? ProcessControl.tame(pid: pid) : ProcessControl.untame(pid: pid)
         let isNowTamed = ProcessControl.isTamed(pid: pid)
+        let acted = result.outcome.isAction
+        var errorText: String? = nil
+        switch result.outcome {
+        case .asked, .forced:
+            break
+        case .changed:
+            errorText = "\(result.name) is no longer running or changed PID."
+        case .blocked(let reason):
+            errorText = "Cannot \(isTame ? "tame" : "restore") \(result.name): \(reason)."
+        case .failed(let reason):
+            errorText = "Failed to \(isTame ? "tame" : "restore") \(result.name): \(reason)."
+        }
         let response = CompanionTameResponse(
-            status: result.outcome.isAction ? "ok" : "blocked",
+            status: acted ? "ok" : "blocked",
             pid: pid,
             name: result.name,
             isTamed: isNowTamed,
-            message: result.outcome.isAction ? (isTame ? "Process tamed" : "Process restored") : "Action blocked",
-            error: nil
+            message: acted ? (isTame ? "Process tamed" : "Process restored") : nil,
+            error: errorText
         )
         let data = (try? JSONEncoder().encode(response)) ?? Data()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.tick()
         }
-        return (200, data)
+        // 400, not 200, when nothing happened: the phone must not show
+        // "Priority Updated" for a blocked or failed request.
+        return (acted ? 200 : 400, data)
     }
 
     private func performRemoteQuit(pid: pid_t, force: Bool) -> (status: Int, body: Data) {
@@ -1485,145 +1509,156 @@ final class HogStore: ObservableObject {
         return (500, Data("{\"error\": \"Failed to encode response\"}".utf8))
     }
 
-    nonisolated private func performRemoteClean() -> (status: Int, body: Data) {
+    /// Starts a phone-requested clean and calls `completion` once, when it
+    /// has finished.  It returns at once: the server queue also answers the
+    /// phone's snapshot polls, and a clean can run for minutes.  Progress
+    /// reaches the phone through the snapshot's `cleanProgress`.
+    nonisolated private func performRemoteClean(completion: @escaping @Sendable (CompanionServer.Reply) -> Void) {
+        Task { @MainActor [weak self] in
+            guard let self else {
+                completion((500, Data("{\"error\": \"Store unavailable\"}".utf8)))
+                return
+            }
+            completion(await self.runRemoteClean())
+        }
+    }
+
+    /// The reply that refuses a phone's clean request, or nil to go ahead.
+    /// One clean at a time, whoever started it.
+    nonisolated static func cleanRefusal(remoteInFlight: Bool, macIsCleaning: Bool) -> CompanionServer.Reply? {
+        guard remoteInFlight || macIsCleaning else { return nil }
+        let body = #"{"status":"busy","error":"A clean is already running on this Mac.\u00a0 Watch its progress in the app."}"#
+        return (409, Data(body.utf8))
+    }
+
+    @MainActor
+    private func runRemoteClean() async -> CompanionServer.Reply {
+        if let refusal = Self.cleanRefusal(remoteInFlight: remoteCleanInFlight, macIsCleaning: activeCleanProgress?.isCleaning == true) {
+            return refusal
+        }
+        remoteCleanInFlight = true
+        defer { remoteCleanInFlight = false }
+
         let runId = UUID()
         let cleaner = DiskCleaner()
         let exclusions = CleanerExclusions.load()
-        let semaphore = DispatchSemaphore(value: 0)
-        var resultData: Data = Data("{}".utf8)
+
+        activeCleanRunId = runId
+        activeCleanProgress = CompanionCleanProgress(
+            isCleaning: true,
+            phase: "scanning",
+            progress: 0.05,
+            statusText: "Scanning Mac clutter…",
+            currentItem: nil,
+            itemsCleaned: 0,
+            totalItems: 0,
+            bytesReclaimed: 0,
+            formattedBytesReclaimed: "0 B",
+            snapshotName: nil,
+            error: nil
+        )
+        publishCompanion()
+
+        let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
+        let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
+        let totalItems = max(1, itemsToClean.count)
+
+        activeCleanRunId = runId
+        activeCleanProgress = CompanionCleanProgress(
+            isCleaning: true,
+            phase: "snapshot",
+            progress: 0.15,
+            statusText: "Creating APFS safety snapshot…",
+            currentItem: nil,
+            itemsCleaned: 0,
+            totalItems: totalItems,
+            bytesReclaimed: 0,
+            formattedBytesReclaimed: "0 B",
+            snapshotName: nil,
+            error: nil
+        )
+        publishCompanion()
+
+        let cleanResult = await cleaner.clean(
+            items: itemsToClean,
+            tier: .standard,
+            createSnapshot: true,
+            exclusions: exclusions,
+            progress: makeRemoteCleanReporter(runId: runId, totalItems: totalItems)
+        )
+
+        let responseObj = CompanionCleanResponse(
+            status: "completed",
+            bytesReclaimed: cleanResult.bytesReclaimed,
+            formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+            itemsRemoved: cleanResult.itemsRemoved,
+            snapshotCreated: cleanResult.snapshotName != nil,
+            snapshotName: cleanResult.snapshotName,
+            tier: cleanResult.tier.title
+        )
+        let resultData = (try? JSONEncoder().encode(responseObj)) ?? Data("{}".utf8)
+
+        activeCleanRunId = runId
+        activeCleanProgress = CompanionCleanProgress(
+            isCleaning: false,
+            phase: "completed",
+            progress: 1.0,
+            statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
+            currentItem: nil,
+            itemsCleaned: cleanResult.itemsRemoved,
+            totalItems: totalItems,
+            bytesReclaimed: cleanResult.bytesReclaimed,
+            formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
+            snapshotName: cleanResult.snapshotName,
+            error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
+        )
+        publishCompanion()
 
         Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
             guard let self else { return }
-            self.activeCleanRunId = runId
-            self.activeCleanProgress = CompanionCleanProgress(
-                isCleaning: true,
-                phase: "scanning",
-                progress: 0.05,
-                statusText: "Scanning Mac clutter…",
-                currentItem: nil,
-                itemsCleaned: 0,
-                totalItems: 0,
-                bytesReclaimed: 0,
-                formattedBytesReclaimed: "0 B",
-                snapshotName: nil,
-                error: nil
-            )
-            self.publishCompanion()
+            // Only clear the run that scheduled this timer.
+            if self.activeCleanRunId == runId {
+                self.activeCleanProgress = nil
+                self.activeCleanRunId = nil
+                self.publishCompanion()
+            }
         }
+        return (200, resultData)
+    }
 
-        Task {
-            defer { semaphore.signal() }
-            let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
-            let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
-            let totalItems = max(1, itemsToClean.count)
-
-            await MainActor.run { [weak self] in
+    /// Builds the progress callback outside the main actor, so the cleaner can
+    /// call it from its own thread.  Throttled to a few updates a second.
+    nonisolated private func makeRemoteCleanReporter(runId: UUID, totalItems: Int) -> (Double, String) -> Void {
+        var lastReportedTime = Date.distantPast
+        var lastReportedFraction: Double = -1.0
+        return { [weak self] fraction, itemTitle in
+            let now = Date()
+            let isMilestone = itemTitle.contains("snapshot") || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
+            guard isMilestone else { return }
+            lastReportedFraction = fraction
+            lastReportedTime = now
+            let scaled = 0.15 + (fraction * 0.8)
+            let itemsCleaned = Int(fraction * Double(totalItems))
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.activeCleanRunId = runId
                 self.activeCleanProgress = CompanionCleanProgress(
                     isCleaning: true,
-                    phase: "snapshot",
-                    progress: 0.15,
-                    statusText: "Creating APFS safety snapshot…",
-                    currentItem: nil,
-                    itemsCleaned: 0,
+                    phase: fraction >= 1.0 ? "finishing" : "cleaning",
+                    progress: scaled,
+                    statusText: itemTitle.contains("snapshot") ? itemTitle : "Cleaning \(itemTitle)…",
+                    currentItem: itemTitle,
+                    itemsCleaned: itemsCleaned,
                     totalItems: totalItems,
                     bytesReclaimed: 0,
-                    formattedBytesReclaimed: "0 B",
+                    formattedBytesReclaimed: "…",
                     snapshotName: nil,
                     error: nil
                 )
                 self.publishCompanion()
             }
-
-            var lastReportedTime = Date.distantPast
-            var lastReportedFraction: Double = -1.0
-
-            let cleanResult = await cleaner.clean(
-                items: itemsToClean,
-                tier: .standard,
-                createSnapshot: true,
-                exclusions: exclusions
-            ) { fraction, itemTitle in
-                let now = Date()
-                let isMilestone = itemTitle.contains("snapshot") || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
-                if isMilestone {
-                    lastReportedFraction = fraction
-                    lastReportedTime = now
-                    let scaled = 0.15 + (fraction * 0.8)
-                    let itemsCleaned = Int(fraction * Double(totalItems))
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.activeCleanRunId = runId
-                        self.activeCleanProgress = CompanionCleanProgress(
-                            isCleaning: true,
-                            phase: fraction >= 1.0 ? "finishing" : "cleaning",
-                            progress: scaled,
-                            statusText: itemTitle.contains("snapshot") ? itemTitle : "Cleaning \(itemTitle)…",
-                            currentItem: itemTitle,
-                            itemsCleaned: itemsCleaned,
-                            totalItems: totalItems,
-                            bytesReclaimed: 0,
-                            formattedBytesReclaimed: "…",
-                            snapshotName: nil,
-                            error: nil
-                        )
-                        self.publishCompanion()
-                    }
-                }
-            }
-
-            let responseObj = CompanionCleanResponse(
-                status: "completed",
-                bytesReclaimed: cleanResult.bytesReclaimed,
-                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
-                itemsRemoved: cleanResult.itemsRemoved,
-                snapshotCreated: cleanResult.snapshotName != nil,
-                snapshotName: cleanResult.snapshotName,
-                tier: cleanResult.tier.title
-            )
-            if let encoded = try? JSONEncoder().encode(responseObj) {
-                resultData = encoded
-            }
-
-            let completedProgress = CompanionCleanProgress(
-                isCleaning: false,
-                phase: "completed",
-                progress: 1.0,
-                statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
-                currentItem: nil,
-                itemsCleaned: cleanResult.itemsRemoved,
-                totalItems: totalItems,
-                bytesReclaimed: cleanResult.bytesReclaimed,
-                formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
-                snapshotName: cleanResult.snapshotName,
-                error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
-            )
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.activeCleanRunId = runId
-                self.activeCleanProgress = completedProgress
-                self.publishCompanion()
-            }
-
-            Task {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    // Only clear the run that scheduled this timer.
-                    if self.activeCleanRunId == runId {
-                        self.activeCleanProgress = nil
-                        self.activeCleanRunId = nil
-                        self.publishCompanion()
-                    }
-                }
-            }
         }
-        let waitResult = semaphore.wait(timeout: .now() + 180)
-        if waitResult == .timedOut {
-            return (504, Data("{\"error\": \"Clean operation timed out\"}".utf8))
-        }
-        return (status: 200, body: resultData)
     }
 
     // MARK: - iPhone companion
@@ -1648,6 +1683,7 @@ final class HogStore: ObservableObject {
             companionStatus = "Off"
             companionTopAppsRefreshTask?.cancel()
             companionTopAppsRefreshTask = nil
+            CompanionNetworkCache.shared.reset()
             return
         }
         companionStatus = "Starting"
@@ -1685,9 +1721,19 @@ final class HogStore: ObservableObject {
 
     private var companionTopAppsRefreshTask: Task<Void, Never>?
 
+    /// Asks the network cache for a fresh scan when its copy is stale.  Called
+    /// on the server queue each time a phone fetches a snapshot, so `lsof`
+    /// runs only while someone is looking at the Network tab's data.
+    nonisolated private func refreshCompanionNetworkIfStale() {
+        CompanionNetworkCache.shared.refreshIfStale(completion: { [weak self] in
+            Task { @MainActor [weak self] in self?.publishCompanion() }
+        })
+    }
+
     private func publishCompanion() {
         guard shareWithIPhone else { return }
         let sampledAt = pulse.sampledAt == .distantPast ? Date() : pulse.sampledAt
+        let networkScan = CompanionNetworkCache.shared.current
         let snapshot = CompanionSnapshotBuilder.make(
             hostName: companionDisplayName,
             sampledAt: sampledAt,
@@ -1697,6 +1743,8 @@ final class HogStore: ObservableObject {
             scale: cpuScale,
             pulse: pulse,
             rows: rows,
+            network: networkScan.rows,
+            networkNote: networkScan.note,
             cleanProgress: activeCleanProgress,
             remoteQuitAllowed: allowRemoteQuit,
             remoteCleanAllowed: allowRemoteClean
