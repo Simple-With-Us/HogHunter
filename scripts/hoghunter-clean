@@ -164,6 +164,18 @@ def budget_left() -> float:
     return max(0.0, _DEADLINE - time.monotonic())
 
 
+# A heavy candidate (a tree, a snapshot, a brew run) is not started with less than this left.  Starting
+# `brew cleanup` with 5 s in hand and killing it half done helps nobody; the next run starts it with a fresh budget.
+MIN_HEAVY_START_SEC = 30.0
+
+
+def op_timeout(default: float) -> float:
+    """The timeout for one apply-time command: its usual limit, cut to what is left of the budget (never under
+    5 s).  Every subprocess an apply step starts takes its timeout from here, so none can run past the budget by
+    more than a few seconds and into the caller's hard stop."""
+    return min(float(default), max(5.0, budget_left()))
+
+
 # --------------------------------------------------------------------------
 # Result types
 # --------------------------------------------------------------------------
@@ -437,7 +449,7 @@ def apply_delete(path: str, known_bytes: int | None = None) -> tuple[int, str]:
             # dirs.  Do NOT use `rm -rf` -- mavis-trash swallows it.
             subprocess.run(
                 ["/usr/bin/find", str(p), "-depth", "-delete"],
-                capture_output=True, timeout=min(600.0, max(5.0, budget_left())),
+                capture_output=True, timeout=op_timeout(600),
             )
         else:
             p.unlink()
@@ -541,10 +553,10 @@ def apply_snapshot_delete(name: str) -> tuple[int, str]:
     the Data volume's free space held against the container.
     """
     out = _run(["/usr/bin/tmutil", "deletelocalsnapshots",
-                snapshot_timestamp(name)], timeout=120)
+                snapshot_timestamp(name)], timeout=op_timeout(120))
     if "Deleted local snapshot" in out or "Deleted snapshot" in out:
         return 0, ""
-    remaining = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=60)
+    remaining = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=op_timeout(60))
     if name not in remaining:
         return 0, ""
     # Surface WHY.  A bare "delete did not take effect" cost a wake cycle on
@@ -1181,7 +1193,7 @@ def apply_candidate(c: Candidate) -> None:
         elif c.op == "snapshot-delete":
             freed, err = apply_snapshot_delete(c.path.split(":", 1)[1])
         elif c.op == "brew-cleanup":
-            _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=600)
+            _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=op_timeout(600))
             freed, err = 0, ""
         else:
             return
@@ -1319,9 +1331,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 break
             applied_here = 0
             for c in batch:
-                if budget_left() <= 0:
+                left = budget_left()
+                if left <= 0:
                     budget_exhausted = True
                     break
+                if not is_light(c) and left < MIN_HEAVY_START_SEC:
+                    budget_exhausted = True  # too little time to start this one; a light item may still fit
+                    continue
                 apply_candidate(c)
                 attempted += 1
                 applied_here += 1

@@ -224,10 +224,11 @@ def test_budget_is_unlimited_without_the_flag_and_counts_down_with_it(hh):
 
 
 def run_main(hh, argv, cands, band, clock, apply_cost=0.0):
-    """Run main() against a canned scan.  apply_candidate marks the candidate applied and costs apply_cost
-    seconds of fake time.  Returns (exit code, parsed JSON, stderr text)."""
+    """Run main() against a canned scan.  apply_candidate marks the candidate applied; a heavy one costs apply_cost
+    seconds of fake time and a light one nothing.  Returns (exit code, parsed JSON, stderr text)."""
     def fake_apply(c):
-        clock.now += apply_cost
+        if not hh.is_light(c):
+            clock.now += apply_cost
         c.applied = True
 
     out, err = io.StringIO(), io.StringIO()
@@ -353,6 +354,50 @@ def test_apply_delete_trusts_the_size_the_scan_measured(hh):
         assert not f.exists()
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_every_apply_time_command_is_cut_to_the_budget(hh):
+    """find had the cut; brew cleanup (600 s) and the tmutil calls (120 s + 60 s) did not, so a candidate that
+    started with seconds left could outlive the engine's hard stop and turn a partial run into a kill."""
+    clock = FakeClock()
+    seen = []
+
+    def fake_run(cmd, timeout=20):
+        seen.append((cmd[0].rsplit("/", 1)[-1], timeout))
+        return ""
+
+    brew = hh.Candidate(category="brew", path="/opt/homebrew", bytes=0, reason="b", op="brew-cleanup")
+    snap = hh.Candidate(category="snapshots", op="snapshot-delete", tier="semi-safe", bytes=0, reason="s",
+                        path="apfs-snapshot:com.apple.TimeMachine.2026-10-09-010101.local")
+    with fake_time(hh, clock), mock.patch.object(hh, "_run", side_effect=fake_run):
+        hh.set_budget(0)
+        hh.apply_candidate(brew)
+        hh.apply_candidate(snap)
+        assert seen == [("brew", 600), ("tmutil", 120), ("tmutil", 60)], seen
+        seen.clear()
+        hh.set_budget(40)
+        clock.now += 10
+        hh.apply_candidate(brew)
+        hh.apply_candidate(snap)
+        assert [t for _n, t in seen] == [30.0, 30.0, 30.0], seen
+        seen.clear()
+        clock.now += 29
+        hh.apply_candidate(brew)
+        assert seen == [("brew", 5.0)], "never under the 5 s floor"
+
+
+def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh):
+    """Two heavy items and three markers, budget 100, the first heavy costs 80 s.  The second heavy needs 30 s
+    to start and has 20, so it waits for the next run; the markers are quick and still go."""
+    clock = FakeClock()
+    cands = [heavy(hh, 1, 900 * 1024 * 1024), heavy(hh, 2, 800 * 1024 * 1024)] + [marker(hh, i) for i in range(3)]
+    _code, report, _err = run_main(hh, ["--clean", "--json", "--budget-sec=100"], cands, calm_band(hh, chunk_size=3),
+                                   clock, apply_cost=80.0)
+    applied = {c["path"] for c in report["candidates"] if c["applied"]}
+    assert "/c/cache1" in applied and "/c/cache2" not in applied, applied
+    assert sum(1 for p in applied if "codex" in p) == 3
+    assert report["applied_count"] == 4 and report["remaining_count"] == 1
+    assert report["budget_exhausted"] is True
 
 
 def completed(code, out=""):

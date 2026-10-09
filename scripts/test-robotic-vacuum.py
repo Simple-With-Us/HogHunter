@@ -577,12 +577,14 @@ class TestRunOutcome(unittest.TestCase):
             self.assertTrue(cleaned)
             self.assertEqual((record.exit_code, record.outcome), expected, statuses)
 
-    def test_partial_run_does_not_post_the_run_failed_alert_but_failed_does(self):
-        """The decision, written down: a partial run keeps its failed step on the record and in the UI, and only
-        a run where nothing worked posts the banner."""
+    def test_the_run_failed_banner_follows_failed_steps_so_a_partial_run_still_speaks(self):
+        """The decision, written down: a partial run exits 0 and is not a failed run, but a step that fails
+        every time must not go quiet, so the banner (whose text says "failed step(s)") is keyed on the steps.
+        A run with no failed step stays silent."""
         for steps, expect_alert in (
-            ([_step("a", StepStatus.RAN), _step("b", StepStatus.FAILED)], False),
+            ([_step("a", StepStatus.RAN), _step("b", StepStatus.FAILED)], True),
             ([_step("a", StepStatus.SKIPPED), _step("b", StepStatus.FAILED)], True),
+            ([_step("a", StepStatus.RAN), _step("b", StepStatus.SKIPPED)], False),
         ):
             with tempfile.TemporaryDirectory() as td:
                 home = Path(td)
@@ -729,10 +731,21 @@ class TestRunInOwnGroup(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertLess(time.time() - started, 30)
         grandchild = int(out.split()[0])
-        for _ in range(50):
+
+        def alive(pid: int) -> bool:
+            # kill(pid, 0) succeeds on a zombie, which a container without an init never reaps.
             try:
-                os.kill(grandchild, 0)
+                os.kill(pid, 0)
             except ProcessLookupError:
+                return False
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                    return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+            except (OSError, IndexError):
+                return True
+
+        for _ in range(50):
+            if not alive(grandchild):
                 break
             time.sleep(0.1)
         else:

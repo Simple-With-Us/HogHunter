@@ -6,7 +6,7 @@ Robotic Vacuum full runs (board `4ea933f0`, issue 111):
 
 - A reclaim sweep no longer runs for hours.  `hoghunter-clean` cuts its work into slots by weight, so 1,710 tiny files are 3 chunks instead of 570 chunks with a sleep after each, and it takes `--budget-sec` so the Vacuum gets a finished report instead of a kill at 900 seconds.  What it did not reach is found again by the next run.
 - The Spotlight journals step reports "needs Full Disk Access" as a skip, and no longer restarts the Spotlight services before it fails.
-- A run where one step failed and another did its work is `partial` (exit 0) instead of `failed`.  The failed step stays marked on the run.
+- A run where one step failed and another did its work is `partial` (exit 0) instead of `failed`.  The failed step stays marked on the run, and the run-failed banner still names it.
 - Reclaim, Grok sessions, Antigravity brain, test databases, PM2 logs and the Spotlight step now count the bytes they remove, so "bytes freed" is no longer 0 after a good run.
 - The cleaner reads a pgrep or lsof that fails as "busy", not as "nothing running".
 
