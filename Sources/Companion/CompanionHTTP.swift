@@ -8,8 +8,8 @@ enum CompanionHTTP {
         body: Data,
         token: String,
         cleanHandler: ((String) -> (status: Int, body: Data))? = nil,
-        quitHandler: ((_ pid: pid_t, _ force: Bool) -> (status: Int, body: Data))? = nil,
-        tameHandler: ((_ pid: pid_t, _ action: String) -> (status: Int, body: Data))? = nil,
+        quitHandler: ((_ request: CompanionProcessRequest, _ force: Bool) -> (status: Int, body: Data))? = nil,
+        tameHandler: ((_ request: CompanionProcessRequest, _ action: String) -> (status: Int, body: Data))? = nil,
         exclusionsHandler: ((CompanionExclusionsUpdateRequest) -> (status: Int, body: Data))? = nil,
         viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil
     ) -> Data {
@@ -62,33 +62,17 @@ enum CompanionHTTP {
             guard let quitHandler else {
                 return message(status: 501, reason: "Not Implemented", body: Data("Quit Not Configured".utf8))
             }
-            var targetPid: pid_t? = nil
             var isForce = false
-            if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
-                for param in query.split(separator: "&") {
-                    let kv = param.split(separator: "=", maxSplits: 1)
-                    if kv.count == 2 {
-                        let k = String(kv[0])
-                        let v = String(kv[1])
-                        if k == "pid", let p = Int32(v) { targetPid = p }
-                        if k == "force" { isForce = (v.lowercased() == "true" || v == "1") }
-                    }
-                }
+            let processRequest = parseProcessRequest(fullPath: fullPath, request: request) { key, value in
+                if key == "force" { isForce = (value.lowercased() == "true" || value == "1") }
+            } bodyField: { json in
+                if let f = json["force"] as? Bool { isForce = f }
             }
-            if targetPid == nil, let range = request.range(of: Data("\r\n\r\n".utf8)) {
-                let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
-                if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                    if let p = json["pid"] as? Int { targetPid = Int32(p) }
-                    else if let p = json["pid"] as? Int32 { targetPid = p }
-                    if let f = json["force"] as? Bool { isForce = f }
-                }
+            guard processRequest.isAddressed else {
+                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing row or pid parameter\"}".utf8), type: "application/json; charset=utf-8")
             }
-            guard let pid = targetPid else {
-                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing pid parameter\"}".utf8), type: "application/json; charset=utf-8")
-            }
-            let (code, resBody) = quitHandler(pid, isForce)
-            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+            let (code, resBody) = quitHandler(processRequest, isForce)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.tamePath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -96,33 +80,17 @@ enum CompanionHTTP {
             guard let tameHandler else {
                 return message(status: 501, reason: "Not Implemented", body: Data("Tame Not Configured".utf8))
             }
-            var targetPid: pid_t? = nil
             var action = "tame"
-            if fullPath.contains("?") {
-                let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
-                for param in query.split(separator: "&") {
-                    let kv = param.split(separator: "=", maxSplits: 1)
-                    if kv.count == 2 {
-                        let k = String(kv[0])
-                        let v = String(kv[1])
-                        if k == "pid", let p = Int32(v) { targetPid = p }
-                        if k == "action" { action = v }
-                    }
-                }
+            let processRequest = parseProcessRequest(fullPath: fullPath, request: request) { key, value in
+                if key == "action" { action = value }
+            } bodyField: { json in
+                if let a = json["action"] as? String { action = a }
             }
-            if targetPid == nil, let range = request.range(of: Data("\r\n\r\n".utf8)) {
-                let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
-                if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                    if let p = json["pid"] as? Int { targetPid = Int32(p) }
-                    else if let p = json["pid"] as? Int32 { targetPid = p }
-                    if let a = json["action"] as? String { action = a }
-                }
+            guard processRequest.isAddressed else {
+                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing row or pid parameter\"}".utf8), type: "application/json; charset=utf-8")
             }
-            guard let pid = targetPid else {
-                return message(status: 400, reason: "Bad Request", body: Data("{\"error\": \"Missing pid parameter\"}".utf8), type: "application/json; charset=utf-8")
-            }
-            let (code, resBody) = tameHandler(pid, action)
-            return message(status: code, reason: code == 200 ? "OK" : "Error", body: resBody, type: "application/json; charset=utf-8")
+            let (code, resBody) = tameHandler(processRequest, action)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.exclusionsPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -311,9 +279,44 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func quitRequest(token: String, pid: Int32, force: Bool = false) -> Data {
+    /// Reads which process or app a quit or tame request addresses, from the
+    /// query string first and the JSON body second.  `extraQuery` and
+    /// `bodyField` let each route pick up its own parameters in the same pass.
+    private static func parseProcessRequest(
+        fullPath: String,
+        request: Data,
+        extraQuery: (_ key: String, _ value: String) -> Void,
+        bodyField: (_ json: [String: Any]) -> Void
+    ) -> CompanionProcessRequest {
+        var result = CompanionProcessRequest()
+        if fullPath.contains("?") {
+            let query = String(fullPath.split(separator: "?", maxSplits: 1)[1])
+            for param in query.split(separator: "&") {
+                let kv = param.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                let k = String(kv[0])
+                let v = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                if k == "pid", let p = Int32(v) { result.pid = p }
+                if k == "row" { result.rowId = v }
+                extraQuery(k, v)
+            }
+        }
+        if !result.isAddressed, let range = request.range(of: Data("\r\n\r\n".utf8)) {
+            let bodyData = request.subdata(in: range.upperBound..<request.endIndex)
+            if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                if let p = json["pid"] as? Int { result.pid = Int32(truncatingIfNeeded: p) }
+                if let r = json["row"] as? String { result.rowId = r }
+                bodyField(json)
+            }
+        }
+        if result.rowId?.isEmpty == true { result.rowId = nil }
+        return result
+    }
+
+    static func quitRequest(token: String, pid: Int32, rowId: String? = nil, force: Bool = false) -> Data {
+        let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
-            "POST \(CompanionService.quitPath)?pid=\(pid)&force=\(force) HTTP/1.1",
+            "POST \(CompanionService.quitPath)?pid=\(pid)\(rowParam)&force=\(force) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",
@@ -323,9 +326,10 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func tameRequest(token: String, pid: Int32, action: String = "tame") -> Data {
+    static func tameRequest(token: String, pid: Int32, rowId: String? = nil, action: String = "tame") -> Data {
+        let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
-            "POST \(CompanionService.tamePath)?pid=\(pid)&action=\(action) HTTP/1.1",
+            "POST \(CompanionService.tamePath)?pid=\(pid)\(rowParam)&action=\(queryAllowedValue(action)) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",

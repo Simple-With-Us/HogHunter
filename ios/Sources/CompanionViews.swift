@@ -504,9 +504,9 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button(isForceQuit ? "Force Quit" : "Quit", role: .destructive) {
-                if let row = pendingQuitRow, let pid = row.pid {
+                if let row = pendingQuitRow, row.pid != nil {
                     Task {
-                        let res = await model.quitProcess(pid: pid, force: isForceQuit)
+                        let res = await model.quitProcess(row: row, force: isForceQuit)
                         lastQuitResult = res
                         showQuitResultAlert = true
                     }
@@ -524,10 +524,10 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button(pendingTameAction == "untame" ? "Restore Priority" : "Tame App (Lower Priority)") {
-                if let row = pendingTameRow, let pid = row.pid {
+                if let row = pendingTameRow, row.pid != nil {
                     let action = pendingTameAction
                     Task {
-                        let res = await model.tameProcess(pid: pid, action: action)
+                        let res = await model.tameProcess(row: row, action: action)
                         lastTameOutcome = (action, res)
                         showTameResultAlert = true
                     }

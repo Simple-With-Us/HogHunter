@@ -2,9 +2,11 @@ import AppKit
 import Darwin
 import Foundation
 
-/// Quitting a process, deliberately.  Every member is re-checked against the
-/// live process table at the moment of the quit, so a pid that was recycled
-/// between the last sample and the click is never signalled.
+/// Quitting or taming a process, deliberately.  Every member is re-checked
+/// against the live process table at the moment of the action, so a pid that
+/// was recycled between the last sample and the click is never signalled.
+/// There is deliberately no entry point that takes a bare pid: the check needs
+/// the start time the member was sampled with.
 enum ProcessControl {
     /// Processes that keep the desktop alive.  Quitting any of these is a bad
     /// day, so the button is never offered for them.
@@ -70,13 +72,15 @@ enum ProcessControl {
 
     struct QuitOutcome {
         var results: [MemberResult]
+        /// What was done, for messages: "quit", "tamed", or "restored".
+        var pastTense = "quit"
 
         var actedOn: Int { results.filter { $0.outcome.isAction }.count }
 
         /// A one-line explanation for the panel, or nil when everything worked.
         var message: String? {
             if results.isEmpty {
-                return "That hog is only in history.  Switch to Now to quit a live process."
+                return "That hog is only in history.  Switch to Now to act on a live process."
             }
             var reasons: [String] = []
             for result in results {
@@ -90,38 +94,23 @@ enum ProcessControl {
             guard !reasons.isEmpty else { return nil }
             let listed = reasons.prefix(3).joined(separator: ", ")
             let extra = reasons.count > 3 ? ", and \(reasons.count - 3) more" : ""
-            if actedOn == 0 { return "Nothing was quit: \(listed)\(extra)." }
-            return "Quit \(actedOn), skipped \(listed)\(extra)."
+            if actedOn == 0 { return "Nothing was \(pastTense): \(listed)\(extra)." }
+            return "\(pastTense.capitalized) \(actedOn), skipped \(listed)\(extra)."
         }
     }
 
     /// Asks every live member of `row` to quit, or kills it when `force`.
     static func quit(_ row: HogRow, force: Bool) -> QuitOutcome {
-        var results: [MemberResult] = []
-        for member in row.keys {
-            let name = currentName(member.pid) ?? row.name
-            guard identityMatches(member) else {
-                results.append(MemberResult(key: member, name: name, outcome: .changed))
-                continue
-            }
-            let uid = currentUid(member.pid) ?? uid_t.max
-            if let reason = blockReason(pid: member.pid, uid: uid, name: name) {
-                results.append(MemberResult(key: member, name: name, outcome: .blocked(reason)))
-                continue
-            }
-            results.append(MemberResult(key: member, name: name, outcome: send(to: member.pid, force: force)))
-        }
-        return QuitOutcome(results: results)
+        quit(members: row.keys, fallbackName: row.name, force: force)
     }
 
-    /// Quits a single process by PID after checking block reasons and ownership.
-    static func quit(pid: pid_t, force: Bool) -> MemberResult {
-        let name = currentName(pid) ?? "PID \(pid)"
-        let uid = currentUid(pid) ?? uid_t.max
-        if let reason = blockReason(pid: pid, uid: uid, name: name) {
-            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+    /// Asks every live member to quit, or kills it when `force`.  A member
+    /// whose pid now belongs to a different process is reported as changed
+    /// and left alone.
+    static func quit(members: [ProcessKey], fallbackName: String, force: Bool) -> QuitOutcome {
+        apply(to: members, fallbackName: fallbackName, pastTense: "quit") { pid in
+            send(to: pid, force: force)
         }
-        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: send(to: pid, force: force))
     }
 
     // MARK: - Process Priority & Taming
@@ -136,32 +125,50 @@ enum ProcessControl {
         return darwinBg == 1
     }
 
-    /// Throttles a process to background QoS and nice level 20.
+    /// Throttles every live member to background QoS and nice level 20.
     @discardableResult
-    static func tame(pid: pid_t) -> MemberResult {
-        let name = currentName(pid) ?? "PID \(pid)"
-        let uid = currentUid(pid) ?? uid_t.max
-        if let reason = blockReason(pid: pid, uid: uid, name: name) {
-            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+    static func tame(members: [ProcessKey], fallbackName: String) -> QuitOutcome {
+        apply(to: members, fallbackName: fallbackName, pastTense: "tamed") { pid in
+            _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), PRIO_DARWIN_BG)
+            let res = setpriority(PRIO_PROCESS, id_t(pid), 20)
+            return res == 0 ? .asked : .failed(String(cString: strerror(errno)))
         }
-        _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), PRIO_DARWIN_BG)
-        let res = setpriority(PRIO_PROCESS, id_t(pid), 20)
-        let outcome: Outcome = res == 0 ? .asked : .failed(String(cString: strerror(errno)))
-        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: outcome)
     }
 
-    /// Restores standard scheduling priority to a previously tamed process.
+    /// Restores standard scheduling priority to every live member.
     @discardableResult
-    static func untame(pid: pid_t) -> MemberResult {
-        let name = currentName(pid) ?? "PID \(pid)"
-        let uid = currentUid(pid) ?? uid_t.max
-        if let reason = blockReason(pid: pid, uid: uid, name: name) {
-            return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: .blocked(reason))
+    static func untame(members: [ProcessKey], fallbackName: String) -> QuitOutcome {
+        apply(to: members, fallbackName: fallbackName, pastTense: "restored") { pid in
+            _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), 0)
+            let res = setpriority(PRIO_PROCESS, id_t(pid), 0)
+            return res == 0 ? .asked : .failed(String(cString: strerror(errno)))
         }
-        _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), 0)
-        let res = setpriority(PRIO_PROCESS, id_t(pid), 0)
-        let outcome: Outcome = res == 0 ? .asked : .failed(String(cString: strerror(errno)))
-        return MemberResult(key: ProcessKey(pid: pid, startTime: 0), name: name, outcome: outcome)
+    }
+
+    /// The one place an action reaches a process.  Per member: the pid must
+    /// still be the process that was sampled, then the block rules apply,
+    /// then the action runs.
+    private static func apply(
+        to members: [ProcessKey],
+        fallbackName: String,
+        pastTense: String,
+        _ action: (pid_t) -> Outcome
+    ) -> QuitOutcome {
+        var results: [MemberResult] = []
+        for member in members {
+            let name = currentName(member.pid) ?? fallbackName
+            guard identityMatches(member) else {
+                results.append(MemberResult(key: member, name: name, outcome: .changed))
+                continue
+            }
+            let uid = currentUid(member.pid) ?? uid_t.max
+            if let reason = blockReason(pid: member.pid, uid: uid, name: name) {
+                results.append(MemberResult(key: member, name: name, outcome: .blocked(reason)))
+                continue
+            }
+            results.append(MemberResult(key: member, name: name, outcome: action(member.pid)))
+        }
+        return QuitOutcome(results: results, pastTense: pastTense)
     }
 
     // MARK: - Live re-checks

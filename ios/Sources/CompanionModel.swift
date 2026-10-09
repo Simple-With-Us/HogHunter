@@ -256,82 +256,59 @@ final class CompanionModel {
         reconcile()
     }
 
-    func quitProcess(pid: Int32, force: Bool = false) async -> CompanionQuitResponse {
+    /// Quits the app or process in `row`.  The Mac acts on the whole row, so
+    /// quitting an app closes all of its processes, each after a live check
+    /// that the pid still belongs to the process the Mac showed.
+    func quitProcess(row: CompanionRow, force: Bool = false) async -> CompanionQuitResponse {
+        let pid = row.pid ?? 0
         if isDemoMode {
-            let targetName = snapshot?.rows.first(where: { $0.pid == pid })?.name ?? "Process"
-            if let index = snapshot?.rows.firstIndex(where: { $0.pid == pid }) {
+            if let index = snapshot?.rows.firstIndex(where: { $0.id == row.id }) {
                 snapshot?.rows.remove(at: index)
             }
             return CompanionQuitResponse(
                 status: force ? "forced" : "asked",
                 pid: pid,
-                name: targetName,
+                name: row.name,
                 message: "\(force ? "Force quit" : "Quit") command delivered to Mac.",
                 error: nil
             )
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
-            return CompanionQuitResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                message: nil,
-                error: "Not connected to Mac."
-            )
+            return CompanionQuitResponse(status: "failed", pid: pid, name: row.name, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, force: force)
+            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, force: force)
             Task { await refresh() }
             return resp
         } catch {
-            return CompanionQuitResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                message: nil,
-                error: error.localizedDescription
-            )
+            return CompanionQuitResponse(status: "failed", pid: pid, name: row.name, message: nil, error: Self.describe(error))
         }
     }
 
-    func tameProcess(pid: Int32, action: String = "tame") async -> CompanionTameResponse {
+    func tameProcess(row: CompanionRow, action: String = "tame") async -> CompanionTameResponse {
+        let pid = row.pid ?? 0
         if isDemoMode {
-            let targetName = snapshot?.rows.first(where: { $0.pid == pid })?.name ?? "Process"
-            if let index = snapshot?.rows.firstIndex(where: { $0.pid == pid }) {
+            if let index = snapshot?.rows.firstIndex(where: { $0.id == row.id }) {
                 snapshot?.rows[index].isTamed = (action == "tame")
             }
             return CompanionTameResponse(
                 status: "success",
                 pid: pid,
-                name: targetName,
+                name: row.name,
                 isTamed: action == "tame",
                 message: action == "tame" ? "Process priority lowered to background QoS." : "Process priority restored to normal.",
                 error: nil
             )
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
-            return CompanionTameResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                isTamed: false,
-                message: nil,
-                error: "Not connected to Mac."
-            )
+            return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, action: action)
+            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, action: action)
             Task { await refresh() }
             return resp
         } catch {
-            return CompanionTameResponse(
-                status: "failed",
-                pid: pid,
-                name: "",
-                isTamed: false,
-                message: nil,
-                error: error.localizedDescription
-            )
+            return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: Self.describe(error))
         }
     }
 

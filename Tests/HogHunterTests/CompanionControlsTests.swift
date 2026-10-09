@@ -292,20 +292,23 @@ final class CleanerExclusionsConcurrencyTests: XCTestCase {
 
 @MainActor
 final class RemoteTameStatusTests: XCTestCase {
-    func testABlockedTameIsNotReportedAsSuccess() throws {
+    func testATameOfAChangedProcessIsNotReportedAsSuccess() throws {
+        // A start time of 1 can never match the live launchd, so this is a
+        // pid that "now belongs to something else".
+        let target = CompanionTarget(rowId: "p-1-1", name: "launchd", members: [ProcessKey(pid: 1, startTime: 1)])
         let suite = "hoghunter.tests.tamestatus.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = HogStore(defaults: defaults)
-
-        // pid 1 is launchd: always protected.
-        let reply = store.performRemoteTame(pid: 1, action: "tame")
+        let reply = store.performRemoteTame(target: target, action: "tame")
 
         XCTAssertEqual(reply.status, 400)
         let decoded = try JSONDecoder().decode(CompanionTameResponse.self, from: reply.body)
-        XCTAssertEqual(decoded.status, "blocked")
+        XCTAssertEqual(decoded.status, "changed")
         XCTAssertNil(decoded.message)
         XCTAssertNotNil(decoded.error)
         XCTAssertFalse(decoded.isTamed)
+        XCTAssertEqual(decoded.acted, 0)
+        XCTAssertEqual(decoded.skipped, 1)
     }
 }

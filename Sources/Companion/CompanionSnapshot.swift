@@ -50,6 +50,16 @@ struct DiskCleanerProgressUpdate: Sendable {
     var progress: CompanionCleanProgress
 }
 
+/// What a quit or tame request points at.  The phone sends the id of the row
+/// it was looking at, so the Mac acts on that exact app or process.  A bare
+/// pid is still accepted from an older phone.
+struct CompanionProcessRequest: Equatable, Sendable {
+    var rowId: String? = nil
+    var pid: Int32? = nil
+
+    var isAddressed: Bool { (rowId?.isEmpty == false) || pid != nil }
+}
+
 /// Response returned when the iOS companion asks to quit a process on the Mac.
 struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var status: String
@@ -57,6 +67,10 @@ struct CompanionQuitResponse: Codable, Equatable, Sendable {
     var name: String
     var message: String?
     var error: String?
+    /// How many processes of the row were signalled, and how many were left
+    /// alone (changed since sampling, protected).  Nil from an older Mac.
+    var acted: Int? = nil
+    var skipped: Int? = nil
 }
 
 /// Response returned when the iOS companion asks to tame or untame a process on the Mac.
@@ -67,6 +81,8 @@ struct CompanionTameResponse: Codable, Equatable, Sendable {
     var isTamed: Bool
     var message: String?
     var error: String?
+    var acted: Int? = nil
+    var skipped: Int? = nil
 }
 
 /// Request sent by the iOS companion to update cleaner category and folder exclusions on the Mac.

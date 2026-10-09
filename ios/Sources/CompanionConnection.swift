@@ -65,19 +65,19 @@ enum CompanionConnection {
         return try decode(CompanionCleanResponse.self, from: reply)
     }
 
-    static func triggerQuit(endpoint: NWEndpoint, token: String, pid: Int32, force: Bool = false) async throws -> CompanionQuitResponse {
+    static func triggerQuit(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, force: Bool = false) async throws -> CompanionQuitResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.quitRequest(token: token, pid: pid, force: force),
+            request: CompanionHTTP.quitRequest(token: token, pid: pid, rowId: rowId, force: force),
             timeout: defaultTimeout
         )
         return try decode(CompanionQuitResponse.self, from: reply)
     }
 
-    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, action: String = "tame") async throws -> CompanionTameResponse {
+    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, action: String = "tame") async throws -> CompanionTameResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.tameRequest(token: token, pid: pid, action: action),
+            request: CompanionHTTP.tameRequest(token: token, pid: pid, rowId: rowId, action: action),
             timeout: defaultTimeout
         )
         return try decode(CompanionTameResponse.self, from: reply)

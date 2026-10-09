@@ -8,6 +8,7 @@ final class CompanionServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "hoghunter.companion")
     private var listener: NWListener?
     private var payload = Data()
+    private var targets: [String: CompanionTarget] = [:]
     private var token = ""
     private var onStatus: (@Sendable (String) -> Void)?
 
@@ -63,9 +64,14 @@ final class CompanionServer: @unchecked Sendable {
         }
     }
 
-    func update(snapshot: CompanionSnapshot) {
+    /// Stores the snapshot to serve and the processes behind its rows.  The
+    /// phone names a row; these are what that name resolves to.
+    func update(snapshot: CompanionSnapshot, targets: [String: CompanionTarget] = [:]) {
         guard let data = try? CompanionJSON.encode(snapshot) else { return }
-        queue.async { self.payload = data }
+        queue.async {
+            self.payload = data
+            self.targets = targets
+        }
     }
 
     func updateToken(_ token: String) {
@@ -110,8 +116,11 @@ final class CompanionServer: @unchecked Sendable {
         get { cleanFlag.value }
         set { cleanFlag.value = newValue }
     }
-    var onRemoteQuit: ((_ pid: pid_t, _ force: Bool) -> Reply)? = nil
-    var onRemoteTame: ((_ pid: pid_t, _ action: String) -> Reply)? = nil
+    /// Called with the live processes behind the row the phone pointed at.
+    /// The server resolves the target itself, from the rows it was last
+    /// handed, so the store never sees an address it cannot verify.
+    var onRemoteQuit: ((_ target: CompanionTarget, _ force: Bool) -> Reply)? = nil
+    var onRemoteTame: ((_ target: CompanionTarget, _ action: String) -> Reply)? = nil
     /// A clean takes minutes.  The handler starts it and calls `completion`
     /// once, when it finishes, from any thread.  It must not block: the
     /// server queue also answers the phone's snapshot polls.
@@ -224,27 +233,35 @@ final class CompanionServer: @unchecked Sendable {
                 // Placeholder: never sent.  `startClean` answers later.
                 return (202, Data())
             },
-            quitHandler: { [weak self] pid, force in
+            quitHandler: { [weak self] request, force in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
                 guard self.allowRemoteQuit else {
                     let res = ["status": "forbidden", "error": "Remote process termination is disabled in Hog Hunter Mac Settings."]
                     return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
                 }
-                if let handler = self.onRemoteQuit {
-                    return handler(pid, force)
+                guard let handler = self.onRemoteQuit else {
+                    return (501, Data("{\"error\": \"Quit handler not configured\"}".utf8))
                 }
-                return (501, Data("{\"error\": \"Quit handler not configured\"}".utf8))
+                guard let target = CompanionTargets.resolve(request, in: self.targets) else {
+                    let res = CompanionQuitResponse(status: "changed", pid: request.pid ?? 0, name: "", message: nil, error: CompanionTargets.unresolvedMessage(for: request))
+                    return (400, (try? JSONEncoder().encode(res)) ?? Data())
+                }
+                return handler(target, force)
             },
-            tameHandler: { [weak self] pid, action in
+            tameHandler: { [weak self] request, action in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
                 guard self.allowRemoteQuit else {
                     let res = ["status": "forbidden", "error": "Remote process control is disabled in Hog Hunter Mac Settings."]
                     return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
                 }
-                if let handler = self.onRemoteTame {
-                    return handler(pid, action)
+                guard let handler = self.onRemoteTame else {
+                    return (501, Data("{\"error\": \"Tame handler not configured\"}".utf8))
                 }
-                return (501, Data("{\"error\": \"Tame handler not configured\"}".utf8))
+                guard let target = CompanionTargets.resolve(request, in: self.targets) else {
+                    let res = CompanionTameResponse(status: "changed", pid: request.pid ?? 0, name: "", isTamed: false, message: nil, error: CompanionTargets.unresolvedMessage(for: request))
+                    return (400, (try? JSONEncoder().encode(res)) ?? Data())
+                }
+                return handler(target, action)
             },
             exclusionsHandler: { [weak self] req in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
