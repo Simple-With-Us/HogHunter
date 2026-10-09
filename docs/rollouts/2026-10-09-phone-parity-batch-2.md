@@ -84,6 +84,10 @@ An owner who already allows Run Disk Cleaner now also allows Extreme (with the p
 
 Nothing beyond batch 1's list.  The rest of a category with more than 100 items cannot be chosen from the phone.
 
+## Screenshots
+
+The hosted `test` job already launches the iOS app with `-HogHunterSample` and uploads the frames as the `app-screenshots` artifact.  This batch adds launch flags that put each new surface on screen, and `scripts/capture-app-screenshots.sh` captures them once on the 6.3 inch iPhone as `extra_*.png`: `-HogHunterNetwork` (bandwidth cards), `-HogHunterStorage`, `-HogHunterMacSettings` (the Mac Settings sheet) and `-HogHunterSampleResult` (the sample result sheet).  They are best effort: a missing one is a warning, and the five format frames stay the gate.  The Activity frames show the CPU scale picker and the sparkline.
+
 ## Verification
 
 - `xcodegen generate && xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.
