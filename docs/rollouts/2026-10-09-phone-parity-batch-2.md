@@ -31,6 +31,10 @@ There is deliberately no new opt-in for either.  Settings are the same kind of c
 
 Until now every phone request was query-only, because the server stopped reading at the first blank line (or 8 KB) and dropped a body that arrived in a later TCP segment.  The server now waits for `Content-Length` bytes (at most 16 KB, answered 413 beyond that), and a client has 15 seconds to deliver a whole request.  A connection that closes before the request is whole is dropped without routing it.  A test sends the headers and the body in two writes a moment apart over a real loopback listener.  The webhook URL travels in the body, never in a query string.
 
+### A bare question mark no longer ends the Mac app
+
+The request parsers took the second piece of a split on `?`, which does not exist when the path ends in the mark, so one `POST /v1/view? HTTP/1.1` from any paired phone trapped and ended the Mac app (found by the review of this batch; the pattern was already on `main` in the exclusions, view and process routes).  All of them now go through `CompanionHTTP.queryString(of:)`, and a test sends every route a bare `?`.
+
 ### The webhook is a secret
 
 `hoghunter.alertWebhookURL` is the one secret in `INFISICAL.md`.  So:

@@ -760,3 +760,40 @@ final class CompanionSampleGuardTests: XCTestCase {
         }
     }
 }
+
+/// A request line ending in a bare `?` must never trap.  The parsers indexed the
+/// second piece of a split on `?`, which does not exist then, so one such line
+/// from a paired phone would have ended the Mac app.
+final class CompanionQueryParsingTests: XCTestCase {
+    func testQueryStringOfAPath() {
+        XCTAssertEqual(CompanionHTTP.queryString(of: "/v1/view"), "")
+        XCTAssertEqual(CompanionHTTP.queryString(of: "/v1/view?"), "")
+        XCTAssertEqual(CompanionHTTP.queryString(of: "/v1/view?a=1&b=2"), "a=1&b=2")
+        XCTAssertEqual(CompanionHTTP.queryString(of: "/v1/view?a=1?b=2"), "a=1?b=2")
+        XCTAssertEqual(CompanionHTTP.queryString(of: "?"), "")
+    }
+
+    func testEveryRouteSurvivesABareQuestionMark() {
+        let server = CompanionServer()
+        server.updateToken("ABCD2345")
+        let token = server.devices.issue(name: "Test iPhone").token
+        server.allowRemoteQuit = true
+        server.allowRemoteEdit = true
+        server.allowRemoteClean = true
+        server.onRemoteExclusionsUpdate = { _ in (200, Data("{}".utf8)) }
+        server.onRemoteViewUpdate = { _ in (200, Data("{}".utf8)) }
+        server.onRemoteQuit = { _, _ in (200, Data("{}".utf8)) }
+        server.onRemoteTame = { _, _ in (200, Data("{}".utf8)) }
+        server.syncOnQueue {}
+        let lan = CompanionPeer(key: "192.168.1.20", isTrusted: true)
+        let header = "Authorization: " + "Bearer " + token
+        for path in ["/v1/view", "/v1/exclusions", "/v1/quit", "/v1/tame", "/v1/sample", "/v1/settings", "/v1/clean", "/v1/snapshot"] {
+            for suffix in ["?", "?&", "?=", "??"] {
+                let method = path == "/v1/snapshot" ? "GET" : "POST"
+                let request = Data("\(method) \(path)\(suffix) HTTP/1.1\r\n\(header)\r\n\r\n".utf8)
+                // Reaching the end of this loop is the assertion: a trap kills the run.
+                _ = server.syncOnQueue { server.disposition(for: request, peer: lan) }
+            }
+        }
+    }
+}
