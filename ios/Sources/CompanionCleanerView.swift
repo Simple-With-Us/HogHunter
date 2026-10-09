@@ -145,7 +145,7 @@ struct CleanerView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let scanned = report.scannedAt {
-                        Text("Scanned \(CompanionRelative.formatter.localizedString(for: scanned, relativeTo: Date())) on \(hostName).")
+                        Text("Scanned \(CompanionRelative.text(for: scanned)) on \(hostName).")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -220,38 +220,41 @@ struct CleanerView: View {
         let allSelected = model.isCleanCategoryFullySelected(category)
         return Section {
             HStack(spacing: 12) {
-                Button {
-                    if isOpen { expanded.remove(category.id) } else { expanded.insert(category.id) }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: category.icon)
-                            .frame(width: 24)
-                            .foregroundStyle(Color.accentColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(category.title)
-                                    .font(.body.weight(.medium))
-                                if category.isExtremeOnly {
-                                    Text("EXTREME ONLY")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.purple)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.purple.opacity(0.12)))
-                                }
+                // Not a Button: a button in a List row tints its whole label, and
+                // the title and count must read as ordinary text, like the Mac's
+                // rows.  A tap gesture with the button trait behaves the same.
+                HStack(spacing: 10) {
+                    Image(systemName: category.icon)
+                        .frame(width: 24)
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(category.title)
+                                .font(.body.weight(.medium))
+                            if category.isExtremeOnly {
+                                Text("EXTREME ONLY")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.purple)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.purple.opacity(0.12)))
                             }
-                            Text("\(category.totalText) in \(category.itemCount) \(category.itemCount == 1 ? "item" : "items")\(selectedCount > 0 ? ", \(selectedCount) selected" : "")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
-                        Spacer(minLength: 4)
-                        Image(systemName: isOpen ? "chevron.down" : "chevron.right")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.tertiary)
+                        Text("\(category.totalText) in \(category.itemCount) \(category.itemCount == 1 ? "item" : "items")\(selectedCount > 0 ? ", \(selectedCount) selected" : "")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .contentShape(Rectangle())
+                    Spacer(minLength: 4)
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.borderless)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if isOpen { expanded.remove(category.id) } else { expanded.insert(category.id) }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("\(category.title), \(category.totalText)")
                 .accessibilityHint(isOpen ? "Hide items" : "Show items")
 
@@ -375,7 +378,7 @@ struct CleanerView: View {
                                     .background(Capsule().fill(Color.accentColor.opacity(0.12)))
                             }
                             Spacer()
-                            Text(CompanionRelative.formatter.localizedString(for: record.cleanedAt, relativeTo: Date()))
+                            Text(CompanionRelative.text(for: record.cleanedAt))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -407,4 +410,10 @@ enum CompanionRelative {
         formatter.unitsStyle = .abbreviated
         return formatter
     }()
+
+    /// "3h ago", or "just now" inside ten seconds, where the formatter says "in 0s".
+    static func text(for date: Date, now: Date = Date()) -> String {
+        if abs(now.timeIntervalSince(date)) < 10 { return "just now" }
+        return formatter.localizedString(for: date, relativeTo: now)
+    }
 }
