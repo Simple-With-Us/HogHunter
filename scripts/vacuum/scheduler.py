@@ -27,11 +27,46 @@ def should_run(store: VacuumStore, cfg: dict[str, Any], kind: str, now: float | 
     return (now - last) >= interval
 
 
-def run_scheduler_tick(store: VacuumStore | None = None, now: float | None = None) -> dict[str, Any]:
+def run_dry_tick(
+    store: VacuumStore, engine: VacuumEngine | None = None, now: float | None = None
+) -> dict[str, Any]:
+    """Run what the next real tick would run, with every deleting step in plan-only mode.  Writes nothing:
+    no history, no scheduler state, no status file, no notification.  The result is JSON-ready."""
+    cfg = store.cfg
+    engine = engine or VacuumEngine(cfg, store.home)
+    now = now or time.time()
+    state = store.scheduler_state()
+    scratch: dict[str, Any] = {}
+    if "last_clean_at" in state:
+        scratch["last_clean_at"] = state["last_clean_at"]
+    prev = state.get("prev_disk_free_gb")
+    prev_f = float(prev) if prev is not None else None
+    due = {kind: should_run(store, cfg, kind, now) for kind in ("watch", "janitor", "full")}
+    records: list[RunRecord] = []
+    if due["watch"]:
+        record, _hits, _cleaned = engine.run_watch_tick(scratch, prev_f, dry_run=True)
+        records.append(record)
+    if due["janitor"]:
+        records.append(engine.run(TriggerKind.JANITOR, dry_run=True))
+    if due["full"]:
+        records.append(engine.run(TriggerKind.FULL, band="cheap", dry_run=True))
+    return {
+        "dry_run": True,
+        "due": due,
+        "plan": engine.plan,
+        "records": [r.as_dict() for r in records],
+    }
+
+
+def run_scheduler_tick(
+    store: VacuumStore | None = None, now: float | None = None, dry_run: bool = False
+) -> dict[str, Any]:
     store = store or VacuumStore.open()
     cfg = store.cfg
     engine = VacuumEngine(cfg, store.home)
     now = now or time.time()
+    if dry_run:
+        return run_dry_tick(store, engine, now)
     results: list[dict[str, Any]] = []
 
     state = store.scheduler_state()
