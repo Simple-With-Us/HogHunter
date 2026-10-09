@@ -51,7 +51,10 @@ struct CompanionPeer: Equatable, Sendable {
             return true
         case .hostPort(let host, _):
             if case .name(let name, _) = host {
-                let lowered = name.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                // A fully qualified name may end in a dot ("studio.local.").  Only
+                // that dot is dropped: a leading one is not part of a real name.
+                var lowered = name.lowercased()
+                if lowered.hasSuffix(".") { lowered.removeLast() }
                 return lowered.hasSuffix(".ts.net") || lowered.hasSuffix(".local") || lowered == "localhost"
             }
             return from(endpoint).isTrusted

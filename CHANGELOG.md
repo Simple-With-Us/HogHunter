@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+iPhone companion, phone parity batch 2, review follow-ups (issue 108):
+
+- A phone clean that stops before it removes anything (the safety snapshot failed, the connection dropped) no longer spends the scan the person chose from, so they can retry without scanning again.  One that removes something still does.
+- Two cleanup history rows can no longer share an id in the phone's list.
+- A MagicDNS or `.local` name with a trailing dot is trusted as a local endpoint, and a leading dot is no longer trimmed away.
+- The Mac-side defect that the phone leaves off its menu on purpose is now on the board: `DiskCleaner` thins every APFS local snapshot whichever row is ticked, before the safety snapshot (board `f6506a29`, issue 107).
+
 iPhone companion, phone parity batch 2, PR B (board `32919186`, issue 101), disk cleaner:
 
 - The phone can scan the Mac for the Standard or the Extreme tier, see the categories and items the Mac found (largest first, at most 100 per category, with the true counts and sizes), tick what to clean starting from the Mac's own default selection, confirm with the same words the Mac uses, and clean.  Behind Allow iPhone to Run Disk Cleaner, as before.
