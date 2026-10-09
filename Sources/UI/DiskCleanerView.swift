@@ -49,7 +49,7 @@ struct DiskCleanerView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to clean \(HogFormat.memory(store.totalSelectedBytes())) across \(store.totalSelectedItemsCount()) items?  An APFS local snapshot is created first.  If that snapshot fails, nothing is deleted.  Items that are not already in the Trash move to the Trash, where Put Back still works.  Items already in the Trash are removed permanently.")
+            Text(CleanerCopy.confirmationMessage(sizeText: HogFormat.memory(store.totalSelectedBytes()), itemCount: store.totalSelectedItemsCount()))
         }
     }
 
@@ -92,16 +92,16 @@ struct DiskCleanerView: View {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text("Extreme Clean Targets AI Agent & Deep Developer Clutter")
+                Text(CleanerCopy.extremeTitle)
                     .font(.system(size: 11, weight: .bold))
             }
-            Text("Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini/Grok/Codex, temporary update downloads, and large/old files.\nWhile git repositories and critical directories are strictly protected, local AI tools may need to re-download model caches, re-index workspaces, or re-authenticate ephemeral CLI sessions.")
+            Text(CleanerCopy.extremeBody)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Toggle(isOn: $store.acknowledgedExtremeDisclaimer) {
-                Text("I understand this targets AI tool caches, orphaned app data, and older transcripts.")
+                Text(CleanerCopy.extremeAcknowledgement)
                     .font(.system(size: 10, weight: .medium))
             }
             .toggleStyle(.checkbox)

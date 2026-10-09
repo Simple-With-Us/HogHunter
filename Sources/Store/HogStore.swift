@@ -141,6 +141,9 @@ final class HogStore: ObservableObject {
         didSet {
             persist()
             companionServer.allowRemoteClean = allowRemoteClean
+            // Turning the cleaner off takes the held scan with it: turning it
+            // back on within the scan's lifetime must not revive a clean.
+            if !allowRemoteClean { discardRemoteScan() }
             if !loadingSettings { publishCompanion() }
         }
     }
@@ -174,6 +177,33 @@ final class HogStore: ObservableObject {
     /// True while a phone-requested clean is running, so a second request is
     /// refused instead of starting a second clean.
     private var remoteCleanInFlight = false
+
+    /// The scan the phone's cleaner works from.  The phone sees references into
+    /// it, never paths; `RemoteCleanScan` explains why.
+    enum RemoteScanState {
+        case idle
+        case scanning(id: String, tier: CleanTier, category: String)
+        case ready(RemoteCleanScan)
+    }
+    private(set) var remoteScanState: RemoteScanState = .idle
+    private var remoteScanTask: Task<Void, Never>?
+    private var remoteScanStartedAt: Date?
+    /// How long a scan may run before a new one is allowed to replace it.
+    var remoteScanWatchdog: TimeInterval = 15 * 60
+    /// What a phone-started scan runs.  Tests replace it so no real folder is
+    /// walked; the app scans exactly as the Mac's own cleaner does.
+    var remoteScanner: (CleanTier, CleanerExclusions, @escaping (String) -> Void) async -> CleanScanReport = { tier, exclusions, progress in
+        await DiskCleaner().scan(tier: tier, exclusions: exclusions, progress: progress)
+    }
+    /// The cleaner a phone-started clean uses.  Tests replace it with one that
+    /// touches no files.
+    var remoteCleanerFactory: () -> DiskCleaner = { DiskCleaner() }
+    /// The exclusions a phone-started scan and clean honor, read fresh each
+    /// time.  Tests replace it so the owner's real exclusions do not matter.
+    var remoteExclusions: () -> CleanerExclusions = { CleanerExclusions.load() }
+    /// Where a clean's row is written, shared with the Mac's own cleaner by
+    /// file, not by instance.  Tests pass an in-memory one.
+    private let cleanupHistory: CleanupHistoryStore
 
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
@@ -283,11 +313,13 @@ final class HogStore: ObservableObject {
         historyURL: URL? = nil,
         defaults: UserDefaults = .standard,
         infisical: InfisicalSettings? = nil,
+        cleanupHistory: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
         vacuum: RoboticVacuumStore? = nil,
         startImmediately: Bool = true
     ) {
         let infisical = infisical ?? InfisicalSettings.shared
         self.defaults = defaults
+        self.cleanupHistory = cleanupHistory
         let devices = CompanionDeviceRegistry(defaults: defaults)
         self.companionDevices = devices
         self.companionServer = CompanionServer(devices: devices)
@@ -1326,12 +1358,24 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteTame(target: target, action: action)
         }
-        companionServer.onRemoteClean = { [weak self] completion in
+        companionServer.onRemoteClean = { [weak self] request, completion in
             guard let self else {
                 completion((500, Data("{\"error\": \"Store unavailable\"}".utf8)))
                 return
             }
-            self.performRemoteClean(completion: completion)
+            self.performRemoteClean(request: request, completion: completion)
+        }
+        companionServer.onRemoteCleanScan = { [weak self] request, completion in
+            Task { @MainActor [weak self] in
+                guard let self else { return completion((500, Data("{\"error\": \"Store unavailable\"}".utf8))) }
+                completion(self.beginRemoteCleanScan(request))
+            }
+        }
+        companionServer.onRemoteCleanReport = { [weak self] completion in
+            Task { @MainActor [weak self] in
+                guard let self else { return completion((500, Data("{\"error\": \"Store unavailable\"}".utf8))) }
+                completion(self.remoteCleanReportReply())
+            }
         }
         companionServer.onSnapshotServed = { [weak self] in
             self?.refreshCompanionNetworkIfStale()
@@ -1698,13 +1742,13 @@ final class HogStore: ObservableObject {
     /// has finished.  It returns at once: the server queue also answers the
     /// phone's snapshot polls, and a clean can run for minutes.  Progress
     /// reaches the phone through the snapshot's `cleanProgress`.
-    nonisolated private func performRemoteClean(completion: @escaping @Sendable (CompanionServer.Reply) -> Void) {
+    nonisolated private func performRemoteClean(request: CompanionCleanRequest?, completion: @escaping @Sendable (CompanionServer.Reply) -> Void) {
         Task { @MainActor [weak self] in
             guard let self else {
                 completion((500, Data("{\"error\": \"Store unavailable\"}".utf8)))
                 return
             }
-            completion(await self.runRemoteClean())
+            completion(await self.runRemoteClean(request: request))
         }
     }
 
@@ -1716,36 +1760,67 @@ final class HogStore: ObservableObject {
         return (409, Data(body.utf8))
     }
 
+    /// The scan a clean request may use: the one the Mac holds, if it is ready.
+    private var readyRemoteScan: RemoteCleanScan? {
+        if case .ready(let scan) = remoteScanState { return scan }
+        return nil
+    }
+
+    /// Internal, not private, so tests can drive a whole clean without a socket.
     @MainActor
-    private func runRemoteClean() async -> CompanionServer.Reply {
+    func runRemoteClean(request: CompanionCleanRequest?) async -> CompanionServer.Reply {
         if let refusal = Self.cleanRefusal(remoteInFlight: remoteCleanInFlight, macIsCleaning: activeCleanProgress?.isCleaning == true) {
             return refusal
+        }
+
+        // Everything that can refuse the request happens before the first
+        // await, so two requests cannot both get past these checks.
+        let tier: CleanTier
+        var itemsToClean: [CleanItem] = []
+        let needsScan: Bool
+        if let request {
+            switch CompanionCleanerReport.plan(for: request, scan: readyRemoteScan) {
+            case .failure(let refusal):
+                return refusal.reply
+            case .success(let plan):
+                tier = plan.tier
+                itemsToClean = plan.items
+            }
+            // A scan is good for one clean.  What it lists is gone or changing
+            // once the clean has run, so the next clean needs a new scan.
+            remoteScanState = .idle
+            needsScan = false
+        } else {
+            // An older phone: the Standard clean with the Mac's default selection.
+            tier = .standard
+            needsScan = true
         }
         remoteCleanInFlight = true
         defer { remoteCleanInFlight = false }
 
         let runId = UUID()
-        let cleaner = DiskCleaner()
-        let exclusions = CleanerExclusions.load()
+        let cleaner = remoteCleanerFactory()
+        let exclusions = remoteExclusions()
 
         activeCleanRunId = runId
-        activeCleanProgress = CompanionCleanProgress(
-            isCleaning: true,
-            phase: "scanning",
-            progress: 0.05,
-            statusText: "Scanning Mac clutter…",
-            currentItem: nil,
-            itemsCleaned: 0,
-            totalItems: 0,
-            bytesReclaimed: 0,
-            formattedBytesReclaimed: "0 B",
-            snapshotName: nil,
-            error: nil
-        )
-        publishCompanion()
-
-        let scanReport = await cleaner.scan(tier: .standard, exclusions: exclusions)
-        let itemsToClean = scanReport.categories.flatMap { $0.items }.filter(\.isSelected)
+        if needsScan {
+            activeCleanProgress = CompanionCleanProgress(
+                isCleaning: true,
+                phase: "scanning",
+                progress: 0.05,
+                statusText: "Scanning Mac clutter…",
+                currentItem: nil,
+                itemsCleaned: 0,
+                totalItems: 0,
+                bytesReclaimed: 0,
+                formattedBytesReclaimed: "0 B",
+                snapshotName: nil,
+                error: nil
+            )
+            publishCompanion()
+            let scanReport = await remoteScanner(tier, exclusions) { _ in }
+            itemsToClean = CompanionCleanerReport.defaultSelection(of: scanReport)
+        }
         let totalItems = max(1, itemsToClean.count)
 
         activeCleanRunId = runId
@@ -1766,11 +1841,17 @@ final class HogStore: ObservableObject {
 
         let cleanResult = await cleaner.clean(
             items: itemsToClean,
-            tier: .standard,
+            tier: tier,
             createSnapshot: true,
             exclusions: exclusions,
             progress: makeRemoteCleanReporter(runId: runId, totalItems: totalItems)
         )
+
+        // The Mac's cleaner writes a row for every clean that removed
+        // something; a clean the phone starts is no different.
+        if let record = CleanupHistoryRecord.record(from: cleanResult, source: "iPhone") {
+            cleanupHistory.append(record)
+        }
 
         let responseObj = CompanionCleanResponse(
             status: "completed",
@@ -1810,6 +1891,106 @@ final class HogStore: ObservableObject {
             }
         }
         return (200, resultData)
+    }
+
+    // MARK: - The phone's cleaner: scan and report
+
+    /// Starts a scan for the phone.  Answers at once; the scan runs on a
+    /// utility task and the phone reads its progress from the report.  One
+    /// scan at a time, and none while a clean is running.
+    @MainActor
+    func beginRemoteCleanScan(_ request: CompanionCleanScanRequest) -> CompanionServer.Reply {
+        let tier: CleanTier
+        switch CompanionCleanerReport.validate(request) {
+        case .failure(let refusal): return refusal.reply
+        case .success(let parsed): tier = parsed
+        }
+        if let refusal = Self.cleanRefusal(remoteInFlight: remoteCleanInFlight, macIsCleaning: activeCleanProgress?.isCleaning == true) {
+            return refusal
+        }
+        if case .scanning = remoteScanState {
+            // A scan that never finishes (a folder that will not answer) must
+            // not shut the cleaner for good.
+            if let started = remoteScanStartedAt, Date().timeIntervalSince(started) > remoteScanWatchdog {
+                discardRemoteScan()
+            } else {
+                let body = #"{"status":"busy","error":"A scan is already running on this Mac.\u00a0 Watch its progress in the app."}"#
+                return (409, Data(body.utf8))
+            }
+        }
+        let id = UUID().uuidString
+        remoteScanState = .scanning(id: id, tier: tier, category: "Starting \(tier.title) scan…")
+        remoteScanTask?.cancel()
+        // The same call the Mac's own cleaner makes, so the phone previews
+        // exactly what the Mac would find.
+        let scanner = remoteScanner
+        let exclusions = remoteExclusions()
+        remoteScanStartedAt = Date()
+        remoteScanTask = Task.detached(priority: .utility) { [weak self] in
+            let report = await scanner(tier, exclusions) { category in
+                Task { @MainActor [weak self] in self?.noteRemoteScanProgress(id: id, category: category) }
+            }
+            guard !Task.isCancelled else { return }
+            let scan = CompanionCleanerReport.build(from: report, id: id)
+            await MainActor.run { [weak self] in self?.finishRemoteScan(scan) }
+        }
+        let response = CompanionCleanScanResponse(status: "scanning", scanId: id, tier: tier.rawValue, message: "Scanning \(tier.title).")
+        return (202, (try? JSONEncoder().encode(response)) ?? Data())
+    }
+
+    /// Forgets the scan, running or finished.  A scan lists paths on this Mac,
+    /// so it goes when sharing or the cleaner opt-in does.
+    @MainActor
+    func discardRemoteScan() {
+        remoteScanTask?.cancel()
+        remoteScanTask = nil
+        remoteScanStartedAt = nil
+        remoteScanState = .idle
+    }
+
+    @MainActor
+    private func noteRemoteScanProgress(id: String, category: String) {
+        guard case .scanning(let current, let tier, _) = remoteScanState, current == id else { return }
+        remoteScanState = .scanning(id: id, tier: tier, category: category)
+    }
+
+    @MainActor
+    private func finishRemoteScan(_ scan: RemoteCleanScan) {
+        guard case .scanning(let current, _, _) = remoteScanState, current == scan.id else { return }
+        remoteScanState = .ready(scan)
+    }
+
+    /// The cleaner's state for the phone: nothing, a scan under way, or a
+    /// finished scan with its items, plus the recent cleanup history.
+    @MainActor
+    func remoteCleanReportReply(now: Date = Date()) -> CompanionServer.Reply {
+        if case .ready(let scan) = remoteScanState, now.timeIntervalSince(scan.scannedAt) > CompanionCleanerReport.scanLifetime {
+            remoteScanState = .idle
+        }
+        var report = CompanionCleanReport(state: "idle")
+        switch remoteScanState {
+        case .idle:
+            break
+        case .scanning(let id, let tier, let category):
+            report.state = "scanning"
+            report.scanId = id
+            report.tier = tier.rawValue
+            report.scanningCategory = category
+        case .ready(let scan):
+            report.state = "ready"
+            report.scanId = scan.id
+            report.tier = scan.tier.rawValue
+            report.scannedAt = scan.scannedAt
+            report.totalBytes = scan.totalBytes
+            report.totalText = HogFormat.memory(scan.totalBytes)
+            report.totalItems = scan.totalItems
+            report.categories = scan.categories
+        }
+        report.history = cleanupHistory.recentRecords(limit: 10).map(CompanionCleanerReport.record)
+        guard let data = try? CompanionJSON.encoder().encode(report) else {
+            return (500, Data("{\"error\": \"Failed to encode the report\"}".utf8))
+        }
+        return (200, data)
     }
 
     /// Builds the progress callback outside the main actor, so the cleaner can
@@ -1885,6 +2066,8 @@ final class HogStore: ObservableObject {
             companionTopAppsRefreshTask?.cancel()
             companionTopAppsRefreshTask = nil
             CompanionNetworkCache.shared.reset()
+            // A scan lists paths on this Mac, so it goes when sharing does.
+            discardRemoteScan()
             return
         }
         companionStatus = "Starting"

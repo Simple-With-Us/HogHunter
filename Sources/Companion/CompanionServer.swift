@@ -188,7 +188,13 @@ final class CompanionServer: @unchecked Sendable {
     /// A clean takes minutes.  The handler starts it and calls `completion`
     /// once, when it finishes, from any thread.  It must not block: the
     /// server queue also answers the phone's snapshot polls.
-    var onRemoteClean: ((_ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
+    var onRemoteClean: ((_ request: CompanionCleanRequest?, _ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
+    /// Starts a scan for the cleaner.  Answers at once (the scan runs on the
+    /// Mac and the phone reads its progress from the report); `completion`
+    /// may be called from any thread.
+    var onRemoteCleanScan: ((_ request: CompanionCleanScanRequest, _ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
+    /// The cleaner's last scan, its progress and the cleanup history.
+    var onRemoteCleanReport: ((_ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
     var onRemoteExclusionsUpdate: ((CompanionExclusionsUpdateRequest) -> Reply)? = nil
     var onRemoteViewUpdate: ((CompanionViewUpdateRequest) -> Reply)? = nil
     /// Refresh interval, alerts and the webhook.  Called on the server queue
@@ -290,8 +296,12 @@ final class CompanionServer: @unchecked Sendable {
                     connection.send(content: response, completion: .contentProcessed { _ in
                         connection.cancel()
                     })
-                case .startClean:
-                    self.startClean(on: connection)
+                case .startClean(let request):
+                    self.startClean(request, on: connection)
+                case .startCleanScan(let request):
+                    self.startCleanScan(request, on: connection)
+                case .startCleanReport:
+                    self.startCleanReport(on: connection)
                 case .startSample(let target):
                     self.startSample(target, on: connection)
                 }
@@ -311,7 +321,11 @@ final class CompanionServer: @unchecked Sendable {
     /// the phone's snapshot polls.
     enum Disposition: Equatable {
         case reply(Data)
-        case startClean
+        case startClean(CompanionCleanRequest?)
+        /// A scan or a report is answered from the main actor, which the router
+        /// must not wait on, so these are held for a moment the same way.
+        case startCleanScan(CompanionCleanScanRequest)
+        case startCleanReport
         /// A sample takes at least its three seconds, so it is held the same way.
         case startSample(CompanionTarget)
     }
@@ -324,24 +338,50 @@ final class CompanionServer: @unchecked Sendable {
         if let wait = throttle.retryAfter(for: peer.key, now: now, appliesGlobal: !peer.isTrusted) {
             return .reply(CompanionHTTP.throttledReply(retryAfter: wait))
         }
-        var cleanRequested = false
+        var cleanRequested: CompanionCleanRequest??
+        var scanRequested: CompanionCleanScanRequest?
+        var reportRequested = false
         var sampleRequested: CompanionTarget?
         let response = CompanionHTTP.response(
             request: buffer,
             body: payload,
             detailBody: detailPayload,
             token: token,
-            cleanHandler: { [weak self] _ in
+            cleanHandler: { [weak self] request in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
-                guard self.allowRemoteClean else {
-                    let res = ["status": "forbidden", "error": "Running the disk cleaner from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings on the Mac."]
-                    return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
-                }
+                guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
                 guard self.onRemoteClean != nil else {
                     return (501, Data("{\"error\": \"Clean handler not configured\"}".utf8))
                 }
-                cleanRequested = true
+                cleanRequested = .some(request)
                 // Placeholder: never sent.  `startClean` answers later.
+                return (202, Data())
+            },
+            cleanRunHandler: { [weak self] request in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
+                guard self.onRemoteClean != nil else {
+                    return (501, Data("{\"error\": \"Clean handler not configured\"}".utf8))
+                }
+                cleanRequested = .some(request)
+                return (202, Data())
+            },
+            cleanScanHandler: { [weak self] request in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
+                guard self.onRemoteCleanScan != nil else {
+                    return (501, Data("{\"error\": \"Scan handler not configured\"}".utf8))
+                }
+                scanRequested = request
+                return (202, Data())
+            },
+            cleanReportHandler: { [weak self] in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
+                guard self.onRemoteCleanReport != nil else {
+                    return (501, Data("{\"error\": \"Report handler not configured\"}".utf8))
+                }
+                reportRequested = true
                 return (202, Data())
             },
             quitHandler: { [weak self] request, force in
@@ -440,7 +480,9 @@ final class CompanionServer: @unchecked Sendable {
         } else if status != 404 {
             throttle.recordSuccess(peer: peer.key)
         }
-        if cleanRequested { return .startClean }
+        if let cleanRequested { return .startClean(cleanRequested) }
+        if let scanRequested { return .startCleanScan(scanRequested) }
+        if reportRequested { return .startCleanReport }
         if let sampleRequested { return .startSample(sampleRequested) }
         if CompanionHTTP.isSnapshotRequest(buffer), status == 200 {
             onSnapshotServed?()
@@ -475,6 +517,13 @@ final class CompanionServer: @unchecked Sendable {
         return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
     }
 
+    /// The answer to any disk cleaner route while the owner has not allowed
+    /// the phone to run it.
+    static var cleanOptInRefusal: Reply {
+        let res = ["status": "forbidden", "error": "Running the disk cleaner from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings on the Mac."]
+        return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
+    }
+
     /// The answer to a process action (sample) while the owner has not
     /// allowed phone control of processes.
     static var processControlRefusal: Reply {
@@ -498,42 +547,60 @@ final class CompanionServer: @unchecked Sendable {
     /// takes three seconds plus the time `sample` needs to symbolicate it.
     static let sampleReplyDeadline: TimeInterval = 45
 
-    private func startSample(_ target: CompanionTarget, on connection: NWConnection) {
-        guard let begin = onRemoteSample else {
-            connection.send(content: CompanionHTTP.jsonReply(status: 501, body: Data("{\"error\": \"Sample handler not configured\"}".utf8)), completion: .contentProcessed { _ in connection.cancel() })
-            return
-        }
-        let once = CompanionOneShotReply { data in
-            connection.send(content: data, completion: .contentProcessed { _ in connection.cancel() })
-        }
-        queue.asyncAfter(deadline: .now() + Self.sampleReplyDeadline) {
-            let body = Data(#"{"status":"failed","name":"","error":"The sample took too long.\u00a0 Try again."}"#.utf8)
-            once.send(CompanionHTTP.jsonReply(status: 504, body: body))
-        }
-        begin(target) { reply in
-            once.send(CompanionHTTP.jsonReply(status: reply.status, body: reply.body))
-        }
-    }
+    /// How long a scan start or a report fetch may take to be answered.  Both
+    /// are answered from the main actor in a moment.  Shorter than the phone's
+    /// own 8 second limit, so the Mac's answer is the one it hears.
+    static let quickReplyDeadline: TimeInterval = 6
 
     /// How long the connection of an unfinished clean is held before the
     /// phone is told to watch the progress instead.
     static let cleanReplyDeadline: TimeInterval = 15 * 60
 
-    private func startClean(on connection: NWConnection) {
-        guard let begin = onRemoteClean else {
-            connection.send(content: CompanionHTTP.jsonReply(status: 501, body: Data("{\"error\": \"Clean handler not configured\"}".utf8)), completion: .contentProcessed { _ in connection.cancel() })
-            return
-        }
+    /// Holds `connection` until `begin` calls back, off the router.  Whichever
+    /// comes first, the callback or the deadline, is the one reply sent.
+    private func hold(
+        _ connection: NWConnection,
+        deadline: TimeInterval,
+        timeout: (status: Int, body: Data),
+        begin: (@escaping @Sendable (Reply) -> Void) -> Void
+    ) {
         let once = CompanionOneShotReply { data in
             connection.send(content: data, completion: .contentProcessed { _ in connection.cancel() })
         }
-        queue.asyncAfter(deadline: .now() + Self.cleanReplyDeadline) {
-            let body = Data(#"{"status":"running","error":"The clean is still running on the Mac.\u00a0 Watch its progress in the app."}"#.utf8)
-            once.send(CompanionHTTP.jsonReply(status: 504, body: body))
+        queue.asyncAfter(deadline: .now() + deadline) {
+            once.send(CompanionHTTP.jsonReply(status: timeout.status, body: timeout.body))
         }
         begin { reply in
             once.send(CompanionHTTP.jsonReply(status: reply.status, body: reply.body))
         }
+    }
+
+    private func notConfigured(_ what: String, on connection: NWConnection) {
+        connection.send(content: CompanionHTTP.jsonReply(status: 501, body: Data("{\"error\": \"\(what) handler not configured\"}".utf8)), completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    private func startSample(_ target: CompanionTarget, on connection: NWConnection) {
+        guard let handler = onRemoteSample else { return notConfigured("Sample", on: connection) }
+        let body = Data(#"{"status":"failed","name":"","error":"The sample took too long.\u00a0 Try again."}"#.utf8)
+        hold(connection, deadline: Self.sampleReplyDeadline, timeout: (504, body)) { done in handler(target, done) }
+    }
+
+    private func startClean(_ request: CompanionCleanRequest?, on connection: NWConnection) {
+        guard let handler = onRemoteClean else { return notConfigured("Clean", on: connection) }
+        let body = Data(#"{"status":"running","error":"The clean is still running on the Mac.\u00a0 Watch its progress in the app."}"#.utf8)
+        hold(connection, deadline: Self.cleanReplyDeadline, timeout: (504, body)) { done in handler(request, done) }
+    }
+
+    private func startCleanScan(_ request: CompanionCleanScanRequest, on connection: NWConnection) {
+        guard let handler = onRemoteCleanScan else { return notConfigured("Scan", on: connection) }
+        let body = Data(#"{"status":"failed","error":"The Mac did not start the scan in time.\u00a0 Try again."}"#.utf8)
+        hold(connection, deadline: Self.quickReplyDeadline, timeout: (504, body)) { done in handler(request, done) }
+    }
+
+    private func startCleanReport(on connection: NWConnection) {
+        guard let handler = onRemoteCleanReport else { return notConfigured("Report", on: connection) }
+        let body = Data(#"{"status":"failed","error":"The Mac did not answer in time.\u00a0 Try again."}"#.utf8)
+        hold(connection, deadline: Self.quickReplyDeadline, timeout: (504, body)) { done in handler(done) }
     }
 
     /// Detects current local LAN IPv4 and Tailscale IPv4 addresses on the host.

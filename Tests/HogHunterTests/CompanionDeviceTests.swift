@@ -159,7 +159,7 @@ final class CompanionDeviceRoutingTests: XCTestCase {
         server.onRemoteTame = { _, _ in (200, Data("{}".utf8)) }
         server.onRemoteExclusionsUpdate = { _ in (200, Data("{}".utf8)) }
         server.onRemoteViewUpdate = { _ in (200, Data("{}".utf8)) }
-        server.onRemoteClean = { _ in }
+        server.onRemoteClean = { _, _ in }
         server.syncOnQueue {}
         return server
     }
@@ -168,7 +168,7 @@ final class CompanionDeviceRoutingTests: XCTestCase {
         let disposition = server.syncOnQueue { server.disposition(for: request, peer: peer ?? lan, now: now ?? t0) }
         switch disposition {
         case .reply(let data): return CompanionHTTP.parseResponse(data)?.status
-        case .startClean, .startSample: return 202
+        case .startClean, .startCleanScan, .startCleanReport, .startSample: return 202
         }
     }
 

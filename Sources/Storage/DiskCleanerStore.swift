@@ -357,22 +357,10 @@ final class DiskCleanerStore: ObservableObject {
                 let completedUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: completedProg)
                 NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedUpdate)
 
-                // Persist only after the user is happy.  A failed clean (no
-                // items removed) is not worth a history row -- the user did not
-                // actually reclaim anything.
-                if result.itemsRemoved > 0 {
-                    // History must mirror successes only: selected-but-failed
-                    // rows (thin failure, isSafeToDelete rejection, trashItem
-                    // throw) stay out of the "Last cleanup" summary.
-                    let record = CleanupHistoryRecord(
-                        bytesReclaimed: result.bytesReclaimed,
-                        itemsRemoved: result.itemsRemoved,
-                        tier: result.tier,
-                        categoryIds: result.removedCategoryIds,
-                        itemTitles: Array(result.removedItemTitles.prefix(50)),
-                        snapshotName: result.snapshotName,
-                        cleanedAt: result.cleanedAt
-                    )
+                // Persist only after the user is happy: a failed clean (no
+                // items removed) gets no row.  The record is built in one place,
+                // shared with a clean the phone starts.
+                if let record = CleanupHistoryRecord.record(from: result) {
                     self.historyStore.append(record)
                     self.lastCleanup = record
                 }

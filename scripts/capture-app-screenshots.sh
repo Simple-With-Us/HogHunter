@@ -81,6 +81,8 @@ EXTRA_SCREENS = [
     ("mac-settings", ["-HogHunterMacSettings"]),
     ("sample-result", ["-HogHunterSampleResult"]),
     ("vacuum", ["-HogHunterVacuum"]),
+    ("cleaner", ["-HogHunterCleaner"]),
+    ("cleaner-extreme", ["-HogHunterCleanerExtreme"]),
 ]
 
 

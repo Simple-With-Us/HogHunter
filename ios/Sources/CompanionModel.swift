@@ -89,6 +89,30 @@ final class CompanionModel {
     /// The row a Sample for 3 Seconds is running on, so the row can say so and
     /// a second tap does not start a second sample.
     var samplingRowId: String?
+    // MARK: Disk cleaner (scan, choose, clean)
+    /// The Mac's last scan, progress and cleanup history, as of the last fetch.
+    var cleanReport: CompanionCleanReport?
+    /// The references the person has ticked.  Starts from the Mac's own default.
+    var selectedCleanRefs: Set<String> = []
+    /// `standard` or `extreme`.
+    var cleanTier = "standard"
+    /// The person's confirmation of the Extreme notice; asked again each launch.
+    var extremeAcknowledged = false
+    var isStartingScan = false
+    /// True while the phone is polling the Mac's scan.  The scan itself keeps
+    /// running on the Mac whether or not the phone is looking.
+    var isFollowingScan = false
+    /// The scan the Scan button started, so leaving the screen can stop following it.
+    var cleanScanTask: Task<Void, Never>?
+    /// Set by the screenshot lane's launch flags: the cleaner shows a canned
+    /// scan and never asks a Mac for one.
+    var isScreenshotMode = false
+    var isCleaningSelection = false
+    /// Why the last scan or clean did not go, shown inside the cleaner screen.
+    var cleanerError: String?
+    /// The scan whose defaults `selectedCleanRefs` was last seeded from.
+    var seededScanId: String?
+    var cleanReportPoll: Task<Void, Never>?
     /// How many settings changes are on their way to the Mac.  A count, not a
     /// flag, so one finishing does not re-enable controls while another is out.
     private(set) var settingsInFlight = 0
@@ -152,6 +176,7 @@ final class CompanionModel {
             snapshot = Self.sample
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
+            seedScreenshotCleaner()
             return
         }
         saved = loadSaved()
@@ -296,6 +321,7 @@ final class CompanionModel {
     }
 
     func forget() {
+        resetCleaner()
         saved = nil
         snapshot = nil
         codeDraft = ""
@@ -305,6 +331,7 @@ final class CompanionModel {
     }
 
     func enterDemoMode() {
+        resetCleaner()
         isDemoMode = true
         snapshot = Self.sample
         // The sample's dates are fixed; the demo shows runs that look recent.
@@ -313,6 +340,7 @@ final class CompanionModel {
     }
 
     func exitDemoMode() {
+        resetCleaner()
         isDemoMode = false
         snapshot = nil
         reconcile()
@@ -425,6 +453,11 @@ final class CompanionModel {
         // The Mac marks the run as going just after it answers.
         try? await Task.sleep(for: .milliseconds(600))
         await refresh()
+    }
+
+    /// Demo mode only: shows clean progress on the dashboard without a Mac.
+    func demoSetCleanProgress(_ progress: CompanionCleanProgress) {
+        snapshot?.cleanProgress = progress
     }
 
     /// What a finished Sample for 3 Seconds looks like, for demo mode and the
@@ -623,7 +656,7 @@ final class CompanionModel {
         discovered.first { $0.id == peerID }
     }
 
-    private func activeEndpoint(for saved: SavedMac) -> NWEndpoint? {
+    func activeEndpoint(for saved: SavedMac) -> NWEndpoint? {
         if let mac = discovered.first(where: { $0.id == saved.peerID }) {
             return mac.endpoint
         }
@@ -712,7 +745,7 @@ final class CompanionModel {
         }
     }
 
-    private func refresh() async {
+    func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             if didBrowse, let saved, saved.remoteHost == nil, discovered.first(where: { $0.id == saved.peerID }) == nil {
                 if phase != .code(saved.peerID) {

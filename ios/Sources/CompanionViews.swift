@@ -401,6 +401,8 @@ struct DashboardView: View {
     // surface on screen (scripts/capture-app-screenshots.sh); nothing else sets them.
     @State private var showMacSettings = ProcessInfo.processInfo.arguments.contains("-HogHunterMacSettings")
     @State private var showVacuum = ProcessInfo.processInfo.arguments.contains("-HogHunterVacuum")
+    @State private var showCleaner = ProcessInfo.processInfo.arguments.contains("-HogHunterCleaner")
+        || ProcessInfo.processInfo.arguments.contains("-HogHunterCleanerExtreme")
     @State private var sampleOutcome: SampleOutcome? = ProcessInfo.processInfo.arguments.contains("-HogHunterSampleResult")
         ? SampleOutcome(response: CompanionModel.sampleSampleResponse(name: "Google Chrome", rowId: 1042))
         : nil
@@ -658,6 +660,9 @@ struct DashboardView: View {
         }
         .navigationDestination(isPresented: $showVacuum) {
             VacuumView(snapshot: snapshot, model: model)
+        }
+        .navigationDestination(isPresented: $showCleaner) {
+            CleanerView(model: model)
         }
         .onChange(of: showMacSettings) { _, isOpen in
             if !isOpen, let queued = queuedSampleOutcome {
@@ -1267,6 +1272,18 @@ struct DashboardView: View {
                 }
             }
             .padding(.vertical, 4)
+
+            NavigationLink {
+                CleanerView(model: model)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Review & Choose What To Clean", systemImage: "list.bullet.rectangle")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Scan, tick items, try Extreme Clean, and read the cleanup history.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
 
         Section("Robotic Vacuum") {

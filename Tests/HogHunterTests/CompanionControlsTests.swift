@@ -27,22 +27,22 @@ final class CompanionServerRoutingTests: XCTestCase {
     func testCleanIsStartedOffTheRouterNotAnsweredInline() {
         let server = makeServer()
         var handlerCalls = 0
-        server.onRemoteClean = { _ in handlerCalls += 1 }
+        server.onRemoteClean = { _, _ in handlerCalls += 1 }
 
         let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
 
-        XCTAssertEqual(disposition, .startClean)
+        XCTAssertEqual(disposition, .startClean(nil))
         XCTAssertEqual(handlerCalls, 0, "routing must not run the clean on the server queue")
     }
 
     func testSnapshotPollIsAnsweredImmediatelyWhileACleanIsRunning() {
         let server = makeServer()
         var finishClean: (@Sendable (CompanionServer.Reply) -> Void)?
-        server.onRemoteClean = { completion in finishClean = completion }
+        server.onRemoteClean = { _, completion in finishClean = completion }
         server.update(snapshot: Self.minimalSnapshot())
 
         let started = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
-        XCTAssertEqual(started, .startClean)
+        XCTAssertEqual(started, .startClean(nil))
         // The clean is "running": its completion has not been called.  A
         // snapshot poll on the same queue must still be served.
         let poll = server.syncOnQueue { server.disposition(for: CompanionHTTP.request(token: code)) }
@@ -53,7 +53,7 @@ final class CompanionServerRoutingTests: XCTestCase {
 
     func testCleanIsRefusedWhenTheOwnerHasNotAllowedIt() {
         let server = makeServer(allowClean: false)
-        server.onRemoteClean = { _ in XCTFail("must not start") }
+        server.onRemoteClean = { _, _ in XCTFail("must not start") }
 
         let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: deviceToken)) }
 
@@ -63,7 +63,7 @@ final class CompanionServerRoutingTests: XCTestCase {
 
     func testCleanNeedsTheCode() {
         let server = makeServer()
-        server.onRemoteClean = { _ in XCTFail("must not start") }
+        server.onRemoteClean = { _, _ in XCTFail("must not start") }
 
         let disposition = server.syncOnQueue { server.disposition(for: CompanionHTTP.cleanRequest(token: "WRONG234")) }
 
