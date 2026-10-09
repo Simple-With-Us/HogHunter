@@ -145,7 +145,7 @@ struct CleanerView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let scanned = report.scannedAt {
-                        Text("Scanned \(CompanionRelative.formatter.localizedString(for: scanned, relativeTo: Date())) on \(hostName).")
+                        Text("Scanned \(CompanionRelative.text(for: scanned)) on \(hostName).")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -231,6 +231,7 @@ struct CleanerView: View {
                             HStack(spacing: 6) {
                                 Text(category.title)
                                     .font(.body.weight(.medium))
+                                    .foregroundStyle(.primary)
                                 if category.isExtremeOnly {
                                     Text("EXTREME ONLY")
                                         .font(.caption2.weight(.bold))
@@ -250,6 +251,9 @@ struct CleanerView: View {
                             .foregroundStyle(.tertiary)
                     }
                     .contentShape(Rectangle())
+                    // A borderless button tints its label; the title and the
+                    // count read as ordinary text, like the Mac's rows.
+                    .foregroundStyle(.primary)
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("\(category.title), \(category.totalText)")
@@ -375,7 +379,7 @@ struct CleanerView: View {
                                     .background(Capsule().fill(Color.accentColor.opacity(0.12)))
                             }
                             Spacer()
-                            Text(CompanionRelative.formatter.localizedString(for: record.cleanedAt, relativeTo: Date()))
+                            Text(CompanionRelative.text(for: record.cleanedAt))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -407,4 +411,10 @@ enum CompanionRelative {
         formatter.unitsStyle = .abbreviated
         return formatter
     }()
+
+    /// "3h ago", or "just now" inside ten seconds, where the formatter says "in 0s".
+    static func text(for date: Date, now: Date = Date()) -> String {
+        if abs(now.timeIntervalSince(date)) < 10 { return "just now" }
+        return formatter.localizedString(for: date, relativeTo: now)
+    }
 }
