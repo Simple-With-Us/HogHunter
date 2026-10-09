@@ -36,6 +36,24 @@ The Mac app reads the Python's output; the background job runs the Python.  The 
 | More than the newest 30 runs | `RoboticVacuumStore` reads the newest 30 of the 200 the engine keeps, so the headline can be a janitor run when the last full run is older than that.  `lastFullRunAt` still comes from the status file. |
 | Run details beyond the headline | Tapping a run for its steps would put step text behind a per-run request.  Not built. |
 
+## Verification
+
+| Command | Result |
+|---|---|
+| `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` | 527 tests, 1 failure.  The failure is `DiskCleanerTests.testScanAPFSSnapshotsFallsBackToAggregateWhenListFails`, the known Time Machine test that fails on the author's Mac.  The 16 new or changed vacuum tests pass. |
+| `xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' build` | Passes. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py` | 188 tests pass, 4 of them new (`TestStatusStepResults`). |
+
+No simulator run.  The hosted `test` job launches the iOS app with `-HogHunterVacuum` and uploads the frames as the `app-screenshots` artifact; the sample data now carries a recent runs list with one failed run, so that frame shows the new section.  Nothing here touches the release scripts, so the `release-safety` job covers them as before.
+
+## Next Steps
+
+| Step | Who |
+|---|---|
+| Decide whether the Mac and the phone should hide or collapse watch ticks (a "Hide Watch Checks" switch). | Owner |
+| Update the integration checkout and run `scripts/install.sh`, so the Mac gets the Python and Swift halves. | Owner, or any seat the owner asks |
+| Ship a new phone build.  It reaches testers only through the guarded TestFlight workflow, which stays disabled until replacement signing credentials are ready (issue #22). | Owner |
+
 ## Rollback
 
 Revert the PR.  The snapshot loses the two fields, a phone built with this change shows "does not share its recent runs" for a Mac without them, and `step_last_results` goes back to the last record's steps.
