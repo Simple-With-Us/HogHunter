@@ -1392,8 +1392,10 @@ final class DiskCleaner: @unchecked Sendable {
             return false
         }
 
-        // Never touch Hog Hunter itself
-        if isHogHunterIdentifier(path) {
+        // Never touch Hog Hunter's own namespaces (bundle caches, Application
+        // Support, Logs).  Use path markers — not a raw "hoghunter" substring —
+        // so a temp folder named HogHunterTest_* cannot poison the allowlist.
+        if isHogHunterProtectedPath(path) {
             return false
         }
 
@@ -1559,9 +1561,29 @@ final class DiskCleaner: @unchecked Sendable {
         homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     }
 
+    /// True for a folder or bundle-id *name* that belongs to Hog Hunter
+    /// (used when scanning Containers / Application Support entries).
     private func isHogHunterIdentifier(_ string: String) -> Bool {
         let lower = string.lowercased()
         return lower.contains("hoghunter") || lower.contains("simplewithus.hoghunter") || lower.contains("jayservices.hoghunter")
+    }
+
+    /// True for a full filesystem path that is one of Hog Hunter's protected
+    /// namespaces.  Deliberately narrower than `isHogHunterIdentifier`: a path
+    /// component like `HogHunterTest_*` must not block orphan allowlisting.
+    private func isHogHunterProtectedPath(_ path: String) -> Bool {
+        let lower = (path as NSString).standardizingPath.lowercased()
+        let markers = [
+            "/library/application support/hoghunter",
+            "/library/logs/hoghunter",
+            "/library/caches/com.simplewithus.hoghunter",
+            "/library/caches/com.jayservices.hoghunter",
+            "/library/containers/com.simplewithus.hoghunter",
+            "/library/containers/com.jayservices.hoghunter",
+            "/library/saved application state/com.simplewithus.hoghunter",
+            "/library/saved application state/com.jayservices.hoghunter"
+        ]
+        return markers.contains { lower.contains($0) }
     }
 
     /// Shared vendor folders hold several live products.  They are not one uninstalled app.
