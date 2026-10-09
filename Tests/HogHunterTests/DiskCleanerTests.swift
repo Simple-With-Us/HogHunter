@@ -79,6 +79,9 @@ final class DiskCleanerTests: XCTestCase {
         // Without routing isSafeToDelete through userHomeURL, scan-and-clean
         // under an injected temp home rejects every orphan (allowlist is the
         // real home) and verification for issue #67 can pass vacuously.
+        // The temp folder name still contains "HogHunter" so a naive substring
+        // HogHunter path guard would also fail this test — path protection must
+        // key off real namespaces, not any occurrence of the product name.
         let fm = FileManager.default
         let orphan = tempDirectory
             .appendingPathComponent("Library/Application Support/DefinitelyRemovedApp", isDirectory: true)
@@ -98,6 +101,14 @@ final class DiskCleanerTests: XCTestCase {
                 category: .orphanedData
             ),
             "injected Library itself must stay prohibited"
+        )
+        // Real Hog Hunter namespaces under the injected home stay protected.
+        let protected = tempDirectory
+            .appendingPathComponent("Library/Application Support/HogHunter", isDirectory: true)
+        try? fm.createDirectory(at: protected, withIntermediateDirectories: true)
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: protected, category: .orphanedData),
+            "Application Support/HogHunter under injected home must stay protected"
         )
     }
 
