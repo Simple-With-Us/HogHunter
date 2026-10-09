@@ -9,10 +9,19 @@ Run:  python3 scripts/test-hoghunter-clean.py
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
+import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import types
 from pathlib import Path
+from unittest import mock
 
 ENGINE = Path(__file__).resolve().parent / "hoghunter-clean"
 
@@ -114,6 +123,350 @@ def test_disk_bands(hh):
         b = hh.Band(disk_free_gb=free, disk_used_pct=0, swap_used_pct=0,
                     load1=0, cheap_only=False)
         assert b.disk_band == want, f"{free}G -> {b.disk_band}, want {want}"
+
+
+# --------------------------------------------------------------------------
+# Pacing, budget, and fail-closed probes (Oct 9 2026, issue #111)
+#
+# A full read-only scan of this Mac takes about 22 s.  The 900 s timeout was
+# the apply loop: 1,710 tiny Codex marker files, chunks of 1 to 3, and a 5 to
+# 20 s sleep plus a host re-read after every chunk.  These tests pin the cure.
+# --------------------------------------------------------------------------
+
+class FakeClock:
+    """A clock that only moves when the code under test sleeps or does work."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@contextlib.contextmanager
+def fake_time(hh, clock):
+    """Swap the engine's `time` name for the fake clock, never the real module."""
+    real = hh.time
+    hh.time = types.SimpleNamespace(
+        monotonic=clock.monotonic, sleep=clock.sleep, time=real.time, strftime=real.strftime,
+    )
+    try:
+        yield
+    finally:
+        hh.time = real
+        hh.set_budget(0)
+
+
+def marker(hh, i, size=2048):
+    return hh.Candidate(category="temp-scratch", path=f"/t/.com.openai.codex.{i:04d}", bytes=size,
+                        reason="Codex per-run marker file (auto-rotated by Codex)")
+
+
+def heavy(hh, i, size=64 * 1024 * 1024):
+    return hh.Candidate(category="dev-caches", path=f"/c/cache{i}", bytes=size, reason="cache")
+
+
+def test_plan_chunks_follows_weight_not_file_count(hh):
+    """1,710 tiny markers were 570 chunks of 3 with a sleep after each.  A chunk is a slot of work, so they
+    are 3 chunks.  Heavy items still take a slot each, three to a chunk."""
+    light = [marker(hh, i) for i in range(1710)]
+    chunks = hh.plan_chunks(light, 3)
+    assert [len(c) for c in chunks] == [600, 600, 510], [len(c) for c in chunks]
+    assert hh.plan_chunks(light, 1)[0].__len__() == hh.LIGHT_PER_SLOT
+    assert len(hh.plan_chunks(light, 1)) == 9
+    big = [heavy(hh, i) for i in range(7)]
+    assert [len(c) for c in hh.plan_chunks(big, 3)] == [3, 3, 1]
+    snap = hh.Candidate(category="snapshots", path="apfs-snapshot:x", bytes=0, reason="s",
+                        tier="semi-safe", op="snapshot-delete")
+    assert not hh.is_light(snap), "a snapshot delete is never light"
+    assert hh.plan_chunks([], 3) == []
+
+
+def test_plan_chunks_keeps_every_candidate_once_in_order(hh):
+    mixed = []
+    for i in range(10):
+        mixed.append(heavy(hh, i))
+        mixed.extend(marker(hh, 100 * i + j) for j in range(70))
+    chunks = hh.plan_chunks(mixed, 2)
+    flat = [c for chunk in chunks for c in chunk]
+    assert [c.path for c in flat] == [c.path for c in mixed]
+    for chunk in chunks:
+        weight = sum(1 if hh.is_light(c) else hh.LIGHT_PER_SLOT for c in chunk)
+        assert weight <= 2 * hh.LIGHT_PER_SLOT or len(chunk) == 1, weight
+
+
+def test_apply_order_puts_snapshots_then_the_biggest_first(hh):
+    snap = hh.Candidate(category="snapshots", path="apfs-snapshot:x", bytes=0, reason="s",
+                        tier="semi-safe", op="snapshot-delete")
+    items = [marker(hh, 1), heavy(hh, 1, 10 * 1024 * 1024), snap, heavy(hh, 2, 900 * 1024 * 1024)]
+    ordered = sorted(items, key=hh.apply_order)
+    assert ordered[0] is snap
+    assert [c.bytes for c in ordered[1:]] == sorted((c.bytes for c in items[:2] + items[3:]), reverse=True)
+
+
+def test_budget_is_unlimited_without_the_flag_and_counts_down_with_it(hh):
+    clock = FakeClock()
+    with fake_time(hh, clock):
+        hh.set_budget(0)
+        assert hh.budget_left() == float("inf")
+        hh.set_budget(100)
+        assert hh.budget_left() == 100
+        clock.now += 40
+        assert hh.budget_left() == 60
+        clock.now += 500
+        assert hh.budget_left() == 0, "the budget never goes negative"
+    assert hh.budget_left() == float("inf"), "fake_time leaves no budget behind"
+
+
+def run_main(hh, argv, cands, band, clock, apply_cost=0.0):
+    """Run main() against a canned scan.  apply_candidate marks the candidate applied; a heavy one costs apply_cost
+    seconds of fake time and a light one nothing.  Returns (exit code, parsed JSON, stderr text)."""
+    def fake_apply(c):
+        if not hh.is_light(c):
+            clock.now += apply_cost
+        c.applied = True
+
+    out, err = io.StringIO(), io.StringIO()
+    with fake_time(hh, clock), \
+            mock.patch.object(hh, "scan", return_value=cands), \
+            mock.patch.object(hh, "read_band", return_value=band), \
+            mock.patch.object(hh, "apply_candidate", side_effect=fake_apply), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = hh.main(argv)
+    return code, json.loads(out.getvalue()), err.getvalue()
+
+
+def calm_band(hh, chunk_size=3, pause=5.0):
+    return hh.Band(disk_free_gb=12.0, disk_used_pct=98, swap_used_pct=10, load1=20, cheap_only=False,
+                   cpu_idle_pct=40.0, chunk_size=chunk_size, chunk_pause_sec=pause)
+
+
+def test_the_marker_sweep_finishes_in_a_handful_of_pauses(hh):
+    """The regression itself: 1,710 markers on a thrashing host (chunk 1, pause 20 s) used to need 1,709
+    sleeps, 9.5 hours.  Now it is 9 chunks and 8 pauses, 160 s, well inside one budget."""
+    clock = FakeClock()
+    cands = [marker(hh, i) for i in range(1710)]
+    band = calm_band(hh, chunk_size=1, pause=20.0)
+    code, report, _err = run_main(hh, ["--clean", "--json", "--budget-sec=600"], cands, band, clock)
+    assert code == 0
+    assert len(clock.sleeps) == 8, clock.sleeps
+    assert sum(clock.sleeps) == 160, sum(clock.sleeps)
+    assert report["applied_count"] == 1710 and report["actionable_count"] == 1710
+    assert report["budget_exhausted"] is False and report["remaining_count"] == 0
+    assert report["applied_bytes"] == 1710 * 2048
+    assert report["failed_count"] == 0
+
+
+def test_a_spent_budget_stops_new_work_and_says_what_is_left(hh):
+    """Budget 100 s, each heavy item costs 30 s: three fit, the fourth never starts.  The run exits 0, says it
+    stopped, and counts the rest, so the caller reports a partial run instead of killing the process."""
+    clock = FakeClock()
+    cands = [heavy(hh, i) for i in range(10)]
+    band = calm_band(hh, chunk_size=1, pause=5.0)
+    code, report, err = run_main(hh, ["--clean", "--json", "--budget-sec=100"], cands, band, clock, apply_cost=30.0)
+    assert code == 0
+    assert report["budget_exhausted"] is True
+    assert 1 <= report["applied_count"] < 10
+    assert report["remaining_count"] == 10 - report["applied_count"], report
+    assert "left for the next run" in err
+    assert clock.now - 1000.0 <= 100.0 + 30.0, "overshoots by at most one item, never by a whole queue"
+    assert all(s <= 5.0 for s in clock.sleeps)
+
+
+def test_a_pause_never_sleeps_past_the_budget(hh):
+    clock = FakeClock()
+    cands = [heavy(hh, i) for i in range(3)]
+    band = calm_band(hh, chunk_size=1, pause=50.0)
+    _code, report, _err = run_main(hh, ["--clean", "--json", "--budget-sec=20"], cands, band, clock, apply_cost=15.0)
+    assert all(s <= 20 for s in clock.sleeps), clock.sleeps
+    assert report["budget_exhausted"] is True
+
+
+def test_no_budget_flag_applies_everything_as_before(hh):
+    clock = FakeClock()
+    cands = [heavy(hh, i) for i in range(4)]
+    band = calm_band(hh, chunk_size=3, pause=5.0)
+    code, report, _err = run_main(hh, ["--clean", "--json"], cands, band, clock, apply_cost=500.0)
+    assert code == 0
+    assert report["applied_count"] == 4 and report["budget_exhausted"] is False
+    assert report["applied_mib"] == 256.0
+
+
+def test_a_scan_reports_the_new_keys_without_applying_anything(hh):
+    clock = FakeClock()
+    cands = [heavy(hh, 1)]
+    code, report, _err = run_main(hh, ["--scan", "--json", "--budget-sec=50"], cands, calm_band(hh), clock)
+    assert code == 0
+    assert report["applied_count"] == 0 and report["remaining_count"] == 0
+    assert report["mode"] == "scan"
+    assert {"applied_bytes", "failed_count", "actionable_count", "budget_exhausted", "elapsed_sec"} <= set(report)
+
+
+def test_the_old_json_keys_are_still_there(hh):
+    """The Robotic Vacuum of an older checkout, and scripts/hoghunter-mcp.py, read these."""
+    clock = FakeClock()
+    _code, report, _err = run_main(hh, ["--clean", "--json"], [heavy(hh, 1)], calm_band(hh), clock)
+    assert {"version", "band", "mode", "tiers_applied", "candidates", "reclaimable_mib", "applied_mib"} <= set(report)
+
+
+def test_apply_delete_cannot_outlive_the_budget(hh):
+    """find -depth -delete had a fixed 600 s timeout, so one big tree could run ten minutes past the budget."""
+    clock = FakeClock()
+    work = Path(tempfile.mkdtemp(prefix="hhclean-test-"))
+    try:
+        victim = work / "tree"
+        (victim / "a").mkdir(parents=True)
+        (victim / "a" / "f").write_text("x")
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(kw.get("timeout"))
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        with fake_time(hh, clock), mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+            hh.set_budget(0)
+            hh.apply_delete(str(victim))
+            hh.set_budget(30)
+            clock.now += 10
+            hh.apply_delete(str(victim))
+            clock.now += 19.5
+            hh.apply_delete(str(victim))
+        assert seen[0] == 600.0, seen
+        assert seen[1] == 20.0, seen
+        assert seen[2] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_apply_delete_trusts_the_size_the_scan_measured(hh):
+    work = Path(tempfile.mkdtemp(prefix="hhclean-test-"))
+    try:
+        f = work / "f.bin"
+        f.write_bytes(b"x" * 10)
+        with mock.patch.object(hh, "dir_bytes", side_effect=AssertionError("walked the tree twice")):
+            freed, err = hh.apply_delete(str(f), known_bytes=4096)
+        assert (freed, err) == (4096, ""), (freed, err)
+        assert not f.exists()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_every_apply_time_command_is_cut_to_the_budget(hh):
+    """find had the cut; brew cleanup (600 s) and the tmutil calls (120 s + 60 s) did not, so a candidate that
+    started with seconds left could outlive the engine's hard stop and turn a partial run into a kill."""
+    clock = FakeClock()
+    seen = []
+
+    def fake_run(cmd, timeout=20):
+        seen.append((cmd[0].rsplit("/", 1)[-1], timeout))
+        return ""
+
+    brew = hh.Candidate(category="brew", path="/opt/homebrew", bytes=0, reason="b", op="brew-cleanup")
+    snap = hh.Candidate(category="snapshots", op="snapshot-delete", tier="semi-safe", bytes=0, reason="s",
+                        path="apfs-snapshot:com.apple.TimeMachine.2026-10-09-010101.local")
+    with fake_time(hh, clock), mock.patch.object(hh, "_run", side_effect=fake_run):
+        hh.set_budget(0)
+        hh.apply_candidate(brew)
+        hh.apply_candidate(snap)
+        assert seen == [("brew", 600), ("tmutil", 120), ("tmutil", 60)], seen
+        seen.clear()
+        hh.set_budget(40)
+        clock.now += 10
+        hh.apply_candidate(brew)
+        hh.apply_candidate(snap)
+        assert [t for _n, t in seen] == [30.0, 30.0, 30.0], seen
+        seen.clear()
+        clock.now += 29
+        hh.apply_candidate(brew)
+        assert seen == [("brew", 5.0)], "never under the 5 s floor"
+
+
+def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh):
+    """Two heavy items and three markers, budget 100, the first heavy costs 80 s.  The second heavy needs 30 s
+    to start and has 20, so it waits for the next run; the markers are quick and still go."""
+    clock = FakeClock()
+    cands = [heavy(hh, 1, 900 * 1024 * 1024), heavy(hh, 2, 800 * 1024 * 1024)] + [marker(hh, i) for i in range(3)]
+    _code, report, _err = run_main(hh, ["--clean", "--json", "--budget-sec=100"], cands, calm_band(hh, chunk_size=3),
+                                   clock, apply_cost=80.0)
+    applied = {c["path"] for c in report["candidates"] if c["applied"]}
+    assert "/c/cache1" in applied and "/c/cache2" not in applied, applied
+    assert sum(1 for p in applied if "codex" in p) == 3
+    assert report["applied_count"] == 4 and report["remaining_count"] == 1
+    assert report["budget_exhausted"] is True
+
+
+def test_truncate_keep_size_is_read_once_from_the_detail(hh):
+    """apply_candidate parsed `keep last 16M` with two searches; one compiled pattern does it, and a detail with
+    no size falls back to 16."""
+    seen = []
+    with mock.patch.object(hh, "apply_truncate", side_effect=lambda path, keep_mib: seen.append(keep_mib) or (0, "")):
+        for detail in ("keep last 32M", "", "no size here"):
+            hh.apply_candidate(hh.Candidate(category="logs", path="/x/a.log", bytes=1, reason="r",
+                                            op="truncate", detail=detail))
+    assert seen == [32, 16, 16], seen
+
+
+def completed(code, out=""):
+    return subprocess.CompletedProcess([], code, out, "")
+
+
+def test_proc_count_fails_closed(hh):
+    """pgrep that times out is not 'nothing is building'.  Every caller reads a non-zero count as busy."""
+    with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("pgrep", 15)):
+        assert hh.proc_count("xcodebuild") == hh.PROBE_FAILED
+    with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no pgrep")):
+        assert hh.proc_count("xcodebuild") == hh.PROBE_FAILED
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(2)):
+        assert hh.proc_count("(") == hh.PROBE_FAILED, "a pgrep usage error is a failed look"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1)):
+        assert hh.proc_count("xcodebuild") == 0, "exit 1 is pgrep's honest 'no match'"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "101\n202\n")):
+        assert hh.proc_count("xcodebuild") == 2
+    assert hh.PROBE_FAILED > 20, "also over the 'node and tsc are building' threshold"
+
+
+def test_a_failed_pgrep_stops_the_dev_cache_rule(hh):
+    """The visible effect: with pgrep unavailable the dev-cache rule offers nothing, instead of offering a cache
+    that a build may be using.  The control case proves the fixture would be offered when pgrep says all clear."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library/Caches/node-gyp"
+        cache.mkdir(parents=True)
+        big = cache / "headers.tar"
+        with big.open("wb") as fh:
+            fh.truncate(9 * 1024 * 1024)
+        old = hh.time.time() - 5 * 3600
+        os.utime(big, (old, old))
+        os.utime(cache, (old, old))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            with mock.patch.object(hh.subprocess, "run", return_value=completed(1)):
+                offered = hh.rule_dev_caches()
+            assert [c.path for c in offered] == [str(cache)], offered
+            with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("pgrep", 15)):
+                assert hh.rule_dev_caches() == []
+                assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_open_handles_fails_closed(hh):
+    with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("lsof", 25)):
+        assert hh.open_handles("/x") == 1
+    with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no lsof")):
+        assert hh.open_handles("/x") == 1
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1, "")):
+        assert hh.open_handles("/x") == 0, "lsof exits 1 for 'nobody has it open'"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1, "p123\n")):
+        assert hh.open_handles("/x") == 1, "lsof exits 1 after a partial listing too, and the pid still counts"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "p1\np1\np2\n")):
+        assert hh.open_handles("/x") == 2
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(2, "")):
+        assert hh.open_handles("/x") == 1, "an lsof that errored did not look"
 
 
 def main() -> int:

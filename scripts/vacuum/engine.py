@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -26,6 +29,18 @@ _BUILD_PROCESSES = ("xcodebuild", "swift-frontend", "clang")
 _DERIVED_DATA_IDLE_SECONDS = 90 * 60.0
 _DEVICE_SUPPORT_IDLE_SECONDS = 7 * 86400.0
 
+# hoghunter-clean gets a time budget it keeps itself (--budget-sec), and a hard stop a little later.  The old
+# single 900 s kill reported a failure and no bytes even when the cleaner had done most of its work.  The budget
+# stays under the 900 s the steps used to get, so a tick is never longer than before.
+_RECLAIM_BUDGET_SECONDS = 600
+_RECLAIM_GRACE_SECONDS = 180
+
+# The Spotlight index folder is protected by macOS (TCC).  A launchd job whose interpreter has no Full Disk Access
+# is refused when it lists the folder, with EPERM ("Operation not permitted").  That is a state of the Mac, not a
+# failure of the step, so the step reports it as skipped.  Nothing here tries to get around the protection.
+_SPOTLIGHT_NEEDS_FDA = "skipped: needs Full Disk Access (macOS blocks the Spotlight index folder)"
+_PROTECTED_ERRNOS = (errno.EPERM, errno.EACCES)
+
 # Steps that interpret dry_run themselves (planning vs destructive apply).
 _DRY_RUN_AWARE_STEPS = frozenset(
     {"resource_sample", "janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps"}
@@ -34,6 +49,43 @@ _DRY_RUN_AWARE_STEPS = frozenset(
 
 def _subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, **kwargs)
+
+
+def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bool]:
+    """Run cmd in its own process group and return (exit code, stdout, stderr, timed_out).  On a timeout the whole
+    group is killed, so the find, lsof or du the child started cannot outlive it and keep the disk busy.  Any other
+    error while waiting (a broken pipe, an interrupt) kills the group too and is raised, so nothing is leaked and
+    the step reports the real error instead of a budget overrun."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+    )
+
+    def kill_group() -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out or "", err or "", False
+    except subprocess.TimeoutExpired:
+        kill_group()
+        try:
+            out, err = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        return -1, out or "", err or "", True
+    except BaseException:
+        kill_group()
+        try:
+            proc.communicate(timeout=15)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise
 
 
 class VacuumEngine:
@@ -108,7 +160,7 @@ class VacuumEngine:
                             continue
                     result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
                     record.steps.append(result)
-                record.finish(0 if all(s.status != StepStatus.FAILED for s in record.steps) else 1)
+                record.finish()
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
@@ -141,7 +193,6 @@ class VacuumEngine:
                         reason=f"{len(hits)} threshold hit(s)" if hits else "within limits",
                     )
                 )
-                escalation_failed = False
                 if hits:
                     now = time.time()
                     last_clean = float(rw_state.get("last_clean_at", 0))
@@ -156,8 +207,7 @@ class VacuumEngine:
                         pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full", dry_run=dry_run)
                         record.steps.extend(pressure_record.steps)
                         rw_state["last_clean_at"] = now
-                        escalation_failed = any(s.status == StepStatus.FAILED for s in pressure_record.steps)
-                record.finish(1 if escalation_failed else 0, summary="watch tick")
+                record.finish(summary="watch tick")
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
@@ -379,39 +429,76 @@ class VacuumEngine:
         return 0, "brew cleanup --prune=all finished", StepStatus.RAN
 
     def _hoghunter_reclaim(self, band: str) -> tuple[int, str, StepStatus]:
+        """Run hoghunter-clean with a time budget, report the bytes it really freed, and treat "budget spent" as
+        a good partial run: it removes the most valuable things first and the next run rescans and carries on.
+        Only a cleaner that overruns its budget plus the grace period, or exits non-zero, is a failure."""
         path = Path(str(self.cfg.get("hoghunter_clean", "")))
         if not path.is_file():
             return 0, "hoghunter-clean not found", StepStatus.SKIPPED
-        res = subprocess.run(
-            [str(path), "--clean", f"--band={band}"],
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        if res.returncode != 0:
-            return 0, (res.stderr or "reclaim failed")[:120], StepStatus.FAILED
-        return 0, f"band={band}", StepStatus.RAN
+        budget = self._reclaim_budget()
+        cmd = [str(path), "--clean", f"--band={band}", "--json", f"--budget-sec={budget}"]
+        code, out, err, timed_out = _run_in_own_group(cmd, budget + _RECLAIM_GRACE_SECONDS)
+        if timed_out:
+            return (
+                0,
+                f"stopped: hoghunter-clean overran its {budget}s budget by more than {_RECLAIM_GRACE_SECONDS}s",
+                StepStatus.FAILED,
+            )
+        if code != 0:
+            tail = [ln for ln in (err or "").strip().splitlines() if ln.strip()]
+            return 0, (tail[-1] if tail else f"reclaim exited {code}")[:200], StepStatus.FAILED
+        try:
+            report = json.loads(out)
+        except ValueError:
+            report = None
+        if not isinstance(report, dict) or "applied_count" not in report:
+            return 0, f"band={band}", StepStatus.RAN  # an older cleaner: it ran, and it cannot say what it freed
+        applied = int(report.get("applied_count") or 0)
+        failed = int(report.get("failed_count") or 0)
+        total = int(report.get("actionable_count") or 0)
+        freed = int(report.get("applied_bytes") or 0)
+        reason = f"band={band}: removed {applied} of {total} item(s), {lanes.format_size(freed)}"
+        if report.get("budget_exhausted"):
+            reason += f"; time budget spent, {int(report.get('remaining_count') or 0)} left for the next run"
+        if failed:
+            reason += f"; {failed} could not be removed"
+        if failed and not applied:
+            return 0, reason[:200], StepStatus.FAILED
+        return freed, reason[:200], StepStatus.RAN
+
+    def _reclaim_budget(self) -> int:
+        try:
+            budget = int(float(self.cfg.get("hoghunter_clean_budget_sec", _RECLAIM_BUDGET_SECONDS)))
+        except (TypeError, ValueError):
+            budget = _RECLAIM_BUDGET_SECONDS
+        return max(30, budget)
 
     def _pm2_logs(self) -> tuple[int, str, StepStatus]:
         cap = 50 * 1024 * 1024
         truncated = 0
+        freed = 0
         logs_dir = self.home / ".pm2/logs"
         if logs_dir.is_dir():
             for logf in logs_dir.glob("*.log"):
                 try:
-                    if logf.stat().st_size > cap:
+                    size = logf.stat().st_size
+                    if size > cap:
                         logf.write_text("")
                         truncated += 1
+                        freed += size
                 except OSError:
                     pass
         pm2_log = self.home / ".pm2/pm2.log"
         try:
-            if pm2_log.is_file() and pm2_log.stat().st_size > cap:
-                pm2_log.write_text("")
-                truncated += 1
+            if pm2_log.is_file():
+                size = pm2_log.stat().st_size
+                if size > cap:
+                    pm2_log.write_text("")
+                    truncated += 1
+                    freed += size
         except OSError:
             pass
-        return 0, f"truncated {truncated} log(s) in place", StepStatus.RAN
+        return freed, f"truncated {truncated} log(s) in place", StepStatus.RAN
 
     def _vitest_temp_dbs(self) -> tuple[int, str, StepStatus]:
         try:
@@ -421,38 +508,57 @@ class VacuumEngine:
         if not ut:
             return 0, "temp dir unavailable", StepStatus.SKIPPED
         removed = 0
+        freed = 0
         for entry in Path(ut).glob("agentic-*"):
             try:
                 if time.time() - entry.stat().st_mtime > 360 * 60:
                     if entry.is_dir():
+                        size = self._dir_size_before_clear(entry)
                         shutil.rmtree(entry, ignore_errors=True)
                     else:
+                        size = entry.stat().st_size
                         entry.unlink(missing_ok=True)
                     removed += 1
+                    freed += size
             except OSError:
                 pass
-        return 0, f"removed {removed} stale temp db(s)", StepStatus.RAN
+        return freed, f"removed {removed} stale temp db(s)", StepStatus.RAN
 
     def _spotlight_journals(self) -> tuple[int, str, StepStatus]:
+        """Reset the Spotlight indexing journals.  macOS protects this folder (TCC): a process without Full Disk
+        Access is refused when it lists it, even though the folder shows as the user's own.  The folder is
+        listed FIRST, so a refusal is reported as a skip before any Spotlight daemon is touched.  The step used
+        to run killall and then fail, which restarted Spotlight on every full run for nothing."""
         pipe = self.home / "Library/Metadata/CoreSpotlight/DocumentProcessing/PipelineStorage"
-        if not pipe.is_dir():
-            return 0, "PipelineStorage missing", StepStatus.SKIPPED
-        subprocess.run(["killall", "knowledgeconstructiond", "corespotlightd", "mds_stores"], capture_output=True)
-        for journals in pipe.rglob("Journals"):
-            if journals.is_dir():
-                shutil.rmtree(journals, ignore_errors=True)
-        for hist in pipe.rglob("HistoricalReports"):
-            if hist.is_dir():
-                shutil.rmtree(hist, ignore_errors=True)
-        for child in pipe.iterdir():
-            if child.is_dir():
-                (child / "Journals").mkdir(parents=True, exist_ok=True)
-        for db in ("StateStore.db", "StateStore.db-wal", "StateStore.db-shm"):
-            try:
-                (pipe / db).unlink(missing_ok=True)
-            except OSError:
-                pass
-        return 0, "journals reset", StepStatus.RAN
+        try:
+            if not pipe.is_dir():
+                return 0, "PipelineStorage missing", StepStatus.SKIPPED
+            list(pipe.iterdir())  # the probe: this is the call macOS refuses without Full Disk Access
+        except OSError as exc:
+            if exc.errno in _PROTECTED_ERRNOS:
+                return 0, _SPOTLIGHT_NEEDS_FDA, StepStatus.SKIPPED
+            raise
+        try:
+            subprocess.run(["killall", "knowledgeconstructiond", "corespotlightd", "mds_stores"], capture_output=True)
+            freed = 0
+            for kind in ("Journals", "HistoricalReports"):
+                for found in pipe.rglob(kind):
+                    if found.is_dir():
+                        freed += self._dir_size_before_clear(found)
+                        shutil.rmtree(found, ignore_errors=True)
+            for child in sorted(pipe.iterdir()):
+                if child.is_dir():
+                    (child / "Journals").mkdir(parents=True, exist_ok=True)
+            for db in ("StateStore.db", "StateStore.db-wal", "StateStore.db-shm"):
+                try:
+                    (pipe / db).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except OSError as exc:
+            if exc.errno in _PROTECTED_ERRNOS:
+                return 0, _SPOTLIGHT_NEEDS_FDA, StepStatus.SKIPPED
+            raise
+        return freed, "journals reset", StepStatus.RAN
 
     def _codex_archived_sessions(self) -> tuple[int, str, StepStatus]:
         path = self.home / ".codex/archived_sessions"
@@ -466,6 +572,7 @@ class VacuumEngine:
         cutoff = days * 86400
         now = time.time()
         removed = 0
+        freed = 0
         for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
             p = Path(dirpath)
             name = p.name
@@ -479,25 +586,28 @@ class VacuumEngine:
             except (OSError, ValueError):
                 continue
             if now - newest > cutoff:
+                freed += self._dir_size_before_clear(p)
                 shutil.rmtree(p, ignore_errors=True)
                 removed += 1
-        return 0, f"removed {removed} session(s)", StepStatus.RAN
+        return freed, f"removed {removed} session(s)", StepStatus.RAN
 
     def _antigravity_brain(self) -> tuple[int, str, StepStatus]:
         brain = self.home / ".gemini/antigravity/brain"
         if not brain.is_dir():
             return 0, "no brain dir", StepStatus.SKIPPED
         removed = 0
+        freed = 0
         cutoff = time.time() - 7 * 86400
         for child in brain.iterdir():
             if child.is_dir():
                 try:
                     if child.stat().st_mtime < cutoff:
+                        freed += self._dir_size_before_clear(child)
                         shutil.rmtree(child, ignore_errors=True)
                         removed += 1
                 except OSError:
                     pass
-        return 0, f"pruned {removed} folder(s)", StepStatus.RAN
+        return freed, f"pruned {removed} folder(s)", StepStatus.RAN
 
     def _lane_report(self) -> lanes.LaneReport:
         """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice."""

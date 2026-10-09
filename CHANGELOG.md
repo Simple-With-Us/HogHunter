@@ -9,6 +9,14 @@ iPhone companion, Robotic Vacuum recent runs (board `5acbcff4`, issue 110):
 - The Mac's Cleaning steps list had the same flaw, because `build_status` took every step result from the last history record only.  Each step now shows its most recent result from any run.  It takes effect when the Vacuum next publishes its status.
 - The snapshot's `vacuum` gains `recentRuns` and `lastRunTrigger`.  A run in the list carries no step text, so the list is not behind Allow iPhone to Run Robotic Vacuum.  An older Mac sends neither field and the phone says that Mac does not share its recent runs; an older phone ignores both.
 
+Robotic Vacuum full runs (board `4ea933f0`, issue 111):
+
+- A reclaim sweep no longer runs for hours.  `hoghunter-clean` cuts its work into slots by weight, so 1,710 tiny files are 3 chunks instead of 570 chunks with a sleep after each, and it takes `--budget-sec` so the Vacuum gets a finished report instead of a kill at 900 seconds.  What it did not reach is found again by the next run.
+- The Spotlight journals step reports "needs Full Disk Access" as a skip, and no longer restarts the Spotlight services before it fails.
+- A run where one step failed and another did its work is `partial` (exit 0) instead of `failed`.  The failed step stays marked on the run, and the run-failed banner still names it.
+- Reclaim, Grok sessions, Antigravity brain, test databases, PM2 logs and the Spotlight step now count the bytes they remove, so "bytes freed" is no longer 0 after a good run.
+- The cleaner reads a pgrep or lsof that fails as "busy", not as "nothing running".
+
 iPhone companion, phone parity batch 2, review follow-ups (issue 108):
 
 - A phone clean that stops before it removes anything (the safety snapshot failed, the connection dropped) no longer spends the scan the person chose from, so they can retry without scanning again.  One that removes something still does.

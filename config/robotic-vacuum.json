@@ -11,6 +11,7 @@
   "housekeeper_lock": "~/.claude-disk-janitor/.housekeeper.lock",
   "data_dir": "~/Library/Application Support/HogHunter/RoboticVacuum",
   "hoghunter_clean": "",
+  "hoghunter_clean_budget_sec": 600,
   "repos": [],
   "keep_worktree_regex": "",
   "coolify_ssh_host": "",

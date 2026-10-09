@@ -6,8 +6,12 @@ command (python3 scripts/test-robotic-vacuum.py) runs both files."""
 from __future__ import annotations
 
 import atexit
+import errno
+import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -60,7 +64,7 @@ from vacuum import alerts  # noqa: E402
 from vacuum.alerts import evaluate_alerts  # noqa: E402
 from vacuum.config import load_config, step_enabled, steps_for_trigger  # noqa: E402
 from vacuum import janitor  # noqa: E402
-from vacuum.models import RunRecord, StepResult, StepStatus, TriggerKind  # noqa: E402
+from vacuum.models import RunOutcome, RunRecord, StepResult, StepStatus, TriggerKind, run_outcome  # noqa: E402
 from vacuum.pressure import evaluate_hits, janitor_pressure_mode, sample_mac  # noqa: E402
 from vacuum.scheduler import build_status, should_run  # noqa: E402
 from vacuum.store import VacuumStore  # noqa: E402
@@ -523,6 +527,478 @@ class TestStatusStepResults(unittest.TestCase):
                 status = build_status(store, cfg, now=time.time())
         self.assertEqual(status["step_last_results"], {})
         self.assertIsNone(status["last_run"])
+
+
+def _step(step_id: str, status: StepStatus, reason: str = "", freed: int = 0) -> StepResult:
+    return StepResult(step_id, step_id, status, reason=reason, bytes_freed=freed)
+
+
+class TestRunOutcome(unittest.TestCase):
+    """One failed step must not fail a whole run whose other steps did their work (issue #111)."""
+
+    def test_outcome_rules(self):
+        ran, skipped, failed = StepStatus.RAN, StepStatus.SKIPPED, StepStatus.FAILED
+        self.assertEqual(run_outcome([]), RunOutcome.OK)
+        self.assertEqual(run_outcome([_step("a", ran), _step("b", skipped)]), RunOutcome.OK)
+        self.assertEqual(run_outcome([_step("a", ran), _step("b", failed)]), RunOutcome.PARTIAL)
+        self.assertEqual(run_outcome([_step("a", skipped), _step("b", failed)]), RunOutcome.FAILED)
+        self.assertEqual(run_outcome([_step("b", failed)]), RunOutcome.FAILED)
+        # The sampler only reads the host.  It never counts as the work that rescued a run.
+        self.assertEqual(run_outcome([_step("resource_sample", ran), _step("b", failed)]), RunOutcome.FAILED)
+        self.assertEqual(
+            run_outcome([_step("resource_sample", ran), _step("b", failed), _step("c", ran)]), RunOutcome.PARTIAL
+        )
+
+    def test_partial_run_exits_zero_and_names_the_failed_step(self):
+        record = RunRecord("x", TriggerKind.FULL, started_at=time.time())
+        record.steps += [
+            _step("pm2_logs", StepStatus.RAN, freed=1000),
+            _step("hoghunter_reclaim", StepStatus.FAILED, "stopped"),
+            _step("npm_cache", StepStatus.SKIPPED),
+        ]
+        record.finish()
+        self.assertEqual(record.exit_code, 0)
+        self.assertEqual(record.outcome, "partial")
+        self.assertEqual(record.bytes_freed, 1000)
+        self.assertIn("hoghunter_reclaim", record.summary)
+        self.assertIn("1 of 3", record.summary)
+        # The failure is not hidden: it is still on the step, and the alert module still sees it.
+        self.assertEqual([s.step_id for s in record.steps if s.status == StepStatus.FAILED], ["hoghunter_reclaim"])
+
+    def test_a_run_where_nothing_worked_still_fails(self):
+        record = RunRecord("x", TriggerKind.JANITOR, started_at=time.time())
+        record.steps += [_step("janitor_worktree_retire", StepStatus.SKIPPED), _step("janitor_cache_reclaim", StepStatus.FAILED)]
+        record.finish()
+        self.assertEqual((record.exit_code, record.outcome), (1, "failed"))
+
+    def test_clean_run_is_ok_with_no_summary_noise(self):
+        record = RunRecord("x", TriggerKind.JANITOR, started_at=time.time())
+        record.steps.append(_step("pm2_logs", StepStatus.RAN))
+        record.finish(summary="watch tick")
+        self.assertEqual((record.exit_code, record.outcome, record.summary), (0, "ok", "watch tick"))
+
+    def test_explicit_exit_codes_still_win(self):
+        failed = RunRecord("x", TriggerKind.FULL, started_at=time.time())
+        failed.steps.append(_step("a", StepStatus.RAN))
+        failed.finish(1)
+        self.assertEqual((failed.exit_code, failed.outcome), (1, "failed"))
+        clean = RunRecord("y", TriggerKind.WATCH, started_at=time.time())
+        clean.steps.append(_step("housekeeper_lock", StepStatus.SKIPPED, "held"))
+        clean.finish(0, summary="watch skipped; lock held")
+        self.assertEqual((clean.exit_code, clean.outcome, clean.summary), (0, "ok", "watch skipped; lock held"))
+        odd = RunRecord("z", TriggerKind.FULL, started_at=time.time())
+        odd.steps.append(_step("a", StepStatus.FAILED))
+        odd.finish(0)
+        self.assertEqual((odd.exit_code, odd.outcome), (0, "partial"), "zero is never worse than partial")
+
+    def test_outcome_round_trips_and_old_records_get_one(self):
+        record = RunRecord("x", TriggerKind.FULL, started_at=time.time())
+        record.steps += [_step("a", StepStatus.RAN), _step("b", StepStatus.FAILED)]
+        record.finish()
+        again = RunRecord.from_dict(json.loads(json.dumps(record.as_dict())))
+        self.assertEqual(again.outcome, "partial")
+        old_ok = RunRecord.from_dict({"run_id": "o", "trigger": "watch", "started_at": 1, "exit_code": 0})
+        old_bad = RunRecord.from_dict({"run_id": "o", "trigger": "watch", "started_at": 1, "exit_code": 1})
+        self.assertEqual((old_ok.outcome, old_bad.outcome), ("ok", "failed"))
+
+    def test_a_failure_summary_is_never_mistaken_for_a_lock_skip(self):
+        from vacuum.scheduler import run_skipped_for_lock
+
+        record = RunRecord("x", TriggerKind.FULL, started_at=time.time())
+        record.steps += [_step("a", StepStatus.RAN)] + [_step(sid, StepStatus.FAILED) for sid in STEP_IDS_FOR_LOCK_CHECK]
+        record.finish()
+        self.assertFalse(run_skipped_for_lock(record), record.summary)
+
+    def _engine(self, home: Path, only: list[str]):
+        from vacuum.engine import VacuumEngine
+
+        cfg = load_config(home=home)
+        cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+        for step_id in cfg["steps"]:
+            cfg["steps"][step_id] = {"enabled": step_id in only}
+        return VacuumEngine(cfg, home=home)
+
+    def test_engine_run_with_one_failing_step_is_partial(self):
+        from vacuum.engine import VacuumEngine
+
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine(Path(td), ["pm2_logs", "vitest_temp_dbs"])
+
+            def dispatch(self, step_id, *args, **kwargs):
+                if step_id == "vitest_temp_dbs":
+                    raise RuntimeError("boom")
+                return 4096, "fine", StepStatus.RAN
+
+            with patch.object(VacuumEngine, "_dispatch", dispatch), patch(
+                "vacuum.engine.sample_mac", return_value={"disk_free_gb": 100.0, "load1": 0.0, "swap_used_pct": 0.0}
+            ):
+                record = engine.run(TriggerKind.JANITOR)
+        self.assertEqual((record.exit_code, record.outcome, record.bytes_freed), (0, "partial", 4096))
+
+    def test_watch_escalation_with_one_failed_step_is_partial_not_failed(self):
+        """Watch ticks were 11 of the 22 runs on Oct 9, and they had their own all-or-nothing exit."""
+        from vacuum.engine import VacuumEngine
+
+        def pressure_record(statuses):
+            def run(self, trigger, pressure=False, band="cheap", dry_run=False):
+                rec = RunRecord("p", trigger, started_at=time.time())
+                for i, status in enumerate(statuses):
+                    rec.steps.append(_step(f"step{i}", status))
+                rec.finish()
+                return rec
+
+            return run
+
+        hits = [{"metric": "disk_free_gb", "severity": "critical"}]
+        for statuses, expected in (
+            ([StepStatus.FAILED, StepStatus.RAN], (0, "partial")),
+            ([StepStatus.FAILED, StepStatus.SKIPPED], (1, "failed")),
+            ([StepStatus.RAN, StepStatus.RAN], (0, "ok")),
+        ):
+            with tempfile.TemporaryDirectory() as td:
+                engine = self._engine(Path(td), [])
+                with patch("vacuum.engine.sample_mac", return_value={"disk_free_gb": 8.0}), patch(
+                    "vacuum.engine.evaluate_hits", return_value=hits
+                ), patch.object(VacuumEngine, "run", pressure_record(statuses)):
+                    record, _hits, cleaned = engine.run_watch_tick({}, None)
+            self.assertTrue(cleaned)
+            self.assertEqual((record.exit_code, record.outcome), expected, statuses)
+
+    def test_the_run_failed_banner_follows_failed_steps_so_a_partial_run_still_speaks(self):
+        """The decision, written down: a partial run exits 0 and is not a failed run, but a step that fails
+        every time must not go quiet, so the banner (whose text says "failed step(s)") is keyed on the steps.
+        A run with no failed step stays silent."""
+        for steps, expect_alert in (
+            ([_step("a", StepStatus.RAN), _step("b", StepStatus.FAILED)], True),
+            ([_step("a", StepStatus.SKIPPED), _step("b", StepStatus.FAILED)], True),
+            ([_step("a", StepStatus.RAN), _step("b", StepStatus.SKIPPED)], False),
+        ):
+            with tempfile.TemporaryDirectory() as td:
+                home = Path(td)
+                cfg = load_config(home=home)
+                cfg["data_dir"] = str(home / "rv")
+                store = VacuumStore(cfg, home=home)
+                now = time.time()
+                record = RunRecord("r", TriggerKind.FULL, started_at=now - 5)
+                record.steps += steps
+                record.finish()
+                record.ended_at = now - 1
+                store.append_run(record)
+                with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                    decisions = evaluate_alerts(store, cfg, now=now)
+                kinds = [d.kind for d in decisions if d.should_notify]
+                self.assertEqual("run_failed" in kinds, expect_alert, (steps, kinds))
+
+
+STEP_IDS_FOR_LOCK_CHECK = ("hoghunter_reclaim", "spotlight_journals", "janitor_worktree_retire", "pm2_logs")
+
+
+class _EngineHome(unittest.TestCase):
+    def setUp(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        self.home = Path(tempfile.mkdtemp(prefix="hhengine-"))
+        self.addCleanup(shutil.rmtree, str(self.home), True)
+        self.cfg = load_config(home=self.home)
+        self.cfg["housekeeper_lock"] = str(self.home / ".housekeeper.lock")
+        self.engine = VacuumEngine(self.cfg, home=self.home)
+
+    def fake_cleaner(self) -> str:
+        path = self.home / "hoghunter-clean"
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+        self.cfg["hoghunter_clean"] = str(path)
+        return str(path)
+
+
+def _report(**overrides) -> str:
+    report = {
+        "applied_count": 1710,
+        "actionable_count": 1710,
+        "failed_count": 0,
+        "applied_bytes": 69_000_000,
+        "budget_exhausted": False,
+        "remaining_count": 0,
+    }
+    report.update(overrides)
+    return json.dumps(report)
+
+
+class TestHogHunterReclaimStep(_EngineHome):
+    def run_step(self, result, band="cheap"):
+        """Run the step with _run_in_own_group answering `result`; returns (step result, the call)."""
+        self.fake_cleaner()
+        with patch("vacuum.engine._run_in_own_group", return_value=result) as run:
+            return self.engine._hoghunter_reclaim(band), run.call_args
+
+    def test_the_cleaner_gets_a_budget_under_its_hard_stop_and_asks_for_json(self):
+        _out, call = self.run_step((0, _report(), "", False))
+        cmd, timeout = call.args
+        self.assertIn("--clean", cmd)
+        self.assertIn("--band=cheap", cmd)
+        self.assertIn("--json", cmd)
+        self.assertIn("--budget-sec=600", cmd)
+        self.assertLess(timeout, 900, "the hard stop stays under the 900 s the step used to get")
+        self.assertGreater(timeout, 600)
+
+    def test_a_finished_sweep_reports_the_real_bytes(self):
+        (freed, reason, status), _call = self.run_step((0, _report(), "", False), band="full")
+        self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
+        self.assertIn("band=full", reason)
+        self.assertIn("removed 1710 of 1710", reason)
+        self.assertNotIn("budget", reason)
+
+    def test_a_spent_budget_is_a_good_partial_run_not_a_failure(self):
+        out = self.run_step((0, _report(applied_count=600, applied_bytes=1_200_000, budget_exhausted=True, remaining_count=1110), "", False))
+        freed, reason, status = out[0]
+        self.assertEqual((freed, status), (1_200_000, StepStatus.RAN))
+        self.assertIn("1110 left for the next run", reason)
+
+    def test_a_cleaner_that_overruns_its_hard_stop_fails_with_a_reason(self):
+        (freed, reason, status), _call = self.run_step((-1, "", "", True))
+        self.assertEqual((freed, status), (0, StepStatus.FAILED))
+        self.assertIn("overran its 600s budget", reason)
+
+    def test_nonzero_exit_reports_the_last_stderr_line(self):
+        (_freed, reason, status), _call = self.run_step((2, "", "usage\n[hoghunter-clean] unknown category 'x'\n", False))
+        self.assertEqual(status, StepStatus.FAILED)
+        self.assertEqual(reason, "[hoghunter-clean] unknown category 'x'")
+
+    def test_items_that_could_not_be_removed_are_named_and_all_failed_is_a_failure(self):
+        some = self.run_step((0, _report(applied_count=10, failed_count=3), "", False))[0]
+        self.assertEqual(some[2], StepStatus.RAN)
+        self.assertIn("3 could not be removed", some[1])
+        none = self.run_step((0, _report(applied_count=0, failed_count=5, applied_bytes=0), "", False))[0]
+        self.assertEqual(none[2], StepStatus.FAILED)
+
+    def test_an_older_cleaner_without_the_new_keys_still_runs(self):
+        (freed, reason, status), _call = self.run_step((0, "hoghunter-clean 1.0.0 - CLEAN\nnothing reclaimable.\n", "", False))
+        self.assertEqual((freed, reason, status), (0, "band=cheap", StepStatus.RAN))
+
+    def test_missing_cleaner_is_a_skip(self):
+        self.cfg["hoghunter_clean"] = str(self.home / "nope")
+        self.assertEqual(self.engine._hoghunter_reclaim("cheap")[2], StepStatus.SKIPPED)
+
+    def test_the_budget_knob_has_a_floor_and_ignores_junk(self):
+        for value, expected in ((120, 120), ("90", 90), (5, 30), ("soon", 600), (None, 600)):
+            self.cfg["hoghunter_clean_budget_sec"] = value
+            self.assertEqual(self.engine._reclaim_budget(), expected, value)
+        del self.cfg["hoghunter_clean_budget_sec"]
+        self.assertEqual(self.engine._reclaim_budget(), 600)
+        self.assertEqual(load_config(home=self.home)["hoghunter_clean_budget_sec"], 600)
+
+    def test_the_janitor_cache_step_uses_the_same_bounded_path(self):
+        self.fake_cleaner()
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "normal", dry_run=False)
+        self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
+        self.assertIn("--budget-sec=600", run.call_args.args[0])
+
+
+class TestRunInOwnGroup(unittest.TestCase):
+    def test_normal_exit_returns_code_and_output(self):
+        from vacuum.engine import _run_in_own_group
+
+        code, out, err, timed_out = _run_in_own_group(
+            [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"], 30
+        )
+        self.assertEqual((code, out.strip(), err.strip(), timed_out), (3, "out", "err", False))
+
+    def test_a_timeout_kills_the_child_and_everything_it_started(self):
+        from vacuum.engine import _run_in_own_group
+
+        script = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen(['sleep', '60'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        started = time.time()
+        code, out, _err, timed_out = _run_in_own_group([sys.executable, "-c", script], 2)
+        self.assertTrue(timed_out)
+        self.assertLess(time.time() - started, 30)
+        grandchild = int(out.split()[0])
+
+        def alive(pid: int) -> bool:
+            # kill(pid, 0) succeeds on a zombie, which a container without an init never reaps.
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                    return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+            except (OSError, IndexError):
+                return True
+
+        for _ in range(50):
+            if not alive(grandchild):
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(grandchild, signal.SIGKILL)
+            self.fail("the grandchild outlived its killed parent")
+
+
+class TestRunInOwnGroupErrors(unittest.TestCase):
+    def test_an_error_while_waiting_kills_the_group_and_is_raised(self):
+        """Not reported as a budget overrun, and the child and its helpers do not outlive the failed wait."""
+        from vacuum.engine import _run_in_own_group
+
+        proc = Mock()
+        proc.pid = 4242
+        proc.communicate.side_effect = [OSError(errno.EIO, "Input/output error"), ("", "")]
+        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch("vacuum.engine.os.killpg") as killpg:
+            with self.assertRaises(OSError):
+                _run_in_own_group(["/bin/true"], 5)
+        killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+    def test_a_missing_group_falls_back_to_killing_the_child(self):
+        from vacuum.engine import _run_in_own_group
+
+        proc = Mock()
+        proc.pid = 4242
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("partial", "")]
+        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch(
+            "vacuum.engine.os.killpg", side_effect=ProcessLookupError
+        ):
+            code, out, _err, timed_out = _run_in_own_group(["/bin/true"], 1)
+        proc.kill.assert_called_once()
+        self.assertEqual((code, out, timed_out), (-1, "partial", True))
+
+
+class TestSpotlightStep(_EngineHome):
+    def setUp(self) -> None:
+        super().setUp()
+        self.pipe = self.home / "Library/Metadata/CoreSpotlight/DocumentProcessing/PipelineStorage"
+        (self.pipe / "store-a" / "Journals").mkdir(parents=True)
+        (self.pipe / "store-a" / "Journals" / "j1").write_bytes(b"x" * 1500)
+        (self.pipe / "store-a" / "HistoricalReports").mkdir()
+        (self.pipe / "store-a" / "HistoricalReports" / "h1").write_bytes(b"y" * 500)
+        (self.pipe / "StateStore.db").write_bytes(b"db")
+
+    def denied_listing(self, code):
+        real = Path.iterdir
+        pipe = self.pipe
+
+        def iterdir(path):
+            if path == pipe:
+                raise PermissionError(code, os.strerror(code), str(path))
+            return real(path)
+
+        return patch.object(Path, "iterdir", iterdir)
+
+    def test_a_macos_refusal_is_a_skip_and_touches_no_daemon(self):
+        for code in (errno.EPERM, errno.EACCES):
+            with self.denied_listing(code), patch("vacuum.engine.subprocess.run") as run:
+                freed, reason, status = self.engine._spotlight_journals()
+            self.assertEqual((freed, status), (0, StepStatus.SKIPPED), code)
+            self.assertIn("Full Disk Access", reason)
+            run.assert_not_called()  # the old step ran killall first, then failed
+            self.assertTrue((self.pipe / "store-a" / "Journals" / "j1").exists())
+
+    def test_the_refusal_is_not_a_failed_step_or_a_failed_run(self):
+        from vacuum.engine import VacuumEngine
+
+        for step_id in self.cfg["steps"]:
+            self.cfg["steps"][step_id] = {"enabled": step_id in ("spotlight_journals", "pm2_logs")}
+        engine = VacuumEngine(self.cfg, home=self.home)
+        with self.denied_listing(errno.EPERM), patch("vacuum.engine.subprocess.run"), patch.object(
+            sys, "platform", "darwin"
+        ), patch("vacuum.engine.sample_mac", return_value={"disk_free_gb": 100.0, "load1": 0.0, "swap_used_pct": 0.0}):
+            record = engine.run(TriggerKind.FULL)
+        by_id = {s.step_id: s for s in record.steps}
+        self.assertEqual(by_id["spotlight_journals"].status, StepStatus.SKIPPED)
+        self.assertEqual((record.exit_code, record.outcome), (0, "ok"))
+
+    def test_a_refusal_after_the_probe_is_still_a_skip(self):
+        with patch("vacuum.engine.subprocess.run"), patch.object(
+            Path, "mkdir", side_effect=PermissionError(errno.EPERM, "Operation not permitted")
+        ):
+            _freed, reason, status = self.engine._spotlight_journals()
+        self.assertEqual(status, StepStatus.SKIPPED)
+        self.assertIn("Full Disk Access", reason)
+
+    def test_any_other_os_error_is_still_a_failure(self):
+        real = Path.iterdir
+        pipe = self.pipe
+
+        def iterdir(path):
+            if path == pipe:
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return real(path)
+
+        with patch.object(Path, "iterdir", iterdir), self.assertRaises(OSError):
+            self.engine._spotlight_journals()
+
+    def test_with_access_it_resets_the_journals_and_counts_the_bytes(self):
+        with patch("vacuum.engine.subprocess.run") as run:
+            freed, reason, status = self.engine._spotlight_journals()
+        run.assert_called_once()
+        self.assertEqual((freed, reason, status), (2000, "journals reset", StepStatus.RAN))
+        self.assertFalse((self.pipe / "store-a" / "Journals" / "j1").exists())
+        self.assertTrue((self.pipe / "store-a" / "Journals").is_dir(), "an empty Journals folder is put back")
+        self.assertFalse((self.pipe / "store-a" / "HistoricalReports").exists())
+        self.assertFalse((self.pipe / "StateStore.db").exists())
+
+    def test_missing_folder_is_a_skip(self):
+        shutil.rmtree(self.pipe)
+        self.assertEqual(self.engine._spotlight_journals()[2], StepStatus.SKIPPED)
+
+
+class TestFreedBytesAreCounted(_EngineHome):
+    """Total bytes freed was 0 on Oct 9 even though antigravity_brain pruned 12 folders."""
+
+    def old(self, path: Path, days: int = 30) -> None:
+        stamp = time.time() - days * 86400
+        for target in [path, *path.rglob("*")]:
+            os.utime(target, (stamp, stamp))
+
+    def test_antigravity_brain(self):
+        brain = self.home / ".gemini/antigravity/brain"
+        (brain / "old").mkdir(parents=True)
+        (brain / "old" / "f").write_bytes(b"z" * 3000)
+        (brain / "new").mkdir()
+        (brain / "new" / "f").write_bytes(b"z" * 100)
+        self.old(brain / "old")
+        freed, reason, status = self.engine._antigravity_brain()
+        self.assertEqual((freed, reason, status), (3000, "pruned 1 folder(s)", StepStatus.RAN))
+        self.assertTrue((brain / "new").exists())
+
+    def test_grok_sessions(self):
+        session = self.home / ".grok/sessions/proj/019abcdef0123456789xyz"
+        session.mkdir(parents=True)
+        (session / "updates.jsonl").write_bytes(b"j" * 2500)
+        self.old(session)
+        freed, _reason, status = self.engine._grok_sessions(pressure=False)
+        self.assertEqual((freed, status), (2500, StepStatus.RAN))
+        self.assertFalse(session.exists())
+
+    def test_pm2_logs(self):
+        logs = self.home / ".pm2/logs"
+        logs.mkdir(parents=True)
+        big = logs / "app-out.log"
+        with big.open("wb") as fh:
+            fh.truncate(51 * 1024 * 1024)
+        small = logs / "small.log"
+        small.write_bytes(b"s" * 10)
+        freed, reason, status = self.engine._pm2_logs()
+        self.assertEqual((freed, reason, status), (51 * 1024 * 1024, "truncated 1 log(s) in place", StepStatus.RAN))
+        self.assertEqual(big.stat().st_size, 0)
+        self.assertEqual(small.stat().st_size, 10)
+
+    def test_vitest_temp_dbs(self):
+        tmp = self.home / "T"
+        stale = tmp / "agentic-old"
+        stale.mkdir(parents=True)
+        (stale / "db").write_bytes(b"d" * 700)
+        self.old(stale, days=2)
+        fresh = tmp / "agentic-new"
+        fresh.mkdir()
+        with patch("vacuum.engine.subprocess.check_output", return_value=str(tmp) + "/\n"):
+            freed, reason, status = self.engine._vitest_temp_dbs()
+        self.assertEqual((freed, reason, status), (700, "removed 1 stale temp db(s)", StepStatus.RAN))
+        self.assertTrue(fresh.exists())
 
 
 def load_tests(loader, tests, pattern):
