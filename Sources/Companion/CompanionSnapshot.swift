@@ -6,6 +6,14 @@ enum CompanionService {
     static let type = "_hoghunter._tcp"
     static let path = "/v1/snapshot"
     static let cleanPath = "/v1/clean"
+    /// Cleans the items chosen from a scan the Mac holds.  Its own path, so a Mac
+    /// that predates it answers 404 and the phone says so, instead of reading the
+    /// body-less route and running its default clean in place of the chosen one.
+    static let cleanRunPath = "/v1/clean/run"
+    /// Starts a scan of the Mac's clutter for the Standard or Extreme tier.
+    static let cleanScanPath = "/v1/clean/scan"
+    /// The last scan (categories and items), the scan's progress and recent cleanup history.
+    static let cleanReportPath = "/v1/clean/report"
     static let quitPath = "/v1/quit"
     static let tamePath = "/v1/tame"
     static let exclusionsPath = "/v1/exclusions"
@@ -29,6 +37,111 @@ struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var snapshotCreated: Bool
     var snapshotName: String?
     var tier: String
+}
+
+/// What the disk cleaner tells the person.  One copy, shared by the Mac's
+/// cleaner and the phone's, so the two cannot drift apart.
+enum CleanerCopy {
+    static let extremeTitle = "Extreme Clean Targets AI Agent & Deep Developer Clutter"
+    static let extremeBody = "Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini/Grok/Codex, temporary update downloads, and large/old files.\nWhile git repositories and critical directories are strictly protected, local AI tools may need to re-download model caches, re-index workspaces, or re-authenticate ephemeral CLI sessions."
+    static let extremeAcknowledgement = "I understand this targets AI tool caches, orphaned app data, and older transcripts."
+
+    /// The confirmation before a clean, with the amount and the count filled in.
+    static func confirmationMessage(sizeText: String, itemCount: Int) -> String {
+        "Are you sure you want to clean \(sizeText) across \(itemCount) items?\u{00A0} An APFS local snapshot is created first.\u{00A0} If that snapshot fails, nothing is deleted.\u{00A0} Items that are not already in the Trash move to the Trash, where Put Back still works.\u{00A0} Items already in the Trash are removed permanently."
+    }
+}
+
+/// One thing a scan found, as the phone sees it.  The phone never names a
+/// path: `id` is a short reference into the Mac's copy of the scan, and the
+/// Mac resolves it to the real item itself.
+struct CompanionCleanItem: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var subtitle: String
+    var bytes: UInt64
+    var sizeText: String
+    var fileCount: Int
+    var detail: String? = nil
+    /// Whether the Mac's own cleaner would start with this item ticked.
+    var isSelected: Bool
+}
+
+struct CompanionCleanCategory: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var description: String
+    var icon: String
+    var isExtremeOnly: Bool
+    var totalBytes: UInt64
+    var totalText: String
+    /// How many items the Mac found, which can be more than `items` holds.
+    var itemCount: Int
+    /// The largest items first, capped so the report stays small.
+    var items: [CompanionCleanItem]
+}
+
+/// One completed cleanup, newest first in the report.
+struct CompanionCleanupRecord: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var cleanedAt: Date
+    var bytesReclaimed: UInt64
+    var sizeText: String
+    var itemsRemoved: Int
+    /// `standard` or `extreme`.
+    var tier: String
+    var tierTitle: String
+    var categoryTitles: [String]
+    /// The first few titles, so the phone can say what went.
+    var itemTitles: [String]
+    var snapshotName: String? = nil
+    /// "iPhone" for a clean the phone started; nil for one started at the Mac.
+    var source: String? = nil
+}
+
+/// The Mac's last scan, its progress, and cleanup history.
+struct CompanionCleanReport: Codable, Equatable, Sendable {
+    /// `idle`, `scanning` or `ready`.
+    var state: String
+    var scanId: String? = nil
+    /// `standard` or `extreme`.
+    var tier: String? = nil
+    var scannedAt: Date? = nil
+    /// The category being scanned now, while `state` is `scanning`.
+    var scanningCategory: String? = nil
+    var totalBytes: UInt64 = 0
+    var totalText: String = "0 B"
+    var totalItems: Int = 0
+    var categories: [CompanionCleanCategory] = []
+    var history: [CompanionCleanupRecord] = []
+}
+
+/// A request to clean, from a scan the Mac is holding, sent to
+/// `POST /v1/clean/run`.  The older `POST /v1/clean` takes no body: it is always
+/// the Standard clean with the Mac's default selection.
+struct CompanionCleanRequest: Codable, Equatable, Sendable {
+    var scanId: String? = nil
+    /// `standard` or `extreme`.  Must match the scan's tier.
+    var tier: String? = nil
+    /// References from the report, never paths.
+    var items: [String]? = nil
+    /// The phone's confirmation of the Extreme notice.
+    var acknowledgedExtreme: Bool? = nil
+}
+
+/// A request to scan.
+struct CompanionCleanScanRequest: Equatable, Sendable {
+    /// `standard` or `extreme`.
+    var tier: String
+    var acknowledgedExtreme: Bool = false
+}
+
+struct CompanionCleanScanResponse: Codable, Equatable, Sendable {
+    var status: String
+    var scanId: String? = nil
+    var tier: String? = nil
+    var message: String? = nil
+    var error: String? = nil
 }
 
 /// Live progress and status of an active or recently completed safe disk cleaning run.

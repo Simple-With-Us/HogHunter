@@ -205,7 +205,7 @@ final class CompanionServerHardeningTests: XCTestCase {
         let disposition = server.syncOnQueue { server.disposition(for: request, peer: peer, now: now ?? t0) }
         switch disposition {
         case .reply(let data): return CompanionHTTP.parseResponse(data)?.status
-        case .startClean, .startSample: return 202
+        case .startClean, .startCleanScan, .startCleanReport, .startSample: return 202
         }
     }
 
@@ -217,7 +217,7 @@ final class CompanionServerHardeningTests: XCTestCase {
         server.onRemoteTame = { _, _ in (200, Data("{}".utf8)) }
         server.onRemoteExclusionsUpdate = { _ in (200, Data("{}".utf8)) }
         server.onRemoteViewUpdate = { _ in (200, Data("{}".utf8)) }
-        server.onRemoteClean = { _ in }
+        server.onRemoteClean = { _, _ in }
         for peer in [lan, tailnet] {
             XCTAssertEqual(status(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: peer), 200)
             XCTAssertEqual(status(server, CompanionHTTP.tameRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: peer), 200)
@@ -233,7 +233,7 @@ final class CompanionServerHardeningTests: XCTestCase {
         server.onRemoteTame = { _, _ in XCTFail("tame must not run"); return (200, Data()) }
         server.onRemoteExclusionsUpdate = { _ in XCTFail("exclusions must not run"); return (200, Data()) }
         server.onRemoteViewUpdate = { _ in XCTFail("view must not run"); return (200, Data()) }
-        server.onRemoteClean = { _ in XCTFail("clean must not run") }
+        server.onRemoteClean = { _, _ in XCTFail("clean must not run") }
         XCTAssertEqual(status(server, CompanionHTTP.quitRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: wan), 403)
         XCTAssertEqual(status(server, CompanionHTTP.tameRequest(token: deviceToken, pid: 100, rowId: "p-100-11"), from: wan), 403)
         XCTAssertEqual(status(server, CompanionHTTP.exclusionsRequest(token: deviceToken, toggleCategory: "trash"), from: wan), 403)

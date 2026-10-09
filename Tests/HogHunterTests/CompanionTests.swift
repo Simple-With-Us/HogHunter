@@ -539,7 +539,7 @@ final class CompanionStorageTelemetryTests: XCTestCase {
 
     func testCompanionCleanRequestAndResponse() {
         var cleanCalled = false
-        let handler: (String) -> (status: Int, body: Data) = { _ in
+        let handler: (CompanionCleanRequest?) -> (status: Int, body: Data) = { _ in
             cleanCalled = true
             let res = CompanionCleanResponse(
                 status: "completed",
