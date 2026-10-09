@@ -259,6 +259,7 @@ final class CompanionModel {
         snapshot = nil
         codeDraft = ""
         codeError = nil
+        pairingDismissed = false
         UserDefaults.standard.removeObject(forKey: defaultsKey)
         reconcile()
     }

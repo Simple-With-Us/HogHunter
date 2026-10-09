@@ -4,8 +4,8 @@ import XCTest
 
 final class CompanionTests: XCTestCase {
     func testManualHostStaysPutWhenBonjourCannotSeeIt() {
-        XCTAssertTrue(CompanionReach.keepsManualHost("macbook.tailnet.ts.net"))
-        XCTAssertTrue(CompanionReach.keepsManualHost("  192.0.2.10  "))  // RFC 5737 TEST-NET-1, not a real Tailscale overlay
+        XCTAssertTrue(CompanionReach.keepsManualHost("my-mac.tailnet.ts.net"))
+        XCTAssertTrue(CompanionReach.keepsManualHost("  192.0.2.1  "))  // RFC 5737 documentation address
         XCTAssertFalse(CompanionReach.keepsManualHost(nil))
         XCTAssertFalse(CompanionReach.keepsManualHost(""))
         XCTAssertFalse(CompanionReach.keepsManualHost("   "))

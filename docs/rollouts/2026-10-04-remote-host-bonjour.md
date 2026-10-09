@@ -1,29 +1,48 @@
 # Remote host stays online when Bonjour updates
 
-Sat, Oct 4, 2026
+Sat, Oct 4, 2026.  Seat GROK-BUILD.  Branch `grok-build/hh-remote-offline`.  Pull request #69.  Issue #64.
 
-Effort row: `grok-build/hh-remote-offline`, issue #64, pull request #69.  State stays In Progress until that pull request merges.
+## Context & Objective
 
-## Why
+repo: `Simple-With-Us/HogHunter`.  Pre-work claim posted to `#agent-sync` (topic HogHunter issue #64 manual host offline on Bonjour).
 
-A saved Tailscale, IP, or domain host uses an address, not a Bonjour peer id.  Every browse update called reconcile, which marked that Mac offline and dropped the dashboard.  A clean confirmation in flight went with it.
+On the same Wi-Fi, the iPhone companion discovers the Mac with Bonjour (`_hoghunter._tcp`).  A phone paired over Tailscale, LAN IP, or custom domain stores `remoteHost` / `remotePort` and reaches the Mac with `NWEndpoint.hostPort` (shipped in PR #75; see `AGENTS.md`).  Every Bonjour browse tick called `reconcile()`, which treated a missing Bonjour peer as offline and cleared the live dashboard—even while fetches over the saved address still worked.  Issue #64.  A second defect re-presented the pairing sheet every three seconds after Cancel when the Mac returned 401 for a rotated code.
 
-## What changed
+Fleet recall (2026-10-09, query *HogHunter iOS companion Bonjour Tailscale manual host*): board lesson `636727035baf4d3dac0beb2c7ebfb578` and contrib `contrib/AG/2026-10-01/6dd52f92` confirm Tailscale / `hostPort` transport is intentional; issue #64 is the Bonjour-flap bug, not a mandate for Bonjour-only transport.
 
-- `Sources/Companion/CompanionSnapshot.swift` — `CompanionReach.keepsManualHost`.
-- `ios/Sources/CompanionModel.swift` — `noteDiscovery`, `reconcile`, `cancelCode`, and `exitDemoMode`.
-- `Tests/HogHunterTests/CompanionTests.swift` — `testManualHostStaysPutWhenBonjourCannotSeeIt`.
-- `docs/EFFORT-LOG.md` — the in-progress row for this branch.
+## Changes Made
+
+- `Sources/Companion/CompanionSnapshot.swift` — `CompanionReach.keepsManualHost` helper shared with the iOS target.
+- `ios/Sources/CompanionModel.swift` — skip offline reconciliation for address-backed saves in `noteDiscovery` / `reconcile`; `pairingDismissed` so `refresh()` does not re-enter `.code` after Cancel; `cancelCode()` paths for manual host vs Wi-Fi-only saved Mac.
+- `Tests/HogHunterTests/CompanionTests.swift` — `testManualHostStaysPutWhenBonjourCannotSeeIt` (RFC 5737 addresses only).
+- `docs/EFFORT-LOG.md` — in-progress row for this branch.
 - `docs/rollouts/2026-10-04-remote-host-bonjour.md` — this note.
 
-`CompanionReach.keepsManualHost` is true when the saved remote host trims to a non-empty string.  Browse updates do not mark that Mac offline.  Cancel on the pairing sheet still leaves the sheet.  Leaving demo mode drops the sample snapshot and waits for the next fetch.  A Wi-Fi-only saved Mac still goes offline when Bonjour cannot see it.
+## Decisions & Trade-offs
 
-## Decisions and trade-offs
+- **Keep manual hosts.**  Bonjour browse results are not ground truth for a saved `remoteHost`.  `forget()` still clears address-backed saves when the user chooses Forget Mac.
+- **Wi-Fi-only saves stay strict.**  When `remoteHost` is nil, losing Bonjour still marks the Mac offline.
+- **Pairing sheet loop.**  `pairingDismissed` is set on Cancel and cleared on successful pair or remote connect; while set, 401 responses land in `.offline` with copy instead of re-opening the sheet.
+- **Stale snapshot on transient errors.**  After at least one successful fetch, a later network error keeps the last snapshot on screen (unchanged from main).
 
-Tailscale and other manual hosts stay.  Bonjour is not the only way to reach a Mac.  A browse update is not evidence that a manual host died.
+## Verification State
 
-A fetch that fails after a snapshot is already on screen keeps that snapshot.  One dropped packet must not blank the dashboard.  The first failed fetch, when there is no snapshot yet, still says the Mac did not answer.
+| Command | Result |
+|---------|--------|
+| `xcodegen generate` | NOT RUN on Linux cloud agent (macOS CI runs this) |
+| `xcodebuild -scheme HogHunter -destination 'platform=macOS' test CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -only-testing:HogHunterTests/CompanionTests/testManualHostStaysPutWhenBonjourCannotSeeIt` | PENDING — requires GitHub Actions `test` job on push |
+| `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` (full macOS unit suite) | PENDING — same CI job |
+| `xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO` | PENDING — CI `build-ios` job |
 
-## Verification
+Last known green (pre-`pairingDismissed` follow-up, local macOS seat): `CompanionTests` filter above exited 0.
 
-`xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath /tmp/hh-bonjour-dd test CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -only-testing:HogHunterTests/CompanionTests` exited 0 before this cancel-sheet follow-up.  The follow-up is in the iOS companion, which has no unit-test target.  `xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' build` is the compile check for that target.
+## Next Steps & Blockers
+
+- Merge after CI green on macOS unit tests and iOS simulator build.
+- Owner smoke on a Tailscale-paired phone: confirm dashboard stays live through Bonjour browse churn; rotate pairing code, tap Cancel once, confirm sheet stays dismissed and status shows code mismatch.
+- No TestFlight or credential changes in this pull request.
+
+## Zero-Code Findings
+
+- Kodus “Bonjour-only” findings conflict with product contract (`AGENTS.md`, PR #75, fleet recall above).  This change preserves address-backed transport and only stops Bonjour from falsely marking those sessions offline.
+- iOS companion UI has no XCTest target; behavioral fixes are validated via macOS `CompanionReach` tests plus CI iOS compile.
