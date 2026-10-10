@@ -76,7 +76,7 @@ final class HogStore: ObservableObject {
     @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
-    @Published var refreshInterval: TimeInterval = 3 {
+    @Published var refreshInterval: TimeInterval = 5 {
         didSet {
             persist()
             restartTimer()

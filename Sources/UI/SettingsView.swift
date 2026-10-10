@@ -121,7 +121,7 @@ enum SettingsTab: Hashable {
 private struct GeneralSettingsTab: View {
     @EnvironmentObject private var store: HogStore
 
-    @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 3
+    @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
