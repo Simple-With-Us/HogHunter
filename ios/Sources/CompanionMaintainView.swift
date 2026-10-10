@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// What the phone draws for the Mac's health word, the same icons and colours
-/// as the Robotic Vacuum card on the Mac.
-private extension CompanionVacuumStatus {
+/// as the Maintain card on the Mac.
+private extension CompanionMaintainStatus {
     var iconName: String {
         switch health {
         case "healthy": return "checkmark.circle.fill"
@@ -23,7 +23,7 @@ private extension CompanionVacuumStatus {
     }
 }
 
-private enum VacuumFormat {
+private enum MaintainFormat {
     static let relative: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
@@ -62,26 +62,26 @@ private enum VacuumFormat {
     }
 }
 
-/// The row on the Storage tab that leads to the Robotic Vacuum screen.
-struct VacuumSummaryRow: View {
+/// The row on the Storage tab that leads to the Maintain screen.
+struct MaintainSummaryRow: View {
     let snapshot: CompanionSnapshot
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: snapshot.vacuum?.iconName ?? "sparkles")
+            Image(systemName: snapshot.maintain?.iconName ?? "sparkles")
                 .font(.title3)
                 .frame(width: 24)
-                .foregroundStyle(snapshot.vacuum?.tint ?? Color.accentColor)
+                .foregroundStyle(snapshot.maintain?.tint ?? Color.accentColor)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Robotic Vacuum")
+                Text("Maintain")
                     .font(.body.weight(.medium))
                 Text(caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if snapshot.vacuum?.isRunning == true {
+            if snapshot.maintain?.isRunning == true {
                 ProgressView().controlSize(.small)
             }
         }
@@ -89,17 +89,17 @@ struct VacuumSummaryRow: View {
     }
 
     private var caption: String {
-        if snapshot.remoteVacuumAllowed == nil { return "Not available on this Mac" }
-        guard let vacuum = snapshot.vacuum else { return "Waiting for first run" }
-        return vacuum.isRunning ? "Running now" : vacuum.displayHealth
+        if snapshot.remoteMaintainAllowed == nil { return "Not available on this Mac" }
+        guard let maintain = snapshot.maintain else { return "Waiting for first run" }
+        return maintain.isRunning ? "Running now" : maintain.displayHealth
     }
 }
 
 /// One line of the Recent Runs list, the way the Mac lists a run (what kind,
 /// what it freed, when it ended), with how long it took and whether it failed
 /// or only partly worked.
-private struct VacuumRunRow: View {
-    let run: CompanionVacuumRun
+private struct MaintainRunRow: View {
+    let run: CompanionMaintainRun
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -112,7 +112,7 @@ private struct VacuumRunRow: View {
                         .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
                 }
                 Spacer()
-                Text(run.bytesFreed > 0 ? "Freed \(VacuumFormat.bytes(run.bytesFreed))" : "Nothing freed")
+                Text(run.bytesFreed > 0 ? "Freed \(MaintainFormat.bytes(run.bytesFreed))" : "Nothing freed")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -126,19 +126,19 @@ private struct VacuumRunRow: View {
 
     /// "3 hours ago, took 20m".
     private var detail: String {
-        let ended = run.endedAt.map { VacuumFormat.relative.localizedString(for: $0, relativeTo: Date()) }
-        let parts = [ended, VacuumFormat.took(run.durationSeconds).map { "took \($0)" }].compactMap { $0 }
+        let ended = run.endedAt.map { MaintainFormat.relative.localizedString(for: $0, relativeTo: Date()) }
+        let parts = [ended, MaintainFormat.took(run.durationSeconds).map { "took \($0)" }].compactMap { $0 }
         return parts.isEmpty ? "No end time recorded" : parts.joined(separator: ", ")
     }
 }
 
-/// Robotic Vacuum on the Mac: whether it is on schedule, what its last run
+/// Maintain on the Mac: whether it is on schedule, what its last run
 /// did, and a Run Now button.
 ///
 /// A run takes minutes and carries on at the Mac whether or not this screen
 /// stays open.  The phone asks for it to start and then watches the snapshot.
 /// Run Now acts on the Mac, so it asks first and says what a run can do.
-struct VacuumView: View {
+struct MaintainView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
     @State private var showRunConfirm = false
@@ -146,13 +146,13 @@ struct VacuumView: View {
     /// The newest snapshot.  This screen is pushed over the dashboard, so the
     /// value it was created with goes stale; the model's copy does not.
     private var live: CompanionSnapshot { model.snapshot ?? snapshot }
-    private var vacuum: CompanionVacuumStatus? { live.vacuum }
-    private var isAvailable: Bool { live.remoteVacuumAllowed != nil }
-    private var isAllowed: Bool { live.remoteVacuumAllowed == true }
-    private var isRunning: Bool { vacuum?.isRunning == true || model.isStartingVacuum }
+    private var maintain: CompanionMaintainStatus? { live.maintain }
+    private var isAvailable: Bool { live.remoteMaintainAllowed != nil }
+    private var isAllowed: Bool { live.remoteMaintainAllowed == true }
+    private var isRunning: Bool { maintain?.isRunning == true || model.isStartingMaintain }
 
-    static let offNote = "Running the Robotic Vacuum from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Robotic Vacuum in Hog Hunter Settings > iPhone on your Mac."
-    static let tooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share the Robotic Vacuum.\u{00A0} Update it on the Mac."
+    static let offNote = "Running the Maintain from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Maintain in Hog Hunter Settings > iPhone on your Mac."
+    static let tooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share the Maintain.\u{00A0} Update it on the Mac."
     static let runsTooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share its recent runs.\u{00A0} Update it on the Mac."
 
     var body: some View {
@@ -163,30 +163,30 @@ struct VacuumView: View {
             recentRunsSection
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Robotic Vacuum")
+        .navigationTitle("Maintain")
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog(
-            "Run the Robotic Vacuum on \(live.hostName)?",
+            "Run the Maintain on \(live.hostName)?",
             isPresented: $showRunConfirm,
             titleVisibility: .visible
         ) {
-            Button("Run Robotic Vacuum", role: .destructive) {
-                Task { await model.runVacuum() }
+            Button("Run Maintain", role: .destructive) {
+                Task { await model.runMaintain() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("\(live.hostName) will run the full set of enabled steps.\u{00A0} That can retire old merged git worktrees, trim caches and build folders, and run maintenance on remote servers.\u{00A0} It can take several minutes, and the run carries on at the Mac even if you close this screen.")
         }
         .alert(
-            "Could Not Run the Robotic Vacuum",
+            "Could Not Run the Maintain",
             isPresented: Binding(
-                get: { model.vacuumError != nil },
-                set: { if !$0 { model.vacuumError = nil } }
+                get: { model.maintainError != nil },
+                set: { if !$0 { model.maintainError = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { model.vacuumError = nil }
+            Button("OK", role: .cancel) { model.maintainError = nil }
         } message: {
-            Text(model.vacuumError ?? "")
+            Text(model.maintainError ?? "")
         }
     }
 
@@ -198,12 +198,12 @@ struct VacuumView: View {
                 Text(Self.tooOldNote)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-            } else if let vacuum {
+            } else if let maintain {
                 HStack {
-                    Image(systemName: vacuum.iconName)
-                        .foregroundStyle(vacuum.tint)
+                    Image(systemName: maintain.iconName)
+                        .foregroundStyle(maintain.tint)
                         .accessibilityHidden(true)
-                    Text(vacuum.displayHealth)
+                    Text(maintain.displayHealth)
                         .font(.headline)
                     Spacer()
                     if isRunning {
@@ -215,21 +215,21 @@ struct VacuumView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("Last Full Clean", value: VacuumFormat.last(vacuum.lastFullRunAt))
-                LabeledContent("Next Full Clean", value: VacuumFormat.next(vacuum.nextFullRunAt))
+                LabeledContent("Last Full Clean", value: MaintainFormat.last(maintain.lastFullRunAt))
+                LabeledContent("Next Full Clean", value: MaintainFormat.next(maintain.nextFullRunAt))
                 // Before the first run there is no status to read this from.
-                if vacuum.health != "unknown" {
-                    LabeledContent("Background Job", value: vacuum.launchdLoaded ? "Loaded" : "Not loaded")
+                if maintain.health != "unknown" {
+                    LabeledContent("Background Job", value: maintain.launchdLoaded ? "Loaded" : "Not loaded")
                 }
                 // Which kind of run the next two rows and the steps below describe.
-                if let trigger = vacuum.lastRunTrigger {
+                if let trigger = maintain.lastRunTrigger {
                     LabeledContent("Last Run", value: trigger.capitalized)
                 }
-                if let freed = vacuum.lastRunBytesFreed {
-                    LabeledContent("Last Run Freed", value: VacuumFormat.bytes(freed))
+                if let freed = maintain.lastRunBytesFreed {
+                    LabeledContent("Last Run Freed", value: MaintainFormat.bytes(freed))
                 }
-                if let ended = vacuum.lastRunEndedAt {
-                    LabeledContent("Last Run Ended", value: VacuumFormat.last(ended))
+                if let ended = maintain.lastRunEndedAt {
+                    LabeledContent("Last Run Ended", value: MaintainFormat.last(ended))
                 }
             } else {
                 HStack {
@@ -243,7 +243,7 @@ struct VacuumView: View {
                         ProgressView().controlSize(.small)
                     }
                 }
-                Text("\(live.hostName) has not recorded a Robotic Vacuum run yet.")
+                Text("\(live.hostName) has not recorded a Maintain run yet.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -279,7 +279,7 @@ struct VacuumView: View {
 
     @ViewBuilder
     private var stepsSection: some View {
-        if let steps = vacuum?.steps {
+        if let steps = maintain?.steps {
             Section {
                 if steps.isEmpty {
                     Text("The last run recorded no steps.")
@@ -302,7 +302,7 @@ struct VacuumView: View {
                                     .foregroundStyle(.secondary)
                             }
                             if step.bytesFreed > 0 {
-                                Text("Freed \(VacuumFormat.bytes(step.bytesFreed))")
+                                Text("Freed \(MaintainFormat.bytes(step.bytesFreed))")
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
@@ -317,7 +317,7 @@ struct VacuumView: View {
             }
         } else if isAvailable, !isAllowed {
             Section {
-                Text("Step results appear here once you allow iPhone to run the Robotic Vacuum.\u{00A0} They can name folders and servers on \(live.hostName), so the Mac shares them only with that setting on.")
+                Text("Step results appear here once you allow iPhone to run the Maintain.\u{00A0} They can name folders and servers on \(live.hostName), so the Mac shares them only with that setting on.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } header: {
@@ -331,10 +331,10 @@ struct VacuumView: View {
     /// does the summary, so this needs no opt-in.
     @ViewBuilder
     private var recentRunsSection: some View {
-        if isAvailable, let vacuum {
+        if isAvailable, let maintain {
             Section {
-                if let runs = vacuum.cleaningRuns {
-                    if let watch = vacuum.watch {
+                if let runs = maintain.cleaningRuns {
+                    if let watch = maintain.watch {
                         Text(watch.summary(now: Date()))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -345,7 +345,7 @@ struct VacuumView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(runs) { run in
-                            VacuumRunRow(run: run)
+                            MaintainRunRow(run: run)
                         }
                     }
                 } else {
@@ -356,8 +356,8 @@ struct VacuumView: View {
             } header: {
                 Text("Recent Runs")
             } footer: {
-                if vacuum.cleaningRuns?.isEmpty == false {
-                    Text(vacuum.watch == nil ? Self.recentRunsFooter : Self.recentRunsFooter + "\u{00A0} " + Self.watchFooterNote)
+                if maintain.cleaningRuns?.isEmpty == false {
+                    Text(maintain.watch == nil ? Self.recentRunsFooter : Self.recentRunsFooter + "\u{00A0} " + Self.watchFooterNote)
                 }
             }
         }

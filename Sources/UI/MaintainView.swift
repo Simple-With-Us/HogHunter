@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Robotic Vacuum — scheduled cleaning at a glance.
+/// Maintain — scheduled cleaning at a glance.
 ///
 /// The header stays put and the cards scroll under it, like the Disk Cleaner
 /// and App Storage tabs.  With nine steps and twenty runs the cards are taller
@@ -8,8 +8,8 @@ import SwiftUI
 /// natural height, the panel's frame would center it, and both ends would be
 /// clipped (the panel's own header and tab picker went out of sight).  Every
 /// card is pinned to the full width so none of them shrinks to its text.
-struct RoboticVacuumView: View {
-    @ObservedObject var store: RoboticVacuumStore
+struct MaintainView: View {
+    @ObservedObject var store: MaintainStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -30,7 +30,7 @@ struct RoboticVacuumView: View {
 
     /// Only the action.  The tab's name and subtitle belong to `StorageView`,
     /// which renders a header for every tab; a second copy here put "Robotic
-    /// Vacuum" on screen twice, an inch apart.  Same defect as the two
+    /// Maintain" on screen twice, an inch apart.  Same defect as the two
     /// scan spinners: two render paths answering one question.  The header is
     /// what pushed the cards out of the panel, so it stays, minus the words.
     private var header: some View {
@@ -76,7 +76,7 @@ struct RoboticVacuumView: View {
                 Text("Turn steps off if you want them skipped on the next run.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                ForEach(RoboticVacuumStore.catalog) { entry in
+                ForEach(MaintainStore.catalog) { entry in
                     HStack {
                         Toggle(isOn: Binding(
                             get: { store.stepToggles[entry.id] ?? true },
@@ -110,8 +110,8 @@ struct RoboticVacuumView: View {
     /// the list instead of filling it.  The phone shows the same.
     private var historySection: some View {
         let now = Date()
-        let runs = CompanionVacuum.recentRuns(from: store.history)
-        let watch = CompanionVacuum.watch(from: store.history, now: now)
+        let runs = CompanionMaintain.recentRuns(from: store.history)
+        let watch = CompanionMaintain.watch(from: store.history, now: now)
         return GroupBox("Recent Runs") {
             VStack(alignment: .leading, spacing: 6) {
                 if let watch {

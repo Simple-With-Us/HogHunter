@@ -8,7 +8,7 @@ import XCTest
 // Nothing here runs the real script: the one store built reads files in a
 // temporary folder and takes a launcher that fails the test if it is called.
 
-private typealias F = CompanionVacuumRunFixtures
+private typealias F = CompanionMaintainRunFixtures
 
 /// A calendar with a fixed zone, so "today" and "5:40pm" mean the same on every machine.
 private let chicago: Calendar = {
@@ -26,9 +26,9 @@ private func epoch(_ date: Date) -> Double { date.timeIntervalSince1970 }
 
 // MARK: - The run record
 
-final class RoboticVacuumRunOutcomeTests: XCTestCase {
-    private func decode(_ json: String) throws -> RoboticVacuumRun {
-        try JSONDecoder().decode(RoboticVacuumRun.self, from: Data(json.utf8))
+final class MaintainRunOutcomeTests: XCTestCase {
+    private func decode(_ json: String) throws -> MaintainRun {
+        try JSONDecoder().decode(MaintainRun.self, from: Data(json.utf8))
     }
 
     func testARunKeepsTheOutcomeTheEngineRecorded() throws {
@@ -52,7 +52,7 @@ final class RoboticVacuumRunOutcomeTests: XCTestCase {
     }
 
     func testTheOutcomeAndTheExitCodeResolveTogether() {
-        let cases: [(exit: Int, outcome: String?, expected: CompanionVacuumRunResult)] = [
+        let cases: [(exit: Int, outcome: String?, expected: CompanionMaintainRunResult)] = [
             (0, "ok", .ok),
             (0, nil, .ok),
             (0, "partial", .partial),
@@ -67,7 +67,7 @@ final class RoboticVacuumRunOutcomeTests: XCTestCase {
         ]
         for item in cases {
             XCTAssertEqual(
-                CompanionVacuumRunResult.resolve(exitCode: item.exit, outcome: item.outcome), item.expected,
+                CompanionMaintainRunResult.resolve(exitCode: item.exit, outcome: item.outcome), item.expected,
                 "exit \(item.exit), outcome \(item.outcome ?? "nil")"
             )
         }
@@ -76,10 +76,10 @@ final class RoboticVacuumRunOutcomeTests: XCTestCase {
     }
 
     func testOnlyPartialAndFailedCarryAMark() {
-        XCTAssertNil(CompanionVacuumRunResult.ok.markLabel)
-        XCTAssertEqual(CompanionVacuumRunResult.partial.markLabel, "Partial")
-        XCTAssertEqual(CompanionVacuumRunResult.failed.markLabel, "Failed")
-        XCTAssertNotEqual(CompanionVacuumRunResult.partial.markLabel, CompanionVacuumRunResult.failed.markLabel)
+        XCTAssertNil(CompanionMaintainRunResult.ok.markLabel)
+        XCTAssertEqual(CompanionMaintainRunResult.partial.markLabel, "Partial")
+        XCTAssertEqual(CompanionMaintainRunResult.failed.markLabel, "Failed")
+        XCTAssertNotEqual(CompanionMaintainRunResult.partial.markLabel, CompanionMaintainRunResult.failed.markLabel)
     }
 
     // MARK: Which runs are cleaning runs
@@ -125,14 +125,14 @@ final class RoboticVacuumRunOutcomeTests: XCTestCase {
 
 // MARK: - The list
 
-final class RoboticVacuumCleaningRunsListTests: XCTestCase {
+final class MaintainCleaningRunsListTests: XCTestCase {
     func testAnEscalatedTickIsInTheListAsPressureWithItsOutcome() {
         let history = [
             F.run("w2", "watch", ended: 300),
             F.run("w1", "watch", ended: 200, steps: [F.step("resource_sample"), F.step("hoghunter_reclaim", "ran")], outcome: "ok"),
             F.run("j1", "janitor", ended: 100),
         ]
-        let runs = CompanionVacuum.recentRuns(from: history)
+        let runs = CompanionMaintain.recentRuns(from: history)
         XCTAssertEqual(runs.map(\.runId), ["w1", "j1"])
         XCTAssertEqual(runs.map(\.trigger), ["pressure", "janitor"])
     }
@@ -145,7 +145,7 @@ final class RoboticVacuumCleaningRunsListTests: XCTestCase {
             F.run("old", "janitor", ended: 50),
             F.run("oldbad", "janitor", ended: 40, exit: 1),
         ]
-        let runs = CompanionVacuum.recentRuns(from: history)
+        let runs = CompanionMaintain.recentRuns(from: history)
         XCTAssertEqual(runs.map(\.outcome), ["partial", "failed", "ok", "ok", "failed"], "the old rows are resolved by the Mac from their exit codes")
         XCTAssertEqual(runs.map(\.result), [.partial, .failed, .ok, .ok, .failed])
         XCTAssertEqual(runs.map { $0.result.markLabel }, ["Partial", "Failed", nil, nil, "Failed"])
@@ -155,7 +155,7 @@ final class RoboticVacuumCleaningRunsListTests: XCTestCase {
     func testTheHeadlineLastRunCountsAnEscalatedTickAsACleaningRun() throws {
         let escalated = F.run("w1", "watch", ended: 300, steps: [F.step("resource_sample"), F.step("hoghunter_reclaim", "failed", reason: "timed out")])
         let janitor = F.run("j1", "janitor", ended: 100, freed: 9)
-        let built = try XCTUnwrap(CompanionVacuum.status(
+        let built = try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: escalated), history: [escalated, janitor], isRunning: false, includeSteps: true
         ))
         XCTAssertEqual(built.lastRunTrigger, "pressure")
@@ -166,29 +166,29 @@ final class RoboticVacuumCleaningRunsListTests: XCTestCase {
     // MARK: The phone filters for an older Mac too
 
     func testThePhoneLeavesWatchTicksOutOfAnOlderMacsList() {
-        var status = CompanionVacuumStatus(health: "healthy", displayHealth: "On schedule", launchdLoaded: true, isRunning: false)
+        var status = CompanionMaintainStatus(health: "healthy", displayHealth: "On schedule", launchdLoaded: true, isRunning: false)
         XCTAssertNil(status.cleaningRuns, "no list at all is unknown, not empty")
         status.recentRuns = [
-            CompanionVacuumRun(runId: "w", trigger: "watch", endedAt: nil, bytesFreed: 0, exitCode: 0, durationSeconds: 0),
-            CompanionVacuumRun(runId: "j", trigger: "janitor", endedAt: nil, bytesFreed: 0, exitCode: 0, durationSeconds: 0),
+            CompanionMaintainRun(runId: "w", trigger: "watch", endedAt: nil, bytesFreed: 0, exitCode: 0, durationSeconds: 0),
+            CompanionMaintainRun(runId: "j", trigger: "janitor", endedAt: nil, bytesFreed: 0, exitCode: 0, durationSeconds: 0),
         ]
         XCTAssertEqual(status.cleaningRuns?.map(\.runId), ["j"])
-        status.recentRuns = [CompanionVacuumRun(runId: "w", trigger: "watch", endedAt: nil, bytesFreed: 0, exitCode: 0, durationSeconds: 0)]
+        status.recentRuns = [CompanionMaintainRun(runId: "w", trigger: "watch", endedAt: nil, bytesFreed: 0, exitCode: 0, durationSeconds: 0)]
         XCTAssertEqual(status.cleaningRuns, [], "a list of only checks is an empty list, which reads No cleaning runs recorded yet")
     }
 }
 
 // MARK: - The watch summary
 
-final class RoboticVacuumWatchSummaryTests: XCTestCase {
-    private func check(_ id: String, at date: Date, took: Double = 5) -> RoboticVacuumRun {
-        RoboticVacuumRun(
+final class MaintainWatchSummaryTests: XCTestCase {
+    private func check(_ id: String, at date: Date, took: Double = 5) -> MaintainRun {
+        MaintainRun(
             runId: id, trigger: "watch", startedAt: epoch(date) - took, endedAt: epoch(date), bytesFreed: 0, exitCode: 0,
             steps: [F.step("resource_sample")]
         )
     }
 
-    private func history(checks: [Date], with others: [RoboticVacuumRun] = []) -> [RoboticVacuumRun] {
+    private func history(checks: [Date], with others: [MaintainRun] = []) -> [MaintainRun] {
         let all = checks.enumerated().map { check("w\($0.offset)", at: $0.element) } + others
         return all.sorted { $0.endedAt > $1.endedAt }
     }
@@ -197,7 +197,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
         // A history that starts yesterday evening, so it reaches back past midnight.
         let now = moment(9, 17, 45)
         let checks = [moment(8, 23, 55), moment(9, 0, 5), moment(9, 8, 0), moment(9, 17, 40)]
-        let watch = try XCTUnwrap(CompanionVacuum.watch(from: history(checks: checks), now: now, calendar: chicago))
+        let watch = try XCTUnwrap(CompanionMaintain.watch(from: history(checks: checks), now: now, calendar: chicago))
         XCTAssertEqual(watch.lastCheckAt, moment(9, 17, 40))
         XCTAssertEqual(watch.checksToday, 3, "the 11:55pm check was yesterday's")
         XCTAssertNil(watch.countedSince, "the history reaches back before midnight, so the count is for the whole day")
@@ -212,7 +212,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
             F.run("lock", "watch", ended: epoch(moment(9, 17, 30)), steps: [F.step("housekeeper_lock", "skipped")]),
         ]
         let checks = [moment(8, 12, 0), moment(9, 17, 40)]
-        let watch = try XCTUnwrap(CompanionVacuum.watch(from: history(checks: checks, with: others), now: now, calendar: chicago))
+        let watch = try XCTUnwrap(CompanionMaintain.watch(from: history(checks: checks, with: others), now: now, calendar: chicago))
         XCTAssertEqual(watch.checksToday, 1, "a janitor run, a full run and a tick that found the lock held are not checks")
         XCTAssertEqual(watch.lastCheckAt, moment(9, 17, 40))
     }
@@ -222,21 +222,21 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
     func testAHistoryThatStartsAfterMidnightSaysSinceInsteadOfToday() throws {
         let now = moment(9, 21, 0)
         let checks = [moment(9, 7, 30), moment(9, 8, 0), moment(9, 20, 55)]
-        let watch = try XCTUnwrap(CompanionVacuum.watch(from: history(checks: checks), now: now, calendar: chicago))
+        let watch = try XCTUnwrap(CompanionMaintain.watch(from: history(checks: checks), now: now, calendar: chicago))
         XCTAssertEqual(watch.checksToday, 3)
         XCTAssertEqual(watch.countedSince, moment(9, 7, 30).addingTimeInterval(-5), "the oldest row started five seconds before it ended")
         XCTAssertEqual(watch.summary(now: now, calendar: chicago), "Last check 8:55pm \u{00B7} 3 checks since 7:29am")
     }
 
     func testNoCheckOnRecordMeansNoSummary() {
-        XCTAssertNil(CompanionVacuum.watch(from: [], now: moment(9, 12, 0), calendar: chicago))
-        XCTAssertNil(CompanionVacuum.watch(from: [F.run("j", "janitor", ended: epoch(moment(9, 1, 0)))], now: moment(9, 12, 0), calendar: chicago))
+        XCTAssertNil(CompanionMaintain.watch(from: [], now: moment(9, 12, 0), calendar: chicago))
+        XCTAssertNil(CompanionMaintain.watch(from: [F.run("j", "janitor", ended: epoch(moment(9, 1, 0)))], now: moment(9, 12, 0), calendar: chicago))
     }
 
     func testAnEscalatedTickCountsAsACheckToo() throws {
         let escalated = F.run("w", "watch", ended: epoch(moment(9, 11, 0)), steps: [F.step("resource_sample"), F.step("hoghunter_reclaim", "failed")])
         let older = check("w0", at: moment(8, 11, 0))
-        let watch = try XCTUnwrap(CompanionVacuum.watch(from: [escalated, older], now: moment(9, 12, 0), calendar: chicago))
+        let watch = try XCTUnwrap(CompanionMaintain.watch(from: [escalated, older], now: moment(9, 12, 0), calendar: chicago))
         XCTAssertEqual(watch.checksToday, 1, "it ran the disk and memory check before it cleaned")
     }
 
@@ -246,8 +246,8 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
         let ordered = history(checks: [moment(8, 12, 0), moment(9, 1, 0), moment(9, 11, 55)])
         let shuffled = [ordered[1], ordered[2], ordered[0]]
         XCTAssertEqual(
-            CompanionVacuum.watch(from: ordered, now: now, calendar: chicago),
-            CompanionVacuum.watch(from: shuffled, now: now, calendar: chicago)
+            CompanionMaintain.watch(from: ordered, now: now, calendar: chicago),
+            CompanionMaintain.watch(from: shuffled, now: now, calendar: chicago)
         )
     }
 
@@ -255,14 +255,14 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
 
     func testTheLineReadsLikeTheOwnersClock() {
         let now = moment(9, 18, 0)
-        let line = CompanionVacuumWatch(lastCheckAt: moment(9, 17, 40), checksToday: 23).summary(now: now, calendar: chicago)
+        let line = CompanionMaintainWatch(lastCheckAt: moment(9, 17, 40), checksToday: 23).summary(now: now, calendar: chicago)
         XCTAssertEqual(line, "Last check 5:40pm \u{00B7} 23 checks today")
         XCTAssertFalse(line.contains("CDT") || line.contains("CST") || line.contains("PM") || line.contains("17:"), "12-hour, lower-case, no zone")
     }
 
     func testMorningAndNoonAndMidnightUseAmAndPm() {
         let now = moment(9, 18, 0)
-        func line(_ at: Date) -> String { CompanionVacuumWatch(lastCheckAt: at, checksToday: 2).summary(now: now, calendar: chicago) }
+        func line(_ at: Date) -> String { CompanionMaintainWatch(lastCheckAt: at, checksToday: 2).summary(now: now, calendar: chicago) }
         XCTAssertTrue(line(moment(9, 0, 5)).hasPrefix("Last check 12:05am "))
         XCTAssertTrue(line(moment(9, 9, 0)).hasPrefix("Last check 9:00am "))
         XCTAssertTrue(line(moment(9, 12, 0)).hasPrefix("Last check 12:00pm "))
@@ -271,7 +271,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
 
     func testTheLineIsThePhonesWhateverItsOwnClockSetting() {
         // Fixed locale and symbols: a phone set to a 24-hour clock or another language reads the same.
-        let line = CompanionVacuumWatch(lastCheckAt: moment(9, 17, 40), checksToday: 1).summary(now: moment(9, 18, 0), calendar: {
+        let line = CompanionMaintainWatch(lastCheckAt: moment(9, 17, 40), checksToday: 1).summary(now: moment(9, 18, 0), calendar: {
             var calendar = chicago
             calendar.locale = Locale(identifier: "de_DE")
             return calendar
@@ -282,11 +282,11 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
     func testACheckFromAnEarlierDaySaysWhichDayAndTodayCountsNone() {
         let now = moment(9, 8, 0)
         XCTAssertEqual(
-            CompanionVacuumWatch(lastCheckAt: moment(8, 23, 55), checksToday: 0).summary(now: now, calendar: chicago),
+            CompanionMaintainWatch(lastCheckAt: moment(8, 23, 55), checksToday: 0).summary(now: now, calendar: chicago),
             "Last check yesterday 11:55pm \u{00B7} 0 checks today"
         )
         XCTAssertEqual(
-            CompanionVacuumWatch(lastCheckAt: moment(6, 14, 5), checksToday: 0).summary(now: now, calendar: chicago),
+            CompanionMaintainWatch(lastCheckAt: moment(6, 14, 5), checksToday: 0).summary(now: now, calendar: chicago),
             "Last check Oct 6 2:05pm \u{00B7} 0 checks today"
         )
     }
@@ -295,7 +295,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
     /// count would describe two different days.
     func testAPhoneInAnotherZoneReadsTheMacsClockAndDay() throws {
         let now = moment(9, 23, 30)
-        let macWatch = try XCTUnwrap(CompanionVacuum.watch(
+        let macWatch = try XCTUnwrap(CompanionMaintain.watch(
             from: history(checks: [moment(8, 12, 0), moment(9, 17, 40), moment(9, 23, 25)]), now: now, calendar: chicago
         ))
         var losAngeles = Calendar(identifier: .gregorian)
@@ -307,7 +307,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
             "the phone reads the Mac's clock, not its own"
         )
         // The zone survives the wire.
-        let decoded = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: CompanionJSON.encoder().encode(macWatch))
+        let decoded = try CompanionJSON.decoder().decode(CompanionMaintainWatch.self, from: CompanionJSON.encoder().encode(macWatch))
         XCTAssertEqual(decoded.summary(now: now, calendar: losAngeles), "Last check 11:25pm \u{00B7} 2 checks today")
     }
 
@@ -315,11 +315,11 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
         let now = moment(9, 18, 0)
         let at = moment(9, 17, 40)
         XCTAssertEqual(
-            CompanionVacuumWatch(lastCheckAt: at, checksToday: 2).summary(now: now, calendar: chicago),
+            CompanionMaintainWatch(lastCheckAt: at, checksToday: 2).summary(now: now, calendar: chicago),
             "Last check 5:40pm \u{00B7} 2 checks today"
         )
         XCTAssertEqual(
-            CompanionVacuumWatch(lastCheckAt: at, checksToday: 2, timeZoneIdentifier: "Not/AZone").summary(now: now, calendar: chicago),
+            CompanionMaintainWatch(lastCheckAt: at, checksToday: 2, timeZoneIdentifier: "Not/AZone").summary(now: now, calendar: chicago),
             "Last check 5:40pm \u{00B7} 2 checks today"
         )
     }
@@ -327,14 +327,14 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
     func testTheCountIsSingularForOne() {
         let now = moment(9, 18, 0)
         XCTAssertEqual(
-            CompanionVacuumWatch(lastCheckAt: moment(9, 17, 40), checksToday: 1, countedSince: moment(9, 17, 40)).summary(now: now, calendar: chicago),
+            CompanionMaintainWatch(lastCheckAt: moment(9, 17, 40), checksToday: 1, countedSince: moment(9, 17, 40)).summary(now: now, calendar: chicago),
             "Last check 5:40pm \u{00B7} 1 check since 5:40pm"
         )
     }
 
     func testWithoutALastCheckTheLineSaysSo() {
         XCTAssertEqual(
-            CompanionVacuumWatch().summary(now: moment(9, 18, 0), calendar: chicago),
+            CompanionMaintainWatch().summary(now: moment(9, 18, 0), calendar: chicago),
             "No checks recorded yet \u{00B7} 0 checks today"
         )
     }
@@ -342,13 +342,13 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
     // MARK: The wire
 
     func testTheSummarySurvivesTheWireAndAnEmptyOneStillDecodes() throws {
-        let watch = CompanionVacuumWatch(lastCheckAt: moment(9, 17, 40), checksToday: 23, countedSince: moment(9, 7, 0), timeZoneIdentifier: "America/Chicago")
-        let decoded = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: CompanionJSON.encoder().encode(watch))
+        let watch = CompanionMaintainWatch(lastCheckAt: moment(9, 17, 40), checksToday: 23, countedSince: moment(9, 7, 0), timeZoneIdentifier: "America/Chicago")
+        let decoded = try CompanionJSON.decoder().decode(CompanionMaintainWatch.self, from: CompanionJSON.encoder().encode(watch))
         XCTAssertEqual(decoded, watch)
         // A payload with nothing in it decodes to the defaults instead of throwing.
-        let empty = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: Data("{}".utf8))
-        XCTAssertEqual(empty, CompanionVacuumWatch())
-        let onlyACount = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: Data(#"{"checksToday": 4}"#.utf8))
+        let empty = try CompanionJSON.decoder().decode(CompanionMaintainWatch.self, from: Data("{}".utf8))
+        XCTAssertEqual(empty, CompanionMaintainWatch())
+        let onlyACount = try CompanionJSON.decoder().decode(CompanionMaintainWatch.self, from: Data(#"{"checksToday": 4}"#.utf8))
         XCTAssertEqual(onlyACount.checksToday, 4)
         XCTAssertNil(onlyACount.lastCheckAt)
         XCTAssertNil(onlyACount.timeZoneIdentifier)
@@ -356,7 +356,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
 
     func testTheSummaryCarriesNoStepText() throws {
         let janitor = F.run("j", "janitor", ended: epoch(moment(9, 10, 0)), steps: [F.step("janitor_worktree_retire", "skipped", reason: "Kept lane-claude-secret-project.")])
-        let status = try XCTUnwrap(CompanionVacuum.status(
+        let status = try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: janitor),
             history: [check("w", at: moment(9, 11, 0)), janitor],
             isRunning: false, includeSteps: false, now: moment(9, 12, 0), calendar: chicago
@@ -369,14 +369,14 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
 
     func testAnOldPayloadWithNoOutcomeAndNoWatchDecodesWithDefaults() throws {
         let oldRun = Data(#"{"runId":"r1","trigger":"janitor","bytesFreed":5,"exitCode":1,"durationSeconds":3}"#.utf8)
-        let run = try CompanionJSON.decoder().decode(CompanionVacuumRun.self, from: oldRun)
+        let run = try CompanionJSON.decoder().decode(CompanionMaintainRun.self, from: oldRun)
         XCTAssertNil(run.outcome)
         XCTAssertEqual(run.result, .failed, "no outcome: the exit code decides")
         XCTAssertFalse(run.succeeded)
         let oldPartial = Data(#"{"runId":"r2","trigger":"full","bytesFreed":5,"exitCode":0,"durationSeconds":3}"#.utf8)
-        XCTAssertEqual(try CompanionJSON.decoder().decode(CompanionVacuumRun.self, from: oldPartial).result, .ok, "an older Mac cannot tell a partial run, so none is flagged")
+        XCTAssertEqual(try CompanionJSON.decoder().decode(CompanionMaintainRun.self, from: oldPartial).result, .ok, "an older Mac cannot tell a partial run, so none is flagged")
         let newPartial = Data(#"{"runId":"r3","trigger":"full","bytesFreed":5,"exitCode":0,"durationSeconds":3,"outcome":"partial"}"#.utf8)
-        let decoded = try CompanionJSON.decoder().decode(CompanionVacuumRun.self, from: newPartial)
+        let decoded = try CompanionJSON.decoder().decode(CompanionMaintainRun.self, from: newPartial)
         XCTAssertEqual(decoded.result, .partial)
         XCTAssertFalse(decoded.succeeded)
     }
@@ -385,16 +385,16 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
 // MARK: - The store reads the whole history
 
 @MainActor
-final class RoboticVacuumStoreHistoryTests: XCTestCase {
+final class MaintainStoreHistoryTests: XCTestCase {
     private func directory() throws -> URL {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-vacuum-\(UUID().uuidString)", isDirectory: true)
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-maintain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
 
-    private func store(_ directory: URL) -> RoboticVacuumStore {
-        RoboticVacuumStore(supportDirectory: directory, repoRoot: directory, launcher: { _ in
+    private func store(_ directory: URL) -> MaintainStore {
+        MaintainStore(supportDirectory: directory, repoRoot: directory, launcher: { _ in
             XCTFail("a test must not launch the script")
             return true
         })
@@ -417,9 +417,9 @@ final class RoboticVacuumStoreHistoryTests: XCTestCase {
         XCTAssertEqual(store.history.count, 500, "no row dropped, old rows without an outcome included")
         XCTAssertEqual(store.history.first?.runId, "r499", "newest first")
         XCTAssertEqual(store.history.last?.runId, "r0")
-        XCTAssertGreaterThan(RoboticVacuumStore.maxHistoryRuns, 500, "room above what the engine keeps")
+        XCTAssertGreaterThan(MaintainStore.maxHistoryRuns, 500, "room above what the engine keeps")
 
-        let listed = CompanionVacuum.recentRuns(from: store.history)
+        let listed = CompanionMaintain.recentRuns(from: store.history)
         XCTAssertEqual(listed.count, 20)
         XCTAssertTrue(listed.allSatisfy { $0.trigger == "janitor" })
         XCTAssertEqual(listed.first?.runId, "r498", "the newest janitor run, not one of the checks after it")
@@ -431,7 +431,7 @@ final class RoboticVacuumStoreHistoryTests: XCTestCase {
     func testAStoreWithNoHistoryFileHasNoRunsAndNoSummary() throws {
         let store = store(try directory())
         XCTAssertEqual(store.history, [])
-        XCTAssertNil(CompanionVacuum.watch(from: store.history, now: Date()))
-        XCTAssertEqual(CompanionVacuum.recentRuns(from: store.history), [])
+        XCTAssertNil(CompanionMaintain.watch(from: store.history, now: Date()))
+        XCTAssertEqual(CompanionMaintain.recentRuns(from: store.history), [])
     }
 }

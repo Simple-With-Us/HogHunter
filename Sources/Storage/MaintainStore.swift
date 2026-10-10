@@ -2,26 +2,26 @@ import AppKit
 import Combine
 import Foundation
 
-/// Reads Robotic Vacuum status from the on-disk store the Python engine maintains.
+/// Reads Maintain status from the on-disk store the Python engine maintains.
 ///
 /// One instance lives in `HogStore` and is shared by the Mac's Storage tab and
 /// the iPhone route, so a run started from either is the only run: neither can
 /// start a second over the other.
 @MainActor
-final class RoboticVacuumStore: ObservableObject {
-    /// Runs `scripts/robotic-vacuum.py` with these arguments and reports
+final class MaintainStore: ObservableObject {
+    /// Runs `scripts/maintain.py` with these arguments and reports
     /// whether it exited cleanly.  Throws when the script could not be
     /// started.  Injected so no test ever launches the real script, whose
     /// full run retires git worktrees and trims caches on this Mac.
     typealias Launcher = @Sendable (_ scriptArguments: [String]) async throws -> Bool
 
-    @Published private(set) var status: RoboticVacuumStatus?
+    @Published private(set) var status: MaintainStatus?
     /// The engine's recent runs, newest first, every kind: the quiet five
     /// minute checks too, which the Mac's Recent Runs line sums up and the
-    /// list leaves out (see `CompanionVacuum.recentRuns` and `.watch`).  The
+    /// list leaves out (see `CompanionMaintain.recentRuns` and `.watch`).  The
     /// checks are most of the file, so reading only the newest few would push
     /// the cleaning runs out of the list within hours.
-    @Published private(set) var history: [RoboticVacuumRun] = []
+    @Published private(set) var history: [MaintainRun] = []
     @Published private(set) var stepToggles: [String: Bool] = [:]
     @Published private(set) var isRunningNow = false
     @Published var lastError: String?
@@ -40,12 +40,12 @@ final class RoboticVacuumStore: ObservableObject {
     /// defaults.
     init(supportDirectory: URL? = nil, repoRoot: URL? = nil, fileManager: FileManager = .default, launcher: Launcher? = nil) {
         let support = supportDirectory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("HogHunter/RoboticVacuum", isDirectory: true)
+            .appendingPathComponent("HogHunter/Maintain", isDirectory: true)
         statusURL = support.appendingPathComponent("status.json")
         historyURL = support.appendingPathComponent("history.json")
         configURL = support.appendingPathComponent("config.json")
-        let root = repoRoot ?? RoboticVacuumStore.locateRepoRoot()
-        self.launcher = launcher ?? RoboticVacuumStore.pythonLauncher(repoRoot: root)
+        let root = repoRoot ?? MaintainStore.locateRepoRoot()
+        self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
         refresh()
     }
 
@@ -144,14 +144,14 @@ final class RoboticVacuumStore: ObservableObject {
     }
 
     struct LauncherRefused: LocalizedError {
-        var errorDescription: String? { "The Robotic Vacuum does not run from a test." }
+        var errorDescription: String? { "The Maintain does not run from a test." }
     }
 
-    /// The launcher the app uses: `/usr/bin/python3 scripts/robotic-vacuum.py ...`.
+    /// The launcher the app uses: `/usr/bin/python3 scripts/maintain.py ...`.
     nonisolated static func pythonLauncher(repoRoot: URL) -> Launcher {
         { arguments in
             guard !isRunningUnderTest else { throw LauncherRefused() }
-            let script = repoRoot.appendingPathComponent("scripts/robotic-vacuum.py")
+            let script = repoRoot.appendingPathComponent("scripts/maintain.py")
             return try await withCheckedThrowingContinuation { continuation in
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
@@ -172,31 +172,31 @@ final class RoboticVacuumStore: ObservableObject {
         }
     }
 
-    nonisolated static let catalog: [RoboticVacuumStepCatalogEntry] = [
-        RoboticVacuumStepCatalogEntry(id: "resource_sample", title: "Check disk and memory"),
-        RoboticVacuumStepCatalogEntry(id: "hoghunter_reclaim", title: "Hog Hunter disk reclaim"),
-        RoboticVacuumStepCatalogEntry(id: "janitor_worktree_retire", title: "Retire old merged git worktrees"),
-        RoboticVacuumStepCatalogEntry(id: "janitor_cache_reclaim", title: "Reclaim caches when disk is low"),
-        RoboticVacuumStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs"),
-        RoboticVacuumStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache"),
-        RoboticVacuumStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache"),
-        RoboticVacuumStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes"),
-        RoboticVacuumStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance"),
+    nonisolated static let catalog: [MaintainStepCatalogEntry] = [
+        MaintainStepCatalogEntry(id: "resource_sample", title: "Check disk and memory"),
+        MaintainStepCatalogEntry(id: "hoghunter_reclaim", title: "Hog Hunter disk reclaim"),
+        MaintainStepCatalogEntry(id: "janitor_worktree_retire", title: "Retire old merged git worktrees"),
+        MaintainStepCatalogEntry(id: "janitor_cache_reclaim", title: "Reclaim caches when disk is low"),
+        MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs"),
+        MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache"),
+        MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache"),
+        MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes"),
+        MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance"),
     ]
 
-    private func loadStatus() -> RoboticVacuumStatus? {
+    private func loadStatus() -> MaintainStatus? {
         guard let data = try? Data(contentsOf: statusURL) else { return nil }
         let decoder = JSONDecoder()
-        return try? decoder.decode(RoboticVacuumStatus.self, from: data)
+        return try? decoder.decode(MaintainStatus.self, from: data)
     }
 
-    private func loadHistory() -> [RoboticVacuumRun] {
+    private func loadHistory() -> [MaintainRun] {
         guard let data = try? Data(contentsOf: historyURL),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
         let decoder = JSONDecoder()
         return raw.compactMap { dict in
             guard let d = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? decoder.decode(RoboticVacuumRun.self, from: d)
+            return try? decoder.decode(MaintainRun.self, from: d)
         }.reversed().prefix(Self.maxHistoryRuns).map { $0 }
     }
 
@@ -231,7 +231,7 @@ final class RoboticVacuumStore: ObservableObject {
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Code/HogHunter"),
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("apps/HogHunter"),
         ] {
-            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("scripts/robotic-vacuum.py").path) {
+            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("scripts/maintain.py").path) {
                 return candidate
             }
         }

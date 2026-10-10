@@ -1,14 +1,14 @@
 import Foundation
 
-/// JSON shapes written by `scripts/robotic-vacuum.py` for the UI and MCP.
-struct RoboticVacuumStatus: Codable, Equatable {
+/// JSON shapes written by `scripts/maintain.py` for the UI and MCP.
+struct MaintainStatus: Codable, Equatable {
     var health: String
     var launchdLoaded: Bool
     var nextRunAt: [String: Double]
     var intervalsSeconds: [String: Double]
     var lastRunAt: [String: Double]?
-    var lastRun: RoboticVacuumRun?
-    var stepLastResults: [String: RoboticVacuumStepResult]
+    var lastRun: MaintainRun?
+    var stepLastResults: [String: MaintainStepResult]
     var historyCount: Int
     var updatedAt: Double?
 
@@ -35,14 +35,14 @@ struct RoboticVacuumStatus: Codable, Equatable {
     }
 }
 
-struct RoboticVacuumRun: Codable, Equatable {
+struct MaintainRun: Codable, Equatable {
     var runId: String
     var trigger: String
     var startedAt: Double
     var endedAt: Double
     var bytesFreed: Int
     var exitCode: Int
-    var steps: [RoboticVacuumStepResult]
+    var steps: [MaintainStepResult]
     /// How the run ended, as the engine recorded it: "ok", "partial" (a step
     /// failed and another did its work, so the run exits 0) or "failed".
     /// Nil for a record written before the engine kept the field.
@@ -60,7 +60,7 @@ struct RoboticVacuumRun: Codable, Equatable {
     }
 }
 
-extension RoboticVacuumRun {
+extension MaintainRun {
     /// The trigger of the five minute tick.
     static let watchTrigger = "watch"
 
@@ -73,7 +73,7 @@ extension RoboticVacuumRun {
     /// existed, or one holding a word this build does not know, is judged by
     /// its exit code.  A non-zero exit is always failed, as in the engine.
     var resolvedOutcome: String {
-        CompanionVacuumRunResult.resolve(exitCode: exitCode, outcome: outcome).rawValue
+        CompanionMaintainRunResult.resolve(exitCode: exitCode, outcome: outcome).rawValue
     }
 
     /// A watch tick the engine took no further action on.  Most ticks are.
@@ -113,7 +113,7 @@ extension RoboticVacuumRun {
     }
 }
 
-struct RoboticVacuumStepResult: Codable, Equatable, Identifiable {
+struct MaintainStepResult: Codable, Equatable, Identifiable {
     var stepId: String
     var title: String
     var status: String
@@ -142,7 +142,7 @@ struct RoboticVacuumStepResult: Codable, Equatable, Identifiable {
     }
 }
 
-struct RoboticVacuumStepCatalogEntry: Identifiable, Sendable {
+struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
 }
