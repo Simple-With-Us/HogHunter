@@ -74,7 +74,7 @@ enum InfisicalKey {
 }
 
 /// Built-in defaults for every migrated key.  These are the values the repo
-/// shipped with; they are also seeded into the Infisical project's dev
+/// shipped with; they are also seeded into the Infisical project's prod
 /// environment, so a configured app and an unconfigured app agree until an
 /// admin changes something.
 enum InfisicalDefaults {
@@ -359,10 +359,12 @@ extension Notification.Name {
 final class InfisicalSettings: ObservableObject {
     static let shared = InfisicalSettings()
 
-    /// The app has a single deployment (this Mac), so it reads the dev
-    /// environment -- the environment the fleet seeds.  staging/prod exist
-    /// for future use; see INFISICAL.md.
-    static let environment = "dev"
+    /// The app has a single deployment (this Mac), so it reads the prod
+    /// environment, and only prod.  The dev and staging environments are
+    /// retired (owner, 2026-10-10); this constant is the guard -- nothing in
+    /// the app, the Keychain record, or the Settings pane can select another
+    /// environment, and a test pins the value.  See INFISICAL.md.
+    static let environment = "prod"
 
     @Published private(set) var isConfigured = false
     @Published private(set) var isRefreshing = false

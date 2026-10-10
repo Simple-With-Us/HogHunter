@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Infisical reads the prod environment only (owner ruling 2026-10-10):
+
+- The Mac app reads the `prod` environment of the Infisical project, where it read `dev` before.  The dev and staging environments are retired, and all 17 settings keys now live in `prod` with the same values.  The environment is a constant in `InfisicalSettings`, and a test pins it.
+- The Cursor cloud start script and `.cursor/infisical.env` default to `prod` and refuse any other `INFISICAL_ENV`.
+- An installed copy of the app keeps reading `dev` until a build with this change is installed.
+
 Robotic Vacuum recent runs, cleaning runs only (board `f13bbbe7`, issue 115):
 
 - The Recent Runs list on the Mac and on the phone shows cleaning runs only: janitor, full, manual and pressure, the newest 20.  The five minute disk and memory check is no longer in it, because 20 of them covered about 100 minutes and pushed every cleaning run off the list within hours.  One line above the list sums the checks up, for example "Last check 5:40pm · 23 checks today".

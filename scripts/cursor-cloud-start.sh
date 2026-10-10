@@ -32,8 +32,17 @@ if [ -f "$INFISICAL_ENV_FILE" ]; then
 fi
 
 PROJECT_ID="${INFISICAL_PROJECT_ID:-}"
-INFISICAL_ENV_VALUE="${INFISICAL_ENV:-dev}"
+INFISICAL_ENV_VALUE="${INFISICAL_ENV:-prod}"
 INFISICAL_DOMAIN_VALUE="${INFISICAL_DOMAIN:-https://app.infisical.com}"
+
+# ── Guard: prod only (owner, 2026-10-10) ──
+# The dev and staging Infisical environments are retired.  Refuse to export
+# anything from another environment, whether the value came from
+# .cursor/infisical.env or from the session environment.
+if [ "$INFISICAL_ENV_VALUE" != "prod" ]; then
+  echo "==> ERROR: INFISICAL_ENV is '$INFISICAL_ENV_VALUE'; only 'prod' is allowed (dev and staging are retired)." >&2
+  exit 1
+fi
 
 # ── Guard: dashboard secrets must be present ──
 if [ -z "${INFISICAL_CLIENT_ID:-}" ] || [ -z "${INFISICAL_CLIENT_SECRET:-}" ]; then

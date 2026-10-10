@@ -240,7 +240,7 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(patches.count, 1)
         XCTAssertEqual(patches[0].path, "/api/v3/secrets/hoghunter.refreshInterval")
         XCTAssertEqual(patches[0].body?["secretValue"] as? String, "9")
-        XCTAssertEqual(patches[0].body?["environment"] as? String, "dev")
+        XCTAssertEqual(patches[0].body?["environment"] as? String, "prod")
         XCTAssertEqual(
             patches[0].body?["workspaceId"] as? String,
             "00000000-1111-2222-3333-444444444444"
@@ -350,10 +350,18 @@ final class InfisicalSettingsTests: XCTestCase {
         let calls = StubURLProtocol.takeRecorded()
         let fetch = try XCTUnwrap(calls.first { $0.path == "/api/v3/secrets/raw" })
         XCTAssertEqual(fetch.query["workspaceId"], selectedProject)
-        XCTAssertEqual(fetch.query["environment"], "dev")
+        XCTAssertEqual(fetch.query["environment"], "prod")
         let patch = try XCTUnwrap(calls.first { $0.method == "PATCH" })
         XCTAssertEqual(patch.body?["workspaceId"] as? String, selectedProject)
-        XCTAssertEqual(patch.body?["environment"] as? String, "dev")
+        XCTAssertEqual(patch.body?["environment"] as? String, "prod")
+    }
+
+    /// The dev and staging environments are retired (owner, 2026-10-10).  The
+    /// environment is a constant, not a setting, so this pins it: a change
+    /// back to a non-prod environment has to break a test first.
+    @MainActor
+    func testEnvironmentIsProdOnly() {
+        XCTAssertEqual(InfisicalSettings.environment, "prod")
     }
 
     @MainActor
