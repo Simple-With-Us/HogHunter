@@ -1086,12 +1086,29 @@ class TestHistoryRetention(unittest.TestCase):
         policy = json.loads((REPO / "config" / "robotic-vacuum.json").read_text(encoding="utf-8"))
         self.assertEqual(policy["history_max_runs"], DEFAULT_HISTORY_MAX_RUNS)
 
+    def _store_source(self) -> str:
+        """The Mac store's source, found by content rather than by filename.
+
+        This test reached into Sources/Storage/<name>.swift by a hardcoded name, so renaming the
+        file broke it with a FileNotFoundError that said nothing about what it was looking for.
+        It is the same class of coupling the Vacuum -> Maintain rename removed everywhere else,
+        one layer down: the test pinned a path instead of pinning the behaviour.
+        """
+        matches = sorted((REPO / "Sources" / "Storage").glob("*.swift"))
+        hits = [p for p in matches if "static let maxHistoryRuns" in p.read_text(encoding="utf-8")]
+        self.assertEqual(
+            len(hits),
+            1,
+            "exactly one Mac store should declare maxHistoryRuns; found "
+            + ", ".join(p.name for p in hits),
+        )
+        return hits[0].read_text(encoding="utf-8")
+
     def test_the_mac_reads_at_least_what_the_engine_keeps(self):
-        """RoboticVacuumStore.maxHistoryRuns bounds the rows the Mac app reads.  Below the cap it would drop the
+        """MaintainStore.maxHistoryRuns bounds the rows the Mac app reads.  Below the cap it would drop the
         oldest rows, and the count would drift low."""
-        source = (REPO / "Sources" / "Storage" / "RoboticVacuumStore.swift").read_text(encoding="utf-8")
-        found = re.search(r"static let maxHistoryRuns = (\d+)", source)
-        self.assertIsNotNone(found, "RoboticVacuumStore.maxHistoryRuns not found")
+        found = re.search(r"static let maxHistoryRuns = (\d+)", self._store_source())
+        self.assertIsNotNone(found, "MaintainStore.maxHistoryRuns not found")
         self.assertGreaterEqual(int(found.group(1)), DEFAULT_HISTORY_MAX_RUNS)
 
     def test_append_keeps_the_newest_runs_up_to_the_cap(self):
