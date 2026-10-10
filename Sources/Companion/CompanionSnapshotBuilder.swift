@@ -24,8 +24,8 @@ enum CompanionSnapshotBuilder {
         bandwidth: CompanionBandwidth? = nil,
         cpuHistory: [Double]? = nil,
         settings: CompanionSettingsSummary? = nil,
-        remoteVacuumAllowed: Bool? = nil,
-        vacuum: CompanionVacuumStatus? = nil
+        remoteMaintainAllowed: Bool? = nil,
+        maintain: CompanionMaintainStatus? = nil
     ) -> CompanionSnapshot {
         let cores = max(1, pulse.coreCount)
         let pressure = Severity.forPressure(pulse.pressure)
@@ -85,8 +85,8 @@ enum CompanionSnapshotBuilder {
             bandwidth: bandwidth,
             cpuHistory: cpuHistory,
             settings: settings,
-            remoteVacuumAllowed: remoteVacuumAllowed,
-            vacuum: vacuum
+            remoteMaintainAllowed: remoteMaintainAllowed,
+            maintain: maintain
         )
     }
 

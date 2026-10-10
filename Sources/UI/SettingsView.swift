@@ -121,7 +121,7 @@ enum SettingsTab: Hashable {
 private struct GeneralSettingsTab: View {
     @EnvironmentObject private var store: HogStore
 
-    @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 3
+    @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
@@ -437,12 +437,12 @@ private struct IPhoneSettingsTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Toggle("Allow iPhone to Run Robotic Vacuum", isOn: $store.allowRemoteVacuum)
-                    Text("When enabled, the paired iPhone can start a full Robotic Vacuum run and read what each step did.\u{00A0} A run can retire old merged git worktrees, trim caches and build folders, and run maintenance on remote servers.\u{00A0} The phone asks you to confirm each run.")
+                    Toggle("Allow iPhone to Run Maintenance", isOn: $store.allowRemoteMaintain)
+                    Text("When enabled, the paired iPhone can start a full Maintain run and read what each step did.\u{00A0} A run can retire old merged git worktrees, trim caches and build folders, and run maintenance on remote servers.\u{00A0} The phone asks you to confirm each run.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick the first three choices.\u{00A0} Running the Robotic Vacuum is never offered there.\u{00A0} Turn it on here, on purpose.")
+                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick the first three choices.\u{00A0} Running maintenance is never offered there.\u{00A0} Turn it on here, on purpose.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

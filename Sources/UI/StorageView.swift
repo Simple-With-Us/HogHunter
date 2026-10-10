@@ -4,7 +4,7 @@ import AppKit
 enum StorageTab: String, CaseIterable, Identifiable {
     case appStorage = "App Storage"
     case diskCleaner = "Disk Cleaner"
-    case roboticVacuum = "Robotic Vacuum"
+    case maintain = "Maintain"
 
     var id: String { rawValue }
 }
@@ -21,7 +21,7 @@ struct StorageView: View {
     @StateObject private var cleanerStore = DiskCleanerStore()
     /// Owned by `HogStore`, which the iPhone route also uses, so the Mac and
     /// the phone cannot start a second run over each other.
-    @ObservedObject private var vacuumStore: RoboticVacuumStore
+    @ObservedObject private var maintainStore: MaintainStore
     @State private var selectedTab: StorageTab = .diskCleaner
     @State private var sortOrder: StorageSort = .total
     @State private var sortAscending: Bool = false
@@ -32,12 +32,12 @@ struct StorageView: View {
     private let isTabActive: Bool
 
     /// `initialTab` is the mode the view opens on.  The app always takes the
-    /// default; a layout test opens the Vacuum mode directly instead of
+    /// default; a layout test opens the Maintain mode directly instead of
     /// clicking the segmented control.
-    init(runningBundleIds: @escaping () -> Set<String>, vacuumStore: RoboticVacuumStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner) {
+    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
         _selectedTab = State(initialValue: initialTab)
-        self.vacuumStore = vacuumStore
+        self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
     }
@@ -55,8 +55,8 @@ struct StorageView: View {
                 footer
             case .diskCleaner:
                 DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
-            case .roboticVacuum:
-                RoboticVacuumView(store: vacuumStore)
+            case .maintain:
+                MaintainView(store: maintainStore)
             }
         }
         .padding(embeddedInPanel ? 0 : 16)
@@ -101,7 +101,7 @@ struct StorageView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : (selectedTab == .roboticVacuum ? "fanblades.fill" : "internaldrive"))
+            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : (selectedTab == .maintain ? "fanblades.fill" : "internaldrive"))
                 .font(.system(size: 20))
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
@@ -121,7 +121,7 @@ struct StorageView: View {
             // segments say what they are, and VoiceOver still reads "Mode".
             Picker("Mode", selection: $selectedTab) {
                 Text("Clean").tag(StorageTab.diskCleaner)
-                Text("Maintain").tag(StorageTab.roboticVacuum)
+                Text("Maintain").tag(StorageTab.maintain)
                 Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
@@ -184,7 +184,7 @@ struct StorageView: View {
     private var headerTitle: String {
         switch selectedTab {
         case .diskCleaner: return "Clean"
-        case .roboticVacuum: return "Maintain"
+        case .maintain: return "Maintain"
         case .appStorage: return "Storage"
         }
     }
@@ -194,7 +194,7 @@ struct StorageView: View {
     private var headerSubtitle: String {
         switch selectedTab {
         case .diskCleaner: return "Find clutter and remove what you choose"
-        case .roboticVacuum: return "Scheduled upkeep, with a record of every run"
+        case .maintain: return "Scheduled upkeep, with a record of every run"
         case .appStorage: return subtitle
         }
     }

@@ -204,16 +204,16 @@ enum CompanionConnection {
         return try decode(CompanionSampleResponse.self, from: reply)
     }
 
-    /// Starts a full Robotic Vacuum run on the Mac.  The Mac answers at once,
+    /// Starts a full Maintain run on the Mac.  The Mac answers at once,
     /// "started" or "busy" (409), and carries the run on by itself: the run
     /// takes minutes, so the phone watches the snapshot instead of waiting.
-    static func triggerVacuumRun(endpoint: NWEndpoint, token: String, kind: String = "full") async throws -> CompanionVacuumRunResponse {
+    static func triggerMaintainRun(endpoint: NWEndpoint, token: String, kind: String = "full") async throws -> CompanionMaintainRunResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.vacuumRunRequest(token: token, kind: kind),
+            request: CompanionHTTP.maintainRunRequest(token: token, kind: kind),
             timeout: defaultTimeout
         )
-        return try decode(CompanionVacuumRunResponse.self, from: reply)
+        return try decode(CompanionMaintainRunResponse.self, from: reply)
     }
 
     // MARK: - Reply handling
