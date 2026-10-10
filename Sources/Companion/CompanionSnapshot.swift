@@ -394,6 +394,11 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
 
     /// `recentRuns` without any watch tick, so an older Mac that still lists
     /// them reads the same as a newer one.  Nil when the Mac sent no list.
+    ///
+    /// An older Mac files a pressure clean under trigger "watch" like a quiet
+    /// tick, and sends no steps to tell them apart, so its escalated ticks go
+    /// too.  A current Mac has already done this: it leaves quiet ticks out
+    /// and sends an escalated one as "pressure", which passes here.
     var cleaningRuns: [CompanionVacuumRun]? {
         recentRuns?.filter { $0.trigger != CompanionVacuumRun.watchTrigger }
     }
@@ -466,11 +471,17 @@ struct CompanionVacuumWatch: Codable, Equatable, Sendable {
     /// today, so the count covers just the time since this moment.  Then the
     /// line must not say "today".
     var countedSince: Date?
+    /// The Mac's time zone, for example "America/Chicago".  "Today" is the
+    /// Mac's day, so the line reads its clock in this zone too, and a phone in
+    /// another zone says the same thing the Mac does.  Nil from a Mac that does
+    /// not say, and then the line uses the reader's own zone.
+    var timeZoneIdentifier: String?
 
-    init(lastCheckAt: Date? = nil, checksToday: Int = 0, countedSince: Date? = nil) {
+    init(lastCheckAt: Date? = nil, checksToday: Int = 0, countedSince: Date? = nil, timeZoneIdentifier: String? = nil) {
         self.lastCheckAt = lastCheckAt
         self.checksToday = checksToday
         self.countedSince = countedSince
+        self.timeZoneIdentifier = timeZoneIdentifier
     }
 
     /// Every field has a default, so a payload missing any of them still reads.
@@ -479,13 +490,19 @@ struct CompanionVacuumWatch: Codable, Equatable, Sendable {
         lastCheckAt = try container.decodeIfPresent(Date.self, forKey: .lastCheckAt)
         checksToday = try container.decodeIfPresent(Int.self, forKey: .checksToday) ?? 0
         countedSince = try container.decodeIfPresent(Date.self, forKey: .countedSince)
+        timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
     }
 
     /// "Last check 5:40pm · 23 checks today".  Twelve-hour time with am or pm
-    /// and no zone, in the calendar's time zone.  A check from an earlier day
-    /// says which day, and a count that covers only part of today says since
-    /// when.  Shared by the Mac and the phone, so the two read alike.
+    /// and no zone, read in the Mac's time zone when the payload names it (else
+    /// the calendar's).  A check from an earlier day says which day, and a
+    /// count that covers only part of today says since when.  Shared by the
+    /// Mac and the phone, so the two read alike.
     func summary(now: Date, calendar: Calendar = .current) -> String {
+        var calendar = calendar
+        if let timeZoneIdentifier, let zone = TimeZone(identifier: timeZoneIdentifier) {
+            calendar.timeZone = zone
+        }
         let last: String
         if let lastCheckAt {
             last = "Last check \(Self.describe(lastCheckAt, now: now, calendar: calendar))"

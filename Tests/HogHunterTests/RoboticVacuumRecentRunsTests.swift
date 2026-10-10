@@ -201,6 +201,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
         XCTAssertEqual(watch.lastCheckAt, moment(9, 17, 40))
         XCTAssertEqual(watch.checksToday, 3, "the 11:55pm check was yesterday's")
         XCTAssertNil(watch.countedSince, "the history reaches back before midnight, so the count is for the whole day")
+        XCTAssertEqual(watch.timeZoneIdentifier, "America/Chicago", "the Mac names the zone its 'today' is in")
     }
 
     func testOtherRunsAndATickThatFoundTheLockHeldAreNotChecks() throws {
@@ -290,6 +291,39 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
         )
     }
 
+    /// "Today" is the Mac's day.  A phone in another zone must read the Mac's clock, or the time and the
+    /// count would describe two different days.
+    func testAPhoneInAnotherZoneReadsTheMacsClockAndDay() throws {
+        let now = moment(9, 23, 30)
+        let macWatch = try XCTUnwrap(CompanionVacuum.watch(
+            from: history(checks: [moment(8, 12, 0), moment(9, 17, 40), moment(9, 23, 25)]), now: now, calendar: chicago
+        ))
+        var losAngeles = Calendar(identifier: .gregorian)
+        losAngeles.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        // 11:25pm in Chicago is 9:25pm in Los Angeles, and a Los Angeles phone's own midnight is two hours later.
+        XCTAssertEqual(macWatch.summary(now: now, calendar: chicago), "Last check 11:25pm \u{00B7} 2 checks today")
+        XCTAssertEqual(
+            macWatch.summary(now: now, calendar: losAngeles), "Last check 11:25pm \u{00B7} 2 checks today",
+            "the phone reads the Mac's clock, not its own"
+        )
+        // The zone survives the wire.
+        let decoded = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: CompanionJSON.encoder().encode(macWatch))
+        XCTAssertEqual(decoded.summary(now: now, calendar: losAngeles), "Last check 11:25pm \u{00B7} 2 checks today")
+    }
+
+    func testAMacThatNamesNoZoneOrAnUnknownOneIsReadInTheReadersOwn() {
+        let now = moment(9, 18, 0)
+        let at = moment(9, 17, 40)
+        XCTAssertEqual(
+            CompanionVacuumWatch(lastCheckAt: at, checksToday: 2).summary(now: now, calendar: chicago),
+            "Last check 5:40pm \u{00B7} 2 checks today"
+        )
+        XCTAssertEqual(
+            CompanionVacuumWatch(lastCheckAt: at, checksToday: 2, timeZoneIdentifier: "Not/AZone").summary(now: now, calendar: chicago),
+            "Last check 5:40pm \u{00B7} 2 checks today"
+        )
+    }
+
     func testTheCountIsSingularForOne() {
         let now = moment(9, 18, 0)
         XCTAssertEqual(
@@ -308,7 +342,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
     // MARK: The wire
 
     func testTheSummarySurvivesTheWireAndAnEmptyOneStillDecodes() throws {
-        let watch = CompanionVacuumWatch(lastCheckAt: moment(9, 17, 40), checksToday: 23, countedSince: moment(9, 7, 0))
+        let watch = CompanionVacuumWatch(lastCheckAt: moment(9, 17, 40), checksToday: 23, countedSince: moment(9, 7, 0), timeZoneIdentifier: "America/Chicago")
         let decoded = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: CompanionJSON.encoder().encode(watch))
         XCTAssertEqual(decoded, watch)
         // A payload with nothing in it decodes to the defaults instead of throwing.
@@ -317,6 +351,7 @@ final class RoboticVacuumWatchSummaryTests: XCTestCase {
         let onlyACount = try CompanionJSON.decoder().decode(CompanionVacuumWatch.self, from: Data(#"{"checksToday": 4}"#.utf8))
         XCTAssertEqual(onlyACount.checksToday, 4)
         XCTAssertNil(onlyACount.lastCheckAt)
+        XCTAssertNil(onlyACount.timeZoneIdentifier)
     }
 
     func testTheSummaryCarriesNoStepText() throws {

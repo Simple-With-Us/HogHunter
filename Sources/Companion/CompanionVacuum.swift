@@ -103,7 +103,8 @@ enum CompanionVacuum {
     }
 
     /// When the last check ran and how many ran today, or nil with no check on
-    /// record.  "Today" starts at the calendar's midnight.
+    /// record.  "Today" starts at the calendar's midnight, and the calendar's
+    /// time zone travels with the answer so the phone reads it the same way.
     ///
     /// The engine keeps a bounded history, so it may not reach back to
     /// midnight (a long day, or an engine that keeps fewer runs).  Then the
@@ -120,7 +121,8 @@ enum CompanionVacuum {
         return CompanionVacuumWatch(
             lastCheckAt: last,
             checksToday: checkTimes.filter { $0 >= midnight }.count,
-            countedSince: oldest.flatMap { $0 > midnight ? $0 : nil }
+            countedSince: oldest.flatMap { $0 > midnight ? $0 : nil },
+            timeZoneIdentifier: calendar.timeZone.identifier
         )
     }
 

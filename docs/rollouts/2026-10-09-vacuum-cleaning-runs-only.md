@@ -22,7 +22,7 @@ The engine ticks every five minutes ("watch"), so the 20 newest runs cover about
 | `ios/Sources/CompanionModel.swift` | Demo and screenshot data: cleaning runs only, one partial and one failed, with a watch summary. |
 | `scripts/vacuum/config.py`, `config/robotic-vacuum.json` | `history_max_runs` 200 to 500.  Every run is a record, so 200 held about 14 hours and the count could not honestly say "today". |
 
-The line reads "Last check 5:40pm · 23 checks today": 12-hour time, lower-case am or pm, no zone, whatever the phone's own clock setting is.  A check from an earlier day says "yesterday 11:55pm" or "Oct 6 2:05pm".  The Mac decides what "today" is (its midnight) and sends the count, so the phone and the Mac agree.
+The line reads "Last check 5:40pm · 23 checks today": 12-hour time, lower-case am or pm, no zone, whatever the phone's own clock setting is.  A check from an earlier day says "yesterday 11:55pm" or "Oct 6 2:05pm".  The Mac decides what "today" is (its midnight) and sends the count with its time zone, so the phone reads the Mac's clock and day even in another zone, and the two agree.
 
 ## Decisions, On Purpose
 
@@ -38,7 +38,7 @@ The line reads "Last check 5:40pm · 23 checks today": 12-hour time, lower-case 
 
 ## Compatibility
 
-Every new field is optional on the wire and decodes with a default.  An older Mac sends no `outcome` and no `watch`: the phone filters the watch ticks out of that Mac's list itself, shows no summary line, and judges each run by its exit code.  An older phone ignores the new fields; it reads the new, shorter list and has no Partial mark.
+Every new field is optional on the wire and decodes with a default.  An older Mac sends no `outcome` and no `watch`: the phone filters the watch ticks out of that Mac's list itself, shows no summary line, and judges each run by its exit code.  That older Mac files a pressure clean under trigger `watch` and sends no steps, so the phone cannot tell it from a quiet tick and drops it with the rest; a current Mac has already done the sorting and sends it as `pressure`, which the phone keeps.  An older phone ignores the new fields; it reads the new, shorter list and has no Partial mark.
 
 ## Where Each Half Takes Effect
 
@@ -59,7 +59,15 @@ Every new field is optional on the wire and decodes with a default.  An older Ma
 
 ## Verification
 
-See the PR description for the commands and results.
+| Command | Result |
+|---|---|
+| `xcodegen generate` | Project generated. |
+| `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` | 559 tests, 1 failure.  The failure is `DiskCleanerTests.testScanAPFSSnapshotsFallsBackToAggregateWhenListFails`, the known Time Machine test that fails on the author's Mac.  The new and changed vacuum tests pass. |
+| `xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build-release ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO CODE_SIGNING_ALLOWED=NO` | Builds. |
+| `xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' build` | Passes. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py` | 227 tests pass, 5 of them new. |
+
+No simulator was booted.  The hosted `test` job launches the iOS app with `-HogHunterVacuum` and uploads the frames as the `app-screenshots` artifact; the sample data is cleaning runs only, with one partial run, one failed run and the watch line.  The Mac and phone screens themselves are verified through those frames and code review; no screenshot of the Mac screen was taken.
 
 ## Rollback
 
