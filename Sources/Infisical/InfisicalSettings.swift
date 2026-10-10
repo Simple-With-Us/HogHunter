@@ -366,6 +366,13 @@ final class InfisicalSettings: ObservableObject {
     /// environment, and a test pins the value.  See INFISICAL.md.
     static let environment = "prod"
 
+    /// The Settings > Advanced note under the credential fields.  Built from
+    /// `environment` so the pane can never name a different environment than
+    /// the one the app reads.
+    static var credentialNotice: String {
+        "Uses the \(environment) environment.  The connection is checked before replacing your saved setup."
+    }
+
     @Published private(set) var isConfigured = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastRefresh: Date?
@@ -597,7 +604,7 @@ final class InfisicalSettings: ObservableObject {
             }
         }
         do {
-            // A valid identity alone is insufficient: verify project + dev read access.
+            // A valid identity alone is insufficient: verify project + prod read access.
             let token = try await client.login(clientId: candidate.clientId, clientSecret: candidate.clientSecret)
             guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
             let secrets = try await client.fetchSecrets(

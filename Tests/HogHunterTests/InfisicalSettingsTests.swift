@@ -364,6 +364,14 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(InfisicalSettings.environment, "prod")
     }
 
+    /// The Advanced pane note is built from the same constant, so it names
+    /// the environment the app reads and never a retired one.
+    @MainActor
+    func testCredentialNoticeNamesTheActiveEnvironment() {
+        XCTAssertTrue(InfisicalSettings.credentialNotice.hasPrefix("Uses the prod environment."))
+        XCTAssertFalse(InfisicalSettings.credentialNotice.contains("dev"))
+    }
+
     @MainActor
     func testHTTPResponseBodyIsNotExposedInStatus() async {
         StubURLProtocol.handler = { _ in (403, Data("synthetic-private-response".utf8)) }
