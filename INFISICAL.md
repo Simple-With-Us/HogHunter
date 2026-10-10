@@ -16,11 +16,11 @@ The iOS companion never talks to Infisical and never holds a credential.  It rec
 
 ## Environment
 
-The app reads the `dev` environment.  Hog Hunter has a single deployment -- this Mac -- so `dev` is its production truth; the fleet seeds `dev`.  `staging` and `prod` exist for future use.
+The app reads the `prod` environment, and only `prod`.  Hog Hunter has a single deployment -- this Mac -- and the `dev` and `staging` environments are retired (owner, 2026-10-10).  `InfisicalSettings.environment` is a constant, not a setting, and `testEnvironmentIsProdOnly` pins it.  The Cursor cloud start script (`scripts/cursor-cloud-start.sh`) reads `INFISICAL_ENV` from `.cursor/infisical.env` (`prod`) and refuses any other value.
 
 ## Key inventory
 
-Non-sensitive defaults were seeded into the `dev` environment from the values the repo shipped with.  Secrets are documented as "to be filled by admin" and left empty -- never invent, guess, or copy a secret value.
+Non-sensitive defaults were seeded into the `prod` environment from the values the repo shipped with.  Secrets are documented as "to be filled by admin" and left empty -- never invent, guess, or copy a secret value.
 
 ### Migrated (Infisical is the source of truth)
 
@@ -79,7 +79,7 @@ The settings surface is gated by the app's existing admin concept: there is none
 
 ## Rotating a value
 
-Edit the key in the Infisical dashboard (project `HogHunter`, environment `dev`).  The app picks it up within `hoghunter.settingsRefreshMinutes` (default 5 minutes), or immediately via Settings > Advanced > Sync Now.  To rotate the universal-auth credential itself: create a new machine identity in Infisical, then replace it in Settings > Advanced (Save to Keychain overwrites).  Never put a secret in code, a log, a PR body, or chat -- names and metadata only.
+Edit the key in the Infisical dashboard (project `HogHunter`, environment `prod`).  The app picks it up within `hoghunter.settingsRefreshMinutes` (default 5 minutes), or immediately via Settings > Advanced > Sync Now.  To rotate the universal-auth credential itself: create a new machine identity in Infisical, then replace it in Settings > Advanced (Save to Keychain overwrites).  Never put a secret in code, a log, a PR body, or chat -- names and metadata only.
 
 ## Local development
 
@@ -87,9 +87,9 @@ Without a Keychain credential the Infisical code paths are inert: the app runs e
 
 ## Selecting another project
 
-Settings > Advanced accepts Client ID, Client Secret, and Project ID.  The host remains `https://app.infisical.com` and the environment remains `dev`.  Existing Keychain records without a valid Project ID remain unconfigured; the admin must enter all three fields and save.  There is no automatic migration or hard-coded project fallback.
+Settings > Advanced accepts Client ID, Client Secret, and Project ID.  The host remains `https://app.infisical.com` and the environment remains `prod`.  Existing Keychain records without a valid Project ID remain unconfigured; the admin must enter all three fields and save.  There is no automatic migration or hard-coded project fallback.
 
-Save first validates nonblank credentials and a UUID Project ID, then authenticates and reads that project's `dev` settings.  Only after both operations succeed does it atomically update the Keychain and activate the new connection.  Authentication, access, or Keychain failures leave the previous connection and cache usable.  Secrets are not trimmed, logged, or included in error messages.
+Save first validates nonblank credentials and a UUID Project ID, then authenticates and reads that project's `prod` settings.  Only after both operations succeed does it atomically update the Keychain and activate the new connection.  Authentication, access, or Keychain failures leave the previous connection and cache usable.  Secrets are not trimmed, logged, or included in error messages.
 
 A successful target change replaces the cache rather than merging it and resets project-derived effective and persisted fallback values, including the alert webhook.  Same-target refresh failures retain last-known-good settings.  A persisted project marker keeps another project's fallback out of an offline relaunch.  Clearing a connection also clears its project-derived values.  Display preferences and consent choices are unaffected.
 
