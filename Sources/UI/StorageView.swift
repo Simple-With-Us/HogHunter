@@ -120,8 +120,8 @@ struct StorageView: View {
             // "e", and the Apps segment was pushed off the right edge.  The
             // segments say what they are, and VoiceOver still reads "Mode".
             Picker("Mode", selection: $selectedTab) {
-                Text("Cleaner").tag(StorageTab.diskCleaner)
-                Text("Vacuum").tag(StorageTab.roboticVacuum)
+                Text("Clean").tag(StorageTab.diskCleaner)
+                Text("Maintain").tag(StorageTab.roboticVacuum)
                 Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
@@ -183,8 +183,8 @@ struct StorageView: View {
 
     private var headerTitle: String {
         switch selectedTab {
-        case .diskCleaner: return "Disk Cleaner"
-        case .roboticVacuum: return "Robotic Vacuum"
+        case .diskCleaner: return "Clean"
+        case .roboticVacuum: return "Maintain"
         case .appStorage: return "Storage"
         }
     }
@@ -193,8 +193,8 @@ struct StorageView: View {
     /// a longer one pushes the mode control past the right edge.
     private var headerSubtitle: String {
         switch selectedTab {
-        case .diskCleaner: return "Reclaim space from caches, leftovers, and clutter"
-        case .roboticVacuum: return "Scheduled cleaning, flagged when it is late"
+        case .diskCleaner: return "Find clutter and remove what you choose"
+        case .roboticVacuum: return "Scheduled upkeep, with a record of every run"
         case .appStorage: return subtitle
         }
     }

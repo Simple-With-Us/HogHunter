@@ -330,15 +330,15 @@ struct DiskCleanerView: View {
                 .padding(.vertical, 2)
             }
         } else {
-            VStack {
-                Spacer()
-                ProgressView()
-                Text("Analyzing disk clutter…")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-                Spacer()
-            }
+            // No progress indicator here.  This branch used to render its own
+            // spinner and the header's `.scanning` case rendered a second one,
+            // and both were on screen for the whole scan: `state` is `.scanning`
+            // while `report` is still nil, because `report` is only assigned
+            // once the scan completes.  Two gates, one question, two spinners.
+            // The same mistake put "Robotic Vacuum" on screen twice in
+            // `RoboticVacuumView.header`.  The status header owns progress now;
+            // the body only has to decide whether there are results to show.
+            Spacer()
         }
     }
 
