@@ -305,7 +305,8 @@ final class CompanionVacuumOptInTests: XCTestCase {
 
     /// The engine writes history oldest first and the store hands it over
     /// newest first.  A phone sees the last run that cleaned, not the watch
-    /// tick the status file names as the last record.
+    /// tick the status file names as the last record, and the list holds the
+    /// cleaning runs only.
     @MainActor
     func testTheRecentRunsAndTheLastRunComeFromTheHistoryFile() async throws {
         let suite = "hoghunter.tests.remotevacuum.history.\(UUID().uuidString)"
@@ -330,7 +331,8 @@ final class CompanionVacuumOptInTests: XCTestCase {
         store.allowRemoteVacuum = true
 
         let plain = try XCTUnwrap(store.vacuumStatusForPhone())
-        XCTAssertEqual(plain.recentRuns?.map(\.runId), ["w1", "j1", "f1"])
+        XCTAssertEqual(plain.recentRuns?.map(\.runId), ["j1", "f1"], "the quiet watch tick is summed up, not listed")
+        XCTAssertEqual(plain.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_001_000))
         XCTAssertEqual(plain.lastRunTrigger, "janitor")
         XCTAssertEqual(plain.lastRunBytesFreed, 5_000)
         XCTAssertNil(plain.steps)
@@ -618,9 +620,9 @@ enum CompanionVacuumRunFixtures {
 
     static func run(
         _ id: String, _ trigger: String, ended: Double, freed: Int = 0, exit: Int = 0, took: Double = 10,
-        steps: [RoboticVacuumStepResult] = []
+        steps: [RoboticVacuumStepResult] = [], outcome: String? = nil
     ) -> RoboticVacuumRun {
-        RoboticVacuumRun(runId: id, trigger: trigger, startedAt: ended - took, endedAt: ended, bytesFreed: freed, exitCode: exit, steps: steps)
+        RoboticVacuumRun(runId: id, trigger: trigger, startedAt: ended - took, endedAt: ended, bytesFreed: freed, exitCode: exit, steps: steps, outcome: outcome)
     }
 
     /// The fixture status with `lastRun` set, the way the engine publishes it: whatever ran last.
@@ -708,9 +710,13 @@ final class CompanionVacuumLastRunTests: XCTestCase {
 
     func testAFirstRunBeforeAnyStatusStillListsTheRunsOnRecord() throws {
         let built = try XCTUnwrap(CompanionVacuum.status(
-            from: nil, history: [F.run("w1", "watch", ended: 1_760_000_100)], isRunning: true, includeSteps: true
+            from: nil,
+            history: [F.run("w1", "watch", ended: 1_760_000_200), F.run("j1", "janitor", ended: 1_760_000_100)],
+            isRunning: true,
+            includeSteps: true
         ))
-        XCTAssertEqual(built.recentRuns?.map(\.runId), ["w1"])
+        XCTAssertEqual(built.recentRuns?.map(\.runId), ["j1"], "the cleaning run is listed, the quiet check is counted")
+        XCTAssertEqual(built.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_000_200))
         XCTAssertNil(built.lastRunTrigger)
     }
 }
@@ -724,25 +730,41 @@ final class CompanionVacuumRecentRunsTests: XCTestCase {
         ))
     }
 
-    func testRunsAreListedNewestFirstWithWatchTicksIncluded() throws {
+    func testOnlyCleaningRunsAreListedNewestFirst() throws {
         let history = [
-            F.run("w1", "watch", ended: 1_760_001_000),
+            F.run("w2", "watch", ended: 1_760_001_000),
             F.run("j1", "janitor", ended: 1_760_000_700, freed: 5_000),
+            F.run("w1", "watch", ended: 1_760_000_400),
             F.run("f1", "full", ended: 1_760_000_100, freed: 6_000),
+            F.run("m1", "manual", ended: 1_760_000_050, freed: 7_000),
         ]
         let runs = try XCTUnwrap(built(history).recentRuns)
-        XCTAssertEqual(runs.map(\.runId), ["w1", "j1", "f1"], "the Mac lists every run, newest first")
-        XCTAssertEqual(runs.map(\.trigger), ["watch", "janitor", "full"])
-        XCTAssertEqual(runs.map(\.bytesFreed), [0, 5_000, 6_000])
+        XCTAssertEqual(runs.map(\.runId), ["j1", "f1", "m1"], "newest first, and no watch tick")
+        XCTAssertEqual(runs.map(\.trigger), ["janitor", "full", "manual"])
+        XCTAssertEqual(runs.map(\.bytesFreed), [5_000, 6_000, 7_000])
     }
 
-    func testTheListIsCappedAtTwentyAndKeepsTheNewest() throws {
-        let history = (0..<25).map { F.run("r\($0)", "watch", ended: 1_760_100_000 - Double($0) * 300) }
+    /// Most of the file is watch ticks: a day holds about 290 of them and 54
+    /// cleaning runs.  The list still holds the newest 20 cleaning runs.
+    func testTheListIsTheNewestTwentyCleaningRunsHoweverManyChecksSitBetween() throws {
+        var history: [RoboticVacuumRun] = []
+        for n in 0..<25 {
+            let ended = 1_760_100_000 - Double(n) * 1_800
+            history.append(F.run("j\(n)", "janitor", ended: ended))
+            for tick in 1...5 { history.append(F.run("w\(n)-\(tick)", "watch", ended: ended - Double(tick) * 300)) }
+        }
         let runs = try XCTUnwrap(built(history).recentRuns)
-        XCTAssertEqual(runs.count, CompanionVacuum.maxRecentRuns)
         XCTAssertEqual(CompanionVacuum.maxRecentRuns, 20)
-        XCTAssertEqual(runs.first?.runId, "r0")
-        XCTAssertEqual(runs.last?.runId, "r19")
+        XCTAssertEqual(runs.count, 20)
+        XCTAssertEqual(runs.first?.runId, "j0")
+        XCTAssertEqual(runs.last?.runId, "j19")
+        XCTAssertFalse(runs.contains { $0.trigger == "watch" })
+    }
+
+    func testAnEmptyListWhenOnlyChecksHaveRunIsStillAListNotAnUnknown() throws {
+        let status = try built([F.run("w1", "watch", ended: 1_760_001_000), F.run("w0", "watch", ended: 1_760_000_700)])
+        XCTAssertEqual(status.recentRuns, [], "this Mac does send the list, and it holds no cleaning run")
+        XCTAssertEqual(status.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_001_000))
     }
 
     func testEachRunCarriesItsEndExitStatusAndDuration() throws {
@@ -760,7 +782,7 @@ final class CompanionVacuumRecentRunsTests: XCTestCase {
     func testBadTimesAndBytesNeverReachThePhone() throws {
         var odd = F.run("odd", "janitor", ended: 0, freed: -9)
         odd.startedAt = 1_760_000_000
-        var backwards = F.run("back", "watch", ended: 1_760_000_000)
+        var backwards = F.run("back", "full", ended: 1_760_000_000)
         backwards.startedAt = 1_760_000_050
         let runs = try XCTUnwrap(built([odd, backwards]).recentRuns)
         XCTAssertNil(runs[0].endedAt, "an end time of 0 is not a date")
@@ -861,11 +883,13 @@ final class CompanionVacuumSnapshotTests: XCTestCase {
         let decoded = try CompanionJSON.decode(CompanionJSON.encode(built))
         XCTAssertEqual(decoded.vacuum, built.vacuum)
         XCTAssertEqual(decoded.vacuum?.lastRunTrigger, "janitor")
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.map(\.runId), ["w1", "j1"])
+        XCTAssertEqual(decoded.vacuum?.recentRuns?.map(\.runId), ["j1"], "the quiet watch tick is counted, not listed")
         XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.bytesFreed, 4_096)
         XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.exitCode, 1)
         XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.durationSeconds, 90)
         XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.endedAt, Date(timeIntervalSince1970: 1_760_000_600))
+        XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.outcome, "failed")
+        XCTAssertEqual(decoded.vacuum?.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_000_900))
     }
 
     func testAnOlderMacsSnapshotWithoutRecentRunsStillDecodes() throws {
@@ -876,10 +900,13 @@ final class CompanionVacuumSnapshotTests: XCTestCase {
         XCTAssertNotNil(vacuum["recentRuns"])
         vacuum.removeValue(forKey: "recentRuns")
         vacuum.removeValue(forKey: "lastRunTrigger")
+        vacuum.removeValue(forKey: "watch")
         object["vacuum"] = vacuum
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try CompanionJSON.decode(legacy)
         XCTAssertNil(decoded.vacuum?.recentRuns)
+        XCTAssertNil(decoded.vacuum?.cleaningRuns)
+        XCTAssertNil(decoded.vacuum?.watch, "an older Mac sends no watch summary: the phone shows no line")
         XCTAssertNil(decoded.vacuum?.lastRunTrigger)
         XCTAssertEqual(decoded.vacuum?.health, "healthy", "the rest of the status is untouched")
     }
@@ -921,11 +948,12 @@ final class CompanionVacuumCopyTests: XCTestCase {
     }
 
     /// The phone's own strings live in the iOS target, which these tests do
-    /// not compile.  Read the source and look for the thing the owner banned:
-    /// two ASCII spaces after a sentence inside a string literal.
+    /// not compile, and the Mac's Robotic Vacuum screen is SwiftUI too.  Read
+    /// the source and look for the thing the owner banned: two ASCII spaces
+    /// after a sentence inside a string literal.
     func testThePhoneScreenWritesItsGapsAsNonBreakingSpaces() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        for name in ["ios/Sources/CompanionVacuumView.swift"] {
+        for name in ["ios/Sources/CompanionVacuumView.swift", "Sources/UI/RoboticVacuumView.swift"] {
             let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
             let code = source.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for line in code {

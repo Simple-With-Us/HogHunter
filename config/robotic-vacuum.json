@@ -6,7 +6,7 @@
     "full": 14400
   },
   "overdue_multiplier": 1.5,
-  "history_max_runs": 200,
+  "history_max_runs": 500,
   "state_dir": "~/.claude-disk-janitor",
   "housekeeper_lock": "~/.claude-disk-janitor/.housekeeper.lock",
   "data_dir": "~/Library/Application Support/HogHunter/RoboticVacuum",

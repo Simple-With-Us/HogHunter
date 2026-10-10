@@ -20,7 +20,7 @@ struct RoboticVacuumView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Robotic Vacuum")
                     .font(.system(size: 17, weight: .semibold))
-                Text("Keeps your Mac tidy on a schedule.  You will be told if a run is late or stops.")
+                Text("Keeps your Mac tidy on a schedule.\u{00A0} You will be told if a run is late or stops.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -60,7 +60,7 @@ struct RoboticVacuumView: View {
     }
 
     private var stepsSection: some View {
-        GroupBox("Cleaning steps") {
+        GroupBox("Cleaning Steps") {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Turn steps off if you want them skipped on the next run.")
                     .font(.system(size: 10))
@@ -89,18 +89,37 @@ struct RoboticVacuumView: View {
         }
     }
 
+    /// The cleaning runs only: janitor, full, manual and pressure.  The quick
+    /// disk and memory check runs every few minutes, so it gets one line above
+    /// the list instead of filling it.  The phone shows the same.
     private var historySection: some View {
-        GroupBox("Recent runs") {
-            if store.history.isEmpty {
-                Text("No runs recorded yet.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(store.history, id: \.runId) { run in
+        let now = Date()
+        let runs = CompanionVacuum.recentRuns(from: store.history)
+        let watch = CompanionVacuum.watch(from: store.history, now: now)
+        return GroupBox("Recent Runs") {
+            VStack(alignment: .leading, spacing: 6) {
+                if let watch {
+                    Text(watch.summary(now: now))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                if runs.isEmpty {
+                    Text("No cleaning runs recorded yet.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(runs) { run in
                         HStack {
                             Text(run.trigger.capitalized)
                                 .font(.system(size: 11, weight: .medium))
+                            if let mark = run.result.markLabel {
+                                Text(mark)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
+                                    .help(run.result == .failed
+                                        ? "The run did not finish cleanly."
+                                        : "A step failed, and the other steps still did their work.")
+                            }
                             Spacer()
                             Text(HogFormat.memory(UInt64(max(0, run.bytesFreed))))
                                 .font(.system(size: 11))
@@ -111,8 +130,8 @@ struct RoboticVacuumView: View {
                         }
                     }
                 }
-                .padding(4)
             }
+            .padding(4)
         }
     }
 
@@ -149,6 +168,11 @@ struct RoboticVacuumView: View {
     private func formatDate(_ epoch: Double?) -> String {
         guard let epoch, epoch > 0 else { return "—" }
         let date = Date(timeIntervalSince1970: epoch)
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+    }
+
+    private func formatDate(_ date: Date?) -> String {
+        guard let date else { return "—" }
         return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
     }
 

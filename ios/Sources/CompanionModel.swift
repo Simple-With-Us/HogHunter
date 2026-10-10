@@ -1146,27 +1146,33 @@ final class CompanionModel {
                 CompanionVacuumStep(stepId: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", statusLabel: "Done", reason: "Nothing to remove.", bytesFreed: 0),
                 CompanionVacuumStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
             ],
-            recentRuns: sampleRecentRuns(now: now, ended: ended, endedSecondsAgo: endedSecondsAgo)
+            recentRuns: sampleRecentRuns(ended: ended),
+            watch: sampleWatch(now: now)
         )
     }
 
-    /// Newest first, the way the Mac lists them: the watch ticks since the
-    /// full run, the full run itself, and the runs before it, one of which
-    /// exited with an error.
-    private static func sampleRecentRuns(now: Date, ended: Date, endedSecondsAgo: TimeInterval) -> [CompanionVacuumRun] {
-        func run(_ id: String, _ trigger: String, endedAt: Date, freed: Int = 0, exitCode: Int = 0, seconds: Int = 0) -> CompanionVacuumRun {
-            CompanionVacuumRun(runId: id, trigger: trigger, endedAt: endedAt, bytesFreed: freed, exitCode: exitCode, durationSeconds: seconds)
+    /// The five minute checks as the Mac sums them up: the last one two
+    /// minutes ago, and as many today as a five minute clock gives by now.
+    private static func sampleWatch(now: Date) -> CompanionVacuumWatch {
+        let sinceMidnight = now.timeIntervalSince(Calendar.current.startOfDay(for: now))
+        return CompanionVacuumWatch(
+            lastCheckAt: now.addingTimeInterval(-120),
+            checksToday: max(1, Int(sinceMidnight / 300))
+        )
+    }
+
+    /// Newest first, the way the Mac lists them: cleaning runs only.  The full
+    /// run, then three earlier janitor runs: one that worked on only part of
+    /// its steps (partial, exit 0), one that failed, and one that freed space.
+    private static func sampleRecentRuns(ended: Date) -> [CompanionVacuumRun] {
+        func run(_ id: String, _ trigger: String, endedAt: Date, freed: Int = 0, exitCode: Int = 0, seconds: Int = 0, outcome: String = "ok") -> CompanionVacuumRun {
+            CompanionVacuumRun(runId: id, trigger: trigger, endedAt: endedAt, bytesFreed: freed, exitCode: exitCode, durationSeconds: seconds, outcome: outcome)
         }
-        var runs: [CompanionVacuumRun] = []
-        if endedSecondsAgo > 900 {
-            runs.append(run("sample-watch-3", "watch", endedAt: now.addingTimeInterval(-120)))
-            runs.append(run("sample-watch-2", "watch", endedAt: now.addingTimeInterval(-420)))
-        }
-        runs.append(run("sample-full", "full", endedAt: ended, freed: 3_400_000_000, seconds: 412))
-        runs.append(run("sample-watch-1", "watch", endedAt: ended.addingTimeInterval(-300)))
-        runs.append(run("sample-janitor", "janitor", endedAt: ended.addingTimeInterval(-1_800), freed: 0, exitCode: 1, seconds: 95))
-        runs.append(run("sample-watch-0", "watch", endedAt: ended.addingTimeInterval(-2_100)))
-        runs.append(run("sample-janitor-0", "janitor", endedAt: ended.addingTimeInterval(-3_600), freed: 220_000_000, seconds: 71))
-        return runs
+        return [
+            run("sample-full", "full", endedAt: ended, freed: 3_400_000_000, seconds: 412),
+            run("sample-janitor-partial", "janitor", endedAt: ended.addingTimeInterval(-1_800), freed: 90_000_000, seconds: 95, outcome: "partial"),
+            run("sample-janitor-failed", "janitor", endedAt: ended.addingTimeInterval(-3_600), exitCode: 1, seconds: 12, outcome: "failed"),
+            run("sample-janitor", "janitor", endedAt: ended.addingTimeInterval(-5_400), freed: 220_000_000, seconds: 71),
+        ]
     }
 }

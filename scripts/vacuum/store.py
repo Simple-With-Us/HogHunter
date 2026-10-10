@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .config import expand_path, load_config
+from .config import DEFAULT_HISTORY_MAX_RUNS, expand_path, load_config
 from .models import RunRecord, TriggerKind
 
 try:
@@ -43,7 +43,7 @@ class VacuumStore:
     def append_run(self, record: RunRecord) -> None:
         def updater(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             history.append(record.as_dict())
-            max_runs = int(self.cfg.get("history_max_runs", 200))
+            max_runs = int(self.cfg.get("history_max_runs", DEFAULT_HISTORY_MAX_RUNS))
             if len(history) > max_runs:
                 history = history[-max_runs:]
             return history

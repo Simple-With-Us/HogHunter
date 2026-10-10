@@ -9,6 +9,7 @@ import atexit
 import errno
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -62,7 +63,7 @@ FAKE_HOME = isolate_process_environment()
 
 from vacuum import alerts  # noqa: E402
 from vacuum.alerts import evaluate_alerts  # noqa: E402
-from vacuum.config import load_config, step_enabled, steps_for_trigger  # noqa: E402
+from vacuum.config import DEFAULT_HISTORY_MAX_RUNS, load_config, step_enabled, steps_for_trigger  # noqa: E402
 from vacuum import janitor  # noqa: E402
 from vacuum.models import RunOutcome, RunRecord, StepResult, StepStatus, TriggerKind, run_outcome  # noqa: E402
 from vacuum.pressure import evaluate_hits, janitor_pressure_mode, sample_mac  # noqa: E402
@@ -999,6 +1000,65 @@ class TestFreedBytesAreCounted(_EngineHome):
             freed, reason, status = self.engine._vitest_temp_dbs()
         self.assertEqual((freed, reason, status), (700, "removed 1 stale temp db(s)", StepStatus.RAN))
         self.assertTrue(fresh.exists())
+
+
+class TestHistoryRetention(unittest.TestCase):
+    """The Mac's Recent Runs line says "N checks today" from history.json, so the file has to reach back past local
+    midnight.  The five minute watch tick is a record like any other, so a cap of 200 held about 14 hours."""
+
+    @staticmethod
+    def _records_per_day(intervals: dict) -> int:
+        return sum(-(-86400 // int(seconds)) for seconds in intervals.values() if int(seconds) > 0)
+
+    def test_default_cap_reaches_back_past_midnight(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = load_config(home=Path(td))
+        per_day = self._records_per_day(cfg["intervals_seconds"])
+        # A local day is 25 hours long when the clocks go back.  Pressure and manual runs add a few more.
+        needed = -(-per_day * 25 // 24) + 20
+        self.assertGreaterEqual(
+            cfg["history_max_runs"],
+            needed,
+            f"{per_day} records a day at these intervals; history_max_runs must be at least {needed} or the "
+            "Mac's 'checks today' line would count a part of the day",
+        )
+
+    def test_the_fallback_matches_the_shipped_policy(self):
+        policy = json.loads((REPO / "config" / "robotic-vacuum.json").read_text(encoding="utf-8"))
+        self.assertEqual(policy["history_max_runs"], DEFAULT_HISTORY_MAX_RUNS)
+
+    def test_the_mac_reads_at_least_what_the_engine_keeps(self):
+        """RoboticVacuumStore.maxHistoryRuns bounds the rows the Mac app reads.  Below the cap it would drop the
+        oldest rows, and the count would drift low."""
+        source = (REPO / "Sources" / "Storage" / "RoboticVacuumStore.swift").read_text(encoding="utf-8")
+        found = re.search(r"static let maxHistoryRuns = (\d+)", source)
+        self.assertIsNotNone(found, "RoboticVacuumStore.maxHistoryRuns not found")
+        self.assertGreaterEqual(int(found.group(1)), DEFAULT_HISTORY_MAX_RUNS)
+
+    def test_append_keeps_the_newest_runs_up_to_the_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(home / "rv")
+            cfg["history_max_runs"] = 3
+            store = VacuumStore(cfg, home=home)
+            for n in range(5):
+                record = RunRecord(f"r{n}", TriggerKind.WATCH, started_at=1_760_000_000.0 + n)
+                store.append_run(record)
+            self.assertEqual([r["run_id"] for r in store.load_history()], ["r2", "r3", "r4"])
+
+    def test_a_config_without_the_key_uses_the_default_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(home / "rv")
+            del cfg["history_max_runs"]
+            store = VacuumStore(cfg, home=home)
+            for n in range(DEFAULT_HISTORY_MAX_RUNS + 2):
+                store.append_run(RunRecord(f"r{n}", TriggerKind.WATCH, started_at=1_760_000_000.0 + n))
+            history = store.load_history()
+            self.assertEqual(len(history), DEFAULT_HISTORY_MAX_RUNS)
+            self.assertEqual(history[-1]["run_id"], f"r{DEFAULT_HISTORY_MAX_RUNS + 1}")
 
 
 def load_tests(loader, tests, pattern):

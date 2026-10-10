@@ -96,6 +96,11 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
 
 
 DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
+# How many runs history.json keeps.  Every run is a record, the five minute watch tick included (about 290 a day, with
+# about 55 janitor and full runs), and the Mac's Recent Runs line counts "checks today" from this file.  The cap has to
+# reach back past local midnight (see test_default_cap_reaches_back_past_midnight), so a janitor or full run also stays
+# on record for more than a day.  config/robotic-vacuum.json carries the same number; this is the fallback.
+DEFAULT_HISTORY_MAX_RUNS = 500
 DEFAULT_HOUSEKEEPER_LOCK = "~/.claude-disk-janitor/.housekeeper.lock"
 
 # Lane doctor settings (see vacuum/lanes.py).  The only setting is where the doctor is installed, a machine-local
