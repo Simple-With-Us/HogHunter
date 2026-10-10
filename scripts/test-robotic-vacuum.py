@@ -796,6 +796,65 @@ class TestHogHunterReclaimStep(_EngineHome):
         self.assertIn("--budget-sec=600", run.call_args.args[0])
 
 
+class TestStepReasonsArePlural(_EngineHome):
+    """The Robotic Vacuum shows each step's reason to a person.  It read "1 threshold hit(s)", "removed 1 of 1
+    item(s)" and "truncated 0 log(s)"; each count now takes the right form of its noun."""
+
+    def test_the_helper_picks_the_form_by_the_count(self):
+        from vacuum.engine import _plural
+
+        self.assertEqual([_plural(n, "log") for n in (0, 1, 2)], ["0 logs", "1 log", "2 logs"])
+        self.assertEqual(_plural(1, "stale temp db"), "1 stale temp db")
+        self.assertEqual(_plural(3, "stale temp db"), "3 stale temp dbs")
+        self.assertEqual(_plural(2, "entry", "entries"), "2 entries")
+        self.assertEqual(_plural(1, "entry", "entries"), "1 entry")
+
+    def test_no_step_reason_hedges_the_plural_in_parentheses(self):
+        source = (REPO / "scripts" / "vacuum" / "engine.py").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"\w\(s\)", source), [])
+
+    def test_the_resource_check_counts_its_threshold_hits(self):
+        for hits, expected in (
+            ([], "within limits"),
+            ([{"metric": "disk_free_gb"}], "1 threshold hit"),
+            ([{"metric": "disk_free_gb"}, {"metric": "swap_used_pct"}], "2 threshold hits"),
+        ):
+            with patch("vacuum.engine.sample_mac", return_value={"disk_free_gb": 8.0}), patch(
+                "vacuum.engine.evaluate_hits", return_value=hits
+            ):
+                # A clean ran a moment ago, so a hit is counted and nothing is cleaned.
+                record, _hits, cleaned = self.engine.run_watch_tick({"last_clean_at": time.time()}, None)
+            self.assertFalse(cleaned)
+            self.assertEqual(record.steps[0].reason, expected)
+
+    def test_the_cleaner_reports_its_item_count_in_the_right_form(self):
+        self.fake_cleaner()
+        for applied, total, expected in (
+            (1, 1, "band=cheap: removed 1 of 1 item, "),
+            (0, 3, "band=cheap: removed 0 of 3 items, "),
+            (0, 0, "band=cheap: removed 0 of 0 items, "),
+        ):
+            result = (0, _report(applied_count=applied, actionable_count=total, applied_bytes=0), "", False)
+            with patch("vacuum.engine._run_in_own_group", return_value=result):
+                _freed, reason, _status = self.engine._hoghunter_reclaim("cheap")
+            self.assertTrue(reason.startswith(expected), reason)
+
+    def test_the_pm2_log_step_counts_in_the_right_form(self):
+        self.assertEqual(self.engine._pm2_logs()[1], "truncated 0 logs in place")
+
+    def test_the_other_counted_steps(self):
+        stamp = time.time() - 30 * 86400
+        brain = self.home / ".gemini/antigravity/brain"
+        for count, expected in ((1, "pruned 1 folder"), (2, "pruned 2 folders")):
+            for child in brain.glob("*") if brain.exists() else []:
+                shutil.rmtree(child)
+            for n in range(count):
+                old = brain / f"old{n}"
+                old.mkdir(parents=True)
+                os.utime(old, (stamp, stamp))
+            self.assertEqual(self.engine._antigravity_brain()[1], expected)
+
+
 class TestRunInOwnGroup(unittest.TestCase):
     def test_normal_exit_returns_code_and_output(self):
         from vacuum.engine import _run_in_own_group
@@ -963,7 +1022,7 @@ class TestFreedBytesAreCounted(_EngineHome):
         (brain / "new" / "f").write_bytes(b"z" * 100)
         self.old(brain / "old")
         freed, reason, status = self.engine._antigravity_brain()
-        self.assertEqual((freed, reason, status), (3000, "pruned 1 folder(s)", StepStatus.RAN))
+        self.assertEqual((freed, reason, status), (3000, "pruned 1 folder", StepStatus.RAN))
         self.assertTrue((brain / "new").exists())
 
     def test_grok_sessions(self):
@@ -984,7 +1043,7 @@ class TestFreedBytesAreCounted(_EngineHome):
         small = logs / "small.log"
         small.write_bytes(b"s" * 10)
         freed, reason, status = self.engine._pm2_logs()
-        self.assertEqual((freed, reason, status), (51 * 1024 * 1024, "truncated 1 log(s) in place", StepStatus.RAN))
+        self.assertEqual((freed, reason, status), (51 * 1024 * 1024, "truncated 1 log in place", StepStatus.RAN))
         self.assertEqual(big.stat().st_size, 0)
         self.assertEqual(small.stat().st_size, 10)
 
@@ -998,7 +1057,7 @@ class TestFreedBytesAreCounted(_EngineHome):
         fresh.mkdir()
         with patch("vacuum.engine.subprocess.check_output", return_value=str(tmp) + "/\n"):
             freed, reason, status = self.engine._vitest_temp_dbs()
-        self.assertEqual((freed, reason, status), (700, "removed 1 stale temp db(s)", StepStatus.RAN))
+        self.assertEqual((freed, reason, status), (700, "removed 1 stale temp db", StepStatus.RAN))
         self.assertTrue(fresh.exists())
 
 

@@ -1452,7 +1452,7 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertTrue(live.exists())
         self.assertFalse(idle.exists())
         self.assertEqual(freed, 100)
-        self.assertIn("cleared 1 DerivedData project folder(s), kept 1", reason)
+        self.assertIn("cleared 1 DerivedData project folder, kept 1", reason)
 
     def test_derived_data_is_left_alone_while_a_build_runs_or_the_check_fails(self) -> None:
         idle = self.folder(self.dd, "Idle-def", 3 * 3600)
@@ -1574,7 +1574,7 @@ class TestEngineDependencies(unittest.TestCase):
         engine = self.engine([self.row()])
         freed, reason, status = engine._pressure_apps_deps(dry_run=True)
         self.assertEqual((freed, status), (0, StepStatus.RAN))
-        self.assertIn("would clear 3 folder(s)", reason)
+        self.assertIn("would clear 3 folders", reason)
         for name in ("node_modules", ".next", "dist"):
             self.assertTrue((self.lane / name).exists(), name)
         self.assertEqual(sorted(a["action"] for a in engine.plan), ["would-remove-folder"] * 3)
@@ -1680,7 +1680,7 @@ class TestEngineDependencies(unittest.TestCase):
         _freed, reason, status = engine._pressure_apps_deps(dry_run=True)
         self.assertEqual(status, StepStatus.SKIPPED)
         self.assertEqual([a for a in engine.plan if a["action"] == "refused"], [])
-        self.assertIn("0 lane(s) refused", reason)
+        self.assertIn("0 lanes refused", reason)
 
     def test_symlinked_folder_is_not_followed(self) -> None:
         elsewhere = self.sb.root / "precious"

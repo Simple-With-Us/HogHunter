@@ -1,15 +1,28 @@
 import SwiftUI
 
 /// Robotic Vacuum — scheduled cleaning at a glance.
+///
+/// The header stays put and the cards scroll under it, like the Disk Cleaner
+/// and App Storage tabs.  With nine steps and twenty runs the cards are taller
+/// than the menu bar panel, which is a fixed size: a plain stack would take its
+/// natural height, the panel's frame would center it, and both ends would be
+/// clipped (the panel's own header and tab picker went out of sight).  Every
+/// card is pinned to the full width so none of them shrinks to its text.
 struct RoboticVacuumView: View {
     @ObservedObject var store: RoboticVacuumStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            statusCard
-            stepsSection
-            historySection
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    statusCard
+                    stepsSection
+                    historySection
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
+            }
         }
         .onAppear { store.startPolling() }
         .onDisappear { store.stopPolling() }
@@ -55,6 +68,7 @@ struct RoboticVacuumView: View {
                         .foregroundStyle(.red)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -75,16 +89,21 @@ struct RoboticVacuumView: View {
                                 Text(entry.title)
                                     .font(.system(size: 12))
                                 if let step = store.status?.stepLastResults[entry.id] {
+                                    // Two lines, not one: the longest reasons name what
+                                    // was skipped and why, and cutting them off hid that.
                                     Text("\(step.statusLabel) — \(step.reason)")
                                         .font(.system(size: 10))
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
                         }
+                        Spacer(minLength: 0)
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -108,29 +127,43 @@ struct RoboticVacuumView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(runs) { run in
-                        HStack {
-                            Text(run.trigger.capitalized)
-                                .font(.system(size: 11, weight: .medium))
-                            if let mark = run.result.markLabel {
-                                Text(mark)
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
-                                    .help(run.result == .failed
-                                        ? "The run did not finish cleanly."
-                                        : "A step failed, and the other steps still did their work.")
+                    // A grid, so the bytes and the times each line up in a column
+                    // whatever the text is ("6 minutes ago" is wider than "1 hour
+                    // ago", and "15 KB" than "0 KB"), both right-aligned.
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                        ForEach(runs) { run in
+                            GridRow {
+                                HStack(spacing: 6) {
+                                    Text(run.trigger.capitalized)
+                                        .font(.system(size: 11, weight: .medium))
+                                    if let mark = run.result.markLabel {
+                                        Text(mark)
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
+                                            .help(run.result == .failed
+                                                ? "The run did not finish cleanly."
+                                                : "A step failed, and the other steps still did their work.")
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(HogFormat.memory(UInt64(max(0, run.bytesFreed))))
+                                    .font(.system(size: 11))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .gridColumnAlignment(.trailing)
+                                Text(formatDate(run.endedAt))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .gridColumnAlignment(.trailing)
                             }
-                            Spacer()
-                            Text(HogFormat.memory(UInt64(max(0, run.bytesFreed))))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            Text(formatDate(run.endedAt))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }

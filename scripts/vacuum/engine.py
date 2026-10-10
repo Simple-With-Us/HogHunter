@@ -22,6 +22,12 @@ from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 # Steps that run the lane doctor.  Under extreme host load they are skipped like the other heavy janitor work.
 _HEAVY_LANE_STEPS = ("janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps")
 
+
+def _plural(count: int, noun: str, plural: Optional[str] = None) -> str:
+    """The count with the right form of the noun: "1 log", "0 logs", "2 folders".  Step reasons are shown to a
+    person in the Robotic Vacuum, so none of them hedges the plural in parentheses."""
+    return f"{count} {noun if count == 1 else (plural or noun + 's')}"
+
 # Gates for the older `full` steps, from config/reclaim-policy.json: the xcode-artifacts and dev-caches rules skip
 # while any of these processes run (skipWhenAny), a DerivedData project must be untouched for the cache idle gate
 # (idlenessGates.cacheMinutes, 90), and an iOS DeviceSupport version for 7 days (idlenessGates.deviceSupportDays).
@@ -190,7 +196,7 @@ class VacuumEngine:
                         "resource_sample",
                         "Check disk and memory",
                         StepStatus.RAN,
-                        reason=f"{len(hits)} threshold hit(s)" if hits else "within limits",
+                        reason=_plural(len(hits), "threshold hit") if hits else "within limits",
                     )
                 )
                 if hits:
@@ -345,7 +351,7 @@ class VacuumEngine:
                 continue
             freed += size
             cleared += 1
-        reason = f"cleared {cleared} {what} folder(s), kept {kept} in use or changed recently"
+        reason = f"cleared {_plural(cleared, what + ' folder')}, kept {kept} in use or changed recently"
         if failed:
             reason += f", {failed} could not be removed"
         return freed, reason, StepStatus.RAN if cleared else StepStatus.SKIPPED
@@ -457,7 +463,7 @@ class VacuumEngine:
         failed = int(report.get("failed_count") or 0)
         total = int(report.get("actionable_count") or 0)
         freed = int(report.get("applied_bytes") or 0)
-        reason = f"band={band}: removed {applied} of {total} item(s), {lanes.format_size(freed)}"
+        reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
         if report.get("budget_exhausted"):
             reason += f"; time budget spent, {int(report.get('remaining_count') or 0)} left for the next run"
         if failed:
@@ -498,7 +504,7 @@ class VacuumEngine:
                     freed += size
         except OSError:
             pass
-        return freed, f"truncated {truncated} log(s) in place", StepStatus.RAN
+        return freed, f"truncated {_plural(truncated, 'log')} in place", StepStatus.RAN
 
     def _vitest_temp_dbs(self) -> tuple[int, str, StepStatus]:
         try:
@@ -522,7 +528,7 @@ class VacuumEngine:
                     freed += size
             except OSError:
                 pass
-        return freed, f"removed {removed} stale temp db(s)", StepStatus.RAN
+        return freed, f"removed {_plural(removed, 'stale temp db')}", StepStatus.RAN
 
     def _spotlight_journals(self) -> tuple[int, str, StepStatus]:
         """Reset the Spotlight indexing journals.  macOS protects this folder (TCC): a process without Full Disk
@@ -589,7 +595,7 @@ class VacuumEngine:
                 freed += self._dir_size_before_clear(p)
                 shutil.rmtree(p, ignore_errors=True)
                 removed += 1
-        return freed, f"removed {removed} session(s)", StepStatus.RAN
+        return freed, f"removed {_plural(removed, 'session')}", StepStatus.RAN
 
     def _antigravity_brain(self) -> tuple[int, str, StepStatus]:
         brain = self.home / ".gemini/antigravity/brain"
@@ -607,7 +613,7 @@ class VacuumEngine:
                         removed += 1
                 except OSError:
                     pass
-        return freed, f"pruned {removed} folder(s)", StepStatus.RAN
+        return freed, f"pruned {_plural(removed, 'folder')}", StepStatus.RAN
 
     def _lane_report(self) -> lanes.LaneReport:
         """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice."""
@@ -688,10 +694,10 @@ class VacuumEngine:
             for item in refused:
                 self._note(step, "refused", **item)
         if not folders:
-            return 0, f"no idle lanes with regenerable folders ({len(refused)} lane(s) refused)", StepStatus.SKIPPED
+            return 0, f"no idle lanes with regenerable folders ({_plural(len(refused), 'lane')} refused)", StepStatus.SKIPPED
         if dry_run:
-            return 0, f"would clear {folders} folder(s) in {touched} lane(s), {lanes.format_size(planned_bytes)}", StepStatus.RAN
-        return freed, f"cleared {folders} folder(s) in {touched} lane(s), {lanes.format_size(freed)}", StepStatus.RAN
+            return 0, f"would clear {_plural(folders, 'folder')} in {_plural(touched, 'lane')}, {lanes.format_size(planned_bytes)}", StepStatus.RAN
+        return freed, f"cleared {_plural(folders, 'folder')} in {_plural(touched, 'lane')}, {lanes.format_size(freed)}", StepStatus.RAN
 
     def _coolify_remote(self) -> tuple[int, str, StepStatus]:
         host_value = self.cfg.get("coolify_ssh_host")
