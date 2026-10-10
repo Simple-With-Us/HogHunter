@@ -28,16 +28,13 @@ struct RoboticVacuumView: View {
         .onDisappear { store.stopPolling() }
     }
 
+    /// Only the action.  The tab's name and subtitle belong to `StorageView`,
+    /// which renders a header for every tab; a second copy here put "Robotic
+    /// Vacuum" on screen twice, an inch apart.  Same defect as the two
+    /// scan spinners: two render paths answering one question.  The header is
+    /// what pushed the cards out of the panel, so it stays, minus the words.
     private var header: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Robotic Vacuum")
-                    .font(.system(size: 17, weight: .semibold))
-                Text("Keeps your Mac tidy on a schedule.\u{00A0} You will be told if a run is late or stops.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             Spacer()
             Button("Run Now") { store.runNow("full") }
                 .disabled(store.isRunningNow)
