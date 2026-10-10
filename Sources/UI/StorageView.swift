@@ -31,8 +31,12 @@ struct StorageView: View {
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
 
-    init(runningBundleIds: @escaping () -> Set<String>, vacuumStore: RoboticVacuumStore, embeddedInPanel: Bool = false, isTabActive: Bool = true) {
+    /// `initialTab` is the mode the view opens on.  The app always takes the
+    /// default; a layout test opens the Vacuum mode directly instead of
+    /// clicking the segmented control.
+    init(runningBundleIds: @escaping () -> Set<String>, vacuumStore: RoboticVacuumStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+        _selectedTab = State(initialValue: initialTab)
         self.vacuumStore = vacuumStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
@@ -111,12 +115,17 @@ struct StorageView: View {
 
             Spacer()
 
+            // The label is hidden because the 260 pt frame covers label and
+            // control together: "Mode" took its share, wrapped to "Mod" over
+            // "e", and the Apps segment was pushed off the right edge.  The
+            // segments say what they are, and VoiceOver still reads "Mode".
             Picker("Mode", selection: $selectedTab) {
                 Text("Cleaner").tag(StorageTab.diskCleaner)
                 Text("Vacuum").tag(StorageTab.roboticVacuum)
                 Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .frame(width: 260)
             .disabled(cleanerStore.isCleaning)
         }
@@ -180,10 +189,12 @@ struct StorageView: View {
         }
     }
 
+    /// Keep each line short: the header is pinned to the panel's inner width, and
+    /// a longer one pushes the mode control past the right edge.
     private var headerSubtitle: String {
         switch selectedTab {
         case .diskCleaner: return "Reclaim space from caches, leftovers, and clutter"
-        case .roboticVacuum: return "Scheduled cleaning with a clear status when something is late"
+        case .roboticVacuum: return "Scheduled cleaning, flagged when it is late"
         case .appStorage: return subtitle
         }
     }
