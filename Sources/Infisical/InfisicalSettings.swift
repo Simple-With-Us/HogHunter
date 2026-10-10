@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import LocalAuthentication
 import Security
 
 /// Infisical as the sole source of truth for Hog Hunter's app-level settings.
@@ -161,6 +162,7 @@ protocol InfisicalServing {
 /// network without touching the real service.
 final class InfisicalClient: InfisicalServing {
     static let baseURL = URL(string: "https://app.infisical.com")!
+    static let projectId = "c1df65f2-adb5-4d64-93c0-f47f969feea1"
 
     private let session: URLSession
     private let baseURL: URL
@@ -678,6 +680,8 @@ final class InfisicalSettings: ObservableObject {
     }
 
     private static func readCredentialFromKeychain() -> KeychainCredentialRead {
+        let context = LAContext()
+        context.interactionNotAllowed = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
@@ -685,6 +689,7 @@ final class InfisicalSettings: ObservableObject {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            kSecUseAuthenticationContext as String: context,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -693,9 +698,15 @@ final class InfisicalSettings: ObservableObject {
         }
         guard status == errSecSuccess,
               let data = item as? Data,
-              let credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
-              credential.isComplete
+              var credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data)
         else {
+            return KeychainCredentialRead(credential: nil, terminal: true)
+        }
+        if credential.projectId == nil || credential.effectiveProjectId.isEmpty {
+            credential.projectId = InfisicalClient.projectId
+            try? writeCredentialToKeychain(credential)
+        }
+        guard credential.isComplete else {
             return KeychainCredentialRead(credential: nil, terminal: true)
         }
         return KeychainCredentialRead(credential: credential, terminal: true)

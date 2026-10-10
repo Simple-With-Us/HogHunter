@@ -179,56 +179,52 @@ struct HogHunterPanel: View {
 
             Spacer()
 
-            activityMonitorButton
-            settingsButton
+            settingsMenu
         }
     }
 
-    /// Activity Monitor's own icon rather than a look-alike SF Symbol, so the
-    /// button is recognisably that app and not another chart.  A borderless
-    /// button matches the gear beside it.
-    private var activityMonitorButton: some View {
-        Button {
-            HogActions.openActivityMonitor()
+    /// Settings dropdown menu using the standard gear icon.  Holds Settings,
+    /// Activity Monitor, Launch at Login, and Quit.
+    private var settingsMenu: some View {
+        Menu {
+            Button("Settings…") {
+                openSettingsWindow()
+            }
+            Button("Activity Monitor") {
+                HogActions.openActivityMonitor()
+            }
+            Divider()
+            Toggle("Launch at Login", isOn: Binding(
+                get: { store.launchesAtLogin },
+                set: { _ in store.toggleLoginItem() }
+            ))
+            Divider()
+            Button("Quit Hog Hunter") {
+                NSApp.terminate(nil)
+            }
         } label: {
-            Image(nsImage: HogActions.activityMonitorIcon)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
+            Image(systemName: "gearshape")
+                .font(.system(size: 15))
+                .foregroundStyle(.primary)
                 .frame(width: 22, height: 22)
         }
-        .buttonStyle(.borderless)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
-        .help("Open Activity Monitor")
-        .accessibilityLabel("Open Activity Monitor")
+        .help("Settings and options")
+        .accessibilityLabel("Settings and options")
     }
 
-    /// Opens Settings rather than a menu.  Storage and Network left this menu
-    /// when they became tabs in this window, so what was left was one action,
-    /// and one action does not need a menu to hold it.  Matches the Activity
-    /// Monitor squircle button beside it.
-    private var settingsButton: some View {
-        Button {
-            if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
-            NSApp.activate(ignoringOtherApps: true)
-            // openSettings() from Environment sometimes fails for accessory apps.
-            // sendAction is the robust fallback.
-            NSApp.sendAction(Selector("showSettingsWindow:"), to: nil, from: nil)
-            openSettings()
-            // The scene builds its window asynchronously, so the "already
-            // open? come forward" pass has to be retried, not run once.
-            HogActions.scheduleFrontSettingsWindow()
-        } label: {
-            Image(nsImage: HogActions.settingsIcon)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 22, height: 22)
-        }
-        .buttonStyle(.borderless)
-        .fixedSize()
-        .help("Settings")
-        .accessibilityLabel("Settings")
+    private func openSettingsWindow() {
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        // openSettings() from Environment sometimes fails for accessory apps.
+        // sendAction is the robust fallback.
+        NSApp.sendAction(Selector("showSettingsWindow:"), to: nil, from: nil)
+        openSettings()
+        // The scene builds its window asynchronously, so the "already
+        // open? come forward" pass has to be retried, not run once.
+        HogActions.scheduleFrontSettingsWindow()
     }
 
     // MARK: - Meters
@@ -518,16 +514,15 @@ struct HogHunterPanel: View {
 
     // MARK: - Footer
 
-    /// Launch at Login moved to Settings -> Startup, where there is room to
-    /// explain what it does and to report a failure.  What is left here is
-    /// only what is true of the numbers on screen.
+    /// Bottom of the pop up window: attribution/coverage note left-aligned and
+    /// CPU core relation right-aligned on the same line to save vertical space.
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .firstTextBaseline) {
             Text(store.coverageNote)
-                .font(.system(size: 11))
+                .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(store.scaleLegend)
+            Spacer(minLength: 8)
+            Text("CPU % relative to all \(max(1, store.pulse.coreCount)) cores")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
         }
