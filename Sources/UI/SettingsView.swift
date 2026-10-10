@@ -774,7 +774,7 @@ private struct AdvancedSettingsTab: View {
                     .disabled(isWorking || infisical.isSaving)
                 TextField("Project ID", text: $projectId)
                     .disabled(isWorking || infisical.isSaving)
-                Text("Uses the dev environment.  The connection is checked before replacing your saved setup.")
+                Text(InfisicalSettings.credentialNotice)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
