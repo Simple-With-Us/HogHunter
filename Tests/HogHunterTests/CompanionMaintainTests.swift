@@ -2,7 +2,7 @@ import XCTest
 
 @testable import HogHunter
 
-// Phone parity, batch 2, PR C: Robotic Vacuum status and Run Now.
+// Phone parity, batch 2, PR C: Maintain status and Run Now.
 //
 // Nothing here runs the real script.  Every store is built with a stub
 // launcher, and the default launcher refuses to start inside XCTest, so a test
@@ -16,18 +16,18 @@ func isolatedHistoryURL() -> URL {
 
 // MARK: - The route
 
-final class CompanionVacuumRouteTests: XCTestCase {
+final class CompanionMaintainRouteTests: XCTestCase {
     private let code = "ABCD2345"
     private var deviceToken = ""
     private let lan = CompanionPeer(key: "192.168.1.20", isTrusted: true)
     private let wan = CompanionPeer(key: "203.0.113.9", isTrusted: false)
 
-    private func server(vacuum: Bool, running: Bool = false) -> CompanionServer {
+    private func server(maintain: Bool, running: Bool = false) -> CompanionServer {
         let server = CompanionServer()
         server.updateToken(code)
         deviceToken = server.devices.issue(name: "Test iPhone").token
-        server.allowRemoteVacuum = vacuum
-        server.vacuumRunning = running
+        server.allowRemoteMaintain = maintain
+        server.maintainRunning = running
         server.syncOnQueue {}
         return server
     }
@@ -51,7 +51,7 @@ final class CompanionVacuumRouteTests: XCTestCase {
     /// request builder would never produce.
     private func rawRequest(query: String, token: String? = nil, method: String = "POST") -> Data {
         let lines = [
-            "\(method) \(CompanionService.vacuumRunPath)\(query) HTTP/1.1",
+            "\(method) \(CompanionService.maintainRunPath)\(query) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token ?? deviceToken)",
             "Connection: close",
@@ -62,62 +62,62 @@ final class CompanionVacuumRouteTests: XCTestCase {
     }
 
     func testTheRunIsRefusedUntilTheOwnerAllowsIt() throws {
-        let server = server(vacuum: false)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
-        let parsed = try XCTUnwrap(reply(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)))
+        let server = server(maintain: false)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        let parsed = try XCTUnwrap(reply(server, CompanionHTTP.maintainRunRequest(token: deviceToken)))
         XCTAssertEqual(parsed.status, 403)
         let message = try errorText(parsed.body)
-        XCTAssertTrue(message.contains("Allow iPhone to Run Robotic Vacuum"), message)
+        XCTAssertTrue(message.contains("Allow iPhone to Run Maintenance"), message)
         XCTAssertTrue(message.contains("\u{00A0}"), "the gap between the sentences must not collapse on the phone: \(message)")
-        XCTAssertFalse(server.vacuumRunning, "a refused request must not mark a run as going")
+        XCTAssertFalse(server.maintainRunning, "a refused request must not mark a run as going")
     }
 
     func testTheOtherOptInsDoNotOpenIt() {
-        let server = server(vacuum: false)
+        let server = server(maintain: false)
         server.allowRemoteQuit = true
         server.allowRemoteClean = true
         server.allowRemoteEdit = true
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 403)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 403)
     }
 
     func testTheRunIsRefusedFromAnUntrustedAddress() {
-        let server = server(vacuum: true)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken), from: wan), 403)
+        let server = server(maintain: true)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken), from: wan), 403)
     }
 
     func testTheRunIsRefusedWithTheSharedCode() {
-        let server = server(vacuum: true)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: code)), 403)
+        let server = server(maintain: true)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: code)), 403)
     }
 
     func testTheRunIsRefusedWithAWrongToken() {
-        let server = server(vacuum: true)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: "hh1_wrong")), 401)
+        let server = server(maintain: true)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: "hh1_wrong")), 401)
     }
 
     func testOnlyPostStartsARun() {
-        let server = server(vacuum: true)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        let server = server(maintain: true)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
         XCTAssertEqual(status(server, rawRequest(query: "?kind=full", method: "GET")), 405)
         XCTAssertEqual(status(server, rawRequest(query: "?kind=full", method: "DELETE")), 405)
     }
 
     func testOnlyTheFullRunCanBeAskedFor() {
-        let server = server(vacuum: true)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        let server = server(maintain: true)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
         // The script accepts janitor, watch and pressure too.  None is on offer.
         for query in ["?kind=janitor", "?kind=watch", "?kind=pressure", "?kind=Full", "?kind=FULL", "?kind=", "?kind", "?kind=full%20", "?kind=full&kind=janitor", "?kind=janitor&kind=full", "?kind=../full"] {
             XCTAssertEqual(status(server, rawRequest(query: query)), 400, query)
         }
-        XCTAssertFalse(server.vacuumRunning)
+        XCTAssertFalse(server.maintainRunning)
     }
 
     func testABadKindIsRefusedWithAReasonAndTheGap() throws {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let parsed = try XCTUnwrap(reply(server, rawRequest(query: "?kind=janitor")))
         XCTAssertEqual(parsed.status, 400)
         let message = try errorText(parsed.body)
@@ -126,114 +126,114 @@ final class CompanionVacuumRouteTests: XCTestCase {
     }
 
     func testAnAbsentKindMeansFull() {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let kind = CompanionLocked<String?>(nil)
-        server.onRemoteVacuumRun = { kind.value = $0; return (202, Data("{}".utf8)) }
+        server.onRemoteMaintainRun = { kind.value = $0; return (202, Data("{}".utf8)) }
         XCTAssertEqual(status(server, rawRequest(query: "")), 202)
         XCTAssertEqual(kind.value, "full")
     }
 
     func testABareQuestionMarkMeansFullAndDoesNotTrap() {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let kind = CompanionLocked<String?>(nil)
-        server.onRemoteVacuumRun = { kind.value = $0; return (202, Data("{}".utf8)) }
+        server.onRemoteMaintainRun = { kind.value = $0; return (202, Data("{}".utf8)) }
         for query in ["?", "?&", "?other=1"] {
             kind.value = nil
-            server.vacuumRunning = false   // the router marks a run going when it accepts one
+            server.maintainRunning = false   // the router marks a run going when it accepts one
             XCTAssertEqual(status(server, rawRequest(query: query)), 202, query)
             XCTAssertEqual(kind.value, "full", query)
         }
     }
 
     func testAnEncodedFullIsStillFull() {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let kind = CompanionLocked<String?>(nil)
-        server.onRemoteVacuumRun = { kind.value = $0; return (202, Data("{}".utf8)) }
+        server.onRemoteMaintainRun = { kind.value = $0; return (202, Data("{}".utf8)) }
         XCTAssertEqual(status(server, rawRequest(query: "?kind=fu%6Cl")), 202)
         XCTAssertEqual(kind.value, "full")
     }
 
     func testTheRequestBuilderAsksForTheFullRun() {
-        let text = String(data: CompanionHTTP.vacuumRunRequest(token: "hh1_x"), encoding: .utf8) ?? ""
-        XCTAssertTrue(text.hasPrefix("POST /v1/vacuum/run?kind=full HTTP/1.1\r\n"), text)
+        let text = String(data: CompanionHTTP.maintainRunRequest(token: "hh1_x"), encoding: .utf8) ?? ""
+        XCTAssertTrue(text.hasPrefix("POST /v1/maintain/run?kind=full HTTP/1.1\r\n"), text)
         XCTAssertTrue(text.contains("Authorization: Bearer hh1_x\r\n"))
     }
 
     func testTheRunReachesTheHandlerOnceAllowed() throws {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let kinds = CompanionLocked<[String]>([])
-        server.onRemoteVacuumRun = { kind in
+        server.onRemoteMaintainRun = { kind in
             kinds.value.append(kind)
             return (202, Data(#"{"status":"started"}"#.utf8))
         }
-        let parsed = try XCTUnwrap(reply(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)))
+        let parsed = try XCTUnwrap(reply(server, CompanionHTTP.maintainRunRequest(token: deviceToken)))
         XCTAssertEqual(parsed.status, 202)
-        XCTAssertEqual(try JSONDecoder().decode(CompanionVacuumRunResponse.self, from: parsed.body).status, "started")
+        XCTAssertEqual(try JSONDecoder().decode(CompanionMaintainRunResponse.self, from: parsed.body).status, "started")
         XCTAssertEqual(kinds.value, ["full"])
-        XCTAssertTrue(server.vacuumRunning, "the router marks the run as going when it accepts it")
+        XCTAssertTrue(server.maintainRunning, "the router marks the run as going when it accepts it")
     }
 
     func testARunThatIsGoingAnswersBusyWithoutReachingTheHandler() throws {
-        let server = server(vacuum: true, running: true)
-        server.onRemoteVacuumRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
-        let parsed = try XCTUnwrap(reply(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)))
+        let server = server(maintain: true, running: true)
+        server.onRemoteMaintainRun = { _ in XCTFail("must not reach the handler"); return (202, Data()) }
+        let parsed = try XCTUnwrap(reply(server, CompanionHTTP.maintainRunRequest(token: deviceToken)))
         XCTAssertEqual(parsed.status, 409)
-        let busy = try JSONDecoder().decode(CompanionVacuumRunResponse.self, from: parsed.body)
+        let busy = try JSONDecoder().decode(CompanionMaintainRunResponse.self, from: parsed.body)
         XCTAssertEqual(busy.status, "busy")
         XCTAssertTrue(busy.error?.contains("\u{00A0}") ?? false, busy.error ?? "")
     }
 
     func testTwoQuickTapsStartOneRun() {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let calls = CompanionLocked(0)
-        server.onRemoteVacuumRun = { _ in calls.value += 1; return (202, Data(#"{"status":"started"}"#.utf8)) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 202)
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 409)
+        server.onRemoteMaintainRun = { _ in calls.value += 1; return (202, Data(#"{"status":"started"}"#.utf8)) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 202)
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 409)
         XCTAssertEqual(calls.value, 1)
     }
 
     func testARunStartsAgainOnceTheHostSaysItFinished() {
-        let server = server(vacuum: true)
+        let server = server(maintain: true)
         let calls = CompanionLocked(0)
-        server.onRemoteVacuumRun = { _ in calls.value += 1; return (202, Data("{}".utf8)) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 202)
-        server.vacuumRunning = false
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 202)
+        server.onRemoteMaintainRun = { _ in calls.value += 1; return (202, Data("{}".utf8)) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 202)
+        server.maintainRunning = false
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 202)
         XCTAssertEqual(calls.value, 2)
     }
 
     func testAHandlerThatFailsDoesNotLeaveTheRunMarkedAsGoing() {
-        let server = server(vacuum: true)
-        server.onRemoteVacuumRun = { _ in (500, Data(#"{"error":"Store unavailable"}"#.utf8)) }
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 500)
-        XCTAssertFalse(server.vacuumRunning)
+        let server = server(maintain: true)
+        server.onRemoteMaintainRun = { _ in (500, Data(#"{"error":"Store unavailable"}"#.utf8)) }
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 500)
+        XCTAssertFalse(server.maintainRunning)
     }
 
     func testMissingHandlerIsNotImplementedAndLeavesNothingRunning() {
-        let server = server(vacuum: true)
-        XCTAssertEqual(status(server, CompanionHTTP.vacuumRunRequest(token: deviceToken)), 501)
-        XCTAssertFalse(server.vacuumRunning)
+        let server = server(maintain: true)
+        XCTAssertEqual(status(server, CompanionHTTP.maintainRunRequest(token: deviceToken)), 501)
+        XCTAssertFalse(server.maintainRunning)
     }
 
     func testTheOptInIsAConsentToggleThatDefaultsOff() {
-        XCTAssertFalse(CompanionServer().allowRemoteVacuum)
-        XCTAssertFalse(CompanionServer().vacuumRunning)
+        XCTAssertFalse(CompanionServer().allowRemoteMaintain)
+        XCTAssertFalse(CompanionServer().maintainRunning)
     }
 }
 
 // MARK: - The opt-in on the Mac
 
-final class CompanionVacuumOptInTests: XCTestCase {
+final class CompanionMaintainOptInTests: XCTestCase {
     @MainActor
-    private func vacuumStore(_ directory: URL, launcher: RoboticVacuumStore.Launcher? = nil) -> RoboticVacuumStore {
-        RoboticVacuumStore(supportDirectory: directory, repoRoot: directory, launcher: launcher ?? { _ in
+    private func maintainStore(_ directory: URL, launcher: MaintainStore.Launcher? = nil) -> MaintainStore {
+        MaintainStore(supportDirectory: directory, repoRoot: directory, launcher: launcher ?? { _ in
             XCTFail("a test must not launch the script")
             return true
         })
     }
 
     private func temporaryDirectory() throws -> URL {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-vacuum-\(UUID().uuidString)", isDirectory: true)
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-maintain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
@@ -246,13 +246,13 @@ final class CompanionVacuumOptInTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = try temporaryDirectory()
 
-        let first = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
-        XCTAssertFalse(first.allowRemoteVacuum, "off until the owner turns it on")
-        first.allowRemoteVacuum = true
-        XCTAssertEqual(defaults.bool(forKey: "allowRemoteVacuum"), true)
+        let first = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintainStore(directory), startImmediately: false)
+        XCTAssertFalse(first.allowRemoteMaintain, "off until the owner turns it on")
+        first.allowRemoteMaintain = true
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteMaintain"), true)
 
-        let second = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
-        XCTAssertTrue(second.allowRemoteVacuum)
+        let second = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintainStore(directory), startImmediately: false)
+        XCTAssertTrue(second.allowRemoteMaintain)
     }
 
     @MainActor
@@ -260,12 +260,12 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let suite = "hoghunter.tests.remotevacuum.independent.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(try temporaryDirectory()), startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintainStore(try temporaryDirectory()), startImmediately: false)
         store.allowRemoteQuit = true
         store.allowRemoteClean = true
         store.allowRemoteEdit = true
-        XCTAssertFalse(store.allowRemoteVacuum, "the three existing opt-ins must not grant the fourth")
-        XCTAssertEqual(defaults.bool(forKey: "allowRemoteVacuum"), false)
+        XCTAssertFalse(store.allowRemoteMaintain, "the three existing opt-ins must not grant the fourth")
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteMaintain"), false)
     }
 
     @MainActor
@@ -273,11 +273,11 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let suite = "hoghunter.tests.remotevacuum.defaults.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(try temporaryDirectory()), startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintainStore(try temporaryDirectory()), startImmediately: false)
         // Settings edits the same keys through @AppStorage in places.
-        defaults.set(true, forKey: "allowRemoteVacuum")
-        try await Self.wait { store.allowRemoteVacuum }
-        XCTAssertTrue(store.allowRemoteVacuum)
+        defaults.set(true, forKey: "allowRemoteMaintain")
+        try await Self.wait { store.allowRemoteMaintain }
+        XCTAssertTrue(store.allowRemoteMaintain)
     }
 
     @MainActor
@@ -286,21 +286,21 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = try temporaryDirectory()
-        try CompanionVacuumFixtures.statusJSON.write(to: directory.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
-        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
+        try CompanionMaintainFixtures.statusJSON.write(to: directory.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintainStore(directory), startImmediately: false)
 
         // The plain snapshot never carries steps, whatever the setting says.
-        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone()).steps)
-        let coarse = try XCTUnwrap(store.vacuumStatusForPhone(detailed: true))
+        XCTAssertNil(try XCTUnwrap(store.maintainStatusForPhone()).steps)
+        let coarse = try XCTUnwrap(store.maintainStatusForPhone(detailed: true))
         XCTAssertEqual(coarse.health, "healthy")
         XCTAssertNil(coarse.steps, "step reasons can name folders and servers: not without the opt-in")
 
-        store.allowRemoteVacuum = true
-        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone()).steps, "the plain snapshot still has none")
-        XCTAssertEqual(try XCTUnwrap(store.vacuumStatusForPhone(detailed: true)).steps?.count, 3)
+        store.allowRemoteMaintain = true
+        XCTAssertNil(try XCTUnwrap(store.maintainStatusForPhone()).steps, "the plain snapshot still has none")
+        XCTAssertEqual(try XCTUnwrap(store.maintainStatusForPhone(detailed: true)).steps?.count, 3)
 
-        store.allowRemoteVacuum = false
-        XCTAssertNil(try XCTUnwrap(store.vacuumStatusForPhone(detailed: true)).steps, "turning it off takes the detail back out")
+        store.allowRemoteMaintain = false
+        XCTAssertNil(try XCTUnwrap(store.maintainStatusForPhone(detailed: true)).steps, "turning it off takes the detail back out")
     }
 
     /// The engine writes history oldest first and the store hands it over
@@ -313,7 +313,7 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = try temporaryDirectory()
-        try CompanionVacuumFixtures.statusJSON.write(to: directory.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
+        try CompanionMaintainFixtures.statusJSON.write(to: directory.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
         func record(_ id: String, _ trigger: String, ended: Int, freed: Int, step: String) -> String {
             """
             {"run_id": "\(id)", "trigger": "\(trigger)", "started_at": \(ended - 30), "ended_at": \(ended), "band": "cheap",
@@ -327,17 +327,17 @@ final class CompanionVacuumOptInTests: XCTestCase {
             record("w1", "watch", ended: 1_760_001_000, freed: 0, step: "resource_sample"),
         ].joined(separator: ",") + "]"
         try history.write(to: directory.appendingPathComponent("history.json"), atomically: true, encoding: .utf8)
-        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuumStore(directory), startImmediately: false)
-        store.allowRemoteVacuum = true
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintainStore(directory), startImmediately: false)
+        store.allowRemoteMaintain = true
 
-        let plain = try XCTUnwrap(store.vacuumStatusForPhone())
+        let plain = try XCTUnwrap(store.maintainStatusForPhone())
         XCTAssertEqual(plain.recentRuns?.map(\.runId), ["j1", "f1"], "the quiet watch tick is summed up, not listed")
         XCTAssertEqual(plain.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_001_000))
         XCTAssertEqual(plain.lastRunTrigger, "janitor")
         XCTAssertEqual(plain.lastRunBytesFreed, 5_000)
         XCTAssertNil(plain.steps)
 
-        let detailed = try XCTUnwrap(store.vacuumStatusForPhone(detailed: true))
+        let detailed = try XCTUnwrap(store.maintainStatusForPhone(detailed: true))
         XCTAssertEqual(detailed.steps?.map(\.stepId), ["pm2_logs"], "the janitor run's step, not the watch tick's")
     }
 
@@ -351,31 +351,31 @@ final class CompanionVacuumOptInTests: XCTestCase {
         let directory = try temporaryDirectory()
         let gate = AsyncGate()
         let launches = CompanionLocked<[[String]]>([])
-        let vacuum = vacuumStore(directory) { arguments in
+        let maintain = maintainStore(directory) { arguments in
             launches.value.append(arguments)
             await gate.wait()
             return true
         }
-        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuum, startImmediately: false)
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintain, startImmediately: false)
 
-        let started = store.performRemoteVacuumRun(kind: "full")
+        let started = store.performRemoteMaintainRun(kind: "full")
         XCTAssertEqual(started.status, 202, "the handler answers before the run is over")
-        let body = try JSONDecoder().decode(CompanionVacuumRunResponse.self, from: started.body)
+        let body = try JSONDecoder().decode(CompanionMaintainRunResponse.self, from: started.body)
         XCTAssertEqual(body.status, "started")
         XCTAssertTrue(body.message?.contains("\u{00A0}") ?? false)
 
-        try await Self.wait { vacuum.isRunningNow && !launches.value.isEmpty }
+        try await Self.wait { maintain.isRunningNow && !launches.value.isEmpty }
         XCTAssertEqual(launches.value, [["--run-now", "full"]])
-        XCTAssertTrue(try XCTUnwrap(store.vacuumStatusForPhone()).isRunning, "the phone sees the run in the snapshot")
+        XCTAssertTrue(try XCTUnwrap(store.maintainStatusForPhone()).isRunning, "the phone sees the run in the snapshot")
 
         // A second request while the run is going starts nothing.
-        _ = store.performRemoteVacuumRun(kind: "full")
+        _ = store.performRemoteMaintainRun(kind: "full")
         try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(launches.value.count, 1)
 
         gate.open()
-        try await Self.wait { !vacuum.isRunningNow }
-        XCTAssertNil(vacuum.lastError)
+        try await Self.wait { !maintain.isRunningNow }
+        XCTAssertNil(maintain.lastError)
     }
 
     @MainActor
@@ -425,36 +425,36 @@ final class AsyncGate: @unchecked Sendable {
 // MARK: - The store
 
 @MainActor
-final class RoboticVacuumStoreInjectionTests: XCTestCase {
+final class MaintainStoreInjectionTests: XCTestCase {
     private func temporaryDirectory() throws -> URL {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-vacuum-\(UUID().uuidString)", isDirectory: true)
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-maintain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
 
     func testTheDefaultLauncherRefusesToRunInsideATest() async throws {
-        XCTAssertTrue(RoboticVacuumStore.isRunningUnderTest)
+        XCTAssertTrue(MaintainStore.isRunningUnderTest)
         // No launcher given: the store would start the real script.  Under a
         // test it must refuse instead.
-        let store = RoboticVacuumStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory())
+        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory())
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, RoboticVacuumStore.LauncherRefused().errorDescription)
+        XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
     }
 
     func testTheDefaultLauncherAlsoRefusesToChangeAStep() async throws {
-        let store = RoboticVacuumStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory())
+        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory())
         store.setStepEnabled("npm_cache", enabled: false)
         for _ in 0..<200 where store.lastError == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        XCTAssertEqual(store.lastError, RoboticVacuumStore.LauncherRefused().errorDescription)
+        XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
     }
 
     func testRunNowHandsTheLauncherTheFullRunAndOnlyOnce() async throws {
         let gate = AsyncGate()
         let launches = CompanionLocked<[[String]]>([])
-        let store = RoboticVacuumStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { arguments in
+        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { arguments in
             launches.value.append(arguments)
             await gate.wait()
             return true
@@ -470,7 +470,7 @@ final class RoboticVacuumStoreInjectionTests: XCTestCase {
     }
 
     func testAFailedRunSaysSoWithTheGapAndFreesTheStore() async throws {
-        let store = RoboticVacuumStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { _ in false }
+        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { _ in false }
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
@@ -482,7 +482,7 @@ final class RoboticVacuumStoreInjectionTests: XCTestCase {
 
     func testARunThatCannotStartReportsWhyAndFreesTheStore() async throws {
         struct Boom: LocalizedError { var errorDescription: String? { "boom" } }
-        let store = RoboticVacuumStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { _ in throw Boom() }
+        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { _ in throw Boom() }
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
@@ -492,7 +492,7 @@ final class RoboticVacuumStoreInjectionTests: XCTestCase {
 
     func testStepTogglesGoThroughTheLauncher() async throws {
         let launches = CompanionLocked<[[String]]>([])
-        let store = RoboticVacuumStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { arguments in
+        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { arguments in
             launches.value.append(arguments)
             return true
         }
@@ -504,10 +504,10 @@ final class RoboticVacuumStoreInjectionTests: XCTestCase {
     func testTheFilesAreReadAtMostEveryThirtySecondsForAPhone() throws {
         let directory = try temporaryDirectory()
         let statusURL = directory.appendingPathComponent("status.json")
-        let store = RoboticVacuumStore(supportDirectory: directory, repoRoot: directory) { _ in true }
+        let store = MaintainStore(supportDirectory: directory, repoRoot: directory) { _ in true }
         XCTAssertNil(store.status, "no file yet")
 
-        try CompanionVacuumFixtures.statusJSON.write(to: statusURL, atomically: true, encoding: .utf8)
+        try CompanionMaintainFixtures.statusJSON.write(to: statusURL, atomically: true, encoding: .utf8)
         // Just read, so a phone polling now does not read again.
         store.refreshIfStale(maxAge: 30, now: store.lastRefreshAt.addingTimeInterval(29))
         XCTAssertNil(store.status)
@@ -519,17 +519,17 @@ final class RoboticVacuumStoreInjectionTests: XCTestCase {
 
 // MARK: - The status the phone gets
 
-final class CompanionVacuumStatusTests: XCTestCase {
-    private func decode(_ json: String = CompanionVacuumFixtures.statusJSON) throws -> RoboticVacuumStatus {
-        try JSONDecoder().decode(RoboticVacuumStatus.self, from: Data(json.utf8))
+final class CompanionMaintainStatusTests: XCTestCase {
+    private func decode(_ json: String = CompanionMaintainFixtures.statusJSON) throws -> MaintainStatus {
+        try JSONDecoder().decode(MaintainStatus.self, from: Data(json.utf8))
     }
 
     func testNothingToSayWithoutAStatusOrARun() {
-        XCTAssertNil(CompanionVacuum.status(from: nil, history: [], isRunning: false, includeSteps: true))
+        XCTAssertNil(CompanionMaintain.status(from: nil, history: [], isRunning: false, includeSteps: true))
     }
 
     func testAFirstRunBeforeAnyStatusStillShowsRunning() throws {
-        let status = try XCTUnwrap(CompanionVacuum.status(from: nil, history: [], isRunning: true, includeSteps: true))
+        let status = try XCTUnwrap(CompanionMaintain.status(from: nil, history: [], isRunning: true, includeSteps: true))
         XCTAssertTrue(status.isRunning)
         XCTAssertEqual(status.health, "unknown")
         XCTAssertEqual(status.displayHealth, "Waiting for first run")
@@ -540,15 +540,15 @@ final class CompanionVacuumStatusTests: XCTestCase {
     func testHealthWordsMatchTheMacCard() throws {
         let expected = ["healthy": "On schedule", "overdue": "Overdue", "failed": "Needs attention", "unloaded": "Not running in background", "weird": "Weird"]
         for (raw, shown) in expected {
-            let json = CompanionVacuumFixtures.statusJSON.replacingOccurrences(of: #""health": "healthy""#, with: #""health": "\#(raw)""#)
-            let built = try XCTUnwrap(CompanionVacuum.status(from: decode(json), history: [], isRunning: false, includeSteps: false))
+            let json = CompanionMaintainFixtures.statusJSON.replacingOccurrences(of: #""health": "healthy""#, with: #""health": "\#(raw)""#)
+            let built = try XCTUnwrap(CompanionMaintain.status(from: decode(json), history: [], isRunning: false, includeSteps: false))
             XCTAssertEqual(built.health, raw)
             XCTAssertEqual(built.displayHealth, shown)
         }
     }
 
     func testTheCoarseFieldsComeFromTheStatus() throws {
-        let built = try XCTUnwrap(CompanionVacuum.status(from: decode(), history: [], isRunning: true, includeSteps: false))
+        let built = try XCTUnwrap(CompanionMaintain.status(from: decode(), history: [], isRunning: true, includeSteps: false))
         XCTAssertTrue(built.launchdLoaded)
         XCTAssertTrue(built.isRunning)
         XCTAssertEqual(built.lastFullRunAt, Date(timeIntervalSince1970: 1_760_000_100))
@@ -559,29 +559,29 @@ final class CompanionVacuumStatusTests: XCTestCase {
     }
 
     func testNeverRanAndNotScheduledAreNotDates() throws {
-        let json = CompanionVacuumFixtures.statusJSON
+        let json = CompanionMaintainFixtures.statusJSON
             .replacingOccurrences(of: #""next_run_at": { "full": 1760014400.0 }"#, with: #""next_run_at": { "full": 0 }"#)
             .replacingOccurrences(of: #""last_runs": { "full": 1760000100.0 }"#, with: #""last_runs": { "full": -1 }"#)
-        let built = try XCTUnwrap(CompanionVacuum.status(from: decode(json), history: [], isRunning: false, includeSteps: false))
+        let built = try XCTUnwrap(CompanionMaintain.status(from: decode(json), history: [], isRunning: false, includeSteps: false))
         XCTAssertNil(built.nextFullRunAt)
         XCTAssertNil(built.lastFullRunAt)
     }
 
     func testTheLastRunFallsBackToTheHistory() throws {
-        let json = CompanionVacuumFixtures.statusJSON.replacingOccurrences(of: "\"last_run\"", with: "\"last_run_unused\"")
+        let json = CompanionMaintainFixtures.statusJSON.replacingOccurrences(of: "\"last_run\"", with: "\"last_run_unused\"")
         let status = try decode(json)
         XCTAssertNil(status.lastRun)
-        let run = RoboticVacuumRun(runId: "old", trigger: "full", startedAt: 1_759_000_000, endedAt: 1_759_000_050, bytesFreed: 777, exitCode: 0, steps: [])
-        let built = try XCTUnwrap(CompanionVacuum.status(from: status, history: [run], isRunning: false, includeSteps: false))
+        let run = MaintainRun(runId: "old", trigger: "full", startedAt: 1_759_000_000, endedAt: 1_759_000_050, bytesFreed: 777, exitCode: 0, steps: [])
+        let built = try XCTUnwrap(CompanionMaintain.status(from: status, history: [run], isRunning: false, includeSteps: false))
         XCTAssertEqual(built.lastRunBytesFreed, 777)
         XCTAssertEqual(built.lastRunEndedAt, Date(timeIntervalSince1970: 1_759_000_050))
     }
 
     func testStepsAppearOnlyWithTheOptInAndInTheMacsOrder() throws {
-        let off = try XCTUnwrap(CompanionVacuum.status(from: decode(), history: [], isRunning: false, includeSteps: false))
+        let off = try XCTUnwrap(CompanionMaintain.status(from: decode(), history: [], isRunning: false, includeSteps: false))
         XCTAssertNil(off.steps)
 
-        let on = try XCTUnwrap(CompanionVacuum.status(from: decode(), history: [], isRunning: false, includeSteps: true))
+        let on = try XCTUnwrap(CompanionMaintain.status(from: decode(), history: [], isRunning: false, includeSteps: true))
         let steps = try XCTUnwrap(on.steps)
         // Catalog order, then a step this build does not know, by id.
         XCTAssertEqual(steps.map(\.stepId), ["resource_sample", "janitor_worktree_retire", "zz_new_step"])
@@ -593,19 +593,19 @@ final class CompanionVacuumStatusTests: XCTestCase {
 
     func testAReasonIsCappedAtOneHundredTwentyCharactersAndOneLine() throws {
         let long = String(repeating: "word ", count: 60)
-        let capped = CompanionVacuum.cappedReason(long)
-        XCTAssertEqual(capped.count, CompanionVacuum.maxReasonLength)
+        let capped = CompanionMaintain.cappedReason(long)
+        XCTAssertEqual(capped.count, CompanionMaintain.maxReasonLength)
         XCTAssertTrue(capped.hasSuffix("…"))
-        XCTAssertEqual(CompanionVacuum.cappedReason(String(repeating: "a", count: 120)).count, 120, "exactly the cap is kept whole")
-        XCTAssertEqual(CompanionVacuum.cappedReason(String(repeating: "a", count: 121)).count, 120)
-        XCTAssertEqual(CompanionVacuum.cappedReason("Retired two\nworktrees.   Kept one."), "Retired two worktrees. Kept one.")
-        XCTAssertEqual(CompanionVacuum.cappedReason(""), "")
-        XCTAssertEqual(CompanionVacuum.cappedReason("Retired two.\u{00A0} Kept one."), "Retired two.\u{00A0} Kept one.", "the gap between sentences survives")
+        XCTAssertEqual(CompanionMaintain.cappedReason(String(repeating: "a", count: 120)).count, 120, "exactly the cap is kept whole")
+        XCTAssertEqual(CompanionMaintain.cappedReason(String(repeating: "a", count: 121)).count, 120)
+        XCTAssertEqual(CompanionMaintain.cappedReason("Retired two\nworktrees.   Kept one."), "Retired two worktrees. Kept one.")
+        XCTAssertEqual(CompanionMaintain.cappedReason(""), "")
+        XCTAssertEqual(CompanionMaintain.cappedReason("Retired two.\u{00A0} Kept one."), "Retired two.\u{00A0} Kept one.", "the gap between sentences survives")
     }
 
     func testBytesNeverGoNegative() throws {
-        let json = CompanionVacuumFixtures.statusJSON.replacingOccurrences(of: #""bytes_freed": 5000"#, with: #""bytes_freed": -5"#)
-        let built = try XCTUnwrap(CompanionVacuum.status(from: decode(json), history: [], isRunning: false, includeSteps: true))
+        let json = CompanionMaintainFixtures.statusJSON.replacingOccurrences(of: #""bytes_freed": 5000"#, with: #""bytes_freed": -5"#)
+        let built = try XCTUnwrap(CompanionMaintain.status(from: decode(json), history: [], isRunning: false, includeSteps: true))
         XCTAssertEqual(built.lastRunBytesFreed, 0)
     }
 }
@@ -613,27 +613,27 @@ final class CompanionVacuumStatusTests: XCTestCase {
 // MARK: - The last run and the recent runs
 
 /// Builders for the history tests: a run, a step and a status whose last run is a watch tick.
-enum CompanionVacuumRunFixtures {
-    static func step(_ id: String, _ status: String = "ran", reason: String = "", freed: Int = 0) -> RoboticVacuumStepResult {
-        RoboticVacuumStepResult(stepId: id, title: "", status: status, reason: reason, bytesFreed: freed, durationMs: 1)
+enum CompanionMaintainRunFixtures {
+    static func step(_ id: String, _ status: String = "ran", reason: String = "", freed: Int = 0) -> MaintainStepResult {
+        MaintainStepResult(stepId: id, title: "", status: status, reason: reason, bytesFreed: freed, durationMs: 1)
     }
 
     static func run(
         _ id: String, _ trigger: String, ended: Double, freed: Int = 0, exit: Int = 0, took: Double = 10,
-        steps: [RoboticVacuumStepResult] = [], outcome: String? = nil
-    ) -> RoboticVacuumRun {
-        RoboticVacuumRun(runId: id, trigger: trigger, startedAt: ended - took, endedAt: ended, bytesFreed: freed, exitCode: exit, steps: steps, outcome: outcome)
+        steps: [MaintainStepResult] = [], outcome: String? = nil
+    ) -> MaintainRun {
+        MaintainRun(runId: id, trigger: trigger, startedAt: ended - took, endedAt: ended, bytesFreed: freed, exitCode: exit, steps: steps, outcome: outcome)
     }
 
     /// The fixture status with `lastRun` set, the way the engine publishes it: whatever ran last.
-    static func status(lastRun: RoboticVacuumRun?) throws -> RoboticVacuumStatus {
-        var status = try JSONDecoder().decode(RoboticVacuumStatus.self, from: Data(CompanionVacuumFixtures.statusJSON.utf8))
+    static func status(lastRun: MaintainRun?) throws -> MaintainStatus {
+        var status = try JSONDecoder().decode(MaintainStatus.self, from: Data(CompanionMaintainFixtures.statusJSON.utf8))
         status.lastRun = lastRun
         return status
     }
 
-    static func statusWithRecentRuns() throws -> CompanionVacuumStatus {
-        try XCTUnwrap(CompanionVacuum.status(
+    static func statusWithRecentRuns() throws -> CompanionMaintainStatus {
+        try XCTUnwrap(CompanionMaintain.status(
             from: status(lastRun: nil),
             history: [run("j1", "janitor", ended: 1_760_000_600)],
             isRunning: false,
@@ -644,8 +644,8 @@ enum CompanionVacuumRunFixtures {
 
 /// The engine ticks every five minutes, so the last run on record is nearly
 /// always a watch tick.  The phone leads with the last run that cleaned.
-final class CompanionVacuumLastRunTests: XCTestCase {
-    private typealias F = CompanionVacuumRunFixtures
+final class CompanionMaintainLastRunTests: XCTestCase {
+    private typealias F = CompanionMaintainRunFixtures
 
     func testTheHeadlineRunSkipsWatchTicks() throws {
         let watch = F.run("w1", "watch", ended: 1_760_001_000, steps: [F.step("resource_sample", reason: "Disk 41% used.")])
@@ -655,7 +655,7 @@ final class CompanionVacuumLastRunTests: XCTestCase {
             F.step("zz_new_step", "failed", reason: "Could not reach the server.", freed: 0),
         ])
         let full = F.run("f1", "full", ended: 1_759_990_000, freed: 9_000_000)
-        let built = try XCTUnwrap(CompanionVacuum.status(
+        let built = try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: watch), history: [watch, janitor, full], isRunning: false, includeSteps: true
         ))
         XCTAssertEqual(built.lastRunTrigger, "janitor")
@@ -670,7 +670,7 @@ final class CompanionVacuumLastRunTests: XCTestCase {
         for trigger in ["janitor", "full", "manual", "pressure"] {
             let watch = F.run("w1", "watch", ended: 1_760_001_000)
             let run = F.run("r1", trigger, ended: 1_760_000_500, freed: 77)
-            let built = try XCTUnwrap(CompanionVacuum.status(
+            let built = try XCTUnwrap(CompanionMaintain.status(
                 from: F.status(lastRun: watch), history: [watch, run], isRunning: false, includeSteps: false
             ))
             XCTAssertEqual(built.lastRunTrigger, trigger)
@@ -681,7 +681,7 @@ final class CompanionVacuumLastRunTests: XCTestCase {
     func testWhenEveryRunIsAWatchTickTheNewestOneIsTheLastRun() throws {
         let newest = F.run("w2", "watch", ended: 1_760_001_000, freed: 3, steps: [F.step("resource_sample")])
         let older = F.run("w1", "watch", ended: 1_760_000_700, freed: 9)
-        let built = try XCTUnwrap(CompanionVacuum.status(
+        let built = try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: newest), history: [newest, older], isRunning: false, includeSteps: true
         ))
         XCTAssertEqual(built.lastRunTrigger, "watch")
@@ -691,7 +691,7 @@ final class CompanionVacuumLastRunTests: XCTestCase {
 
     func testWithoutAnyHistoryTheStatusLastRunIsUsed() throws {
         let full = F.run("f1", "full", ended: 1_760_000_100, freed: 5_000)
-        let built = try XCTUnwrap(CompanionVacuum.status(
+        let built = try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: full), history: [], isRunning: false, includeSteps: false
         ))
         XCTAssertEqual(built.lastRunTrigger, "full")
@@ -700,7 +700,7 @@ final class CompanionVacuumLastRunTests: XCTestCase {
     }
 
     func testNoRunAtAllLeavesTheLastRunOut() throws {
-        let built = try XCTUnwrap(CompanionVacuum.status(
+        let built = try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: nil), history: [], isRunning: false, includeSteps: false
         ))
         XCTAssertNil(built.lastRunTrigger)
@@ -709,7 +709,7 @@ final class CompanionVacuumLastRunTests: XCTestCase {
     }
 
     func testAFirstRunBeforeAnyStatusStillListsTheRunsOnRecord() throws {
-        let built = try XCTUnwrap(CompanionVacuum.status(
+        let built = try XCTUnwrap(CompanionMaintain.status(
             from: nil,
             history: [F.run("w1", "watch", ended: 1_760_000_200), F.run("j1", "janitor", ended: 1_760_000_100)],
             isRunning: true,
@@ -721,11 +721,11 @@ final class CompanionVacuumLastRunTests: XCTestCase {
     }
 }
 
-final class CompanionVacuumRecentRunsTests: XCTestCase {
-    private typealias F = CompanionVacuumRunFixtures
+final class CompanionMaintainRecentRunsTests: XCTestCase {
+    private typealias F = CompanionMaintainRunFixtures
 
-    private func built(_ history: [RoboticVacuumRun], includeSteps: Bool = false) throws -> CompanionVacuumStatus {
-        try XCTUnwrap(CompanionVacuum.status(
+    private func built(_ history: [MaintainRun], includeSteps: Bool = false) throws -> CompanionMaintainStatus {
+        try XCTUnwrap(CompanionMaintain.status(
             from: F.status(lastRun: history.first), history: history, isRunning: false, includeSteps: includeSteps
         ))
     }
@@ -747,14 +747,14 @@ final class CompanionVacuumRecentRunsTests: XCTestCase {
     /// Most of the file is watch ticks: a day holds about 290 of them and 54
     /// cleaning runs.  The list still holds the newest 20 cleaning runs.
     func testTheListIsTheNewestTwentyCleaningRunsHoweverManyChecksSitBetween() throws {
-        var history: [RoboticVacuumRun] = []
+        var history: [MaintainRun] = []
         for n in 0..<25 {
             let ended = 1_760_100_000 - Double(n) * 1_800
             history.append(F.run("j\(n)", "janitor", ended: ended))
             for tick in 1...5 { history.append(F.run("w\(n)-\(tick)", "watch", ended: ended - Double(tick) * 300)) }
         }
         let runs = try XCTUnwrap(built(history).recentRuns)
-        XCTAssertEqual(CompanionVacuum.maxRecentRuns, 20)
+        XCTAssertEqual(CompanionMaintain.maxRecentRuns, 20)
         XCTAssertEqual(runs.count, 20)
         XCTAssertEqual(runs.first?.runId, "j0")
         XCTAssertEqual(runs.last?.runId, "j19")
@@ -815,53 +815,53 @@ final class CompanionVacuumRecentRunsTests: XCTestCase {
 
 // MARK: - The snapshot
 
-final class CompanionVacuumSnapshotTests: XCTestCase {
-    private func snapshot(allowed: Bool?, vacuum: CompanionVacuumStatus?) -> CompanionSnapshot {
+final class CompanionMaintainSnapshotTests: XCTestCase {
+    private func snapshot(allowed: Bool?, maintain: CompanionMaintainStatus?) -> CompanionSnapshot {
         CompanionSnapshotBuilder.make(
             hostName: "test", sampledAt: Date(), hasBaseline: true,
             window: .now, grouping: .apps, scale: .perCore, pulse: MachinePulse.empty, rows: [],
-            remoteVacuumAllowed: allowed, vacuum: vacuum
+            remoteMaintainAllowed: allowed, maintain: maintain
         )
     }
 
-    private func status(steps: Bool) throws -> CompanionVacuumStatus {
-        let parsed = try JSONDecoder().decode(RoboticVacuumStatus.self, from: Data(CompanionVacuumFixtures.statusJSON.utf8))
-        return try XCTUnwrap(CompanionVacuum.status(from: parsed, history: [], isRunning: false, includeSteps: steps))
+    private func status(steps: Bool) throws -> CompanionMaintainStatus {
+        let parsed = try JSONDecoder().decode(MaintainStatus.self, from: Data(CompanionMaintainFixtures.statusJSON.utf8))
+        return try XCTUnwrap(CompanionMaintain.status(from: parsed, history: [], isRunning: false, includeSteps: steps))
     }
 
     func testTheOptInAndTheStatusSurviveTheWire() throws {
-        let built = snapshot(allowed: true, vacuum: try status(steps: true))
+        let built = snapshot(allowed: true, maintain: try status(steps: true))
         let decoded = try CompanionJSON.decode(CompanionJSON.encode(built))
-        XCTAssertEqual(decoded.remoteVacuumAllowed, true)
-        XCTAssertEqual(decoded.vacuum, built.vacuum)
-        XCTAssertEqual(decoded.vacuum?.steps?.count, 3)
+        XCTAssertEqual(decoded.remoteMaintainAllowed, true)
+        XCTAssertEqual(decoded.maintain, built.maintain)
+        XCTAssertEqual(decoded.maintain?.steps?.count, 3)
     }
 
     func testTheStepsAreAbsentFromTheWireWithoutTheOptIn() throws {
-        let built = snapshot(allowed: false, vacuum: try status(steps: false))
+        let built = snapshot(allowed: false, maintain: try status(steps: false))
         let data = try CompanionJSON.encode(built)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let vacuum = try XCTUnwrap(object["vacuum"] as? [String: Any])
-        XCTAssertNil(vacuum["steps"], "the snapshot is readable with the shared code, so no step detail without the opt-in")
-        XCTAssertEqual(vacuum["health"] as? String, "healthy")
+        let maintain = try XCTUnwrap(object["maintain"] as? [String: Any])
+        XCTAssertNil(maintain["steps"], "the snapshot is readable with the shared code, so no step detail without the opt-in")
+        XCTAssertEqual(maintain["health"] as? String, "healthy")
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("janitor_worktree_retire"))
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("lane-"), "a reason that names a folder must not leak")
     }
 
     func testAnOlderMacsSnapshotStillDecodes() throws {
-        let built = snapshot(allowed: true, vacuum: try status(steps: true))
+        let built = snapshot(allowed: true, maintain: try status(steps: true))
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: CompanionJSON.encode(built)) as? [String: Any])
-        object.removeValue(forKey: "remoteVacuumAllowed")
-        object.removeValue(forKey: "vacuum")
+        object.removeValue(forKey: "remoteMaintainAllowed")
+        object.removeValue(forKey: "maintain")
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try CompanionJSON.decode(legacy)
-        XCTAssertNil(decoded.remoteVacuumAllowed, "unknown, not off")
-        XCTAssertNil(decoded.vacuum)
+        XCTAssertNil(decoded.remoteMaintainAllowed, "unknown, not off")
+        XCTAssertNil(decoded.maintain)
     }
 
     func testAStatusWithoutOptionalFieldsDecodes() throws {
         let minimal = Data(#"{"health":"healthy","displayHealth":"On schedule","launchdLoaded":true,"isRunning":false}"#.utf8)
-        let decoded = try CompanionJSON.decoder().decode(CompanionVacuumStatus.self, from: minimal)
+        let decoded = try CompanionJSON.decoder().decode(CompanionMaintainStatus.self, from: minimal)
         XCTAssertNil(decoded.steps)
         XCTAssertNil(decoded.lastFullRunAt)
         XCTAssertNil(decoded.lastRunBytesFreed)
@@ -870,50 +870,50 @@ final class CompanionVacuumSnapshotTests: XCTestCase {
     }
 
     func testTheRecentRunsAndTheirTriggerSurviveTheWire() throws {
-        let status = try XCTUnwrap(CompanionVacuum.status(
-            from: JSONDecoder().decode(RoboticVacuumStatus.self, from: Data(CompanionVacuumFixtures.statusJSON.utf8)),
+        let status = try XCTUnwrap(CompanionMaintain.status(
+            from: JSONDecoder().decode(MaintainStatus.self, from: Data(CompanionMaintainFixtures.statusJSON.utf8)),
             history: [
-                CompanionVacuumRunFixtures.run("w1", "watch", ended: 1_760_000_900, steps: [CompanionVacuumRunFixtures.step("resource_sample")]),
-                CompanionVacuumRunFixtures.run("j1", "janitor", ended: 1_760_000_600, freed: 4_096, exit: 1, took: 90),
+                CompanionMaintainRunFixtures.run("w1", "watch", ended: 1_760_000_900, steps: [CompanionMaintainRunFixtures.step("resource_sample")]),
+                CompanionMaintainRunFixtures.run("j1", "janitor", ended: 1_760_000_600, freed: 4_096, exit: 1, took: 90),
             ],
             isRunning: false,
             includeSteps: false
         ))
-        let built = snapshot(allowed: true, vacuum: status)
+        let built = snapshot(allowed: true, maintain: status)
         let decoded = try CompanionJSON.decode(CompanionJSON.encode(built))
-        XCTAssertEqual(decoded.vacuum, built.vacuum)
-        XCTAssertEqual(decoded.vacuum?.lastRunTrigger, "janitor")
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.map(\.runId), ["j1"], "the quiet watch tick is counted, not listed")
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.bytesFreed, 4_096)
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.exitCode, 1)
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.durationSeconds, 90)
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.endedAt, Date(timeIntervalSince1970: 1_760_000_600))
-        XCTAssertEqual(decoded.vacuum?.recentRuns?.last?.outcome, "failed")
-        XCTAssertEqual(decoded.vacuum?.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_000_900))
+        XCTAssertEqual(decoded.maintain, built.maintain)
+        XCTAssertEqual(decoded.maintain?.lastRunTrigger, "janitor")
+        XCTAssertEqual(decoded.maintain?.recentRuns?.map(\.runId), ["j1"], "the quiet watch tick is counted, not listed")
+        XCTAssertEqual(decoded.maintain?.recentRuns?.last?.bytesFreed, 4_096)
+        XCTAssertEqual(decoded.maintain?.recentRuns?.last?.exitCode, 1)
+        XCTAssertEqual(decoded.maintain?.recentRuns?.last?.durationSeconds, 90)
+        XCTAssertEqual(decoded.maintain?.recentRuns?.last?.endedAt, Date(timeIntervalSince1970: 1_760_000_600))
+        XCTAssertEqual(decoded.maintain?.recentRuns?.last?.outcome, "failed")
+        XCTAssertEqual(decoded.maintain?.watch?.lastCheckAt, Date(timeIntervalSince1970: 1_760_000_900))
     }
 
     func testAnOlderMacsSnapshotWithoutRecentRunsStillDecodes() throws {
-        let built = snapshot(allowed: true, vacuum: try CompanionVacuumRunFixtures.statusWithRecentRuns())
-        XCTAssertEqual(built.vacuum?.recentRuns?.count, 1, "the fixture does carry one")
+        let built = snapshot(allowed: true, maintain: try CompanionMaintainRunFixtures.statusWithRecentRuns())
+        XCTAssertEqual(built.maintain?.recentRuns?.count, 1, "the fixture does carry one")
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: CompanionJSON.encode(built)) as? [String: Any])
-        var vacuum = try XCTUnwrap(object["vacuum"] as? [String: Any])
-        XCTAssertNotNil(vacuum["recentRuns"])
-        vacuum.removeValue(forKey: "recentRuns")
-        vacuum.removeValue(forKey: "lastRunTrigger")
-        vacuum.removeValue(forKey: "watch")
-        object["vacuum"] = vacuum
+        var maintain = try XCTUnwrap(object["maintain"] as? [String: Any])
+        XCTAssertNotNil(maintain["recentRuns"])
+        maintain.removeValue(forKey: "recentRuns")
+        maintain.removeValue(forKey: "lastRunTrigger")
+        maintain.removeValue(forKey: "watch")
+        object["maintain"] = maintain
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try CompanionJSON.decode(legacy)
-        XCTAssertNil(decoded.vacuum?.recentRuns)
-        XCTAssertNil(decoded.vacuum?.cleaningRuns)
-        XCTAssertNil(decoded.vacuum?.watch, "an older Mac sends no watch summary: the phone shows no line")
-        XCTAssertNil(decoded.vacuum?.lastRunTrigger)
-        XCTAssertEqual(decoded.vacuum?.health, "healthy", "the rest of the status is untouched")
+        XCTAssertNil(decoded.maintain?.recentRuns)
+        XCTAssertNil(decoded.maintain?.cleaningRuns)
+        XCTAssertNil(decoded.maintain?.watch, "an older Mac sends no watch summary: the phone shows no line")
+        XCTAssertNil(decoded.maintain?.lastRunTrigger)
+        XCTAssertEqual(decoded.maintain?.health, "healthy", "the rest of the status is untouched")
     }
 
     func testARunInTheListNeedsOnlyItsIdentityToDecode() throws {
         let minimal = Data(#"{"runId":"r1","trigger":"watch","bytesFreed":0,"exitCode":0,"durationSeconds":0}"#.utf8)
-        let run = try CompanionJSON.decoder().decode(CompanionVacuumRun.self, from: minimal)
+        let run = try CompanionJSON.decoder().decode(CompanionMaintainRun.self, from: minimal)
         XCTAssertNil(run.endedAt)
         XCTAssertTrue(run.succeeded)
         XCTAssertEqual(run.id, "r1")
@@ -922,7 +922,7 @@ final class CompanionVacuumSnapshotTests: XCTestCase {
 
 // MARK: - Copy
 
-final class CompanionVacuumCopyTests: XCTestCase {
+final class CompanionMaintainCopyTests: XCTestCase {
     private func message(of body: Data) throws -> String {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         return try XCTUnwrap(json["error"] as? String)
@@ -940,20 +940,20 @@ final class CompanionVacuumCopyTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-        let vacuum = RoboticVacuumStore(supportDirectory: directory, repoRoot: directory) { _ in true }
-        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), vacuum: vacuum, startImmediately: false)
-        let started = store.performRemoteVacuumRun(kind: "full")
+        let maintain = MaintainStore(supportDirectory: directory, repoRoot: directory) { _ in true }
+        let store = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintain, startImmediately: false)
+        let started = store.performRemoteMaintainRun(kind: "full")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: started.body) as? [String: Any])
         assertGap(try XCTUnwrap(json["message"] as? String))
     }
 
     /// The phone's own strings live in the iOS target, which these tests do
-    /// not compile, and the Mac's Robotic Vacuum screen is SwiftUI too.  Read
+    /// not compile, and the Mac's Maintain screen is SwiftUI too.  Read
     /// the source and look for the thing the owner banned: two ASCII spaces
     /// after a sentence inside a string literal.
     func testThePhoneScreenWritesItsGapsAsNonBreakingSpaces() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        for name in ["ios/Sources/CompanionVacuumView.swift", "Sources/UI/RoboticVacuumView.swift"] {
+        for name in ["ios/Sources/CompanionMaintainView.swift", "Sources/UI/MaintainView.swift"] {
             let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
             let code = source.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for line in code {
@@ -985,8 +985,8 @@ final class CompanionVacuumCopyTests: XCTestCase {
 
 // MARK: - Fixtures
 
-enum CompanionVacuumFixtures {
-    /// What `scripts/robotic-vacuum.py` writes to `status.json`, trimmed to
+enum CompanionMaintainFixtures {
+    /// What `scripts/maintain.py` writes to `status.json`, trimmed to
     /// three steps.  One reason names a folder, to check it stays behind the opt-in.
     static let statusJSON = """
     {
@@ -1014,20 +1014,20 @@ enum CompanionVacuumFixtures {
     """
 }
 
-/// Who reads the vacuum's step detail.  The shared pairing code can read the
+/// Who reads the maintain's step detail.  The shared pairing code can read the
 /// snapshot from anywhere, and a step's reason can name a folder or a server.
-final class CompanionVacuumDisclosureTests: XCTestCase {
+final class CompanionMaintainDisclosureTests: XCTestCase {
     private let code = "ABCD2345"
     private let lan = CompanionPeer(key: "192.168.1.20", isTrusted: true)
     private let wan = CompanionPeer(key: "203.0.113.9", isTrusted: false)
 
     private func snapshot(steps: Bool) -> CompanionSnapshot {
         var snapshot = CompanionServerRoutingTests.minimalSnapshot()
-        var status = CompanionVacuumStatus(health: "healthy", displayHealth: "On schedule", launchdLoaded: true, isRunning: false)
+        var status = CompanionMaintainStatus(health: "healthy", displayHealth: "On schedule", launchdLoaded: true, isRunning: false)
         if steps {
-            status.steps = [CompanionVacuumStep(stepId: "janitor_worktree_retire", title: "Retire old merged git worktrees", statusLabel: "Done", reason: "Retired ~/apps/lanes/hoghunter/claude-secret-lane.", bytesFreed: 1)]
+            status.steps = [CompanionMaintainStep(stepId: "janitor_worktree_retire", title: "Retire old merged git worktrees", statusLabel: "Done", reason: "Retired ~/apps/lanes/hoghunter/claude-secret-lane.", bytesFreed: 1)]
         }
-        snapshot.vacuum = status
+        snapshot.maintain = status
         return snapshot
     }
 
@@ -1046,11 +1046,11 @@ final class CompanionVacuumDisclosureTests: XCTestCase {
         server.update(snapshot: snapshot(steps: false), detailed: snapshot(steps: true))
         server.syncOnQueue {}
 
-        XCTAssertNotNil(try served(server, token: token, from: lan).vacuum?.steps, "a paired phone at home reads the detail")
-        XCTAssertNil(try served(server, token: token, from: wan).vacuum?.steps, "from outside the local network it reads the plain snapshot")
-        XCTAssertNil(try served(server, token: code, from: lan).vacuum?.steps, "the shared code never reads the detail")
-        XCTAssertNil(try served(server, token: code, from: wan).vacuum?.steps)
-        XCTAssertEqual(try served(server, token: code, from: wan).vacuum?.health, "healthy", "the coarse status is there for everyone")
+        XCTAssertNotNil(try served(server, token: token, from: lan).maintain?.steps, "a paired phone at home reads the detail")
+        XCTAssertNil(try served(server, token: token, from: wan).maintain?.steps, "from outside the local network it reads the plain snapshot")
+        XCTAssertNil(try served(server, token: code, from: lan).maintain?.steps, "the shared code never reads the detail")
+        XCTAssertNil(try served(server, token: code, from: wan).maintain?.steps)
+        XCTAssertEqual(try served(server, token: code, from: wan).maintain?.health, "healthy", "the coarse status is there for everyone")
     }
 
     func testWithoutADetailedSnapshotEveryoneReadsThePlainOne() throws {
@@ -1059,6 +1059,6 @@ final class CompanionVacuumDisclosureTests: XCTestCase {
         let token = server.devices.issue(name: "Test iPhone").token
         server.update(snapshot: snapshot(steps: false))
         server.syncOnQueue {}
-        XCTAssertNil(try served(server, token: token, from: lan).vacuum?.steps)
+        XCTAssertNil(try served(server, token: token, from: lan).maintain?.steps)
     }
 }

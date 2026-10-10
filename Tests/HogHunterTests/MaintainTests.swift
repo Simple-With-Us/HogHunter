@@ -1,7 +1,7 @@
 import XCTest
 @testable import HogHunter
 
-final class RoboticVacuumTests: XCTestCase {
+final class MaintainTests: XCTestCase {
     func testDecodeStatus() throws {
         let json = """
         {
@@ -23,7 +23,7 @@ final class RoboticVacuumTests: XCTestCase {
           "history_count": 1
         }
         """.data(using: .utf8)!
-        let status = try JSONDecoder().decode(RoboticVacuumStatus.self, from: json)
+        let status = try JSONDecoder().decode(MaintainStatus.self, from: json)
         XCTAssertEqual(status.health, "healthy")
         XCTAssertEqual(status.displayHealth, "On schedule")
         XCTAssertTrue(status.launchdLoaded)

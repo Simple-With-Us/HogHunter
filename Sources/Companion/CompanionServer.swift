@@ -146,8 +146,8 @@ final class CompanionServer: @unchecked Sendable {
     private let quitFlag = CompanionLocked(false)
     private let cleanFlag = CompanionLocked(false)
     private let editFlag = CompanionLocked(false)
-    private let vacuumFlag = CompanionLocked(false)
-    private let vacuumRunningFlag = CompanionLocked(false)
+    private let maintainFlag = CompanionLocked(false)
+    private let maintainRunningFlag = CompanionLocked(false)
 
     var allowRemoteQuit: Bool {
         get { quitFlag.value }
@@ -168,20 +168,20 @@ final class CompanionServer: @unchecked Sendable {
         get { editFlag.value }
         set { editFlag.value = newValue }
     }
-    /// Off until the owner turns on "Allow iPhone to Run Robotic Vacuum" in
+    /// Off until the owner turns on "Allow iPhone to Run Maintenance" in
     /// Settings.  Not offered in the pairing alert: a run can retire old git
     /// worktrees and run maintenance on remote servers, so the owner grants
     /// it on purpose, in Settings only.
-    var allowRemoteVacuum: Bool {
-        get { vacuumFlag.value }
-        set { vacuumFlag.value = newValue }
+    var allowRemoteMaintain: Bool {
+        get { maintainFlag.value }
+        set { maintainFlag.value = newValue }
     }
-    /// Whether a Robotic Vacuum run is going on the Mac, whoever started it.
+    /// Whether a Maintain run is going on the Mac, whoever started it.
     /// The host keeps it current; the router also sets it when it accepts a
     /// phone's request, so two quick taps cannot both start a run.
-    var vacuumRunning: Bool {
-        get { vacuumRunningFlag.value }
-        set { vacuumRunningFlag.value = newValue }
+    var maintainRunning: Bool {
+        get { maintainRunningFlag.value }
+        set { maintainRunningFlag.value = newValue }
     }
     var onRemoteQuit: ((_ target: CompanionTarget, _ force: Bool) -> Reply)? = nil
     var onRemoteTame: ((_ target: CompanionTarget, _ action: String) -> Reply)? = nil
@@ -204,11 +204,11 @@ final class CompanionServer: @unchecked Sendable {
     /// server queue, so the handler starts it and calls `completion` once,
     /// from any thread, when the report is written.
     var onRemoteSample: ((_ target: CompanionTarget, _ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
-    /// Starts a Robotic Vacuum run.  Called on the server queue, only when the
+    /// Starts a Maintain run.  Called on the server queue, only when the
     /// opt-in is on and no run is going.  It must answer at once, without
     /// waiting for the run: the run takes minutes, the server queue also
     /// serves snapshot polls, and the phone watches the snapshot instead.
-    var onRemoteVacuumRun: ((_ kind: String) -> Reply)? = nil
+    var onRemoteMaintainRun: ((_ kind: String) -> Reply)? = nil
     /// Called on the server queue each time a phone fetches the snapshot, so
     /// the host can refresh slow-to-gather data only while someone is looking.
     var onSnapshotServed: (() -> Void)? = nil
@@ -454,19 +454,19 @@ final class CompanionServer: @unchecked Sendable {
                 // Placeholder: never sent.  `startSample` answers later.
                 return (202, Data())
             },
-            vacuumHandler: { [weak self] kind in
+            maintainHandler: { [weak self] kind in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
-                guard self.allowRemoteVacuum else { return Self.vacuumRefusal }
-                guard let handler = self.onRemoteVacuumRun else {
-                    return (501, Data("{\"error\": \"Vacuum handler not configured\"}".utf8))
+                guard self.allowRemoteMaintain else { return Self.maintainRefusal }
+                guard let handler = self.onRemoteMaintainRun else {
+                    return (501, Data("{\"error\": \"Maintain handler not configured\"}".utf8))
                 }
                 // Requests are handled one at a time on this queue, so the
                 // check and the set below cannot interleave with another phone
                 // request.
-                guard !self.vacuumRunningFlag.value else { return Self.vacuumBusyReply }
-                self.vacuumRunningFlag.value = true
+                guard !self.maintainRunningFlag.value else { return Self.maintainBusyReply }
+                self.maintainRunningFlag.value = true
                 let reply = handler(kind)
-                if !(200..<300).contains(reply.status) { self.vacuumRunningFlag.value = false }
+                if !(200..<300).contains(reply.status) { self.maintainRunningFlag.value = false }
                 return reply
             },
             peerTrusted: peer.isTrusted,
@@ -531,15 +531,15 @@ final class CompanionServer: @unchecked Sendable {
         return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
     }
 
-    /// The answer to a Robotic Vacuum run while the owner has not allowed it.
-    static var vacuumRefusal: Reply {
-        let res = ["status": "forbidden", "error": "Running the Robotic Vacuum from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Robotic Vacuum in Hog Hunter Settings > iPhone on the Mac."]
+    /// The answer to a Maintain run while the owner has not allowed it.
+    static var maintainRefusal: Reply {
+        let res = ["status": "forbidden", "error": "Running maintenance from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Maintenance in Hog Hunter Settings > iPhone on the Mac."]
         return (403, (try? JSONSerialization.data(withJSONObject: res)) ?? Data())
     }
 
-    /// The answer to a Robotic Vacuum run while one is already going.
-    static var vacuumBusyReply: Reply {
-        let body = #"{"status":"busy","error":"A Robotic Vacuum run is already going on this Mac.\u00a0 Watch its progress in the app."}"#
+    /// The answer to a Maintain run while one is already going.
+    static var maintainBusyReply: Reply {
+        let body = #"{"status":"busy","error":"A Maintain run is already going on this Mac.\u00a0 Watch its progress in the app."}"#
         return (409, Data(body.utf8))
     }
 

@@ -57,13 +57,13 @@ final class CompanionReplyTextTests: XCTestCase {
     }
 
     func testTheVacuumRefusalNamesTheSettingAndKeepsItsGap() throws {
-        let text = try message(of: CompanionServer.vacuumRefusal.body)
-        XCTAssertTrue(text.contains("Allow iPhone to Run Robotic Vacuum"), text)
+        let text = try message(of: CompanionServer.maintainRefusal.body)
+        XCTAssertTrue(text.contains("Allow iPhone to Run Maintenance"), text)
         assertGap(text)
     }
 
     func testTheVacuumBusyReplyKeepsItsGap() throws {
-        let busy = CompanionServer.vacuumBusyReply
+        let busy = CompanionServer.maintainBusyReply
         XCTAssertEqual(busy.status, 409)
         assertGap(try message(of: busy.body))
     }
@@ -71,11 +71,11 @@ final class CompanionReplyTextTests: XCTestCase {
     func testTheVacuumBadKindReplyKeepsItsGap() throws {
         let server = CompanionServer()
         server.updateToken("ABCD2345")
-        server.allowRemoteVacuum = true
+        server.allowRemoteMaintain = true
         let token = server.devices.issue(name: "Test iPhone").token
         server.syncOnQueue {}
         let disposition = server.syncOnQueue {
-            server.disposition(for: CompanionHTTP.vacuumRunRequest(token: token, kind: "janitor"), peer: CompanionPeer(key: "192.168.1.20", isTrusted: true))
+            server.disposition(for: CompanionHTTP.maintainRunRequest(token: token, kind: "janitor"), peer: CompanionPeer(key: "192.168.1.20", isTrusted: true))
         }
         guard case .reply(let data) = disposition else { return XCTFail("expected an inline refusal") }
         let parsed = try XCTUnwrap(CompanionHTTP.parseResponse(data))

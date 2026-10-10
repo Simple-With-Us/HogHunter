@@ -659,7 +659,7 @@ struct DashboardView: View {
             MacSettingsView(snapshot: snapshot, model: model)
         }
         .navigationDestination(isPresented: $showVacuum) {
-            VacuumView(snapshot: snapshot, model: model)
+            MaintainView(snapshot: snapshot, model: model)
         }
         .navigationDestination(isPresented: $showCleaner) {
             CleanerView(model: model)
@@ -1286,11 +1286,11 @@ struct DashboardView: View {
             }
         }
 
-        Section("Robotic Vacuum") {
+        Section("Maintain") {
             NavigationLink {
-                VacuumView(snapshot: snapshot, model: model)
+                MaintainView(snapshot: snapshot, model: model)
             } label: {
-                VacuumSummaryRow(snapshot: snapshot)
+                MaintainSummaryRow(snapshot: snapshot)
             }
         }
 

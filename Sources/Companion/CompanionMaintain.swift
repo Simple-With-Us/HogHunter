@@ -1,9 +1,9 @@
 import Foundation
 
-/// Turns the Robotic Vacuum's on-disk status into the part of the phone
+/// Turns the Maintain's on-disk status into the part of the phone
 /// snapshot that describes it.  Pure, so it can be tested without a store, a
 /// file or a clock.
-enum CompanionVacuum {
+enum CompanionMaintain {
     /// The most a step's reason may carry, ellipsis included.
     static let maxReasonLength = 120
 
@@ -13,7 +13,7 @@ enum CompanionVacuum {
     /// A watch tick is the five minute disk and memory check.  It is not a
     /// cleaning run: it is summed up in `watch` instead of listed, and it is
     /// never the "last run" the phone leads with.
-    static let watchTrigger = CompanionVacuumRun.watchTrigger
+    static let watchTrigger = CompanionMaintainRun.watchTrigger
 
     /// The status for the phone, or nil when there is nothing to say.
     ///
@@ -35,18 +35,18 @@ enum CompanionVacuum {
     ///
     /// `now` and `calendar` say what "today" is for the watch count.
     static func status(
-        from status: RoboticVacuumStatus?,
-        history: [RoboticVacuumRun],
+        from status: MaintainStatus?,
+        history: [MaintainRun],
         isRunning: Bool,
         includeSteps: Bool,
         now: Date = Date(),
         calendar: Calendar = .current
-    ) -> CompanionVacuumStatus? {
+    ) -> CompanionMaintainStatus? {
         let recent = recentRuns(from: history)
         let watchSummary = watch(from: history, now: now, calendar: calendar)
         guard let status else {
             guard isRunning else { return nil }
-            return CompanionVacuumStatus(
+            return CompanionMaintainStatus(
                 health: "unknown",
                 displayHealth: "Waiting for first run",
                 launchdLoaded: false,
@@ -56,7 +56,7 @@ enum CompanionVacuum {
             )
         }
         let lastRun = headlineRun(status: status, history: history)
-        return CompanionVacuumStatus(
+        return CompanionMaintainStatus(
             health: status.health,
             displayHealth: status.displayHealth,
             launchdLoaded: status.launchdLoaded,
@@ -77,7 +77,7 @@ enum CompanionVacuum {
     /// went on to clean), or the newest run of any kind when every run on
     /// record is a quiet tick.  The status's own last run is only a fallback
     /// for a history that could not be read.
-    static func headlineRun(status: RoboticVacuumStatus, history: [RoboticVacuumRun]) -> RoboticVacuumRun? {
+    static func headlineRun(status: MaintainStatus, history: [MaintainRun]) -> MaintainRun? {
         history.first { $0.isCleaningRun } ?? history.first ?? status.lastRun
     }
 
@@ -88,9 +88,9 @@ enum CompanionVacuum {
     /// A quiet watch tick is left out.  One that found the disk or memory in
     /// trouble and cleaned is a run like any other and stays in, listed as
     /// "pressure" because that is what its steps ran as.
-    static func recentRuns(from history: [RoboticVacuumRun]) -> [CompanionVacuumRun] {
+    static func recentRuns(from history: [MaintainRun]) -> [CompanionMaintainRun] {
         history.filter(\.isCleaningRun).prefix(maxRecentRuns).map { run in
-            CompanionVacuumRun(
+            CompanionMaintainRun(
                 runId: run.runId,
                 trigger: run.displayTrigger,
                 endedAt: date(run.endedAt),
@@ -110,7 +110,7 @@ enum CompanionVacuum {
     /// midnight (a long day, or an engine that keeps fewer runs).  Then the
     /// count would be low and "today" a false word, so `countedSince` says
     /// where the history starts and the line says "since" instead.
-    static func watch(from history: [RoboticVacuumRun], now: Date, calendar: Calendar = .current) -> CompanionVacuumWatch? {
+    static func watch(from history: [MaintainRun], now: Date, calendar: Calendar = .current) -> CompanionMaintainWatch? {
         let checkTimes = history.filter(\.isCheck).compactMap(\.finishedOrStartedAt)
         guard let last = checkTimes.max() else { return nil }
         let midnight = calendar.startOfDay(for: now)
@@ -118,7 +118,7 @@ enum CompanionVacuum {
             let epoch = run.startedAt > 0 ? run.startedAt : run.endedAt
             return epoch > 0 ? Date(timeIntervalSince1970: epoch) : nil
         }.min()
-        return CompanionVacuumWatch(
+        return CompanionMaintainWatch(
             lastCheckAt: last,
             checksToday: checkTimes.filter { $0 >= midnight }.count,
             countedSince: oldest.flatMap { $0 > midnight ? $0 : nil },
@@ -137,7 +137,7 @@ enum CompanionVacuum {
     /// recorded none, what the status holds for each step.  `lastRun` is the
     /// run `headlineRun` chose, so it is a watch tick only when every run on
     /// record is one (a watch tick's steps are then the honest answer).
-    static func steps(from status: RoboticVacuumStatus, lastRun: RoboticVacuumRun?) -> [CompanionVacuumStep] {
+    static func steps(from status: MaintainStatus, lastRun: MaintainRun?) -> [CompanionMaintainStep] {
         guard let lastRun, !lastRun.steps.isEmpty else { return steps(from: status.stepLastResults) }
         return steps(from: Dictionary(lastRun.steps.map { ($0.stepId, $0) }, uniquingKeysWith: { _, newer in newer }))
     }
@@ -145,15 +145,15 @@ enum CompanionVacuum {
     /// Step results in the order the Mac lists the steps, then any step the
     /// engine knows that this build does not, by id.  The engine keeps them in
     /// a dictionary, whose order changes from one read to the next.
-    static func steps(from results: [String: RoboticVacuumStepResult]) -> [CompanionVacuumStep] {
-        let known = RoboticVacuumStore.catalog.map(\.id)
+    static func steps(from results: [String: MaintainStepResult]) -> [CompanionMaintainStep] {
+        let known = MaintainStore.catalog.map(\.id)
         let extra = results.keys.filter { !known.contains($0) }.sorted()
         return (known + extra).compactMap { id in
             guard let result = results[id] else { return nil }
             let title = result.title.isEmpty
-                ? (RoboticVacuumStore.catalog.first { $0.id == id }?.title ?? id)
+                ? (MaintainStore.catalog.first { $0.id == id }?.title ?? id)
                 : result.title
-            return CompanionVacuumStep(
+            return CompanionMaintainStep(
                 stepId: id,
                 title: title,
                 statusLabel: result.statusLabel,
