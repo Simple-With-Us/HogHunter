@@ -1,5 +1,8 @@
 # Hog Hunter — effort log
 
+> **ARCHIVED Sun, Oct 11, 2026.**  Linear is the system of record: team HH, https://linear.app/simple-with-us/team/HH.
+> This file is read-only history.  Do not edit it or add rows.  See EFFORT-LOG-PROTOCOL.md.
+
 Mirror of the live fleet board rows for this app.  Reserve a row before starting work.  Never delete another seat's rows.
 
 | Date (CT) | Seat | Branch | State | Work |
