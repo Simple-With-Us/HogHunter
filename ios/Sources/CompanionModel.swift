@@ -207,11 +207,13 @@ final class CompanionModel {
         // the wrong message.
         let wasUnauthorized = codeError != nil
         codeError = nil
-        pairingDismissed = true
         guard case .code = phase else {
             reconcile()
             return
         }
+        // Only a real cancel of the pairing sheet.  SwiftUI also calls this
+        // when submitCode() flips phase to .live and the sheet dismisses.
+        pairingDismissed = true
         // A manual host is not in the Bonjour list, so reconcile would return
         // without leaving the pairing sheet.
         if let saved, CompanionReach.keepsManualHost(saved.remoteHost) {
@@ -236,14 +238,19 @@ final class CompanionModel {
         }
         reconcile()
         if case .code = phase {
-            if snapshot == nil {
+            if snapshot != nil {
+                phase = .live
+                statusLine = saved?.name ?? "Hog Hunter"
+            } else if let saved, discovered.contains(where: { $0.id == saved.peerID }) {
+                // The Mac is still on this Wi-Fi.  Cancel means go back to
+                // the picker, not "the Mac did not answer".
+                phase = .choose
+                statusLine = "Pick the Mac you want to watch."
+            } else {
                 phase = .offline
                 statusLine = wasUnauthorized
                     ? "The code for \(saved?.name ?? "your Mac") no longer matches.  Reconnect to pair again."
                     : "The Mac did not answer."
-            } else {
-                phase = .live
-                statusLine = saved?.name ?? "Hog Hunter"
             }
         }
     }
