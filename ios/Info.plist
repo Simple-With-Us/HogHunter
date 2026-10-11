@@ -16,6 +16,11 @@
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- Sentry DSN, injected at build time from the SENTRY_DSN environment.
+	     Empty unless the TestFlight archive passes the secret, which keeps
+	     SentryTelemetry a no-op. -->
+	<key>SentryDSN</key>
+	<string>$(SENTRY_DSN)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

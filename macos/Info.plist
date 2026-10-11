@@ -8,5 +8,9 @@
 	<array>
 		<string>_hoghunter._tcp</string>
 	</array>
+	<!-- Sentry DSN, injected at build time from the SENTRY_DSN environment.
+	     Empty in local and CI builds, which keeps SentryTelemetry a no-op. -->
+	<key>SentryDSN</key>
+	<string>$(SENTRY_DSN)</string>
 </dict>
 </plist>

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Sentry for the Mac menubar app and the iPhone companion (project `hoghunter`):
+
+- sentry-cocoa is linked on both app targets.  `SentryTelemetry` starts from Info.plist `SentryDSN` (`$(SENTRY_DSN)`), with `sendDefaultPii = false`, tracing 0.2, continuous profiling 0.1, app-hang tracking, and 5xx capture.  Session Replay stays off.  An empty DSN is a no-op.
+- The TestFlight archive uploads dSYMs when `SENTRY_AUTH_TOKEN` is set.  CI failures report to fleet-infra via `sentry-ci-report.yml`.
+- Privacy manifests declare crash, performance, and other diagnostic data.  App Store answers live in `ios/AppStore/privacy-answers.md`.
+
 Infisical reads the prod environment only (owner ruling 2026-10-10):
 
 - The Mac app reads the `prod` environment of the Infisical project, where it read `dev` before.  The dev and staging environments are retired, and all 17 settings keys now live in `prod` with the same values.  The environment is a constant in `InfisicalSettings`, and a test pins it.

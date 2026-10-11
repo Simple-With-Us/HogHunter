@@ -15,6 +15,17 @@ options:
   xcodeVersion: "16.0"
   createIntermediateGroups: true
 
+# 2026-10-11 — Sentry (project `hoghunter`).  sentry-cocoa serves the macOS
+#   menubar app and the iOS companion.  The DSN is never stored here: both
+#   app Info.plists expand `$(SENTRY_DSN)` from the build environment, and an
+#   empty value makes `SentryTelemetry.start()` a silent no-op.
+packages:
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa
+    # 8.56+ has configureProfiling (8.x profilesSampleRate is gone in 9).
+    # `from` is up-to-next-major, so this stays on 8.x until Renovate opens a major PR.
+    from: "8.56.0"
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -31,7 +42,11 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      - path: macos/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
+      - package: Sentry
+        product: Sentry
       - sdk: ServiceManagement.framework
       - sdk: UserNotifications.framework
       - sdk: libsqlite3.tbd
@@ -54,6 +69,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         COMBINE_HIDPI_IMAGES: YES
         INFOPLIST_FILE: macos/Info.plist
+        # Empty unless `xcodebuild SENTRY_DSN=...` or the environment supplies it.
+        SENTRY_DSN: ""
       configs:
         Release:
           ENABLE_HARDENED_RUNTIME: YES
@@ -85,8 +102,14 @@ targets:
       - path: Sources/Companion/CompanionPeer.swift
       # The same sparkline the Mac menu bar draws, so the two cannot differ.
       - path: Sources/UI/CpuSparklineView.swift
+      # Shared Sentry bootstrap (DSN from Info.plist, empty is a no-op).
+      - path: Sources/Telemetry/SentryTelemetry.swift
       - path: ios/Assets.xcassets
+      - path: ios/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
+      - package: Sentry
+        product: Sentry
       - target: HogHunterWidgets
     settings:
       base:
@@ -103,6 +126,8 @@ targets:
         SWIFT_EMIT_LOC_STRINGS: YES
         ENABLE_PREVIEWS: NO
         INFOPLIST_FILE: ios/Info.plist
+        # Empty unless the TestFlight archive passes SENTRY_DSN=...
+        SENTRY_DSN: ""
 
   HogHunterWidgets:
     type: app-extension
