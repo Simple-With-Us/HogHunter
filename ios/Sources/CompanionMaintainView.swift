@@ -151,7 +151,7 @@ struct MaintainView: View {
     private var isAllowed: Bool { live.remoteMaintainAllowed == true }
     private var isRunning: Bool { maintain?.isRunning == true || model.isStartingMaintain }
 
-    static let offNote = "Running the Maintain from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Maintain in Hog Hunter Settings > iPhone on your Mac."
+    static let offNote = "Running the Maintain from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Maintenance in Hog Hunter Settings > iPhone on your Mac."
     static let tooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share the Maintain.\u{00A0} Update it on the Mac."
     static let runsTooOldNote = "This Mac's copy of Hog Hunter is older than this app and does not share its recent runs.\u{00A0} Update it on the Mac."
 

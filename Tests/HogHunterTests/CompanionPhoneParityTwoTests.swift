@@ -357,7 +357,7 @@ final class CompanionSettingsRouteTests: XCTestCase {
         let decoded = try JSONDecoder().decode(CompanionSettingsUpdateResponse.self, from: refused.body)
         XCTAssertEqual(decoded.status, "rejected")
         XCTAssertNotNil(decoded.error)
-        XCTAssertEqual(store.refreshInterval, 3)
+        XCTAssertEqual(store.refreshInterval, 5)
     }
 }
 
