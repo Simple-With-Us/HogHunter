@@ -22,12 +22,12 @@ enum CompanionService {
     static let settingsPath = "/v1/settings"
     /// Sample for 3 Seconds on one row.  Behind the process-control opt-in.
     static let samplePath = "/v1/sample"
-    /// Starts a Robotic Vacuum run.  Behind its own opt-in: a run can retire
+    /// Starts a Maintain run.  Behind its own opt-in: a run can retire
     /// old git worktrees and run maintenance on remote servers.
-    static let vacuumRunPath = "/v1/vacuum/run"
+    static let maintainRunPath = "/v1/maintain/run"
     /// The only run the phone may start.  The Mac's script also knows
     /// cheaper cadences and a pressure run; none of them is reachable from here.
-    static let vacuumRunKinds = ["full"]
+    static let maintainRunKinds = ["full"]
     static let pairPath = "/v1/pair"
     /// Trades the shared pairing code for a token of the phone's own.
     static let enrollPath = "/v1/enroll"
@@ -333,19 +333,19 @@ struct CompanionSampleResponse: Codable, Equatable, Sendable {
     var summary: [String]? = nil
 }
 
-/// Response to a Robotic Vacuum run request.  The Mac answers at once: the run
+/// Response to a Maintain run request.  The Mac answers at once: the run
 /// carries on there and the phone watches the snapshot for its progress.
-struct CompanionVacuumRunResponse: Codable, Equatable, Sendable {
+struct CompanionMaintainRunResponse: Codable, Equatable, Sendable {
     /// "started" or "busy" (a run is already going).
     var status: String
     var message: String? = nil
     var error: String? = nil
 }
 
-/// One step of the last Robotic Vacuum run.  Reasons can name lane folders and
+/// One step of the last Maintain run.  Reasons can name lane folders and
 /// servers, so the Mac sends steps only when the owner allowed the phone to
-/// run the vacuum.
-struct CompanionVacuumStep: Codable, Equatable, Identifiable, Sendable {
+/// run the maintain.
+struct CompanionMaintainStep: Codable, Equatable, Identifiable, Sendable {
     var stepId: String
     var title: String
     /// "Done", "Skipped" or "Failed", as the Mac shows it.
@@ -357,9 +357,9 @@ struct CompanionVacuumStep: Codable, Equatable, Identifiable, Sendable {
     var id: String { stepId }
 }
 
-/// Where the Robotic Vacuum stands: when it last ran and will next run, whether
+/// Where the Maintain stands: when it last ran and will next run, whether
 /// its background job is loaded, and whether a run is going now.
-struct CompanionVacuumStatus: Codable, Equatable, Sendable {
+struct CompanionMaintainStatus: Codable, Equatable, Sendable {
     /// The engine's own word: healthy, overdue, failed or unloaded.  "unknown"
     /// while the first run has not written a status yet.
     var health: String
@@ -377,8 +377,8 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
     /// five minute disk and memory check and says nothing about cleaning.
     var lastRunTrigger: String? = nil
     /// What the last run did, step by step.  Nil unless the owner allowed the
-    /// phone to run the vacuum.
-    var steps: [CompanionVacuumStep]? = nil
+    /// phone to run the maintain.
+    var steps: [CompanionMaintainStep]? = nil
     /// The Mac's recent cleaning runs, newest first, the way the Mac lists
     /// them: janitor, full, manual and pressure runs, and nothing for the
     /// quiet five minute checks, which `watch` sums up instead.  A run carries
@@ -386,11 +386,11 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
     /// Nil from a Mac that predates the field (empty means the Mac has
     /// recorded no cleaning runs).  A Mac that predates the cleaning-only list
     /// still sends watch ticks in it, so read it through `cleaningRuns`.
-    var recentRuns: [CompanionVacuumRun]? = nil
+    var recentRuns: [CompanionMaintainRun]? = nil
     /// The five minute disk and memory checks, summed up: when the last one
     /// ran and how many ran today.  Nil from a Mac that predates the field,
     /// and from a Mac that has recorded no check.  Carries no step text.
-    var watch: CompanionVacuumWatch? = nil
+    var watch: CompanionMaintainWatch? = nil
 
     /// `recentRuns` without any watch tick, so an older Mac that still lists
     /// them reads the same as a newer one.  Nil when the Mac sent no list.
@@ -399,13 +399,13 @@ struct CompanionVacuumStatus: Codable, Equatable, Sendable {
     /// tick, and sends no steps to tell them apart, so its escalated ticks go
     /// too.  A current Mac has already done this: it leaves quiet ticks out
     /// and sends an escalated one as "pressure", which passes here.
-    var cleaningRuns: [CompanionVacuumRun]? {
-        recentRuns?.filter { $0.trigger != CompanionVacuumRun.watchTrigger }
+    var cleaningRuns: [CompanionMaintainRun]? {
+        recentRuns?.filter { $0.trigger != CompanionMaintainRun.watchTrigger }
     }
 }
 
-/// How a Robotic Vacuum run ended, for the mark on its row.
-enum CompanionVacuumRunResult: String, Equatable, Sendable {
+/// How a Maintain run ended, for the mark on its row.
+enum CompanionMaintainRunResult: String, Equatable, Sendable {
     case ok
     /// A step failed and another one did its work.  The run exits 0, which is
     /// why the exit code alone cannot show it.
@@ -416,7 +416,7 @@ enum CompanionVacuumRunResult: String, Equatable, Sendable {
     /// the engine.  Otherwise the run's recorded outcome decides, and a run
     /// with no outcome (an older Mac or an older history row) or one this
     /// build does not know is judged by its exit code, which is zero here.
-    static func resolve(exitCode: Int, outcome: String?) -> CompanionVacuumRunResult {
+    static func resolve(exitCode: Int, outcome: String?) -> CompanionMaintainRunResult {
         if exitCode != 0 { return .failed }
         switch outcome {
         case "partial": return .partial
@@ -435,9 +435,9 @@ enum CompanionVacuumRunResult: String, Equatable, Sendable {
     }
 }
 
-/// One finished Robotic Vacuum run in the Recent Runs list.  Only what can be
+/// One finished Maintain run in the Recent Runs list.  Only what can be
 /// said without naming a folder or a server.
-struct CompanionVacuumRun: Codable, Equatable, Identifiable, Sendable {
+struct CompanionMaintainRun: Codable, Equatable, Identifiable, Sendable {
     var runId: String
     /// "watch", "janitor", "full", "manual" or "pressure", as the engine records it.
     var trigger: String
@@ -455,14 +455,14 @@ struct CompanionVacuumRun: Codable, Equatable, Identifiable, Sendable {
     static let watchTrigger = "watch"
 
     var id: String { runId }
-    var result: CompanionVacuumRunResult { .resolve(exitCode: exitCode, outcome: outcome) }
+    var result: CompanionMaintainRunResult { .resolve(exitCode: exitCode, outcome: outcome) }
     /// True when the run has nothing to flag: not failed and not partial.
     var succeeded: Bool { result == .ok }
 }
 
 /// The five minute disk and memory checks in one line's worth of numbers.  The
 /// checks are left out of the list of runs because there are hundreds a day.
-struct CompanionVacuumWatch: Codable, Equatable, Sendable {
+struct CompanionMaintainWatch: Codable, Equatable, Sendable {
     /// When the newest check ran.
     var lastCheckAt: Date?
     /// How many ran since the start of today on the Mac's clock.
@@ -605,12 +605,12 @@ struct CompanionSnapshot: Codable, Equatable {
     var cpuHistory: [Double]? = nil
     /// Refresh interval, alerts and the webhook as the Mac holds them.
     var settings: CompanionSettingsSummary? = nil
-    /// Whether the phone may start a Robotic Vacuum run.  Nil from an older
+    /// Whether the phone may start a Maintain run.  Nil from an older
     /// Mac, which has no such route.
-    var remoteVacuumAllowed: Bool? = nil
-    /// Robotic Vacuum status.  Nil from an older Mac, and on a Mac that has
+    var remoteMaintainAllowed: Bool? = nil
+    /// Maintain status.  Nil from an older Mac, and on a Mac that has
     /// never run it.
-    var vacuum: CompanionVacuumStatus? = nil
+    var maintain: CompanionMaintainStatus? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {

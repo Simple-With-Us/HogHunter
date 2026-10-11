@@ -8,6 +8,38 @@ import SwiftUI
 class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     private var screenshotWindow: NSWindow?
 
+    /// One app, one menu bar item, one set of timers.
+    ///
+    /// Without this a second launch starts a second Hog Hunter.  That is not
+    /// cosmetic: macOS grants Full Disk Access per binary *and* pid, so two
+    /// copies probe protected paths independently and the owner gets the same
+    /// permission prompt twice, with denying one leaving the other asking.
+    ///
+    /// Checked in `willFinishLaunching`, before any window or timer exists, so
+    /// the loser never gets far enough to own anything.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let isRunningTests = NSClassFromString("XCTestCase") != nil
+        let handOver = SingleInstance.shouldHandOver(
+            argumentStrings: ProcessInfo.processInfo.arguments,
+            isRunningTests: isRunningTests,
+            ownPID: ProcessInfo.processInfo.processIdentifier,
+            runningPIDs: RunningCopies.otherPIDs(
+                bundleIdentifier: Bundle.main.bundleIdentifier,
+                ownPID: ProcessInfo.processInfo.processIdentifier
+            )
+        )
+        guard handOver else { return }
+        // Bring the incumbent forward so the owner's click appears to do
+        // something, then step aside.
+        if let bundleID = Bundle.main.bundleIdentifier {
+            for other in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            where other.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                other.activate(options: [.activateAllWindows])
+            }
+        }
+        NSApp.terminate(nil)
+    }
+
     private func screenshotLog(_ message: String) {
         // FileHandle.standardError.write is unbuffered - each line hits the log immediately.
         FileHandle.standardError.write(Data(("[HogHunterScreenshot] " + message + "\n").utf8))
@@ -17,11 +49,11 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
         // Headless UI smoke test.  Runs before anything else touches the app so
         // it is not racing the sampler, the bandwidth timer, or the screenshot
         // hook.  See UISmokeTest for why this exists.
-        if ProcessInfo.processInfo.arguments.contains("-HogHunterUISmoke") {
+        if ProcessInfo.processInfo.arguments.contains(HarnessArgument.uiSmoke) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { UISmokeTest.run() }
             return
         }
-        guard ProcessInfo.processInfo.arguments.contains("-HogHunterScreenshot") else { return }
+        guard ProcessInfo.processInfo.arguments.contains(HarnessArgument.screenshot) else { return }
         screenshotLog("flag seen; applicationDidFinishLaunching fired (isActive=\(NSApp.isActive))")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
@@ -111,7 +143,7 @@ struct HogHunterApp: App {
         // Storage and Network are tabs of the menu bar panel.  These scenes stay
         // for the Window menu's benefit; nothing in the UI points at them.
         Window("Storage", id: "hoghunter.storage") {
-            StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, vacuumStore: store.vacuum)
+            StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, maintainStore: store.maintain)
         }
         .defaultSize(width: 560, height: 680)
 

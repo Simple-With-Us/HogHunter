@@ -124,14 +124,14 @@ final class CompanionModel {
     /// `controlError` because the settings screen is a sheet over the
     /// dashboard, and two alerts on one error cannot both present.
     var settingsError: String?
-    /// True from the tap on Run Robotic Vacuum until the Mac has answered, and a
+    /// True from the tap on Run Maintain until the Mac has answered, and a
     /// moment longer while the snapshot catches up, so the button cannot be
     /// tapped twice.
-    var isStartingVacuum = false
-    /// Why the last Robotic Vacuum run did not start.  Kept apart from
-    /// `controlError`: the vacuum screen is pushed over the dashboard, and two
+    var isStartingMaintain = false
+    /// Why the last Maintain run did not start.  Kept apart from
+    /// `controlError`: the maintain screen is pushed over the dashboard, and two
     /// alerts on one error cannot both present.
-    var vacuumError: String?
+    var maintainError: String?
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
 
@@ -335,7 +335,7 @@ final class CompanionModel {
         isDemoMode = true
         snapshot = Self.sample
         // The sample's dates are fixed; the demo shows runs that look recent.
-        snapshot?.vacuum = Self.sampleVacuum(now: Date())
+        snapshot?.maintain = Self.sampleMaintain(now: Date())
         phase = .live
     }
 
@@ -424,31 +424,31 @@ final class CompanionModel {
         }
     }
 
-    /// Asks the Mac to start a full Robotic Vacuum run.  The Mac answers at once
+    /// Asks the Mac to start a full Maintain run.  The Mac answers at once
     /// and runs it by itself, so this returns when the run has started; the
-    /// snapshot then shows it running.  A refusal lands in `vacuumError`.
-    func runVacuum() async {
-        guard !isStartingVacuum else { return }
-        vacuumError = nil
-        isStartingVacuum = true
-        defer { isStartingVacuum = false }
+    /// snapshot then shows it running.  A refusal lands in `maintainError`.
+    func runMaintain() async {
+        guard !isStartingMaintain else { return }
+        maintainError = nil
+        isStartingMaintain = true
+        defer { isStartingMaintain = false }
         if isDemoMode {
-            snapshot?.vacuum?.isRunning = true
+            snapshot?.maintain?.isRunning = true
             try? await Task.sleep(for: .seconds(4))
-            snapshot?.vacuum = Self.sampleVacuum(now: Date(), endedSecondsAgo: 0)
+            snapshot?.maintain = Self.sampleMaintain(now: Date(), endedSecondsAgo: 0)
             return
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
-            vacuumError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            maintainError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
             return
         }
         do {
-            let res = try await CompanionConnection.triggerVacuumRun(endpoint: endpoint, token: saved.token)
+            let res = try await CompanionConnection.triggerMaintainRun(endpoint: endpoint, token: saved.token)
             if res.status != "started" {
-                vacuumError = res.error ?? res.message ?? "The Mac did not start a run."
+                maintainError = res.error ?? res.message ?? "The Mac did not start a run."
             }
         } catch {
-            vacuumError = Self.describe(error)
+            maintainError = Self.describe(error)
         }
         // The Mac marks the run as going just after it answers.
         try? await Task.sleep(for: .milliseconds(600))
@@ -1116,16 +1116,16 @@ final class CompanionModel {
             webhookStatus: "Delivered (200) at 9:41:07 AM",
             notificationsDenied: false
         ),
-        remoteVacuumAllowed: true,
+        remoteMaintainAllowed: true,
         // Relative to launch, so the sample reads "3 hours ago", not a year ago.
-        vacuum: sampleVacuum(now: Date())
+        maintain: sampleMaintain(now: Date())
     )
 
-    /// A healthy Robotic Vacuum whose last full run ended `endedSecondsAgo`
+    /// A healthy Maintain whose last full run ended `endedSecondsAgo`
     /// before `now`, for the sample snapshot and Demo Mode.
-    static func sampleVacuum(now: Date, endedSecondsAgo: TimeInterval = 3 * 3600) -> CompanionVacuumStatus {
+    static func sampleMaintain(now: Date, endedSecondsAgo: TimeInterval = 3 * 3600) -> CompanionMaintainStatus {
         let ended = now.addingTimeInterval(-endedSecondsAgo)
-        return CompanionVacuumStatus(
+        return CompanionMaintainStatus(
             health: "healthy",
             displayHealth: "On schedule",
             launchdLoaded: true,
@@ -1136,15 +1136,15 @@ final class CompanionModel {
             lastRunEndedAt: ended,
             lastRunTrigger: "full",
             steps: [
-                CompanionVacuumStep(stepId: "resource_sample", title: "Check disk and memory", statusLabel: "Done", reason: "Disk 76% used.\u{00A0} Memory pressure normal.", bytesFreed: 0),
-                CompanionVacuumStep(stepId: "hoghunter_reclaim", title: "Hog Hunter disk reclaim", statusLabel: "Done", reason: "Standard clean reclaimed 1.1 GB.", bytesFreed: 1_100_000_000),
-                CompanionVacuumStep(stepId: "janitor_worktree_retire", title: "Retire old merged git worktrees", statusLabel: "Done", reason: "Retired 2 merged worktrees.", bytesFreed: 1_900_000_000),
-                CompanionVacuumStep(stepId: "janitor_cache_reclaim", title: "Reclaim caches when disk is low", statusLabel: "Skipped", reason: "The disk has plenty of free space.", bytesFreed: 0),
-                CompanionVacuumStep(stepId: "pm2_logs", title: "Cap oversized PM2 logs", statusLabel: "Done", reason: "No log is over the limit.", bytesFreed: 0),
-                CompanionVacuumStep(stepId: "npm_cache", title: "Trim npm download cache", statusLabel: "Done", reason: "Trimmed the download cache.", bytesFreed: 400_000_000),
-                CompanionVacuumStep(stepId: "xcode_derived_data", title: "Clear Xcode build cache", statusLabel: "Skipped", reason: "Xcode is open.", bytesFreed: 0),
-                CompanionVacuumStep(stepId: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", statusLabel: "Done", reason: "Nothing to remove.", bytesFreed: 0),
-                CompanionVacuumStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
+                CompanionMaintainStep(stepId: "resource_sample", title: "Check disk and memory", statusLabel: "Done", reason: "Disk 76% used.\u{00A0} Memory pressure normal.", bytesFreed: 0),
+                CompanionMaintainStep(stepId: "hoghunter_reclaim", title: "Hog Hunter disk reclaim", statusLabel: "Done", reason: "Standard clean reclaimed 1.1 GB.", bytesFreed: 1_100_000_000),
+                CompanionMaintainStep(stepId: "janitor_worktree_retire", title: "Retire old merged git worktrees", statusLabel: "Done", reason: "Retired 2 merged worktrees.", bytesFreed: 1_900_000_000),
+                CompanionMaintainStep(stepId: "janitor_cache_reclaim", title: "Reclaim caches when disk is low", statusLabel: "Skipped", reason: "The disk has plenty of free space.", bytesFreed: 0),
+                CompanionMaintainStep(stepId: "pm2_logs", title: "Cap oversized PM2 logs", statusLabel: "Done", reason: "No log is over the limit.", bytesFreed: 0),
+                CompanionMaintainStep(stepId: "npm_cache", title: "Trim npm download cache", statusLabel: "Done", reason: "Trimmed the download cache.", bytesFreed: 400_000_000),
+                CompanionMaintainStep(stepId: "xcode_derived_data", title: "Clear Xcode build cache", statusLabel: "Skipped", reason: "Xcode is open.", bytesFreed: 0),
+                CompanionMaintainStep(stepId: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", statusLabel: "Done", reason: "Nothing to remove.", bytesFreed: 0),
+                CompanionMaintainStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
             ],
             recentRuns: sampleRecentRuns(ended: ended),
             watch: sampleWatch(now: now)
@@ -1153,9 +1153,9 @@ final class CompanionModel {
 
     /// The five minute checks as the Mac sums them up: the last one two
     /// minutes ago, and as many today as a five minute clock gives by now.
-    private static func sampleWatch(now: Date) -> CompanionVacuumWatch {
+    private static func sampleWatch(now: Date) -> CompanionMaintainWatch {
         let sinceMidnight = now.timeIntervalSince(Calendar.current.startOfDay(for: now))
-        return CompanionVacuumWatch(
+        return CompanionMaintainWatch(
             lastCheckAt: now.addingTimeInterval(-120),
             checksToday: max(1, Int(sinceMidnight / 300))
         )
@@ -1164,9 +1164,9 @@ final class CompanionModel {
     /// Newest first, the way the Mac lists them: cleaning runs only.  The full
     /// run, then three earlier janitor runs: one that worked on only part of
     /// its steps (partial, exit 0), one that failed, and one that freed space.
-    private static func sampleRecentRuns(ended: Date) -> [CompanionVacuumRun] {
-        func run(_ id: String, _ trigger: String, endedAt: Date, freed: Int = 0, exitCode: Int = 0, seconds: Int = 0, outcome: String = "ok") -> CompanionVacuumRun {
-            CompanionVacuumRun(runId: id, trigger: trigger, endedAt: endedAt, bytesFreed: freed, exitCode: exitCode, durationSeconds: seconds, outcome: outcome)
+    private static func sampleRecentRuns(ended: Date) -> [CompanionMaintainRun] {
+        func run(_ id: String, _ trigger: String, endedAt: Date, freed: Int = 0, exitCode: Int = 0, seconds: Int = 0, outcome: String = "ok") -> CompanionMaintainRun {
+            CompanionMaintainRun(runId: id, trigger: trigger, endedAt: endedAt, bytesFreed: freed, exitCode: exitCode, durationSeconds: seconds, outcome: outcome)
         }
         return [
             run("sample-full", "full", endedAt: ended, freed: 3_400_000_000, seconds: 412),

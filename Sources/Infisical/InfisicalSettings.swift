@@ -79,7 +79,7 @@ enum InfisicalKey {
 /// admin changes something.
 enum InfisicalDefaults {
     static let values: [String: String] = [
-        InfisicalKey.refreshInterval: "3",
+        InfisicalKey.refreshInterval: "5",
         InfisicalKey.alertThresholdPercent: "300",
         InfisicalKey.alertSustainedMinutes: "5",
         InfisicalKey.alertCooldownMinutes: "30",
