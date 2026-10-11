@@ -162,6 +162,20 @@ final class CompanionModel {
     // re-enter .code on the next 401 after an explicit cancel; it stays
     // offline until the user starts pairing again.
     private var pairingDismissed = false
+    /// Why the last pairing attempt failed.  `codeError` carries the words to
+    /// show, but its presence alone does not say why: the short-code guard and
+    /// an unreachable Mac set it too, and neither means the code was rejected.
+    private enum CodeFailure {
+        /// The Mac answered and rejected the credential (401).
+        case unauthorized
+        /// A short code, an unreachable Mac, or anything else.
+        case other
+    }
+    private var codeFailure: CodeFailure?
+
+    private static func failureKind(for error: Error) -> CodeFailure {
+        (error as? CompanionClientError) == .unauthorized ? .unauthorized : .other
+    }
     private let defaultsKey = "hoghunter.companion.saved"
     private let appGroupSuite = "group.com.simplewithus.hoghunter"
 
@@ -197,6 +211,7 @@ final class CompanionModel {
     func select(_ mac: DiscoveredMac) {
         codeDraft = ""
         codeError = nil
+        codeFailure = nil
         pairingDismissed = false
         phase = .code(mac.id)
     }
@@ -204,9 +219,12 @@ final class CompanionModel {
     func cancelCode() {
         // Capture the 401 diagnosis before clearing it: after a pairing-code
         // rotation the Mac answers (with 401), so "did not answer" would be
-        // the wrong message.
-        let wasUnauthorized = codeError != nil
+        // the wrong message.  Read the recorded kind, not `codeError`'s mere
+        // presence — a short code and an unreachable Mac set that too, and
+        // calling either of those "the code no longer matches" misleads.
+        let wasUnauthorized = codeFailure == .unauthorized
         codeError = nil
+        codeFailure = nil
         guard case .code = phase else {
             reconcile()
             return
@@ -260,6 +278,7 @@ final class CompanionModel {
         let token = codeDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
         guard token.count >= 8 else {
             codeError = "Enter the 8 character code from Hog Hunter Settings on your Mac."
+            codeFailure = .other
             return
         }
         isSubmittingCode = true
@@ -271,10 +290,12 @@ final class CompanionModel {
             persistSaved()
             snapshot = next
             codeError = nil
+            codeFailure = nil
             pairingDismissed = false
             phase = .live
         } catch {
             codeError = Self.codeMessage(for: error)
+            codeFailure = Self.failureKind(for: error)
         }
     }
 
@@ -312,13 +333,16 @@ final class CompanionModel {
     func requestApproval() async {
         guard case let .code(peerID) = phase else {
             codeError = "Pick a Mac first."
+            codeFailure = .other
             return
         }
         guard let mac = discovered.first(where: { $0.id == peerID }) else {
             codeError = "That Mac is no longer on this Wi-Fi.  Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
+            codeFailure = .other
             return
         }
         codeError = nil
+        codeFailure = nil
         isWaitingForApproval = true
         defer { isWaitingForApproval = false }
         do {
@@ -330,6 +354,7 @@ final class CompanionModel {
             phase = .live
         } catch {
             codeError = Self.approvalMessage(for: error)
+            codeFailure = Self.failureKind(for: error)
         }
     }
 
@@ -381,6 +406,7 @@ final class CompanionModel {
         snapshot = nil
         codeDraft = ""
         codeError = nil
+        codeFailure = nil
         pairingDismissed = false
         UserDefaults.standard.removeObject(forKey: defaultsKey)
         reconcile()
@@ -399,10 +425,15 @@ final class CompanionModel {
         resetCleaner()
         isDemoMode = false
         snapshot = nil
-        phase = .looking
-        statusLine = CompanionReach.keepsManualHost(saved?.remoteHost)
-            ? "Reconnecting to \(saved?.name ?? "your Mac")."
-            : "Looking for Hog Hunter on this Wi-Fi."
+        // Only say "looking" when nothing is saved.  For a saved Mac that page
+        // tells the person to open Hog Hunter and turn on Share With iPhone,
+        // which is false: the Mac is still paired and the next poll refills
+        // the dashboard.  Its statusLine would not show either, because the
+        // page renders a fixed message and only .offline uses statusLine.
+        if saved == nil {
+            phase = .looking
+            statusLine = "Looking for Hog Hunter on this Wi-Fi."
+        }
         reconcile()
     }
 
@@ -789,6 +820,7 @@ final class CompanionModel {
             saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: portNum)
             persistSaved()
             pairingDismissed = false
+            codeFailure = nil
             snapshot = fetched
             phase = .live
             statusLine = "\(displayName) (Remote)"
@@ -820,6 +852,7 @@ final class CompanionModel {
         do {
             let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token)
             pairingDismissed = false
+            codeFailure = nil
             snapshot = fetched
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
@@ -839,6 +872,9 @@ final class CompanionModel {
                 codeError = CompanionToken.isDeviceToken(saved.token)
                     ? "This iPhone is no longer paired with the Mac.\u{00A0} Enter the code from Hog Hunter Settings to pair it again."
                     : "The code no longer matches.\u{00A0} Enter the code from Hog Hunter Settings on your Mac."
+                // Only a 401 gets here, so this is the case cancelCode() must
+                // report as a code problem rather than a connectivity one.
+                codeFailure = .unauthorized
                 phase = .code(saved.peerID)
             }
         } catch {
