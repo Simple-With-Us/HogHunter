@@ -88,8 +88,12 @@ enum SentryTelemetry {
             options.releaseName = config.release
             options.environment = config.environment
             options.sendDefaultPii = false
+            // Screenshots and view hierarchies are iOS-only in sentry-cocoa.
+            // They stay off on the phone: the panel lists running processes.
+            #if os(iOS)
             options.attachScreenshot = false
             options.attachViewHierarchy = false
+            #endif
             options.tracesSampleRate = NSNumber(value: config.tracesSampleRate)
             options.configureProfiling = { profileOptions in
                 profileOptions.sessionSampleRate = config.profilesSessionSampleRate
