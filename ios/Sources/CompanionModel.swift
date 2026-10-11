@@ -237,7 +237,7 @@ final class CompanionModel {
         if let saved, CompanionReach.keepsManualHost(saved.remoteHost) {
             if wasUnauthorized {
                 phase = .offline
-                statusLine = "The code for \(saved.name) no longer matches.  Reconnect to pair again."
+                statusLine = "The code for \(saved.name) no longer matches.\u{00A0} Reconnect to pair again."
             } else if snapshot != nil {
                 phase = .live
                 statusLine = "\(saved.name) (Remote)"
@@ -267,7 +267,7 @@ final class CompanionModel {
             } else {
                 phase = .offline
                 statusLine = wasUnauthorized
-                    ? "The code for \(saved?.name ?? "your Mac") no longer matches.  Reconnect to pair again."
+                    ? "The code for \(saved?.name ?? "your Mac") no longer matches.\u{00A0} Reconnect to pair again."
                     : "The Mac did not answer."
             }
         }
@@ -867,7 +867,7 @@ final class CompanionModel {
                 // The user already cancelled this pairing attempt; the next
                 // poll must not re-present the sheet on every 401.
                 phase = .offline
-                statusLine = "The code for \(saved.name) no longer matches.  Reconnect to pair again."
+                statusLine = "The code for \(saved.name) no longer matches.\u{00A0} Reconnect to pair again."
             } else {
                 codeError = CompanionToken.isDeviceToken(saved.token)
                     ? "This iPhone is no longer paired with the Mac.\u{00A0} Enter the code from Hog Hunter Settings to pair it again."
