@@ -49,4 +49,25 @@ final class RenamedKeyMigrationTests: XCTestCase {
             )
         }
     }
-}
+
+    /// A user who enabled the opt-in under the old name must end up with
+    /// the new name set, the old name removed, and the live @Published value
+    /// reflecting the carried-over true.
+    @MainActor
+    func testAnOldOptInIsCarriedIntoTheNewKeyAndTheOldKeyIsRemoved() throws {
+        let suite = "RenamedKeyMigrationTests.carry.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "allowRemoteVacuum")
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hoghunter-rename-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let maintain = MaintainStore(supportDirectory: directory, repoRoot: directory) { _ in true }
+        let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), maintain: maintain, startImmediately: false)
+
+        XCTAssertTrue(store.allowRemoteMaintain)
+        XCTAssertNil(defaults.object(forKey: "allowRemoteVacuum"), "the old key must be removed after migration")
+        XCTAssertEqual(defaults.bool(forKey: "allowRemoteMaintain"), true)
+    }

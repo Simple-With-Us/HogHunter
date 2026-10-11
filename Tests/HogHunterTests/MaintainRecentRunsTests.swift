@@ -428,6 +428,20 @@ final class MaintainStoreHistoryTests: XCTestCase {
         XCTAssertEqual(listed.last?.outcome, "ok", "a row from before the field reads as ok, by its exit code")
     }
 
+    func testALegacyRoboticVacuumDirectoryIsMovedOnFirstLaunch() throws {
+        let parent = try directory()
+        let legacy = parent.appendingPathComponent("RoboticVacuum", isDirectory: true)
+        let next = parent.appendingPathComponent("Maintain", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try #"{"health":"healthy","launchd_loaded":true,"next_run_at":{},"intervals_seconds":{},"step_last_results":{},"history_count":1}"#
+            .write(to: legacy.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
+        try "[]".write(to: legacy.appendingPathComponent("history.json"), atomically: true, encoding: .utf8)
+        let store = store(next)
+        XCTAssertEqual(store.status?.health, "healthy")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.appendingPathComponent("status.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: next.appendingPathComponent("status.json").path))
+    }
+
     func testAStoreWithNoHistoryFileHasNoRunsAndNoSummary() throws {
         let store = store(try directory())
         XCTAssertEqual(store.history, [])

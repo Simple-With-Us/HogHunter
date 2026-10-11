@@ -44,9 +44,30 @@ final class MaintainStore: ObservableObject {
         statusURL = support.appendingPathComponent("status.json")
         historyURL = support.appendingPathComponent("history.json")
         configURL = support.appendingPathComponent("config.json")
+        MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
         self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
         refresh()
+    }
+
+    /// Pre-rename builds wrote `HogHunter/RoboticVacuum/`.  The JSON shape
+    /// is the same, so a one-shot move keeps recent-run history and status
+    /// instead of looking like a fresh install.
+    static func migrateLegacySupportIfNeeded(to support: URL, fileManager: FileManager) {
+        let newStatus = support.appendingPathComponent("status.json")
+        guard !fileManager.fileExists(atPath: newStatus.path) else { return }
+        let legacyRoot = support.deletingLastPathComponent()
+            .appendingPathComponent("RoboticVacuum", isDirectory: true)
+        let legacyStatus = legacyRoot.appendingPathComponent("status.json")
+        guard fileManager.fileExists(atPath: legacyStatus.path) else { return }
+        try? fileManager.createDirectory(at: support, withIntermediateDirectories: true)
+        for name in ["status.json", "history.json", "config.json"] {
+            let src = legacyRoot.appendingPathComponent(name)
+            let dest = support.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: src.path),
+                  !fileManager.fileExists(atPath: dest.path) else { continue }
+            try? fileManager.moveItem(at: src, to: dest)
+        }
     }
 
     func startPolling() {
