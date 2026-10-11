@@ -71,3 +71,4 @@ final class RenamedKeyMigrationTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "allowRemoteVacuum"), "the old key must be removed after migration")
         XCTAssertEqual(defaults.bool(forKey: "allowRemoteMaintain"), true)
     }
+}
