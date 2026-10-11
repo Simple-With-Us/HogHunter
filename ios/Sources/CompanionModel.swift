@@ -87,6 +87,31 @@ final class CompanionModel {
     /// through, so the dashboard can say so instead of silently doing nothing.
     var controlError: String?
     var showCleanDialogRequested = false
+    /// When the current Clean request arrived.  The root view only builds the
+    /// dashboard when the phase is `.live`, so a link that lands while the Mac
+    /// is unreachable would otherwise leave the flag set and pop the
+    /// destructive confirmation unprompted once the Mac came back.
+    private var cleanRequestAt: Date?
+    /// How long a Clean request stays valid.  A cold start still has to launch,
+    /// find the Mac and fetch a snapshot before the dashboard exists, so this
+    /// is generous -- but short enough that a link is not replayed much later.
+    static let cleanRequestLifetime: TimeInterval = 30
+
+    /// Record a `hoghunter://clean` link as asking for the confirmation now.
+    func requestCleanDialog() {
+        showCleanDialogRequested = true
+        cleanRequestAt = Date()
+    }
+
+    /// Take the pending Clean request, returning whether one is still valid.
+    /// Cleared either way, so a link is honoured at most once.
+    func takeCleanRequest() -> Bool {
+        let fresh = showCleanDialogRequested
+            && cleanRequestAt.map { Date().timeIntervalSince($0) < Self.cleanRequestLifetime } == true
+        showCleanDialogRequested = false
+        cleanRequestAt = nil
+        return fresh
+    }
     /// The row a Sample for 3 Seconds is running on, so the row can say so and
     /// a second tap does not start a second sample.
     var samplingRowId: String?
@@ -837,14 +862,34 @@ final class CompanionModel {
         }
     }
 
+    /// How long a widget timeline reload is rate limited to.  The widget sets
+    /// its own `.after(5 minutes)` policy, so a reload more often than this
+    /// only spins up the extension to redraw data nobody is waiting on.
+    private static let widgetReloadInterval: TimeInterval = 300
+    private var lastWidgetReload: Date?
+    /// The clean keys the widget renders, so a clean finishing forces a reload
+    /// even when the throttle has not elapsed.
+    private var lastCleanKeysForWidget: [String]?
+
     private func storeSnapshotForWidgets(_ fetched: CompanionSnapshot) {
-        // Reloading every poll would burn WidgetKit's reload budget (~20/min)
-        // re-rendering unchanged data, and is pure waste while the App Group
-        // entitlement is missing (the write below is then a silent no-op).
+        // A write into a missing App Group is a silent no-op, so there is
+        // nothing to reload for.  The payload itself changes on every poll
+        // (sampledAt plus live CPU and memory), so comparing bytes cannot
+        // suppress the reload -- write every poll, but rate limit the reload.
         guard let defaults = UserDefaults(suiteName: appGroupSuite),
-              let data = try? CompanionJSON.encode(fetched),
-              defaults.data(forKey: "last_snapshot") != data else { return }
+              let data = try? CompanionJSON.encode(fetched) else { return }
         defaults.set(data, forKey: "last_snapshot")
+        let cleanKeys = [
+            defaults.string(forKey: "clean_status") ?? "",
+            defaults.string(forKey: "last_clean_bytes") ?? "",
+            String(defaults.double(forKey: "last_clean_date")),
+        ]
+        let now = Date()
+        let cleanChanged = cleanKeys != lastCleanKeysForWidget
+        let dueForReload = lastWidgetReload.map { now.timeIntervalSince($0) >= Self.widgetReloadInterval } ?? true
+        guard cleanChanged || dueForReload else { return }
+        lastWidgetReload = now
+        lastCleanKeysForWidget = cleanKeys
         WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 

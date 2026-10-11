@@ -16,7 +16,7 @@ struct HogHunterIOSApp: App {
                 .preferredColorScheme(.light)
                 .onOpenURL { url in
                     if url.scheme == "hoghunter" && url.host == "clean" {
-                        model.showCleanDialogRequested = true
+                        model.requestCleanDialog()
                     }
                 }
         }

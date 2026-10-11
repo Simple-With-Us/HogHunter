@@ -412,9 +412,8 @@ struct DashboardView: View {
     @State private var showSampleConfirm = false
 
     private func consumeCleanRequest() {
-        guard model.showCleanDialogRequested else { return }
+        guard model.takeCleanRequest() else { return }
         showCleanConfirm = true
-        model.showCleanDialogRequested = false
     }
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
