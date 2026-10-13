@@ -24,7 +24,7 @@ packages:
     url: https://github.com/getsentry/sentry-cocoa
     # 8.56+ has configureProfiling (8.x profilesSampleRate is gone in 9).
     # `from` is up-to-next-major, so this stays on 8.x until Renovate opens a major PR.
-    from: "8.58.4"
+    from: "9.30.1"
 
 settings:
   base:
