@@ -19,9 +19,11 @@ jobs:
 
       - name: Check manual release scripts without signing credentials
         run: |
-          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh
+          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh
           bash scripts/test-ios-stage-asc-key.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-ci-report.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-wiring.py
 
       - name: Robotic Vacuum Python tests
         run: |

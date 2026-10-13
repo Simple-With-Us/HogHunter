@@ -104,6 +104,9 @@ struct HogHunterApp: App {
     @StateObject private var store = HogStore()
 
     init() {
+        // Sentry first, so early-launch crashes are captured.  A build
+        // without a baked-in DSN is a silent no-op.  See SentryTelemetry.
+        SentryTelemetry.start()
         // Infisical SOT bootstrap: fetches app-level settings into the
         // in-memory cache on a background task.  Never blocks launch; when
         // Infisical is not configured (or unreachable) every built-in default
