@@ -18,7 +18,7 @@ enum CompanionHTTP {
         viewHandler: ((CompanionViewUpdateRequest) -> (status: Int, body: Data))? = nil,
         settingsHandler: ((CompanionSettingsUpdateRequest) -> (status: Int, body: Data))? = nil,
         sampleHandler: ((CompanionProcessRequest) -> (status: Int, body: Data))? = nil,
-        vacuumHandler: ((_ kind: String) -> (status: Int, body: Data))? = nil,
+        maintainHandler: ((_ kind: String) -> (status: Int, body: Data))? = nil,
         peerTrusted: Bool = true,
         deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
@@ -46,7 +46,7 @@ enum CompanionHTTP {
             || path == CompanionService.viewPath
             || path == CompanionService.settingsPath
             || path == CompanionService.samplePath
-            || path == CompanionService.vacuumRunPath else {
+            || path == CompanionService.maintainRunPath else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
@@ -266,30 +266,30 @@ enum CompanionHTTP {
             }
             let (code, resBody) = sampleHandler(CompanionProcessRequest(rowId: processRequest.rowId, pid: nil))
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
-        } else if path == CompanionService.vacuumRunPath {
+        } else if path == CompanionService.maintainRunPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
             }
-            guard let vacuumHandler else {
-                return message(status: 501, reason: "Not Implemented", body: Data("Vacuum Not Configured".utf8))
+            guard let maintainHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Maintain Not Configured".utf8))
             }
             // Only the full run is on offer.  An absent kind means full, and
             // anything else is refused before the handler or the opt-in is
             // consulted, so a hand-built request cannot reach the script's
             // other cadences.
-            guard let kind = vacuumRunKind(fullPath: fullPath) else {
+            guard let kind = maintainRunKind(fullPath: fullPath) else {
                 return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"That kind of run is not available from iPhone.\u00a0 Only the full run is."}"#.utf8), type: "application/json; charset=utf-8")
             }
-            let (code, resBody) = vacuumHandler(kind)
+            let (code, resBody) = maintainHandler(kind)
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         }
         return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
     }
 
-    /// The run kind a vacuum request asks for: "full" when the query names
+    /// The run kind a maintain request asks for: "full" when the query names
     /// none, nil when it names anything the phone may not start.  Every
     /// `kind` in the query must be "full", so a repeated key cannot smuggle one in.
-    static func vacuumRunKind(fullPath: String) -> String? {
+    static func maintainRunKind(fullPath: String) -> String? {
         var kinds: [String] = []
         if fullPath.contains("?") {
             let query = queryString(of: fullPath)
@@ -301,7 +301,7 @@ enum CompanionHTTP {
             }
         }
         if kinds.isEmpty { return "full" }
-        return kinds.allSatisfy { CompanionService.vacuumRunKinds.contains($0) } ? kinds[0] : nil
+        return kinds.allSatisfy { CompanionService.maintainRunKinds.contains($0) } ? kinds[0] : nil
     }
 
     /// Everything after the first `?`, or empty.  `split(separator: "?")` on a
@@ -750,9 +750,9 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func vacuumRunRequest(token: String, kind: String = "full") -> Data {
+    static func maintainRunRequest(token: String, kind: String = "full") -> Data {
         let lines = [
-            "POST \(CompanionService.vacuumRunPath)?kind=\(queryAllowedValue(kind)) HTTP/1.1",
+            "POST \(CompanionService.maintainRunPath)?kind=\(queryAllowedValue(kind)) HTTP/1.1",
             "Host: hoghunter",
             "Authorization: Bearer \(token)",
             "Accept: application/json",

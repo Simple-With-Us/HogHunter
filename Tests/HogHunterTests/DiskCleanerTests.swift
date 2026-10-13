@@ -19,6 +19,99 @@ final class DiskCleanerTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSharedVendorFoldersAreNotOrphans() {
+        for name in ["Google", "Mozilla", "Microsoft", "MobileSync", "CrashReporter", "  google  "] {
+            XCTAssertTrue(DiskCleaner.isSharedVendorContainer(name), name)
+        }
+        XCTAssertFalse(DiskCleaner.isSharedVendorContainer("com.removed.App"))
+        XCTAssertFalse(DiskCleaner.isSharedVendorContainer("SomeUninstalledApp"))
+        XCTAssertTrue(DiskCleaner.holdsInstalledProduct(
+            childNames: ["Chrome"],
+            knownBundleIds: ["com.google.chrome"],
+            knownNames: ["chrome", "google chrome"]
+        ))
+        // Vendor/product layout: JetBrains/IntelliJIdea2024.2 and
+        // BraveSoftware/Brave-Browser must match after normalization.
+        XCTAssertTrue(DiskCleaner.holdsInstalledProduct(
+            childNames: ["IntelliJIdea2024.2"],
+            knownBundleIds: ["com.jetbrains.intellij"],
+            knownNames: ["intellij", "intellij idea"]
+        ))
+        XCTAssertTrue(DiskCleaner.holdsInstalledProduct(
+            childNames: ["Brave-Browser"],
+            knownBundleIds: ["com.brave.Browser"],
+            knownNames: ["browser", "brave browser"]
+        ))
+        XCTAssertFalse(DiskCleaner.holdsInstalledProduct(
+            childNames: ["OldProduct"],
+            knownBundleIds: ["com.google.chrome"],
+            knownNames: ["chrome"]
+        ))
+    }
+
+    func testScanOrphanedDataSkipsVendorAndInstalledProductFolders() {
+        // The two `continue` guards in the Application Support scan must be
+        // consulted by the scan itself, not just correct in isolation:
+        // deleting either one reintroduces the data-loss path from issue #67.
+        let fm = FileManager.default
+        func makeAppSupportFolder(_ name: String, child: String) {
+            let dir = tempDirectory
+                .appendingPathComponent("Library/Application Support/\(name)/\(child)", isDirectory: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? "x".write(to: dir.appendingPathComponent("data.bin"), atomically: true, encoding: .utf8)
+        }
+        makeAppSupportFolder("Google", child: "Chrome")
+        makeAppSupportFolder("JetBrains", child: "IntelliJIdea2024.2")
+        makeAppSupportFolder("DefinitelyRemovedApp", child: "OldData")
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let apps = [StorageScanner.InstalledApp(bundleId: "com.jetbrains.intellij",
+                                                name: "IntelliJ IDEA",
+                                                url: nil,
+                                                groupContainers: [])]
+        let titles = Set(cleaner.scanOrphanedData(installedApps: apps).map(\.title))
+        XCTAssertFalse(titles.contains("Google"), "shared vendor folder must not be listed as an orphan")
+        XCTAssertFalse(titles.contains("JetBrains"), "folder holding an installed product must not be listed as an orphan")
+        XCTAssertTrue(titles.contains("DefinitelyRemovedApp"), "genuinely removed app leftovers must still surface")
+    }
+
+    func testIsSafeToDeleteUsesInjectedHome() {
+        // Without routing isSafeToDelete through userHomeURL, scan-and-clean
+        // under an injected temp home rejects every orphan (allowlist is the
+        // real home) and verification for issue #67 can pass vacuously.
+        // The temp folder name still contains "HogHunter" so a naive substring
+        // HogHunter path guard would also fail this test — path protection must
+        // key off real namespaces, not any occurrence of the product name.
+        let fm = FileManager.default
+        let orphan = tempDirectory
+            .appendingPathComponent("Library/Application Support/DefinitelyRemovedApp", isDirectory: true)
+        try? fm.createDirectory(at: orphan, withIntermediateDirectories: true)
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertTrue(
+            cleaner.isSafeToDelete(url: orphan, category: .orphanedData),
+            "orphan under injected home must pass the orphan allowlist"
+        )
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: tempDirectory, category: .orphanedData),
+            "injected home itself must stay prohibited"
+        )
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(
+                url: tempDirectory.appendingPathComponent("Library", isDirectory: true),
+                category: .orphanedData
+            ),
+            "injected Library itself must stay prohibited"
+        )
+        // Real Hog Hunter namespaces under the injected home stay protected.
+        let protected = tempDirectory
+            .appendingPathComponent("Library/Application Support/HogHunter", isDirectory: true)
+        try? fm.createDirectory(at: protected, withIntermediateDirectories: true)
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: protected, category: .orphanedData),
+            "Application Support/HogHunter under injected home must stay protected"
+        )
+    }
+
     // MARK: - Category Metadata Tests
 
     func testCategoryMetadata() {

@@ -335,8 +335,8 @@ struct DiskCleanerView: View {
             // and both were on screen for the whole scan: `state` is `.scanning`
             // while `report` is still nil, because `report` is only assigned
             // once the scan completes.  Two gates, one question, two spinners.
-            // The same mistake put "Robotic Vacuum" on screen twice in
-            // `RoboticVacuumView.header`.  The status header owns progress now;
+            // The same mistake put "Maintain" on screen twice in
+            // `MaintainView.header`.  The status header owns progress now;
             // the body only has to decide whether there are results to show.
             Spacer()
         }

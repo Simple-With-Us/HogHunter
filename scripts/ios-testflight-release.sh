@@ -48,13 +48,63 @@ validate_app() {
   "${validator[@]}"
 }
 
+# After a successful archive: upload dSYMs to project `hoghunter`.  Never fail
+# the TestFlight ship if Sentry is missing or the upload errors.  Never print
+# the auth token or DSN.
+upload_sentry_dsyms() {
+  { set +x; } 2>/dev/null
+  local archive_path="$1"
+  local project="${SENTRY_PROJECT:-hoghunter}"
+  local sentry_org="${SENTRY_ORG:-simple-with-us}"
+  if [[ -z "${SENTRY_AUTH_TOKEN:-}" ]]; then
+    echo "sentry: SENTRY_AUTH_TOKEN unset; skipping dSYM upload"
+    return 0
+  fi
+  if [[ ! -d "$archive_path" ]]; then
+    echo "sentry: archive missing; skipping dSYM upload"
+    return 0
+  fi
+  if ! command -v sentry-cli >/dev/null 2>&1; then
+    echo "sentry: sentry-cli not on PATH; trying official installer"
+    if ! curl -sL https://sentry.io/get-cli/ | bash >/dev/null 2>&1; then
+      echo "warning: sentry-cli install failed; TestFlight ship continues"
+      return 0
+    fi
+    export PATH="${HOME}/.local/bin:${HOME}/.sentry-cli:${PATH}:/opt/homebrew/bin"
+  fi
+  if ! command -v sentry-cli >/dev/null 2>&1; then
+    echo "warning: sentry-cli still missing; skipping dSYM upload"
+    return 0
+  fi
+  echo "sentry: uploading debug files for project=${project}"
+  if ! SENTRY_ORG="$sentry_org" SENTRY_PROJECT="$project" \
+      sentry-cli debug-files upload --include-sources "$archive_path" \
+      >"$work_dir/sentry-debug-files.log" 2>&1; then
+    echo "warning: sentry dSYM upload failed; TestFlight continues"
+  else
+    echo "sentry: dSYM upload finished"
+  fi
+}
+
 xcodegen generate
+# Bake SENTRY_DSN into the archive when the workflow loaded one.  Empty keeps
+# SentryTelemetry a no-op.  The value is never printed.
+{ set +x; } 2>/dev/null
+SENTRY_DSN_FLAGS=()
+if [[ -n "${SENTRY_DSN:-}" ]]; then
+  SENTRY_DSN_FLAGS+=(SENTRY_DSN="$SENTRY_DSN")
+  echo "SENTRY_DSN present for the iOS archive (length ${#SENTRY_DSN})."
+else
+  echo "warning: SENTRY_DSN unset; this TestFlight build ships with Sentry Cocoa inert."
+fi
 xcodebuild -project HogHunter.xcodeproj -scheme HogHunterIOS -configuration Release \
   -destination 'generic/platform=iOS' -derivedDataPath "$work_dir/DerivedData" \
   -archivePath "$archive" -allowProvisioningUpdates "${auth[@]}" \
   DEVELOPMENT_TEAM=CC8UTF7ATG CODE_SIGN_STYLE=Automatic \
-  CURRENT_PROJECT_VERSION="$HH_BUILD_NUMBER" archive -quiet
+  CURRENT_PROJECT_VERSION="$HH_BUILD_NUMBER" \
+  ${SENTRY_DSN_FLAGS[@]+"${SENTRY_DSN_FLAGS[@]}"} archive -quiet
 validate_app "$archive/Products/Applications/HogHunter.app"
+upload_sentry_dsyms "$archive"
 
 python3 - "$work_dir/ExportOptions.plist" <<'PY'
 import plistlib, sys

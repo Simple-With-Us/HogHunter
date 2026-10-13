@@ -72,8 +72,21 @@ echo "Generating the Xcode project."
 xcodegen generate
 
 echo "Building Release."
+# SENTRY_DSN_MACOS wins when both are set (fleet split).  The value is passed
+# as an xcodebuild setting and never printed.  Empty keeps Sentry inert.
+{ set +x; } 2>/dev/null
+SENTRY_DSN_FLAGS=()
+MAC_SENTRY_DSN="${SENTRY_DSN_MACOS:-${SENTRY_DSN:-}}"
+if [[ -n "$MAC_SENTRY_DSN" ]]; then
+  SENTRY_DSN_FLAGS+=(SENTRY_DSN="$MAC_SENTRY_DSN")
+  echo "SENTRY_DSN present for the Mac archive (length ${#MAC_SENTRY_DSN})."
+else
+  echo "SENTRY_DSN unset; this install ships with Sentry Cocoa inert."
+fi
+unset MAC_SENTRY_DSN
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build \
-  ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO CODE_SIGNING_ALLOWED=NO
+  ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO CODE_SIGNING_ALLOWED=NO \
+  ${SENTRY_DSN_FLAGS[@]+"${SENTRY_DSN_FLAGS[@]}"}
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Build did not produce $APP_PATH." >&2

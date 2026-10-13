@@ -53,6 +53,8 @@ jobs:
           SECRET_IOS_DIST_P12_BASE64: ${{ secrets.IOS_DIST_P12_BASE64 }}
           SECRET_IOS_DIST_P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
           SECRET_ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          SECRET_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SECRET_SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
@@ -167,8 +169,39 @@ jobs:
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
+
+          # Sentry is best-effort: an inert Cocoa SDK beats a red ship.
+          # GitHub Actions secrets win; Infisical prod is the fallback when
+          # this step already holds a token from the signing load above.
+          for name in SENTRY_DSN SENTRY_AUTH_TOKEN; do
+            case "$name" in
+              SENTRY_DSN) val="${SECRET_SENTRY_DSN:-}" ;;
+              SENTRY_AUTH_TOKEN) val="${SECRET_SENTRY_AUTH_TOKEN:-}" ;;
+            esac
+            if [ -z "$val" ] && [ -n "${TOKEN:-}" ]; then
+              val="$(
+                INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
+                  --plain --silent --telemetry=false --expand=false \
+                  --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
+                  2>/dev/null || true
+              )"
+            fi
+            if [ -z "$val" ]; then
+              echo "sentry: $name unset; TestFlight continues with Sentry inert or without dSYM upload."
+              continue
+            fi
+            if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+              echo "::error::$name must be single-line; correct secret formatting." >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${val//'%'/'%25'}"
+            printf -v "$name" '%s' "$val"
+            export "${name?}"
+            printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
+          done
           unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD \
-                SECRET_ASC_KEY_ID SECRET_ASC_ISSUER_ID SECRET_IOS_DIST_P12_BASE64 SECRET_IOS_DIST_P12_PASSWORD SECRET_ASC_KEY_P8
+                SECRET_ASC_KEY_ID SECRET_ASC_ISSUER_ID SECRET_IOS_DIST_P12_BASE64 SECRET_IOS_DIST_P12_PASSWORD SECRET_ASC_KEY_P8 \
+                SECRET_SENTRY_DSN SECRET_SENTRY_AUTH_TOKEN
 
       - name: Archive, validate, export, and optionally upload
         run: bash scripts/ios-testflight-release.sh

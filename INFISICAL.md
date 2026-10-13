@@ -56,7 +56,20 @@ These stay in UserDefaults (or the app-group defaults for shared state).  They a
 - Cleaner exclusions and the regimen's enabled-rule set -- per-user choices about what may be deleted on this Mac.
 - `hoghunter.cleaner.regimen.lastRunAt` -- local operational state.
 - `config/reclaim-policy.json` -- the machine-readable reclaim policy with owner rulings and rationale, shared with the `scripts/hoghunter-clean` CLI.  Only its numeric bands are migrated (see the `hoghunter.reclaim.*` keys); the document itself, its comments, and its rule inventory stay in the repo.
-No secrets, env vars, or build-time configuration existed in the repo before this change -- there was no `.env` file, no API keys, no service URLs.  The only secret in the inventory is the alert webhook URL, which the admin fills in.
+The only runtime secret in the Infisical inventory the Mac app reads is the alert webhook URL, which the admin fills in.
+
+### Build-time Sentry (not a runtime Infisical read)
+
+These names are never fetched into `InfisicalStore`.  The DSN is baked into Info.plist at archive / install time (`$(SENTRY_DSN)`), and an empty value keeps `SentryTelemetry.start()` a no-op.  The iPhone companion never talks to Infisical.
+
+| Key | Where Jay sets it | What it drives |
+|---|---|---|
+| `SENTRY_DSN` | Infisical project `HogHunter` env `prod` path `/`, and GitHub Actions secret `SENTRY_DSN` | iOS TestFlight archive; also the Mac install when `SENTRY_DSN_MACOS` is unset |
+| `SENTRY_DSN_MACOS` | Infisical prod `/` (optional) | `scripts/install.sh` prefers this over `SENTRY_DSN` for the menubar app |
+| `SENTRY_AUTH_TOKEN` | Infisical prod `/`, and GitHub Actions secret `SENTRY_AUTH_TOKEN` | `sentry-cli debug-files upload` after a TestFlight archive (org `simple-with-us`, project `hoghunter`) |
+| `SENTRY_FLEET_DSN` | GitHub Actions org or repo secret | `.github/workflows/sentry-ci-report.yml` reports CI failures to fleet-infra |
+
+Never put a DSN or auth token in git, `project.yml`, Info.plist, a log, or a PR body.
 
 ### Robotic Vacuum (Python, Not Migrated)
 

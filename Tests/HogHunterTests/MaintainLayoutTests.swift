@@ -4,9 +4,9 @@ import XCTest
 
 @testable import HogHunter
 
-// The Robotic Vacuum tab in the menu bar panel.  Issue 117, board d578aa68.
+// The Maintain tab in the menu bar panel.  Issue 117, board d578aa68.
 //
-// The panel is a fixed 620 by 680.  The Vacuum tab was a plain stack taller than the room it was given, so
+// The panel is a fixed 620 by 680.  The Maintain tab was a plain stack taller than the room it was given, so
 // the panel's own frame centered the overflow and clipped the top (the panel header and the tab picker went
 // out of sight) and the bottom (the last Recent Runs row).  Nothing here launches the real script: the store
 // reads files in a temporary folder and takes a launcher that fails the test if it is called.
@@ -15,21 +15,21 @@ import XCTest
 // tab as the panel and the Storage window show it.  With it unset the tests write nothing.
 
 @MainActor
-final class RoboticVacuumLayoutTests: XCTestCase {
+final class MaintainLayoutTests: XCTestCase {
 
     // MARK: - Sample data
 
     /// A store holding what a busy week looks like: all nine steps with a result, and 20 cleaning runs among
     /// the five minute checks, with times that differ in width ("6 minutes ago", "1 hour ago", "2 days ago").
-    private func sampleStore() throws -> RoboticVacuumStore {
+    private func sampleStore() throws -> MaintainStore {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("hoghunter-vacuum-layout-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("hoghunter-maintain-layout-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
 
         let now = Date().timeIntervalSince1970
-        func step(_ id: String, _ title: String, _ status: String, _ reason: String, freed: Int = 0) -> RoboticVacuumStepResult {
-            RoboticVacuumStepResult(stepId: id, title: title, status: status, reason: reason, bytesFreed: freed, durationMs: 120)
+        func step(_ id: String, _ title: String, _ status: String, _ reason: String, freed: Int = 0) -> MaintainStepResult {
+            MaintainStepResult(stepId: id, title: title, status: status, reason: reason, bytesFreed: freed, durationMs: 120)
         }
         let steps = [
             step("resource_sample", "Check disk and memory", "ran", "1 threshold hit"),
@@ -42,7 +42,7 @@ final class RoboticVacuumLayoutTests: XCTestCase {
             step("simctl_delete_unavailable", "Remove unavailable Simulator runtimes", "skipped", "not run: it would delete simulator devices in CoreSimulator/Devices, which no cleanup step touches"),
             step("coolify_remote", "Remote server maintenance", "skipped", "coolify_ssh_host not configured"),
         ]
-        let status = RoboticVacuumStatus(
+        let status = MaintainStatus(
             health: "healthy",
             launchdLoaded: true,
             nextRunAt: ["full": now + 3 * 3600, "janitor": now + 900],
@@ -63,9 +63,9 @@ final class RoboticVacuumLayoutTests: XCTestCase {
             (440, "manual", 52_428_800, "ok"), (700, "janitor", 0, "ok"), (1_500, "janitor", 4_096, "ok"), (1_560, "full", 0, "failed"),
             (2_900, "janitor", 0, "ok"), (3_000, "pressure", 25_165_824, "ok"), (4_400, "janitor", 0, "ok"), (4_500, "full", 0, "ok"),
         ]
-        var runs: [RoboticVacuumRun] = cleaning.enumerated().map { index, item in
+        var runs: [MaintainRun] = cleaning.enumerated().map { index, item in
             let ended = now - item.minutes * 60
-            return RoboticVacuumRun(
+            return MaintainRun(
                 runId: "c\(index)", trigger: item.kind, startedAt: ended - 40, endedAt: ended, bytesFreed: item.bytes,
                 exitCode: item.outcome == "failed" ? 1 : 0,
                 steps: [step("pm2_logs", "Cap oversized PM2 logs", "ran", "truncated 0 logs in place")],
@@ -75,7 +75,7 @@ final class RoboticVacuumLayoutTests: XCTestCase {
         // The quiet five minute checks the list leaves out.
         for index in 0..<20 {
             let ended = now - Double(index) * 300 - 30
-            runs.append(RoboticVacuumRun(
+            runs.append(MaintainRun(
                 runId: "w\(index)", trigger: "watch", startedAt: ended - 2, endedAt: ended, bytesFreed: 0, exitCode: 0,
                 steps: [step("resource_sample", "Check disk and memory", "ran", "within limits")], outcome: "ok"
             ))
@@ -83,7 +83,7 @@ final class RoboticVacuumLayoutTests: XCTestCase {
         runs.sort { $0.endedAt < $1.endedAt }   // the engine writes oldest first
         try JSONEncoder().encode(runs).write(to: directory.appendingPathComponent("history.json"))
 
-        return RoboticVacuumStore(supportDirectory: directory, repoRoot: directory, launcher: { _ in
+        return MaintainStore(supportDirectory: directory, repoRoot: directory, launcher: { _ in
             XCTFail("a test must not launch the script")
             return true
         })
@@ -91,13 +91,13 @@ final class RoboticVacuumLayoutTests: XCTestCase {
 
     // MARK: - Hosting
 
-    private func storageView(_ store: RoboticVacuumStore, embedded: Bool, tab: StorageTab = .roboticVacuum) -> StorageView {
-        StorageView(runningBundleIds: { [] }, vacuumStore: store, embeddedInPanel: embedded, isTabActive: true, initialTab: tab)
+    private func storageView(_ store: MaintainStore, embedded: Bool, tab: StorageTab = .maintain) -> StorageView {
+        StorageView(runningBundleIds: { [] }, maintainStore: store, embeddedInPanel: embedded, isTabActive: true, initialTab: tab)
     }
 
     /// The tab as `HogHunterPanel` composes it: pinned to the panel's inner width, clipped, in a `ZStack` under
     /// the panel's own header, inside the fixed panel frame.
-    private func panelComposition(_ store: RoboticVacuumStore) -> some View {
+    private func panelComposition(_ store: MaintainStore) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Text("Hog Hunter").font(.system(size: 17, weight: .semibold))
@@ -162,7 +162,7 @@ final class RoboticVacuumLayoutTests: XCTestCase {
             rootView: storageView(store, embedded: true).frame(width: HogHunterPanel.contentWidth, alignment: .leading)
         )
         let fitted = controller.sizeThatFits(in: CGSize(width: HogHunterPanel.contentWidth, height: offered))
-        XCTAssertLessThanOrEqual(fitted.height, offered + 1, "the Vacuum tab wants \(Int(fitted.height)) pt but was offered \(Int(offered)) pt")
+        XCTAssertLessThanOrEqual(fitted.height, offered + 1, "the Maintain tab wants \(Int(fitted.height)) pt but was offered \(Int(offered)) pt")
         XCTAssertLessThanOrEqual(fitted.width, HogHunterPanel.contentWidth + 1, "wider than the panel's inner width")
     }
 
@@ -173,11 +173,11 @@ final class RoboticVacuumLayoutTests: XCTestCase {
         let offered: CGFloat = 700
         let controller = NSHostingController(rootView: storageView(store, embedded: false).frame(width: 560, alignment: .leading))
         let fitted = controller.sizeThatFits(in: CGSize(width: 560, height: offered))
-        XCTAssertLessThanOrEqual(fitted.height, offered + 1, "the Vacuum tab wants \(Int(fitted.height)) pt but was offered \(Int(offered)) pt")
+        XCTAssertLessThanOrEqual(fitted.height, offered + 1, "the Maintain tab wants \(Int(fitted.height)) pt but was offered \(Int(offered)) pt")
     }
 
-    /// **The header.**  The segmented control (Cleaner, Vacuum, Apps) sits in the Storage header next to a
-    /// subtitle pinned to its full width.  The Vacuum subtitle was long enough that the header was wider than
+    /// **The header.**  The segmented control (Cleaner, Maintain, Apps) sits in the Storage header next to a
+    /// subtitle pinned to its full width.  The Maintain subtitle was long enough that the header was wider than
     /// the panel, so the control lost its "Apps" segment off the right edge and its "Mode" label wrapped
     /// ("Mod" over "e").  Whatever a mode's subtitle says, the view's own width must fit the panel.
     func testEveryModeFitsThePanelWidth() throws {
@@ -195,19 +195,19 @@ final class RoboticVacuumLayoutTests: XCTestCase {
         let panelSize = CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
         let panel = bitmap(of: panelComposition(store), size: panelSize)
         XCTAssertEqual(panel?.pixelsWide, Int(panelSize.width * (panel.map { CGFloat($0.pixelsWide) / panelSize.width } ?? 1)))
-        try savePNG(panel, named: "vacuum-panel")
+        try savePNG(panel, named: "maintain-panel")
 
         // The whole tab on one picture, tall enough that nothing scrolls out of sight: every Recent Runs row.
         let tall = CGSize(width: HogHunterPanel.contentWidth, height: 1_100)
-        let all = bitmap(of: RoboticVacuumView(store: store).frame(width: tall.width, height: tall.height, alignment: .topLeading)
+        let all = bitmap(of: MaintainView(store: store).frame(width: tall.width, height: tall.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor)), size: tall)
         XCTAssertNotNil(all)
-        try savePNG(all, named: "vacuum-tab-all-rows")
+        try savePNG(all, named: "maintain-tab-all-rows")
 
         let windowSize = CGSize(width: 560, height: 680)
         let window = bitmap(of: storageView(store, embedded: false).frame(width: windowSize.width, height: windowSize.height)
             .background(Color(nsColor: .windowBackgroundColor)), size: windowSize)
         XCTAssertNotNil(window)
-        try savePNG(window, named: "vacuum-window")
+        try savePNG(window, named: "maintain-window")
     }
 }
