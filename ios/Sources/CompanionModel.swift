@@ -893,7 +893,7 @@ final class CompanionModel {
         WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 
-    private func refresh() async {
+    func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             if didBrowse, let saved, saved.remoteHost == nil, discovered.first(where: { $0.id == saved.peerID }) == nil {
                 if phase != .code(saved.peerID) {
