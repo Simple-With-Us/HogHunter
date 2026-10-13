@@ -237,6 +237,7 @@ final class CleanRegimenRunner: ObservableObject {
         case .logsAndDiagnostics: return "logs"
         case .developer: return "xcode-artifacts"
         case .trash: return "temp-scratch"
+        case .tempFiles: return "temp-scratch"
         case .apfsSnapshots:
             // Own rule: an unattended regimen must not thin snapshots just
             // because the user opted into log cleanup.

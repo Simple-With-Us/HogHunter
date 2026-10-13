@@ -529,5 +529,150 @@ final class DiskCleanerTests: XCTestCase {
             XCTAssertTrue(item.isSelected)
         }
     }
+
+    // MARK: - Temp Files Category (/tmp)
+
+    func testTempFilesCategoryMetadata() {
+        let cat = CleanCategory.tempFiles
+        XCTAssertEqual(cat.id, "tempFiles")
+        XCTAssertEqual(cat.title, "Temp Files")
+        XCTAssertFalse(cat.description.isEmpty)
+        XCTAssertFalse(cat.icon.isEmpty)
+        XCTAssertEqual(cat.sortOrder, 9)
+        XCTAssertFalse(cat.defaultSelected, "Temp files must require explicit per-item review — /tmp can hold live pipeline staging")
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(cat), "Temp files belong in the Standard tier (safe, reversible via snapshot + Trash)")
+        XCTAssertTrue(CleanTier.extreme.isCategoryIncluded(cat))
+    }
+
+    /// Builds a temp-root fixture: stale files/dirs plus every live-fixture
+    /// class the scan must exclude.  Returns the injected cleaner and root.
+    private func makeTempFixture(worktrees: Set<String> = []) -> (DiskCleaner, URL) {
+        let fm = FileManager.default
+        let root = tempDirectory.appendingPathComponent("tmproot_\(UUID().uuidString)", isDirectory: true)
+        try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+        func write(_ name: String, stale: Bool) {
+            let url = root.appendingPathComponent(name)
+            try! "payload".write(to: url, atomically: true, encoding: .utf8)
+            if stale {
+                let old = Date().addingTimeInterval(-2 * 24 * 3600)
+                try! fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
+            }
+        }
+        func mkdir(_ name: String, stale: Bool) -> URL {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try! fm.createDirectory(at: url, withIntermediateDirectories: true)
+            try! "payload".write(to: url.appendingPathComponent("inner.bin"), atomically: true, encoding: .utf8)
+            if stale {
+                let old = Date().addingTimeInterval(-2 * 24 * 3600)
+                try! fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
+            }
+            return url
+        }
+
+        // Provably dead: stale regular file and stale directory.
+        write("dead-stale.txt", stale: true)
+        _ = mkdir("dead-dir", stale: true)
+        // Live: fresh file touched just now.
+        write("fresh.txt", stale: false)
+
+        // Registered git worktree (injected provider) and a checkout the
+        // provider cannot enumerate (top-level .git file).
+        let wt = mkdir("lane-worktree", stale: true)
+        try! "gitdir: /elsewhere".write(to: wt.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        var worktreeSet = worktrees
+        worktreeSet.insert(wt.path)
+
+        // Active conversion-batch staging: pipeline name prefix, and a
+        // marker file inside an otherwise ordinary directory.
+        _ = mkdir("vc-014", stale: true)
+        let marked = mkdir("export-job", stale: true)
+        try! "{}".write(to: marked.appendingPathComponent("export_state.json"), atomically: true, encoding: .utf8)
+
+        // Fleet locks: adjacent sentinel, and fleet.lock inside a directory.
+        write("locked.bin", stale: true)
+        try! "".write(to: root.appendingPathComponent("locked.bin.lock"), atomically: true, encoding: .utf8)
+        let fleetDir = mkdir("fleet-job", stale: true)
+        try! "".write(to: fleetDir.appendingPathComponent("fleet.lock"), atomically: true, encoding: .utf8)
+
+        // Symlink: never followed, even when its target is stale.
+        try! fm.createSymbolicLink(at: root.appendingPathComponent("link-to-dead"),
+                                  withDestinationURL: root.appendingPathComponent("dead-stale.txt"))
+
+        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { worktreeSet })
+        return (cleaner, root)
+    }
+
+    func testScanTempFilesListsOnlyDeadEntries() {
+        let (cleaner, _) = makeTempFixture()
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertTrue(titles.contains("dead-stale.txt"), "stale temp file must be listed")
+        XCTAssertTrue(titles.contains("dead-dir"), "stale temp directory must be listed")
+        XCTAssertFalse(titles.contains("fresh.txt"), "fresh file must not be listed as dead")
+    }
+
+    func testScanTempFilesSkipsWorktrees() {
+        let (cleaner, _) = makeTempFixture()
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertFalse(titles.contains("lane-worktree"), "registered worktree must never be listed")
+    }
+
+    func testScanTempFilesSkipsBatchStaging() {
+        let (cleaner, _) = makeTempFixture()
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertFalse(titles.contains("vc-014"), "pipeline batch prefix must be skipped")
+        XCTAssertFalse(titles.contains("export-job"), "directory with a batch marker file must be skipped")
+    }
+
+    func testScanTempFilesSkipsLockedFiles() {
+        let (cleaner, _) = makeTempFixture()
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertFalse(titles.contains("locked.bin"), "lock-held file must never be listed")
+        XCTAssertFalse(titles.contains("fleet-job"), "directory with fleet.lock must never be listed")
+    }
+
+    func testScanTempFilesSkipsSymlinks() {
+        let (cleaner, _) = makeTempFixture()
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertFalse(titles.contains("link-to-dead"), "symlinks must never be followed or listed")
+    }
+
+    func testScanTempFilesItemsCarryDrillDownFields() {
+        let (cleaner, root) = makeTempFixture()
+        let items = cleaner.scanTempFiles()
+        XCTAssertFalse(items.isEmpty)
+        for item in items {
+            XCTAssertEqual(item.category, .tempFiles)
+            XCTAssertFalse(item.title.isEmpty, "filename must be present")
+            XCTAssertTrue(item.path.hasPrefix(root.path), "full path must be present")
+            XCTAssertNotNil(item.lastModified, "modified date must be present")
+            XCTAssertGreaterThan(item.bytes, 0, "size must be present")
+            XCTAssertFalse(item.isSelected, "temp items must require explicit per-item selection")
+        }
+    }
+
+    func testIsSafeToDeleteAcceptsOnlyTempRoot() {
+        let (cleaner, root) = makeTempFixture()
+        XCTAssertTrue(
+            cleaner.isSafeToDelete(url: root.appendingPathComponent("dead-stale.txt"), category: .tempFiles),
+            "items under the temp root must be deletable"
+        )
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: root, category: .tempFiles),
+            "the temp root itself must never be deletable"
+        )
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: URL(fileURLWithPath: "/tmp/elsewhere.txt"), category: .tempFiles),
+            "paths outside the injected temp root must be rejected"
+        )
+    }
+
+    func testScanTempFilesEmptyRootScansClean() {
+        let fm = FileManager.default
+        let root = tempDirectory.appendingPathComponent("emptytmp_\(UUID().uuidString)", isDirectory: true)
+        try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { [] })
+        XCTAssertTrue(cleaner.scanTempFiles().isEmpty)
+    }
 }
 

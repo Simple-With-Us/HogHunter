@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Temp Files scan category (the October 6 cleaner review's missing /tmp coverage):
+
+- A new "Temp Files" category scans `/tmp` for stale temporary files untouched for 24+ hours — the gap PureMac's ~8.6 GB finding exposed.  It is selectable as a scan option in both Standard and Extreme tiers, and ships unselected so every deletion needs explicit per-item review.
+- The scan lists an entry only when it is provably dead: regular files/directories only (never symlinks, sockets, or devices), and it skips registered git worktrees (`git worktree list`, plus a top-level `.git` check), active conversion-batch staging (`vc-*` pipeline prefixes and batch marker files like `export_state.json`), and fleet-locked entries (adjacent `.lock` sentinels, `fleet.lock`).
+- Deletion follows the existing safety path: APFS snapshot first, Trash-first removal, and the safety guard restricts deletes to paths strictly inside the temp root.  Shipped with fixture tests covering each exclusion class.
+
 Sentry for the Mac menubar app and the iPhone companion (project `hoghunter`):
 
 - sentry-cocoa is linked on both app targets.  `SentryTelemetry` starts from Info.plist `SentryDSN` (`$(SENTRY_DSN)`), with `sendDefaultPii = false`, tracing 0.2, continuous profiling 0.1, app-hang tracking, and 5xx capture.  Session Replay stays off.  An empty DSN is a no-op.
