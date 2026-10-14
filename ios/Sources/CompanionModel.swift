@@ -95,7 +95,7 @@ final class CompanionModel {
     /// How long a Clean request stays valid.  A cold start still has to launch,
     /// find the Mac and fetch a snapshot before the dashboard exists, so this
     /// is generous -- but short enough that a link is not replayed much later.
-    static let cleanRequestLifetime: TimeInterval = 30
+    static let cleanRequestLifetime = CleanRequest.lifetime
 
     /// Record a `hoghunter://clean` link as asking for the confirmation now.
     func requestCleanDialog() {
@@ -105,9 +105,13 @@ final class CompanionModel {
 
     /// Take the pending Clean request, returning whether one is still valid.
     /// Cleared either way, so a link is honoured at most once.
-    func takeCleanRequest() -> Bool {
-        let fresh = showCleanDialogRequested
-            && cleanRequestAt.map { Date().timeIntervalSince($0) < Self.cleanRequestLifetime } == true
+    func takeCleanRequest(now: Date = Date()) -> Bool {
+        let fresh = CleanRequest.isFresh(
+            pending: showCleanDialogRequested,
+            issuedAt: cleanRequestAt,
+            now: now,
+            lifetime: Self.cleanRequestLifetime
+        )
         showCleanDialogRequested = false
         cleanRequestAt = nil
         return fresh
@@ -221,6 +225,11 @@ final class CompanionModel {
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
             seedScreenshotCleaner()
+            // Set before DashboardView exists, so its onAppear consumes the
+            // request.  That is the cold-start path the widget's Clean pill hits.
+            if ProcessInfo.processInfo.arguments.contains("-HogHunterCleanConfirm") {
+                requestCleanDialog()
+            }
             return
         }
         saved = loadSaved()

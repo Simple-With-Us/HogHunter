@@ -161,6 +161,15 @@ struct CompanionRootView: View {
 
     @ViewBuilder
     private var content: some View {
+        if ProcessInfo.processInfo.arguments.contains("-HogHunterWidgetPreview") {
+            WidgetScreenshotHost()
+        } else {
+            phaseContent
+        }
+    }
+
+    @ViewBuilder
+    private var phaseContent: some View {
         switch model.phase {
         case .live:
             if let snapshot = model.snapshot {
@@ -199,6 +208,29 @@ struct CompanionRootView: View {
                     model.enterDemoMode()
                 }
             )
+        }
+    }
+}
+
+/// Renders the real widget views for `xcrun simctl io … screenshot`.
+/// Launch argument only.  The home-screen widget is the same SwiftUI.
+private struct WidgetScreenshotHost: View {
+    private let entry = Provider.sampleEntry()
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Text("Hog Hunter Widget")
+                    .font(.headline)
+                HogHunterSmallWidgetView(entry: entry)
+                    .frame(width: 170, height: 170)
+                HogHunterMediumWidgetView(entry: entry)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 170)
+                HogHunterLargeWidgetView(entry: entry)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding()
         }
     }
 }
@@ -544,6 +576,8 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button("Run Safe Clean", role: .destructive) {
+                // The only place a Clean deep link can reach the Mac.
+                // hoghunter://clean stops at this confirmation.
                 Task { await model.triggerRemoteClean() }
             }
             Button("Cancel", role: .cancel) {}

@@ -82,6 +82,9 @@ targets:
     platform: macOS
     sources:
       - path: Tests/HogHunterTests
+      # Foundation-only, so the Mac test bundle can compile the link rules
+      # without the iOS app.
+      - path: ios/Sources/CompanionDeepLink.swift
     dependencies:
       - target: HogHunter
     settings:
@@ -95,6 +98,9 @@ targets:
     platform: iOS
     sources:
       - path: ios/Sources
+      # Same widget views the extension draws, so -HogHunterWidgetPreview can
+      # render them.  The @main widget stays in the extension target only.
+      - path: ios/Widgets/HogHunterWidgetViews.swift
       - path: Sources/Companion/CompanionSnapshot.swift
       - path: Sources/Companion/CompanionHTTP.swift
       # Decides whether the Mac is on the local network or Tailscale, the same
@@ -111,6 +117,7 @@ targets:
       - package: Sentry
         product: Sentry
       - target: HogHunterWidgets
+      - sdk: WidgetKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios
