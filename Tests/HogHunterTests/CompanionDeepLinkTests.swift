@@ -23,6 +23,25 @@ final class CompanionDeepLinkTests: XCTestCase {
         XCTAssertEqual(CompanionDeepLink.classify(URL(string: "HogHunter://CLEAN")!), .confirmClean)
     }
 
+    func testCleanLinkDoesNotOfferConfirmationUnlessTheMacOptedIn() {
+        XCTAssertTrue(CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: true))
+        XCTAssertFalse(CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: false))
+        XCTAssertFalse(CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: nil))
+    }
+
+    func testWidgetReloadRequiresTheAppGroupContainer() {
+        XCTAssertFalse(CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: false, snapshotEncoded: true, cleanKeysChanged: true, reloadDue: true))
+        XCTAssertFalse(CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: true, snapshotEncoded: false, cleanKeysChanged: true, reloadDue: true))
+        XCTAssertTrue(CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: true, snapshotEncoded: true, cleanKeysChanged: true, reloadDue: false))
+        XCTAssertTrue(CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: true, snapshotEncoded: true, cleanKeysChanged: false, reloadDue: true))
+        XCTAssertFalse(CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: true, snapshotEncoded: true, cleanKeysChanged: false, reloadDue: false))
+    }
+
     func testCleanRequestExpiresAndClearsStaleFlags() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         XCTAssertTrue(CleanRequest.isFresh(pending: true, issuedAt: now.addingTimeInterval(-29), now: now))
