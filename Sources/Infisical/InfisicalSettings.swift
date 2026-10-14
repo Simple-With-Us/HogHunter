@@ -411,7 +411,7 @@ final class InfisicalSettings: ObservableObject {
         self.store = store
         self.credentialProvider = credentialProvider
         self.keychainReader = { InfisicalSettings.readCredentialFromKeychain() }
-        self.credentialWriter = credentialWriter ?? Self.writeCredentialToKeychain
+        self.credentialWriter = credentialWriter ?? Self.writeCredentialToKeychainAllowingUI
         self.credentialRemover = credentialRemover ?? Self.removeCredentialFromKeychain
     }
 
@@ -631,7 +631,11 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    private static func writeCredentialToKeychain(_ credential: InfisicalCredential, allowUI: Bool = true) throws {
+    private static func writeCredentialToKeychainAllowingUI(_ credential: InfisicalCredential) throws {
+        try writeCredentialToKeychain(credential, allowUI: true)
+    }
+
+    private static func writeCredentialToKeychain(_ credential: InfisicalCredential, allowUI: Bool) throws {
         let data = try JSONEncoder().encode(credential)
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
