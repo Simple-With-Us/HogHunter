@@ -660,10 +660,15 @@ final class DiskCleanerTests: XCTestCase {
         let (cleaner, root) = makeTempFixture()
         let items = cleaner.scanTempFiles()
         XCTAssertFalse(items.isEmpty)
+        // `FileManager.temporaryDirectory` is `/var/folders/...`, a symlink
+        // to `/private/var/folders/...`.  Compare the resolved forms so the
+        // assertion matches the scan and the safety guard.
+        let rootPath = root.resolvingSymlinksInPath().path
         for item in items {
             XCTAssertEqual(item.category, .tempFiles)
             XCTAssertFalse(item.title.isEmpty, "filename must be present")
-            XCTAssertTrue(item.path.hasPrefix(root.path), "full path must be present")
+            let itemPath = URL(fileURLWithPath: item.path).resolvingSymlinksInPath().path
+            XCTAssertTrue(itemPath.hasPrefix(rootPath), "full path must be present")
             XCTAssertNotNil(item.lastModified, "modified date must be present")
             XCTAssertGreaterThan(item.bytes, 0, "size must be present")
             XCTAssertFalse(item.isSelected, "temp items must require explicit per-item selection")
@@ -692,6 +697,60 @@ final class DiskCleanerTests: XCTestCase {
         try! fm.createDirectory(at: root, withIntermediateDirectories: true)
         let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { [] })
         XCTAssertTrue(cleaner.scanTempFiles().isEmpty)
+    }
+
+    func testScanTempFilesSkipsDirectoryWithNestedGitCheckout() {
+        let fm = FileManager.default
+        let root = tempDirectory.appendingPathComponent("nestedgit_\(UUID().uuidString)", isDirectory: true)
+        try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let old = Date().addingTimeInterval(-2 * 24 * 3600)
+
+        func staleDir(_ name: String, under: URL? = nil) -> URL {
+            let parent = under ?? root
+            let url = parent.appendingPathComponent(name, isDirectory: true)
+            try! fm.createDirectory(at: url, withIntermediateDirectories: true)
+            let inner = url.appendingPathComponent("inner.bin")
+            try! "payload".write(to: inner, atomically: true, encoding: .utf8)
+            try! fm.setAttributes([.modificationDate: old], ofItemAtPath: inner.path)
+            try! fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
+            return url
+        }
+
+        _ = staleDir("dead-dir")
+
+        // Stale container holding a nested checkout one level down.
+        let container = staleDir("container")
+        let nested = staleDir("checkout", under: container)
+        try! "gitdir: /elsewhere".write(to: nested.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        try! fm.setAttributes([.modificationDate: old], ofItemAtPath: container.path)
+
+        // Stale container whose child is a registered worktree (no .git file).
+        let wrap = staleDir("wrap")
+        let lane = staleDir("lane", under: wrap)
+        try! fm.setAttributes([.modificationDate: old], ofItemAtPath: wrap.path)
+
+        let worktrees: Set<String> = [(lane.path as NSString).standardizingPath]
+        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { worktrees })
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertTrue(titles.contains("dead-dir"), "a dead directory with no nested git must still be listed")
+        XCTAssertFalse(titles.contains("container"), "directory holding a nested git checkout must not be listed")
+        XCTAssertFalse(titles.contains("wrap"), "directory holding a nested registered worktree must not be listed")
+        XCTAssertFalse(titles.contains("checkout"))
+        XCTAssertFalse(titles.contains("lane"))
+    }
+
+    func testWorktreePathCacheIsStableAcrossCalls() {
+        XCTAssertEqual(DiskCleaner.worktreeCacheTTL, 300)
+        let first = DiskCleaner.defaultWorktreePaths()
+        let second = DiskCleaner.defaultWorktreePaths()
+        XCTAssertEqual(first, second, "a second call must reuse the cached worktree set")
+    }
+
+    func testResolvedPathAgreesOnSymlinkedTempRoots() {
+        let viaTmp = DiskCleaner.resolvedPath("/tmp")
+        let viaPrivate = DiskCleaner.resolvedPath("/private/tmp")
+        XCTAssertEqual(viaTmp, viaPrivate)
+        XCTAssertFalse(viaTmp.isEmpty)
     }
 }
 

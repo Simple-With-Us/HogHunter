@@ -158,7 +158,7 @@ struct CleanRegimen: Codable, Equatable, Sendable {
     /// bulk work are not in here; the expensive tier is a *property of disk
     /// pressure*, not a rule the user enables.
     static let schedulableRules: [String] = [
-        "snapshots", "temp-scratch", "app-staging", "dev-caches",
+        "snapshots", "temp-scratch", "tmp-files", "app-staging", "dev-caches",
         "xcode-artifacts", "simulator-runtimes", "logs", "sqlite-wal", "brew",
     ]
 

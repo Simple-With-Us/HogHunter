@@ -5,8 +5,11 @@
 Temp Files scan category (the October 6 cleaner review's missing /tmp coverage):
 
 - A new "Temp Files" category scans `/tmp` for stale temporary files untouched for 24+ hours — the gap PureMac's ~8.6 GB finding exposed.  It is selectable as a scan option in both Standard and Extreme tiers, and ships unselected so every deletion needs explicit per-item review.
-- The scan lists an entry only when it is provably dead: regular files/directories only (never symlinks, sockets, or devices), and it skips registered git worktrees (`git worktree list`, plus a top-level `.git` check), active conversion-batch staging (`vc-*` pipeline prefixes and batch marker files like `export_state.json`), and fleet-locked entries (adjacent `.lock` sentinels, `fleet.lock`).
-- Deletion follows the existing safety path: APFS snapshot first, Trash-first removal, and the safety guard restricts deletes to paths strictly inside the temp root.  Shipped with fixture tests covering each exclusion class.
+- The scan lists an entry only when it is provably dead: regular files/directories only (never symlinks, sockets, or devices), and it skips registered git worktrees (`git worktree list`, plus a `.git` check at the entry and nested checkouts one or more levels down), active conversion-batch staging (`vc-*` pipeline prefixes and batch marker files like `export_state.json`), and fleet-locked entries (adjacent `.lock` sentinels, `fleet.lock`).
+- A directory's own mtime is not enough: nested file activity counts toward the 24-hour cutoff, so a cold directory still holding live writes is not listed.
+- The unattended regimen maps Temp Files to its own `tmp-files` rule (schedulable, off by default) so toggling Trash's `temp-scratch` rule cannot include or exclude them.
+- Worktree discovery caches `git worktree list` for five minutes, and drains the git pipe before waiting so a large listing cannot deadlock the scan thread.
+- Deletion follows the existing safety path: APFS snapshot first, Trash-first removal, and the safety guard restricts deletes to paths strictly inside the resolved temp root.  Shipped with fixture tests covering each exclusion class.
 
 Sentry for the Mac menubar app and the iPhone companion (project `hoghunter`):
 
