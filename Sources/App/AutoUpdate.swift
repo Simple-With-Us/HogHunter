@@ -58,33 +58,6 @@ enum AutoUpdateAvailability: Equatable {
     }
 }
 
-/// Marks the launch that follows an automatic update, so the relaunch Sparkle
-/// performs does not pull focus from whatever the owner is doing.  The mark
-/// expires, so an install that never completes cannot affect some later,
-/// ordinary launch.
-struct UpdateRelaunchMarker {
-    static let key = "HogHunterRelaunchedForUpdate"
-    static let lifetime: TimeInterval = 600
-
-    let defaults: UserDefaults
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
-    func mark(now: Date = Date()) {
-        defaults.set(now.timeIntervalSince1970, forKey: Self.key)
-    }
-
-    /// True at most once per mark, and only while the mark is fresh.
-    func consume(now: Date = Date()) -> Bool {
-        guard let stamp = defaults.object(forKey: Self.key) as? Double else { return false }
-        defaults.removeObject(forKey: Self.key)
-        let age = now.timeIntervalSince1970 - stamp
-        return age >= 0 && age < Self.lifetime
-    }
-}
-
 /// Owns Sparkle for the life of the app.
 ///
 /// Updates are checked hourly, downloaded in the background, and installed
@@ -149,7 +122,6 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     private func installPendingUpdateIfIdle() {
         guard let install = pendingInstall, !NSApp.isActive else { return }
         pendingInstall = nil
-        UpdateRelaunchMarker().mark()
         install()
     }
 }
