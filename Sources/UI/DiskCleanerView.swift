@@ -603,6 +603,7 @@ private struct CategoryCardView: View {
         case .localAIModels: color = .mint
         case .largeAndOldFiles: color = .teal
         case .apfsSnapshots: color = .cyan
+        case .tempFiles: color = .brown
         }
 
         return ZStack {
