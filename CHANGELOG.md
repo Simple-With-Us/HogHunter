@@ -4,7 +4,7 @@
 
 Sentry Cocoa 9 (PR #136):
 
-- sentry-cocoa is pinned at `exactVersion: 9.30.1`.  The 9.x Swift 6.2 package manifest depends on KSCrash, which SPM treats as unstable, so a version range (`from` or `minorVersion`) cannot resolve 9.30.1 on the macOS CI runner.
+- sentry-cocoa is pinned to the 9.30.1 git revision.  The 9.x Swift 6.2 package manifest depends on KSCrash by commit, which SPM treats as unstable, so every version pin (`from`, `minorVersion`, `exactVersion`) fails to resolve on the macOS CI runner.
 
 Sentry for the Mac menubar app and the iPhone companion (project `hoghunter`):
 
