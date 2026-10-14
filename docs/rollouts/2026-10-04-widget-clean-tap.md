@@ -12,7 +12,7 @@ Issue #65 stays open for the App Group.  This change does not add the entitlemen
 
 - `ios/Widgets/HogHunterWidgetViews.swift` — widget SwiftUI, including the small widget's Clean pill (`hoghunter://clean`) and `widgetURL` `hoghunter://open` on the rest of the widget.  `Provider.sampleEntry()` is the screenshot fixture.
 - `ios/Widgets/HogHunterWidgets.swift` — WidgetKit `@main` entry only.
-- `ios/Sources/CompanionDeepLink.swift` — `hoghunter://clean` is `confirmClean`.  There is no run-clean case.  `CleanRequest.isFresh` expires a pending confirm after 30 seconds.
+- `ios/Sources/CompanionDeepLink.swift` — `hoghunter://clean` is `confirmClean`.  There is no run-clean case.  `CleanLinkPolicy` offers the destructive confirmation only when the Mac opt-in is on, and reloads the widget only when the App Group container exists.  `CleanRequest.isFresh` expires a pending confirm after 30 seconds.
 - `ios/Sources/HogHunterIOSApp.swift` — `onOpenURL` calls `requestCleanDialog()` only when the link asks for confirmation.
 - `ios/Sources/CompanionModel.swift` — `takeCleanRequest()` uses that expiry and clears the flag either way.  `triggerRemoteClean()` returns without calling the Mac when `remoteCleanAllowed` is not true.  Widget writes go through `sharedWidgetDefaults()`, which is nil unless `containerURL(forSecurityApplicationGroupIdentifier:)` exists.  `-HogHunterCleanConfirm` with `-HogHunterSample` sets the request before the dashboard exists.
 - `ios/Sources/CompanionViews.swift` — consumes the request on appear and on change.  The destructive confirmation is offered only when `CleanLinkPolicy.mayOfferCleanConfirmation` is true.  Otherwise the dashboard shows `CleanLinkPolicy.cleanOffNote` and does not call `triggerRemoteClean()`.  Run Safe Clean is the only call to `triggerRemoteClean()`.  `-HogHunterWidgetPreview` draws the widget views.
@@ -61,7 +61,7 @@ The macOS `test` job still runs the screenshot script under the existing 8-minut
 
 ## Zero-Code Findings
 
-A cold-launched SwiftUI view never sees the `.onChange` a warm view would.  Any launch flag consumed only by `.onChange` is dead on cold start.  Consume one-shot launch intents on appear too, and stamp them so they expire if the view that consumes them does not exist yet.  That paragraph is the contributed lesson below.  It was not already in the corpus.
+A cold-launched SwiftUI view never sees the `.onChange` a warm view would.  Any launch flag consumed only by `.onChange` is dead on cold start.  Consume one-shot launch intents on appear too, and stamp them so they expire if the view that consumes them does not exist yet.  The reusable form of that finding is the one paragraph in Fleet Recall.  It was not already in the corpus.
 
 While the App Group entitlement is missing (issue #65), the widget cannot see the phone's defaults.  Gate persistence and timeline reloads on `containerURL(forSecurityApplicationGroupIdentifier:)` being non-nil.  Do not treat `UserDefaults(suiteName:)` returning an object as proof the write reached the widget.  The authenticated search below did not return a corpus source that says the initializer itself is a silent no-op, so this note does not claim that.
 
