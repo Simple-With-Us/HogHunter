@@ -336,9 +336,19 @@ private final class CompanionExchange: @unchecked Sendable {
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.lock.lock()
+            guard !self.finished else {
+                self.lock.unlock()
+                return
+            }
             let cause = self.waitingError ?? CompanionClientError.timedOut
+            self.finished = true
+            self.timer = nil
+            let waiting = self.continuation
+            self.continuation = nil
+            if waiting == nil { self.early = .failure(cause) }
             self.lock.unlock()
-            self.finish(.failure(cause))
+            self.connection.cancel()
+            waiting?.resume(with: .failure(cause))
         }
         lock.lock()
         timer = item

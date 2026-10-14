@@ -631,13 +631,19 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    private static func writeCredentialToKeychain(_ credential: InfisicalCredential) throws {
+    private static func writeCredentialToKeychain(_ credential: InfisicalCredential, allowUI: Bool = true) throws {
         let data = try JSONEncoder().encode(credential)
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount,
         ]
+        if !allowUI {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+            query[kSecUseAuthenticationContext as String] = context
+        }
         let attributes: [String: Any] = [kSecValueData as String: data]
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
@@ -713,7 +719,8 @@ final class InfisicalSettings: ObservableObject {
         }
         if credential.projectId == nil || credential.effectiveProjectId.isEmpty {
             credential.projectId = InfisicalClient.projectId
-            try? writeCredentialToKeychain(credential)
+            // Migration during a non-interactive read must not pop Keychain UI.
+            try? writeCredentialToKeychain(credential, allowUI: false)
         }
         guard credential.isComplete else {
             return KeychainCredentialRead(credential: nil, terminal: true)
