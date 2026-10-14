@@ -52,6 +52,10 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Hog Hunter disk reclaim",
         "triggers": ["full", "pressure"],
     },
+    "cleanmymac_cli": {
+        "title": "CleanMyMac CLI sweep (when installed)",
+        "triggers": ["full"],
+    },
     "pm2_logs": {
         "title": "Cap oversized PM2 logs",
         "triggers": ["full", "janitor"],
@@ -112,8 +116,9 @@ DEFAULT_LANES: dict[str, Any] = {
 }
 
 # Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
-# docs/DEV-CLEANUP-PLAYBOOK.md: it re-downloads only when that device is attached again.
-DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support"})
+# docs/DEV-CLEANUP-PLAYBOOK.md: it re-downloads only when that device is attached again.  The CleanMyMac CLI is
+# MacPaw closed-source software: invoke-only when installed, never vendored, and only with the owner's opt-in.
+DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support", "cleanmymac_cli"})
 
 # Seat suffixes the keep regex protects in flat lanes (~/apps/<prefix>-<suffix>).  Order is part of the pattern.
 KEEP_SEAT_SUFFIXES: tuple[str, ...] = (

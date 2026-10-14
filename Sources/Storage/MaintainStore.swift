@@ -203,6 +203,7 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache"),
         MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes"),
         MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance"),
+        MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)"),
     ]
 
     private func loadStatus() -> MaintainStatus? {
@@ -226,10 +227,15 @@ final class MaintainStore: ObservableObject {
     /// checks), so this reads all of them with room to spare.
     nonisolated static let maxHistoryRuns = 600
 
+    /// Steps the engine keeps off until the owner turns them on.  Mirrors
+    /// `DEFAULT_OFF_STEPS` in scripts/vacuum/config.py: the toggle must read
+    /// off on a fresh install, or the tab promises a sweep the run skips.
+    nonisolated static let defaultOffSteps: Set<String> = ["cleanmymac_cli"]
+
     private func loadStepToggles() -> [String: Bool] {
         var toggles: [String: Bool] = [:]
         for entry in Self.catalog {
-            toggles[entry.id] = true
+            toggles[entry.id] = !Self.defaultOffSteps.contains(entry.id)
         }
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

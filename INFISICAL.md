@@ -26,7 +26,7 @@ Non-sensitive defaults were seeded into the `prod` environment from the values t
 
 | Key | Default | What it drives |
 |---|---|---|
-| `hoghunter.refreshInterval` | `3` | Sampling interval, seconds (Settings > General) |
+| `hoghunter.refreshInterval` | `5` | Sampling interval, seconds (Settings > General) |
 | `hoghunter.alertThresholdPercent` | `300` | Alert threshold, per-core percent (Settings > Alerts) |
 | `hoghunter.alertSustainedMinutes` | `5` | Alert sustained window, minutes (Settings > Alerts) |
 | `hoghunter.alertCooldownMinutes` | `30` | Quiet period after an alert fires, minutes |

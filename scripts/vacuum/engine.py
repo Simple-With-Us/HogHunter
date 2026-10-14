@@ -267,6 +267,7 @@ class VacuumEngine:
             "yarn_cache": self._yarn_cache,
             "brew_cleanup": self._brew_cleanup,
             "hoghunter_reclaim": lambda: self._hoghunter_reclaim(band),
+            "cleanmymac_cli": self._cleanmymac_cli,
             "pm2_logs": self._pm2_logs,
             "vitest_temp_dbs": self._vitest_temp_dbs,
             "spotlight_journals": self._spotlight_journals,
@@ -471,6 +472,33 @@ class VacuumEngine:
         if failed and not applied:
             return 0, reason[:200], StepStatus.FAILED
         return freed, reason[:200], StepStatus.RAN
+
+    def _cleanmymac_cli(self) -> tuple[int, str, StepStatus]:
+        """Run the CleanMyMac CLI's non-interactive sweeps when installed.  Off by default: the CLI is MacPaw
+        closed-source software, so this step only invokes it, never vendors it, and only after the owner turns
+        the step on.  Mirrors the --cleanmymac path in scripts/hoghunter-clean; keep the two command lists in
+        sync.  A missing CLI is a skip, not a failure; a non-zero exit or a timeout is a failure with the tail."""
+        if shutil.which("cleanmymac") is None:
+            return 0, "CleanMyMac CLI not installed", StepStatus.SKIPPED
+        commands = (
+            (["cleanmymac", "clean", "junk", "--force"], 600),
+            (["cleanmymac", "optimize", "purgeable"], 300),
+        )
+        ran: list[str] = []
+        for argv, timeout in commands:
+            try:
+                proc = self._runner(argv, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return 0, f"{' '.join(argv[1:])}: no finish within {timeout}s", StepStatus.FAILED
+            except OSError as exc:
+                return 0, f"{' '.join(argv[1:])}: {type(exc).__name__}", StepStatus.FAILED
+            code = getattr(proc, "returncode", 1)
+            if code != 0:
+                out = (getattr(proc, "stdout", "") or "") + "\n" + (getattr(proc, "stderr", "") or "")
+                tail = [ln for ln in out.splitlines() if ln.strip()]
+                return 0, ((tail[-1] if tail else f"exit {code}") + f" ({' '.join(argv[1:])})")[:200], StepStatus.FAILED
+            ran.append(" ".join(argv[1:]))
+        return 0, f"CleanMyMac sweeps finished ({'; '.join(ran)})", StepStatus.RAN
 
     def _reclaim_budget(self) -> int:
         try:

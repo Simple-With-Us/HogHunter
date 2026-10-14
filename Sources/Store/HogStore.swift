@@ -1186,7 +1186,7 @@ final class HogStore: ObservableObject {
         let previous = defaults.string(forKey: Key.infisicalProjectId) ?? InfisicalStore.localProjectId
         applyingInfisical = true
         if previous != projectId {
-            refreshInterval = 3
+            refreshInterval = 5
             alertThresholdPercent = 300
             alertSustainedMinutes = 5
             alertWebhookURL = ""

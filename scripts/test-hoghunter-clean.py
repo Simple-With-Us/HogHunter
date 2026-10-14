@@ -469,6 +469,75 @@ def test_open_handles_fails_closed(hh):
         assert hh.open_handles("/x") == 1, "an lsof that errored did not look"
 
 
+def test_cleanmymac_missing_cli_skips(hh):
+    """Without the flag the CLI is never touched; with it and no CLI the run
+    records a skip and still exits clean.  The CLI is closed-source MacPaw
+    software: invoke-only, never vendored, never required."""
+    report = {"requested": True, "installed": True, "ran": False, "commands": [], "skipped": None}
+    with mock.patch.object(shutil, "which", return_value=None):
+        hh.run_cleanmymac_cli(report)
+    assert report["installed"] is False
+    assert report["ran"] is False
+    assert report["commands"] == []
+    assert report["skipped"] == "cleanmymac CLI not installed"
+
+
+def test_cleanmymac_runs_only_its_two_sweeps(hh):
+    """The opt-in runs exactly `clean junk --force` and `optimize purgeable`:
+    the non-interactive pair.  Interactive-only commands (purge, analyze)
+    must never appear here."""
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="done\n", stderr="")
+
+    report = {"requested": True, "installed": False, "ran": False, "commands": [], "skipped": None}
+    with mock.patch.object(shutil, "which", return_value="/opt/homebrew/bin/cleanmymac"), \
+         mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+        hh.run_cleanmymac_cli(report)
+    assert report["installed"] is True
+    assert report["ran"] is True
+    assert report["skipped"] is None
+    assert seen[0] == ["cleanmymac", "--version"]
+    assert seen[1:] == [
+        ["cleanmymac", "clean", "junk", "--force"],
+        ["cleanmymac", "optimize", "purgeable"],
+    ]
+    for argv in seen[1:]:
+        assert argv[1] in ("clean", "optimize"), argv
+    assert [c["exit"] for c in report["commands"]] == [0, 0]
+
+
+def test_cleanmymac_failure_never_raises(hh):
+    """A non-zero exit or a timeout is recorded, not raised: the CLI is an
+    extra, and its failure must not fail the reclaim run."""
+
+    def fake_fail(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 2, stdout="", stderr="boom\n")
+
+    report = {"requested": True, "installed": False, "ran": False, "commands": [], "skipped": None}
+    with mock.patch.object(shutil, "which", return_value="/opt/homebrew/bin/cleanmymac"), \
+         mock.patch.object(hh.subprocess, "run", side_effect=fake_fail):
+        hh.run_cleanmymac_cli(report)  # must not raise
+    assert report["ran"] is True
+    assert report["commands"][0]["exit"] == 2
+    assert report["commands"][0]["tail"] == ["boom"]
+
+
+def test_cleanmymac_spent_budget_skips(hh):
+    """With a budget and no time left, the sweeps wait for the next run
+    instead of starting work that would be killed half done."""
+    report = {"requested": True, "installed": False, "ran": False, "commands": [], "skipped": None}
+    with mock.patch.object(shutil, "which", return_value="/opt/homebrew/bin/cleanmymac"), \
+         mock.patch.object(hh, "budget_left", return_value=0.0), \
+         mock.patch.object(hh.subprocess, "run") as run:
+        hh.run_cleanmymac_cli(report, budget_sec=600)
+    assert report["ran"] is False
+    assert report["skipped"] == "budget spent"
+    run.assert_not_called()
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -2,15 +2,18 @@
 """
 hoghunter-clean — Hog Hunter's reclaim engine.
 
-Replaces CleanMyMac CLI as the Mac's cleanup driver.  CleanMyMac is
-uninstalled (stale `brew list` entry, no Cellar dir, `command -v` fails) and
-its cleanup was mostly "delete app caches."  This engine does that *and* the
-things CleanMyMac cannot do for this Mac:
+This engine is the Mac's cleanup driver: it does the app-cache deletes a
+junk cleaner does *and* the things one cannot do for this Mac:
 
   SHRINK   APFS local snapshots, SQLite -wal files, unbounded logs
   DELETE   fleet-specific regenerable staging (BotFleet, ShipIt, Sparkle,
            mktemp `ssr` nests, simulator runtimes, device support)
   REPORT   ask-first inventory, duplicates — surfaced, never auto-applied
+
+The CleanMyMac CLI (MacPaw's free public beta, closed-source, never vendored)
+stays an opt-in extra: `--cleanmymac` runs its non-interactive sweeps
+(`clean junk --force`, `optimize purgeable`) after this engine's own work,
+and only when the CLI is installed.  Without the flag it is never invoked.
 
 Every rule encodes a lesson from BF-HOUSEKEEPER's wake log; see
 config/reclaim-policy.json for the machine-readable version of the same
@@ -22,6 +25,7 @@ Usage
   hoghunter-clean --clean                apply the safe tier
   hoghunter-clean --clean --band=full   also apply semi-safe tier
   hoghunter-clean --clean --budget-sec=600   stop starting work after 10 minutes
+  hoghunter-clean --clean --cleanmymac  also run the CleanMyMac CLI sweeps
   hoghunter-clean --scan --categories=snapshots,logs --json
 
 Modes are mutually exclusive with --categories=... --policy to see everything.
@@ -270,6 +274,68 @@ def _run(cmd: Sequence[str], timeout: int = 20) -> str:
         return p.stdout if p.returncode == 0 else ""
     except (subprocess.TimeoutExpired, OSError):
         return ""
+
+
+# --------------------------------------------------------------------------
+# CleanMyMac CLI -- opt-in extra, never a dependency.  The CLI is MacPaw's
+# closed-source free public beta: it is invoked when installed, never
+# vendored.  Only its non-interactive sweeps run here (`clean junk --force`
+# skips the review step by MacPaw's own flag; `optimize purgeable` has no
+# review step).  Interactive-only commands (`purge`, `analyze`, the per-item
+# review) are deliberately out.  Mirrors VacuumEngine._cleanmymac_cli in
+# scripts/vacuum/engine.py; keep the two command lists in sync.
+# --------------------------------------------------------------------------
+
+CLEANMYMAC_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("cleanmymac", "clean", "junk", "--force"),
+    ("cleanmymac", "optimize", "purgeable"),
+)
+CLEANMYMAC_TIMEOUT_SEC = 600
+
+
+def run_cleanmymac_cli(report: dict, budget_sec: float = 0.0) -> None:
+    """Run the CleanMyMac sweeps, recording each into report.  Never raises and
+    never fails the caller: a missing CLI, a spent budget, a timeout, or a
+    non-zero exit is recorded in the report and logged, and the run continues
+    with exit 0.  Fills report keys: installed, ran, commands, skipped."""
+    if budget_sec > 0 and budget_left() < MIN_HEAVY_START_SEC:
+        report["skipped"] = "budget spent"
+        log("cleanmymac: budget spent; skipping sweeps")
+        return
+    if shutil.which("cleanmymac") is None:
+        report["installed"] = False
+        report["skipped"] = "cleanmymac CLI not installed"
+        log("cleanmymac CLI not installed; skipping (--cleanmymac)")
+        return
+    report["installed"] = True
+    try:
+        version = subprocess.run(
+            ["cleanmymac", "--version"], capture_output=True, text=True, timeout=20
+        )
+        report["version"] = (version.stdout or version.stderr or "").strip()[:80]
+    except (subprocess.TimeoutExpired, OSError):
+        report["version"] = ""
+    for argv in CLEANMYMAC_COMMANDS:
+        if budget_sec > 0 and budget_left() < MIN_HEAVY_START_SEC:
+            report["skipped"] = "budget spent"
+            log("cleanmymac: budget spent; skipping remaining sweeps")
+            return
+        timeout = CLEANMYMAC_TIMEOUT_SEC
+        if budget_sec > 0:
+            timeout = int(max(MIN_HEAVY_START_SEC, min(CLEANMYMAC_TIMEOUT_SEC, budget_left())))
+        try:
+            p = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
+            tail = [ln for ln in ((p.stdout or "") + "\n" + (p.stderr or "")).splitlines() if ln.strip()]
+            entry = {"argv": list(argv), "exit": p.returncode, "tail": tail[-3:] if tail else []}
+            log(f"cleanmymac {' '.join(argv[1:])}: exit {p.returncode}")
+        except subprocess.TimeoutExpired:
+            entry = {"argv": list(argv), "exit": "timeout", "tail": [f"no finish within {timeout}s"]}
+            log(f"cleanmymac {' '.join(argv[1:])}: timed out after {timeout}s")
+        except OSError as exc:
+            entry = {"argv": list(argv), "exit": "error", "tail": [f"{type(exc).__name__}: {exc}"[:200]]}
+            log(f"cleanmymac {' '.join(argv[1:])}: {exc}")
+        report["commands"].append(entry)
+    report["ran"] = True
 
 
 # --------------------------------------------------------------------------
@@ -1258,6 +1324,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--budget-sec", type=float, default=0.0,
                    help="stop starting work after this many seconds and report what is left "
                         "(0 = no limit); the next run rescans and carries on")
+    p.add_argument("--cleanmymac", action="store_true",
+                   help="after this engine's own work, also run the CleanMyMac CLI "
+                        "sweeps (clean junk --force, optimize purgeable) when installed; "
+                        "never invoked without this flag")
     p.add_argument("--version", action="store_true")
     args = p.parse_args(argv)
 
@@ -1368,6 +1438,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             if snapshot_delta > 512:
                 log(f"snapshot prune freed {snapshot_delta:.0f}M (df-verified)")
 
+    cleanmymac_report: dict = {
+        "requested": bool(args.cleanmymac),
+        "installed": shutil.which("cleanmymac") is not None,
+        "ran": False,
+        "commands": [],
+        "skipped": None,
+    }
+    if args.cleanmymac:
+        if args.clean:
+            run_cleanmymac_cli(cleanmymac_report, args.budget_sec)
+        else:
+            cleanmymac_report["skipped"] = "scan mode (nothing applied)"
+            log("scan mode: CleanMyMac sweeps reported, not run (needs --clean --cleanmymac)")
+
     if args.json:
         print(json.dumps({
             "version": VERSION,
@@ -1386,6 +1470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "budget_exhausted": budget_exhausted,
             "remaining_count": (len(actionable) - attempted) if args.clean else 0,
             "elapsed_sec": round(time.monotonic() - started, 1),
+            "cleanmymac": cleanmymac_report,
         }, indent=2))
         return 0
 
@@ -1397,6 +1482,12 @@ def main(argv: Sequence[str] | None = None) -> int:
               + (f"  [pressure: {band.pressure_label}"
                  f"{', ' + ', '.join(band.reasons) if band.reasons else ''}]"))
         print(f"tiers applied: {', '.join(sorted(allowed))}\n")
+        if cleanmymac_report["requested"]:
+            if cleanmymac_report["ran"]:
+                exits = ",".join(str(c.get("exit")) for c in cleanmymac_report["commands"])
+                print(f"CleanMyMac CLI sweeps ran (exits {exits}).")
+            else:
+                print(f"CleanMyMac CLI sweeps skipped: {cleanmymac_report['skipped']}.")
         if not cands:
             print("nothing reclaimable.")
         by_cat: dict[str, list[Candidate]] = {}

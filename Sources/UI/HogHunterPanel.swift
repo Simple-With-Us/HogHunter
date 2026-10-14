@@ -204,9 +204,9 @@ struct HogHunterPanel: View {
             }
         } label: {
             Image(systemName: "gearshape")
-                .font(.system(size: 15))
+                .font(.system(size: 17))
                 .foregroundStyle(.primary)
-                .frame(width: 22, height: 22)
+                .frame(width: 28, height: 28)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)

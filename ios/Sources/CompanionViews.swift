@@ -946,12 +946,21 @@ struct DashboardView: View {
                         }
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 2) {
-                            Text(row.cpuText)
-                                .font(.body.weight(sortOrder == .cpu ? .bold : .semibold).monospacedDigit())
-                                .foregroundStyle(rowColor(row.severity))
-                            Text(row.memoryText)
-                                .font(.caption.weight(sortOrder == .memory ? .semibold : .regular).monospacedDigit())
-                                .foregroundStyle(sortOrder == .memory ? Color.primary : Color.secondary)
+                            if sortOrder == .memory {
+                                Text(row.memoryText)
+                                    .font(.body.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(Color.primary)
+                                Text(row.cpuText)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(Color.secondary)
+                            } else {
+                                Text(row.cpuText)
+                                    .font(.body.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(rowColor(row.severity))
+                                Text(row.memoryText)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(Color.secondary)
+                            }
                         }
                     }
                     .accessibilityElement(children: .combine)
@@ -1775,7 +1784,7 @@ struct RemoteConnectSheet: View {
                 } header: {
                     Text("Mac Address")
                 } footer: {
-                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  Using a VPN, port forward, or your own domain instead?  Point it at that port.")
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  A VPN or a tunnel that lands on the Mac itself pairs like the local network.  Do not forward this port from your router: the link is not encrypted.  An HTTPS tunnel needs app TLS first, which is still to come.")
                 }
 
                 Section {
