@@ -11,6 +11,10 @@ Temp Files scan category (the October 6 cleaner review's missing /tmp coverage):
 - Worktree discovery caches `git worktree list` for five minutes, and drains the git pipe before waiting so a large listing cannot deadlock the scan thread.
 - Deletion follows the existing safety path: APFS snapshot first, Trash-first removal, and the safety guard restricts deletes to paths strictly inside the resolved temp root.  Shipped with fixture tests covering each exclusion class.
 
+Sentry Cocoa 9 (PR #136):
+
+- sentry-cocoa is pinned to the 9.30.1 git revision.  The 9.x Swift 6.2 package manifest depends on KSCrash by commit, which SPM treats as unstable, so every version pin (`from`, `minorVersion`, `exactVersion`) fails to resolve on the macOS CI runner.
+
 Sentry for the Mac menubar app and the iPhone companion (project `hoghunter`):
 
 - sentry-cocoa is linked on both app targets.  `SentryTelemetry` starts from Info.plist `SentryDSN` (`$(SENTRY_DSN)`), with `sendDefaultPii = false`, tracing 0.2, continuous profiling 0.1, app-hang tracking, and 5xx capture.  Session Replay stays off.  An empty DSN is a no-op.

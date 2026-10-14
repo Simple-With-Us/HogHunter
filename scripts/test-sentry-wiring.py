@@ -45,6 +45,20 @@ class WiringTests(unittest.TestCase):
         self.assertIn("https://github.com/getsentry/sentry-cocoa", text)
         self.assertIn("product: Sentry", text)
         self.assertIn("Sources/Telemetry/SentryTelemetry.swift", text)
+        match = re.search(
+            r"^packages:\n  Sentry:\n((?:    .*\n)+)",
+            text,
+            re.M,
+        )
+        self.assertIsNotNone(match, "project.yml is missing the Sentry package block")
+        block = match.group(1)
+        # sentry-cocoa 9 depends on KSCrash by git revision.  SPM rejects
+        # every version pin (`from`, `minorVersion`, `exactVersion`).
+        self.assertRegex(block, r"revision:\s*[0-9a-f]{40}")
+        self.assertIn("9.30.1", block)
+        self.assertNotRegex(block, r"^\s*from:", re.M)
+        self.assertNotRegex(block, r"^\s*minorVersion:", re.M)
+        self.assertNotRegex(block, r"^\s*exactVersion:", re.M)
 
     def test_info_plists_expand_the_build_setting(self):
         for relative in ("macos/Info.plist", "ios/Info.plist"):
