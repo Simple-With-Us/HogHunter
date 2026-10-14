@@ -180,17 +180,17 @@ sign_with_identity() {
   local sign_opts=(--options runtime --timestamp)
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
-    codesign_bounded --force "${sign_opts[@]}" \
+    codesign_bounded --force ${sign_opts[@]+"${sign_opts[@]}"} \
       --preserve-metadata=entitlements --sign "$identity" "$target" || return 1
   done < <(framework_helper_paths)
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
-    codesign_bounded --force "${sign_opts[@]}" --sign "$identity" "$target" && continue
+    codesign_bounded --force ${sign_opts[@]+"${sign_opts[@]}"} --sign "$identity" "$target" && continue
     status=$?
     [[ "$status" != "$WATCHDOG_STATUS" ]] || return 1
     echo "note: not separately signable, sealed as a resource instead: $target"
   done < <(nested_code_paths)
-  codesign_bounded --force "${sign_opts[@]}" \
+  codesign_bounded --force ${sign_opts[@]+"${sign_opts[@]}"} \
     --entitlements "$ENTITLEMENTS" --sign "$identity" "$APP_BUNDLE" || return 1
 }
 
@@ -214,9 +214,9 @@ build_and_stage() {
   [[ -n "${SENTRY_DSN:-}" ]] && sentry_args=(SENTRY_DSN="$SENTRY_DSN")
   /usr/bin/xcodebuild -project "$ROOT_DIR/HogHunter.xcodeproj" \
     -scheme HogHunter -configuration Release \
-    -derivedDataPath "$derived" "${arch_args[@]}" \
+    -derivedDataPath "$derived" ${arch_args[@]+"${arch_args[@]}"} \
     CODE_SIGN_STYLE=Manual CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-    "${sentry_args[@]}" \
+    ${sentry_args[@]+"${sentry_args[@]}"} \
     build
   local product="$derived/Build/Products/Release/HogHunter.app"
   [[ -d "$product" ]] || { echo "error: built app not found at $product" >&2; exit 1; }
@@ -291,7 +291,7 @@ notarize_file() {
     echo "error: no notarization credentials (NOTARY_KEY_PATH, NOTARY_KEY_ID, NOTARY_ISSUER_ID)." >&2
     exit 1
   fi
-  if ! response="$(xcrun notarytool submit "$file" "${NOTARY_AUTH[@]}" --wait --output-format json 2>/dev/null)"; then
+  if ! response="$(xcrun notarytool submit "$file" ${NOTARY_AUTH[@]+"${NOTARY_AUTH[@]}"} --wait --output-format json 2>/dev/null)"; then
     echo "notarization could not be submitted for $(basename "$file")." >&2
     echo "check NOTARY_KEY_PATH, NOTARY_KEY_ID and NOTARY_ISSUER_ID (an App Store Connect API key)." >&2
     exit 1
@@ -302,7 +302,7 @@ notarize_file() {
   echo "notarization status: $status"
   if [[ "$status" != "Accepted" ]]; then
     echo "notarization was not accepted for $(basename "$file").  Apple's log follows." >&2
-    xcrun notarytool log "$submission" "${NOTARY_AUTH[@]}" >&2 || true
+    xcrun notarytool log "$submission" ${NOTARY_AUTH[@]+"${NOTARY_AUTH[@]}"} >&2 || true
     exit 1
   fi
 }
