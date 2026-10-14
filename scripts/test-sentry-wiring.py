@@ -52,10 +52,11 @@ class WiringTests(unittest.TestCase):
         )
         self.assertIsNotNone(match, "project.yml is missing the Sentry package block")
         block = match.group(1)
-        # sentry-cocoa 9 depends on KSCrash.  SPM rejects `from`
-        # (up-to-next-major) for a package with an unstable dependency.
-        self.assertRegex(block, r'minorVersion:\s*"9\.\d+\.\d+"')
+        # sentry-cocoa 9 depends on KSCrash.  SPM skips ranged pins
+        # (`from`, `minorVersion`) and only resolves an exact version.
+        self.assertRegex(block, r'exactVersion:\s*"9\.\d+\.\d+"')
         self.assertNotRegex(block, r"^\s*from:", re.M)
+        self.assertNotRegex(block, r"^\s*minorVersion:", re.M)
 
     def test_info_plists_expand_the_build_setting(self):
         for relative in ("macos/Info.plist", "ios/Info.plist"):
