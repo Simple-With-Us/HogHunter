@@ -20,6 +20,10 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case largeAndOldFiles
     /// APFS local Time Machine snapshots pinning deleted storage blocks.
     case apfsSnapshots
+    /// Stale temporary files in `/tmp` untouched for 24+ hours, excluding
+    /// registered git worktrees, nested git checkouts, active conversion-batch
+    /// staging, and fleet-locked files.
+    case tempFiles
 
     var id: String { rawValue }
 
@@ -34,6 +38,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .localAIModels: return "Local AI & LLM Models"
         case .largeAndOldFiles: return "Large & Old Files"
         case .apfsSnapshots: return "APFS Local Snapshots"
+        case .tempFiles: return "Temp Files"
         }
     }
 
@@ -57,6 +62,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Files over 100 MB, or over 20 MB untouched for 6+ months."
         case .apfsSnapshots:
             return "Local Time Machine backup snapshots pinning deleted disk blocks on APFS containers."
+        case .tempFiles:
+            return "Stale temporary files in /tmp untouched for 24+ hours.  Skips registered git worktrees, nested git checkouts, active conversion-batch staging, and fleet-locked files."
         }
     }
 
@@ -71,6 +78,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .localAIModels: return "brain.head.profile"
         case .largeAndOldFiles: return "clock.arrow.circlepath"
         case .apfsSnapshots: return "camera.metering.matrix"
+        case .tempFiles: return "timer"
         }
     }
 
@@ -85,13 +93,14 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .localAIModels: return 6
         case .largeAndOldFiles: return 7
         case .apfsSnapshots: return 8
+        case .tempFiles: return 9
         }
     }
 
     /// Whether this category is restricted to the Extreme Clean tier.
     var isExtremeOnly: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots, .tempFiles:
             return false
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return true
@@ -103,8 +112,9 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
             return true
-        case .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots:
-            // Large/old files, AI agent artifacts, and local snapshots require explicit user review to prevent accidental deletion
+        case .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots, .tempFiles:
+            // Large/old files, AI agent artifacts, local snapshots, and temp
+            // files require explicit user review to prevent accidental deletion
             return false
         }
     }
@@ -503,17 +513,27 @@ final class DiskCleaner: @unchecked Sendable {
     /// Tests inject a temp home so scan-level behavior is verifiable without
     /// touching the real home directory.
     private let homeDirectory: URL?
+    /// Tests inject a temp root so the temp-file scan is verifiable without
+    /// touching the real `/tmp`.
+    private let tempRootDirectory: URL?
+    /// Tests inject a fixed worktree set; the default shells out to
+    /// `git worktree list --porcelain`.
+    private let worktreePathsProvider: () -> Set<String>
 
     init(fileManager: FileManager = .default,
          makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
          listSnapshots: @escaping (String) -> [String]? = { _ in SnapshotSafety.listLocalSnapshots() },
          purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) },
-         homeDirectory: URL? = nil) {
+         homeDirectory: URL? = nil,
+         tempRootDirectory: URL? = nil,
+         worktreePathsProvider: (() -> Set<String>)? = nil) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
         self.listSnapshots = listSnapshots
         self.purgeableProvider = purgeableProvider
         self.homeDirectory = homeDirectory
+        self.tempRootDirectory = tempRootDirectory
+        self.worktreePathsProvider = worktreePathsProvider ?? Self.defaultWorktreePaths
     }
 
     // MARK: - Full Scan
@@ -581,6 +601,8 @@ final class DiskCleaner: @unchecked Sendable {
             return scanLargeAndOldFiles()
         case .apfsSnapshots:
             return scanAPFSSnapshots()
+        case .tempFiles:
+            return scanTempFiles()
         }
     }
 
@@ -626,6 +648,222 @@ final class DiskCleaner: @unchecked Sendable {
     }
 
     // MARK: - Category Scanners
+
+    /// A temp entry is listed only when it is provably dead: untouched for
+    /// longer than `tempFileStaleThreshold`.  `/tmp` is transient by design;
+    /// anything idle for a full day while the machine is in active use is
+    /// abandoned staging, not live work.
+    static let tempFileStaleThreshold: TimeInterval = 24 * 3600
+
+    /// Marker files whose presence inside a directory means an active
+    /// conversion batch owns it.  Batch staging is pipeline-owned; the
+    /// pipeline cleans up after itself, so the cleaner never touches it.
+    static let batchActiveMarkerNames: Set<String> = [
+        ".batch-active", "BATCH_ACTIVE", "export_state.json",
+        ".converting", ".export-in-progress"
+    ]
+
+    /// Directory name prefixes owned by the video conversion pipeline's
+    /// batch staging (e.g. `vc-012`).  Always skipped, even without markers.
+    static let batchStagingNamePrefixes = ["vc-"]
+
+    /// Scans the temp root (`/tmp`) for stale temp files.  An entry is
+    /// listed only when every exclusion below agrees it is dead:
+    /// - never symlinks (we do not follow links out of the temp root)
+    /// - never a registered git worktree, nested inside one, or a container
+    ///   holding a nested checkout (`git worktree list`, plus `.git` at the
+    ///   entry or one or more levels down)
+    /// - never active conversion-batch staging (pipeline name prefixes or
+    ///   batch marker files)
+    /// - never held by a fleet lock (adjacent `<name>.lock` sentinels, or a
+    ///   `fleet.lock` inside the directory)
+    /// - only regular files and directories (never sockets, FIFOs, devices)
+    /// - untouched for longer than `tempFileStaleThreshold`
+    ///
+    /// Items come back unselected: `/tmp` can hold live pipeline staging, so
+    /// every deletion needs explicit per-item review in the UI.
+    func scanTempFiles() -> [CleanItem] {
+        let root = tempRootURL
+        let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .contentModificationDateKey]
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: []
+        ) else {
+            return []
+        }
+
+        let worktrees = Set(worktreePathsProvider().map(Self.resolvedPath))
+        let staleCutoff = Date().addingTimeInterval(-Self.tempFileStaleThreshold)
+        let siblingNames = Set(entries.map(\.lastPathComponent))
+
+        var items: [CleanItem] = []
+        for url in entries {
+            if Task.isCancelled { break }
+            let values = try? url.resourceValues(forKeys: resourceKeys)
+            // Never follow symlinks: a link in /tmp can point anywhere.
+            if values?.isSymbolicLink == true { continue }
+
+            let path = Self.resolvedPath(url.path)
+
+            // Registered git worktree, or nested inside one.
+            if worktrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { continue }
+            // A top-level .git (file = worktree, dir = repo) catches checkouts
+            // the provider could not enumerate.
+            if fileManager.fileExists(atPath: (path as NSString).appendingPathComponent(".git")) { continue }
+
+            // Active conversion-batch staging is pipeline-owned.
+            if isBatchStaging(url) { continue }
+
+            // Fleet-locked entries are live by definition.
+            if isLockHeld(url, siblingNames: siblingNames) { continue }
+
+            // Only regular files and directories; never sockets, FIFOs, or devices.
+            let isDir = values?.isDirectory == true
+            let isFile = values?.isRegularFile == true
+            guard isDir || isFile else { continue }
+
+            // Provably dead: untouched longer than the stale threshold.
+            guard let modified = values?.contentModificationDate, modified < staleCutoff else { continue }
+
+            let stats = directoryStats(at: url)
+            guard stats.bytes > 0 else { continue }
+            // A directory's own mtime only moves when direct children are
+            // created, renamed, or removed; files written in place leave it
+            // alone.  Nested activity counts, so a directory holding live
+            // output is not stale even when its own mtime is old.
+            if isDir, let nested = stats.lastModified, nested >= staleCutoff { continue }
+
+            // A stale container holding a nested checkout one or more levels
+            // down would otherwise pass every other check.  Run after the
+            // freshness filters so live directories are not walked twice.
+            if isDir, containsNestedGitCheckout(url, worktrees: worktrees) { continue }
+
+            // Resolved URL so item.path, the subtitle, and the safety
+            // guard agree when `/var` and `/private/var` are the same inode.
+            let itemURL = URL(fileURLWithPath: path, isDirectory: isDir)
+            items.append(CleanItem(
+                category: .tempFiles,
+                title: url.lastPathComponent,
+                subtitle: itemURL.path,
+                url: itemURL,
+                bytes: stats.bytes,
+                fileCount: stats.fileCount,
+                lastModified: stats.lastModified,
+                isSelected: CleanCategory.tempFiles.defaultSelected,
+                detail: "Stale temporary file — untouched for 24+ hours"
+            ))
+        }
+
+        return items.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// True when a temp entry is (or contains) active conversion-batch
+    /// staging: a pipeline batch name prefix, or a batch marker file inside.
+    func isBatchStaging(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        if Self.batchStagingNamePrefixes.contains(where: { name.hasPrefix($0) }) { return true }
+        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return false }
+        let contents = Set((try? fileManager.contentsOfDirectory(atPath: url.path)) ?? [])
+        return !Self.batchActiveMarkerNames.isDisjoint(with: contents)
+    }
+
+    /// True when a fleet lock holds a temp entry: an adjacent `<name>.lock`
+    /// or `.<name>.lock` sentinel in the same directory, or a `fleet.lock`
+    /// inside the directory itself.
+    func isLockHeld(_ url: URL, siblingNames: Set<String>) -> Bool {
+        let name = url.lastPathComponent
+        if siblingNames.contains(name + ".lock") || siblingNames.contains("." + name + ".lock") { return true }
+        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return false }
+        return fileManager.fileExists(atPath: url.appendingPathComponent("fleet.lock").path)
+    }
+
+    /// True when a temp directory holds a git checkout below its own top
+    /// level: a nested `.git`, or a registered worktree under this path.
+    /// The entry's own `.git` is already handled by the caller.  Fails closed
+    /// on a cancelled or capped walk so a huge tree is not listed as dead.
+    func containsNestedGitCheckout(_ url: URL, worktrees: Set<String>) -> Bool {
+        let path = Self.resolvedPath(url.path)
+        if worktrees.contains(where: { $0.hasPrefix(path + "/") }) {
+            return true
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: [.skipsPackageDescendants]
+        ) else {
+            return true
+        }
+        var visited = 0
+        for case let child as URL in enumerator {
+            if Task.isCancelled { return true }
+            visited += 1
+            if visited > 25_000 { return true }
+            if child.lastPathComponent != ".git" { continue }
+            let parent = Self.resolvedPath(child.deletingLastPathComponent().path)
+            if parent != path { return true }
+        }
+        return false
+    }
+
+    /// Registered git worktree paths, via `git worktree list --porcelain`
+    /// across the likely repo parents.  A failing git (not a repo, git
+    /// missing) contributes nothing; the scan's top-level `.git` check still
+    /// catches checkouts the provider misses.  Cached for `worktreeCacheTTL`
+    /// so a scan does not fork git three times on every pass.
+    private static let worktreeCacheLock = NSLock()
+    private static var cachedWorktreePaths: (fetchedAt: Date, paths: Set<String>)?
+    static let worktreeCacheTTL: TimeInterval = 300
+
+    static func defaultWorktreePaths() -> Set<String> {
+        worktreeCacheLock.lock()
+        if let cached = cachedWorktreePaths,
+           Date().timeIntervalSince(cached.fetchedAt) < worktreeCacheTTL {
+            let paths = cached.paths
+            worktreeCacheLock.unlock()
+            return paths
+        }
+        worktreeCacheLock.unlock()
+
+        let home = NSHomeDirectory()
+        let roots = [home,
+                     (home as NSString).appendingPathComponent("apps"),
+                     (home as NSString).appendingPathComponent("Code")]
+        let paths = roots.reduce(into: Set<String>()) { $0.formUnion(worktreePaths(in: $1)) }
+
+        worktreeCacheLock.lock()
+        cachedWorktreePaths = (Date(), paths)
+        worktreeCacheLock.unlock()
+        return paths
+    }
+
+    private static func worktreePaths(in root: String) -> Set<String> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", root, "worktree", "list", "--porcelain"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return []
+        }
+        // Drain before waiting and close the read end: a full ~64 KB pipe
+        // buffer blocks the child on write(2), and an unclosed handle leaks.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        try? pipe.fileHandleForReading.close()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [] }
+        let output = String(data: data, encoding: .utf8) ?? ""
+        return output
+            .split(separator: "\n")
+            .compactMap { line -> String? in
+                guard line.hasPrefix("worktree ") else { return nil }
+                return resolvedPath(String(line.dropFirst("worktree ".count)))
+            }
+            .reduce(into: Set<String>()) { $0.insert($1) }
+    }
 
     /// Known high-churn caches where deletion causes immediate large re-downloads over the network.
     /// These are unselected by default to prevent wasteful bandwidth and disk wear.
@@ -1659,6 +1897,15 @@ final class DiskCleaner: @unchecked Sendable {
 
         case .apfsSnapshots:
             return path.hasPrefix("/.snapshots/com.apple.TimeMachine.")
+
+        case .tempFiles:
+            // Same resolved root the scanner uses, so injected-root tests
+            // and the real /tmp (/private/tmp) stay on one path.  Resolve the
+            // candidate too: `standardizingPath` does not consult the file
+            // system, so `/var` and `/private/var` would otherwise disagree.
+            let tmpRoot = tempRootURL.path
+            let resolved = Self.resolvedPath(path)
+            return resolved.hasPrefix(tmpRoot + "/") && resolved != tmpRoot
         }
     }
 
@@ -1725,6 +1972,19 @@ final class DiskCleaner: @unchecked Sendable {
 
     private var userHomeURL: URL {
         homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    }
+
+    /// Root scanned by the temp-files category.  Tests inject an override.
+    /// Always resolved so `/tmp` (`/private/tmp`) and `/var` (`/private/var`)
+    /// stay on one path for the scan, the listed item URL, and the safety guard.
+    private var tempRootURL: URL {
+        (tempRootDirectory ?? URL(fileURLWithPath: "/tmp", isDirectory: true)).resolvingSymlinksInPath()
+    }
+
+    /// Resolve a filesystem path so `/var` and `/private/var` compare equal.
+    /// `standardizingPath` does not consult the file system.
+    static func resolvedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
     }
 
     /// True for a folder or bundle-id *name* that belongs to Hog Hunter
