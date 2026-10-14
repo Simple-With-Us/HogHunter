@@ -161,6 +161,15 @@ struct CompanionRootView: View {
 
     @ViewBuilder
     private var content: some View {
+        if ProcessInfo.processInfo.arguments.contains("-HogHunterWidgetPreview") {
+            WidgetScreenshotHost()
+        } else {
+            phaseContent
+        }
+    }
+
+    @ViewBuilder
+    private var phaseContent: some View {
         switch model.phase {
         case .live:
             if let snapshot = model.snapshot {
@@ -199,6 +208,29 @@ struct CompanionRootView: View {
                     model.enterDemoMode()
                 }
             )
+        }
+    }
+}
+
+/// Renders the real widget views for `xcrun simctl io … screenshot`.
+/// Launch argument only.  The home-screen widget is the same SwiftUI.
+private struct WidgetScreenshotHost: View {
+    private let entry = Provider.sampleEntry()
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Text("Hog Hunter Widget")
+                    .font(.headline)
+                HogHunterSmallWidgetView(entry: entry)
+                    .frame(width: 170, height: 170)
+                HogHunterMediumWidgetView(entry: entry)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 170)
+                HogHunterLargeWidgetView(entry: entry)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding()
         }
     }
 }
@@ -411,6 +443,17 @@ struct DashboardView: View {
     @State private var pendingSampleRow: CompanionRow?
     @State private var showSampleConfirm = false
 
+    private func consumeCleanRequest() {
+        guard model.takeCleanRequest() else { return }
+        // The link never calls triggerRemoteClean.  Offer the destructive
+        // confirmation only when the Mac has opted in.
+        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) {
+            showCleanConfirm = true
+        } else {
+            model.controlError = CleanLinkPolicy.cleanOffNote
+        }
+    }
+
     private func confirmQuit(row: CompanionRow, force: Bool) {
         pendingQuitRow = row
         isForceQuit = force
@@ -539,6 +582,12 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button("Run Safe Clean", role: .destructive) {
+                // The only place a Clean deep link can reach the Mac, and
+                // only after the Mac opt-in.  hoghunter://clean stops here.
+                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) else {
+                    model.controlError = CleanLinkPolicy.cleanOffNote
+                    return
+                }
                 Task { await model.triggerRemoteClean() }
             }
             Button("Cancel", role: .cancel) {}
@@ -639,11 +688,9 @@ struct DashboardView: View {
         } message: {
             Text(model.controlError ?? "")
         }
-        .onChange(of: model.showCleanDialogRequested) { _, requested in
-            if requested {
-                showCleanConfirm = true
-                model.showCleanDialogRequested = false
-            }
+        .onAppear { consumeCleanRequest() }
+        .onChange(of: model.showCleanDialogRequested) { _, _ in
+            consumeCleanRequest()
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -1275,7 +1322,7 @@ struct DashboardView: View {
                 .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
 
                 if snapshot.remoteCleanAllowed != true {
-                    Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")
+                    Text(CleanLinkPolicy.cleanOffNote)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

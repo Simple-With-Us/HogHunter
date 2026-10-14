@@ -2,6 +2,8 @@
 # Capture app screenshots across standard device formats.
 # This lane is the visual-verification gate: it FAILS (exit 1) when any
 # expected artifact is missing, so CI can never pass with no screenshots.
+# It also requires the embedded widget extension, a widget-preview frame,
+# a cold-start Clean confirm frame, and a simctl openurl of hoghunter://clean.
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,12 +27,21 @@ if [[ -n "$ios_app" && -d "$ios_app" ]]; then
   python3 -u - "$ios_app" "$bundle_id" <<'PYIOS' || failures=$((failures + 1))
 import json, os, re, subprocess, sys, time
 
+sys.path.insert(0, "scripts")
+from ios_screenshot_checks import (  # noqa: E402
+    CLEAN_URL,
+    COLD_CLEAN_LAUNCH_ARGS,
+    WARM_CLEAN_LAUNCH_ARGS,
+    WIDGET_PREVIEW_LAUNCH_ARGS,
+    clean_openurl_command,
+    screenshot_command,
+    screenshot_problem,
+    widget_appex_present,
+)
+
 app_path, bundle_id = sys.argv[1], sys.argv[2]
 
 BOOT_TIMEOUT_S = 180
-# A solid-colour frame compresses to ~0.1% of its raw size; a rendered screen
-# is an order of magnitude above this.
-MIN_COMPRESSED_RATIO = 0.003
 
 
 def boot_simulator(udid):
@@ -108,34 +119,54 @@ def capture_extras(udid, out_dir):
         print(f"  OK extra screen saved: {out_file}")
 
 
-def screenshot_problem(path):
-    """Sanity-check the captured PNG itself.  Returns None when it looks like
-    real UI, else why not.  Stdlib only: the PNG header must be valid and the
-    device-sized, and the compressed image data must not be nearly empty (a
-    blank, black or single-colour frame compresses to a tiny fraction of a
-    rendered screen).  This catches a blank or black frame, not a dialog drawn
-    over an otherwise normal screen; that still needs a person looking at the
-    uploaded artifact."""
-    import struct, zlib
-    try:
-        data = open(path, "rb").read()
-    except OSError as e:
-        return f"unreadable: {e}"
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
-        return "not a PNG"
-    pos, width, height, idat = 8, 0, 0, 0
-    while pos + 8 <= len(data):
-        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
-        if kind == b"IHDR":
-            width, height = struct.unpack(">II", data[pos + 8:pos + 16])
-        elif kind == b"IDAT":
-            idat += length
-        pos += 12 + length
-    if width < 300 or height < 300:
-        return f"unexpected size {width}x{height}"
-    if idat / (width * height * 4) < MIN_COMPRESSED_RATIO:
-        return f"looks blank ({idat} compressed bytes for {width}x{height})"
-    return None
+def capture_required_frames(udid):
+    """Widget render plus the Clean deep link.  These fail the lane.
+
+    The home-screen widget is the extension embedded in the app.  simctl
+    cannot place that widget on SpringBoard, so the lane also launches
+    -HogHunterWidgetPreview, which draws the same SwiftUI the extension uses.
+    hoghunter://clean is opened with simctl openurl on the booted simulator,
+    and the cold-start confirm is a launch with the request already set.
+    """
+    global failures
+    shots = [
+        ("widget-small", WIDGET_PREVIEW_LAUNCH_ARGS, False),
+        ("clean-cold-start", COLD_CLEAN_LAUNCH_ARGS, False),
+        ("clean-deep-link", WARM_CLEAN_LAUNCH_ARGS, True),
+    ]
+    for name, args, open_clean in shots:
+        out_file = f"screenshots/ios/{name}.png"
+        subprocess.run(["xcrun", "simctl", "terminate", udid, bundle_id], capture_output=True)
+        launch = subprocess.run(
+            ["xcrun", "simctl", "launch", udid, bundle_id, *args],
+            capture_output=True, text=True,
+        )
+        if launch.returncode != 0:
+            print(f"ERROR: {name}: launch failed: {(launch.stderr or '').strip()}")
+            failures += 1
+            continue
+        time.sleep(5)
+        if open_clean:
+            opened = subprocess.run(clean_openurl_command(udid), capture_output=True, text=True)
+            if opened.returncode != 0:
+                detail = (opened.stderr or opened.stdout or "").strip()
+                print(f"ERROR: {name}: xcrun simctl openurl {CLEAN_URL} failed: {detail}")
+                failures += 1
+                continue
+            time.sleep(3)
+        res = subprocess.run(screenshot_command(udid, out_file), capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.isfile(out_file):
+            print(f"ERROR: {name}: simctl io screenshot failed: {(res.stderr or '').strip() or 'no file'}")
+            failures += 1
+            continue
+        problem = screenshot_problem(out_file)
+        if problem:
+            print(f"ERROR: {name}: frame rejected: {problem}")
+            os.remove(out_file)
+            failures += 1
+            continue
+        print(f"  OK required screen saved: {out_file}")
+
 
 # Format definitions: key -> (output_name, list_of_preferred_devices, fallback_devicetype_pattern)
 FORMATS = {
@@ -148,6 +179,13 @@ FORMATS = {
 
 failures = 0
 extras_done = False
+required_done = False
+
+if not widget_appex_present(app_path):
+    print("ERROR: HogHunterWidgets.appex is not inside the built app.  The widget extension was not embedded, so simctl install cannot put it on the simulator.")
+    failures += 1
+else:
+    print("  OK widget extension embedded: HogHunterWidgets.appex")
 
 try:
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
@@ -286,6 +324,8 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
             # killed by the cap before it reaches the later ones.
             if not extras_done:
                 extras_done = True
+                capture_required_frames(udid)
+                required_done = True
                 capture_extras(udid, "screenshots/ios")
         else:
             print(f"[{fmt_key}] ERROR: screenshot failed: {res.stderr.strip() or 'no file written'}")
@@ -298,8 +338,12 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
         if created_udid:
             subprocess.run(["xcrun", "simctl", "delete", created_udid], capture_output=True)
 
+if not required_done:
+    print("ERROR: widget preview and hoghunter://clean screenshots were not captured.")
+    failures += 1
+
 if failures:
-    print(f"iOS screenshot lane FAILED: {failures} of {len(FORMATS)} formats missing.")
+    print(f"iOS screenshot lane FAILED: {failures} problem(s).")
 sys.exit(1 if failures else 0)
 
 PYIOS

@@ -4,6 +4,7 @@ import Observation
 #if canImport(UIKit)
 import UIKit
 #endif
+import WidgetKit
 
 struct SavedMac: Codable, Equatable {
     var peerID: String
@@ -86,6 +87,35 @@ final class CompanionModel {
     /// through, so the dashboard can say so instead of silently doing nothing.
     var controlError: String?
     var showCleanDialogRequested = false
+    /// When the current Clean request arrived.  The root view only builds the
+    /// dashboard when the phase is `.live`, so a link that lands while the Mac
+    /// is unreachable would otherwise leave the flag set and pop the
+    /// destructive confirmation unprompted once the Mac came back.
+    private var cleanRequestAt: Date?
+    /// How long a Clean request stays valid.  A cold start still has to launch,
+    /// find the Mac and fetch a snapshot before the dashboard exists, so this
+    /// is generous -- but short enough that a link is not replayed much later.
+    static let cleanRequestLifetime = CleanRequest.lifetime
+
+    /// Record a `hoghunter://clean` link as asking for the confirmation now.
+    func requestCleanDialog() {
+        showCleanDialogRequested = true
+        cleanRequestAt = Date()
+    }
+
+    /// Take the pending Clean request, returning whether one is still valid.
+    /// Cleared either way, so a link is honoured at most once.
+    func takeCleanRequest(now: Date = Date()) -> Bool {
+        let fresh = CleanRequest.isFresh(
+            pending: showCleanDialogRequested,
+            issuedAt: cleanRequestAt,
+            now: now,
+            lifetime: Self.cleanRequestLifetime
+        )
+        showCleanDialogRequested = false
+        cleanRequestAt = nil
+        return fresh
+    }
     /// The row a Sample for 3 Seconds is running on, so the row can say so and
     /// a second tap does not start a second sample.
     var samplingRowId: String?
@@ -195,6 +225,11 @@ final class CompanionModel {
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
             seedScreenshotCleaner()
+            // Set before DashboardView exists, so its onAppear consumes the
+            // request.  That is the cold-start path the widget's Clean pill hits.
+            if ProcessInfo.processInfo.arguments.contains("-HogHunterCleanConfirm") {
+                requestCleanDialog()
+            }
             return
         }
         saved = loadSaved()
@@ -856,9 +891,7 @@ final class CompanionModel {
             phase = .live
             statusLine = "\(displayName) (Remote)"
             isRemoteSheetPresented = false
-            if let data = try? CompanionJSON.encode(fetched) {
-                UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
-            }
+            storeSnapshotForWidgets(fetched)
         } catch CompanionClientError.unauthorized {
             remoteConnectError = "Pairing Code does not match this Mac."
         } catch let error as CompanionClientError where error != .badResponse {
@@ -871,6 +904,52 @@ final class CompanionModel {
                 remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
             }
         }
+    }
+
+    /// How long a widget timeline reload is rate limited to.  The widget sets
+    /// its own `.after(5 minutes)` policy, so a reload more often than this
+    /// only spins up the extension to redraw data nobody is waiting on.
+    private static let widgetReloadInterval: TimeInterval = 300
+    private var lastWidgetReload: Date?
+    /// The clean keys the widget renders, so a clean finishing forces a reload
+    /// even when the throttle has not elapsed.
+    private var lastCleanKeysForWidget: [String]?
+
+    /// Nil when this build has no App Group container.  `UserDefaults(suiteName:)`
+    /// can still return an object in that case, and those writes never reach
+    /// the widget, so they are not a reason to reload.
+    private func sharedWidgetDefaults() -> UserDefaults? {
+        guard FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil else {
+            return nil
+        }
+        return UserDefaults(suiteName: appGroupSuite)
+    }
+
+    private func storeSnapshotForWidgets(_ fetched: CompanionSnapshot) {
+        // The payload changes on every poll (sampledAt plus live CPU and
+        // memory), so comparing bytes cannot suppress the reload.  Write
+        // every poll the container can actually hold, and rate limit the reload.
+        let containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil
+        let data = try? CompanionJSON.encode(fetched)
+        guard let defaults = sharedWidgetDefaults(), let data else { return }
+        defaults.set(data, forKey: "last_snapshot")
+        let cleanKeys = [
+            defaults.string(forKey: "clean_status") ?? "",
+            defaults.string(forKey: "last_clean_bytes") ?? "",
+            String(defaults.double(forKey: "last_clean_date")),
+        ]
+        let now = Date()
+        let cleanChanged = cleanKeys != lastCleanKeysForWidget
+        let dueForReload = lastWidgetReload.map { now.timeIntervalSince($0) >= Self.widgetReloadInterval } ?? true
+        guard CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: containerAvailable,
+            snapshotEncoded: true,
+            cleanKeysChanged: cleanChanged,
+            reloadDue: dueForReload
+        ) else { return }
+        lastWidgetReload = now
+        lastCleanKeysForWidget = cleanKeys
+        WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 
     func refresh() async {
@@ -891,10 +970,7 @@ final class CompanionModel {
             snapshot = fetched
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
-            // Persist for iOS WidgetKit extension
-            if let data = try? CompanionJSON.encode(fetched) {
-                UserDefaults(suiteName: appGroupSuite)?.set(data, forKey: "last_snapshot")
-            }
+            storeSnapshotForWidgets(fetched)
             Task { await upgradeToDeviceTokenIfNeeded() }
         } catch CompanionClientError.unauthorized {
             snapshot = nil
@@ -1013,10 +1089,16 @@ final class CompanionModel {
             isCleaning = false
             return
         }
+        // A deep link can reach this only after the person taps Run Safe
+        // Clean.  Refuse here too when the Mac has not opted in.
+        guard snapshot?.remoteCleanAllowed == true else {
+            controlError = CleanLinkPolicy.cleanOffNote
+            return
+        }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
         isCleaning = true
         cleanError = nil
-        let defaults = UserDefaults(suiteName: appGroupSuite)
+        let defaults = sharedWidgetDefaults()
         defaults?.set("Cleaning…", forKey: "clean_status")
 
         // Start high-frequency polling during clean execution so progress updates are relayed smoothly
