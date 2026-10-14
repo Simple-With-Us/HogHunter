@@ -44,5 +44,5 @@ Last known green (pre-`pairingDismissed` follow-up, local macOS seat): `Companio
 
 ## Zero-Code Findings
 
-- Kodus “Bonjour-only” findings conflict with product contract (`AGENTS.md`, PR #75, fleet recall above).  This change preserves address-backed transport and only stops Bonjour from falsely marking those sessions offline.
+- Kodus “Bonjour-only” findings conflict with product contract (`AGENTS.md`, PR #75, fleet recall above).  This change preserves address-backed transport and only stops Bonjour from falsely marking those sessions offline.  Fleet rule scope fix: `Simple-With-Us/Kodus-Config` → `HogHunter/.kody-rules/review/hoghunter-companion-bonjour-and-address-transport.yml` (PR #31 on that repo).  After merge, approve the pending Kody import if `kodyKnowledgeApproval` queues it.
 - iOS companion UI has no XCTest target; behavioral fixes are validated via macOS `CompanionReach` tests plus CI iOS compile.
