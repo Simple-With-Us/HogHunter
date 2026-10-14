@@ -78,6 +78,30 @@ jobs:
             sleep 8
             SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
             xcrun simctl io "$UDID" screenshot "screenshots/${SAFE_NAME}.png" || echo "Screenshot failed for $DEVICE_PATTERN"
+            # Once per run: the embedded widget, the cold-start confirm, and
+            # hoghunter://clean via simctl openurl.  Same checks as
+            # scripts/capture-app-screenshots.sh.
+            if [[ ! -f screenshots/clean-deep-link.png ]]; then
+              if ! find "$APP_PATH" -name 'HogHunterWidgets.appex' -type d | grep -q .; then
+                echo "ERROR: HogHunterWidgets.appex is missing from $APP_PATH"
+                exit 1
+              fi
+              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterWidgetPreview
+              sleep 5
+              xcrun simctl io "$UDID" screenshot "screenshots/widget-small.png"
+              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterCleanConfirm
+              sleep 5
+              xcrun simctl io "$UDID" screenshot "screenshots/clean-cold-start.png"
+              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample
+              sleep 4
+              xcrun simctl openurl "$UDID" "hoghunter://clean"
+              sleep 3
+              xcrun simctl io "$UDID" screenshot "screenshots/clean-deep-link.png"
+              python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_problem; paths = ["screenshots/widget-small.png", "screenshots/clean-cold-start.png", "screenshots/clean-deep-link.png"]; bad = [(p, screenshot_problem(p)) for p in paths]; bad = [(p, problem) for p, problem in bad if problem]; [print("ERROR: %s: %s" % item) for item in bad]; [print("OK %s" % p) for p in paths if p not in [item[0] for item in bad]]; sys.exit(1 if bad else 0)'
+            fi
             xcrun simctl shutdown "$UDID" || true
           done
           

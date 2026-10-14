@@ -15,8 +15,10 @@ struct HogHunterIOSApp: App {
             CompanionRootView(model: model)
                 .preferredColorScheme(.light)
                 .onOpenURL { url in
-                    if url.scheme == "hoghunter" && url.host == "clean" {
-                        model.showCleanDialogRequested = true
+                    // A link may show the confirmation.  It never calls
+                    // triggerRemoteClean.  Only the Run Safe Clean button does.
+                    if CompanionDeepLink.classify(url).requestsCleanConfirmation {
+                        model.requestCleanDialog()
                     }
                 }
         }
