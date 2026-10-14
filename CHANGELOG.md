@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Sentry Cocoa 9 (PR #136):
+
+- sentry-cocoa is pinned at `minorVersion: 9.30.1` (up to next minor).  The 9.x Swift 6.2 package manifest depends on KSCrash, which SPM treats as unstable, so `from` (up-to-next-major) cannot resolve 9.30.1 on the macOS CI runner.
+
 Sentry for the Mac menubar app and the iPhone companion (project `hoghunter`):
 
 - sentry-cocoa is linked on both app targets.  `SentryTelemetry` starts from Info.plist `SentryDSN` (`$(SENTRY_DSN)`), with `sendDefaultPii = false`, tracing 0.2, continuous profiling 0.1, app-hang tracking, and 5xx capture.  Session Replay stays off.  An empty DSN is a no-op.

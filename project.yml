@@ -23,8 +23,10 @@ packages:
   Sentry:
     url: https://github.com/getsentry/sentry-cocoa
     # 8.56+ has configureProfiling (8.x profilesSampleRate is gone in 9).
-    # `from` is up-to-next-major, so this stays on 8.x until Renovate opens a major PR.
-    from: "9.30.1"
+    # sentry-cocoa 9's Swift 6.2 manifest depends on KSCrash, which SPM
+    # treats as unstable.  `from` is up-to-next-major and cannot resolve
+    # 9.x; `minorVersion` is up-to-next-minor (9.30.1..<9.31.0).
+    minorVersion: "9.30.1"
 
 settings:
   base:
