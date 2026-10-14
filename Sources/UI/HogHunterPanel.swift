@@ -497,6 +497,7 @@ struct HogHunterPanel: View {
                         row: row,
                         scale: store.cpuScale,
                         coreCount: store.pulse.coreCount,
+                        sort: store.sort,
                         store: store
                     ) {
                         pendingQuit = row

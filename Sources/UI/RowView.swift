@@ -8,6 +8,9 @@ struct HogRowView: View {
     let row: HogRow
     let scale: CpuScale
     let coreCount: Int
+    /// Which figure stands large on the right.  Follows the list's sort, so
+    /// sorting by Memory puts the RAM amount on top instead of %CPU.
+    let sort: HogSort
     /// Used only to report a failed action; the row does not observe it, so a
     /// store update never redraws twenty-five rows.
     let store: HogStore
@@ -49,12 +52,21 @@ struct HogRowView: View {
             }
             Spacer(minLength: 4)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(HogFormat.cpu(row.cpuPercent, scale: scale, coreCount: coreCount))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(cpuColor)
-                Text(HogFormat.memory(row.memoryBytes))
-                    .font(.system(size: 10.5, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                if sort == .memory {
+                    Text(HogFormat.memory(row.memoryBytes))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(Color.primary)
+                    Text(HogFormat.cpu(row.cpuPercent, scale: scale, coreCount: coreCount))
+                        .font(.system(size: 10.5, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(HogFormat.cpu(row.cpuPercent, scale: scale, coreCount: coreCount))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(cpuColor)
+                    Text(HogFormat.memory(row.memoryBytes))
+                        .font(.system(size: 10.5, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
             trailingControl
         }

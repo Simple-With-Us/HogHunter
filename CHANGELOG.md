@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+Mac panel swaps figures with the sort (HH-144):
+
+- Sorting the main window by Memory now puts the RAM amount on top in the large style, with %CPU small beneath it, instead of always leading with %CPU.  Sorting by CPU keeps %CPU large with its severity color.  The iPhone rows learned this in HH-143; the Mac panel never had it until now.
+
 Owner batch (HH-143, full context in `docs/rollouts/2026-10-14-hh-143-owner-batch.md`):
 
 - CleanMyMac CLI is an opt-in extra in regular maintenance.  `hoghunter-clean --cleanmymac` runs its non-interactive sweeps (`clean junk --force`, `optimize purgeable`) after the engine's own work, only when the CLI is installed, and a missing CLI never fails the run.  The Robotic Vacuum gains a `cleanmymac_cli` step (full runs, off by default) with a matching toggle in the Maintain tab's Cleaning Steps list.  The CLI is closed-source MacPaw software: invoked when present, never vendored.
-- The iPhone process list now swaps its figures like the Mac panel: sorting by Memory puts the RAM amount on top in the large style instead of always leading with %CPU.
+- The iPhone process list now swaps its figures with the sort order: sorting by Memory puts the RAM amount on top in the large style instead of always leading with %CPU.  (The Mac panel did not swap yet; that shipped as HH-144.)
 - The panel's Settings gear is larger (17 pt in a 28 px frame).
 - Default refresh is 5 seconds everywhere it was not already: the Infisical project-switch reset, the INFISICAL.md inventory, and the phone's sample fixture.  A stored interval is never rewritten.
 - iPhone pairing names the failure instead of always saying the Mac did not answer: refused connection, unreachable address, unresolvable name, and timeout each get their own sentence with the fix.  The snapshot window grows to 10 seconds for slow Tailscale relays, and Connect by Address says which tunnels pair (Tailscale, VPN, or anything landing on the Mac itself) and which do not (raw router forwards, HTTPS tunnels before app TLS).
