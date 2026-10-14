@@ -1223,16 +1223,19 @@ final class CompanionModel {
         return DiscoveredMac(id: peerID, name: name, endpoint: result.endpoint)
     }
 
+    /// Snapshot window for every poll and pairing fetch, stated once.  Longer
+    /// than the connection's default snapshot limit, so a first paint over a
+    /// slow Tailscale relay still lands instead of reading as "the Mac did
+    /// not answer".  Passed through to the connection so both limits agree.
+    private static let snapshotFetchTimeout: TimeInterval = 10
+
     private static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
         try await withThrowingTaskGroup(of: CompanionSnapshot.self) { group in
             group.addTask {
-                try await CompanionConnection.fetch(endpoint: endpoint, token: token)
+                try await CompanionConnection.fetch(endpoint: endpoint, token: token, timeout: Self.snapshotFetchTimeout)
             }
             group.addTask {
-                // Longer than the connection's own 5 second snapshot limit, so
-                // a first paint over a slow Tailscale relay still lands instead
-                // of reading as "the Mac did not answer".
-                try await Task.sleep(for: .seconds(10))
+                try await Task.sleep(for: .seconds(Self.snapshotFetchTimeout))
                 throw CompanionClientError.timedOut
             }
             guard let value = try await group.next() else {

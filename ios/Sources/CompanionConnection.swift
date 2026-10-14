@@ -77,11 +77,11 @@ enum CompanionConnection {
         }
     }
 
-    static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
+    static func fetch(endpoint: NWEndpoint, token: String, timeout: TimeInterval = snapshotTimeout) async throws -> CompanionSnapshot {
         let reply = try await exchange(
             endpoint: endpoint,
             request: CompanionHTTP.request(token: token),
-            timeout: snapshotTimeout
+            timeout: timeout
         )
         return try decode(CompanionSnapshot.self, from: reply, decoder: CompanionJSON.decoder())
     }
@@ -268,6 +268,9 @@ enum CompanionConnection {
                 connection.stateUpdateHandler = { [weak exchange] state in
                     switch state {
                     case .ready:
+                        // The route exists now.  A later timeout is a slow
+                        // Mac, not a dead route, so the recorded wait ends here.
+                        exchange?.clearWaiting()
                         connection.send(content: request, completion: .contentProcessed { error in
                             if let error { exchange?.finish(.failure(error)) }
                         })
@@ -275,8 +278,13 @@ enum CompanionConnection {
                         exchange?.finish(.failure(error))
                     case .cancelled:
                         exchange?.finish(.failure(CancellationError()))
+                    case .waiting(let error):
+                        // No route yet: VPN connecting, DNS resolving, no
+                        // network.  Keep waiting (the timeout decides), but
+                        // remember why, so an ultimate timeout can name the
+                        // failure instead of answering generic timedOut.
+                        exchange?.noteWaiting(error)
                     default:
-                        // `.waiting` has no route yet.  The timeout decides.
                         break
                     }
                 }
@@ -303,6 +311,10 @@ private final class CompanionExchange: @unchecked Sendable {
     private var early: Result<CompanionReply, Error>?
     private var finished = false
     private var timer: DispatchWorkItem?
+    /// The latest `.waiting` error, if the connection never got a route.
+    /// Reported when the timeout fires so the caller hears "refused" or
+    /// "unresolvable" instead of a generic timeout.  Cleared on `.ready`.
+    private var waitingError: Error?
 
     init(connection: NWConnection) {
         self.connection = connection
@@ -322,12 +334,33 @@ private final class CompanionExchange: @unchecked Sendable {
 
     func armTimeout(after seconds: TimeInterval) {
         let item = DispatchWorkItem { [weak self] in
-            self?.finish(.failure(CompanionClientError.timedOut))
+            guard let self else { return }
+            self.lock.lock()
+            let cause = self.waitingError ?? CompanionClientError.timedOut
+            self.lock.unlock()
+            self.finish(.failure(cause))
         }
         lock.lock()
         timer = item
         lock.unlock()
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    /// Remembers why the connection is waiting for a route.  Only the first
+    /// reason is kept: it names the original failure, and later ones are
+    /// usually its echo.
+    func noteWaiting(_ error: Error) {
+        lock.lock()
+        if waitingError == nil { waitingError = error }
+        lock.unlock()
+    }
+
+    /// The route exists, so a later timeout is a slow Mac.  Drops the
+    /// recorded wait reason.
+    func clearWaiting() {
+        lock.lock()
+        waitingError = nil
+        lock.unlock()
     }
 
     func receive(buffer: Data) {
