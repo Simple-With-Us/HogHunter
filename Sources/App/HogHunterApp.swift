@@ -46,6 +46,10 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Sparkle self-update starts first: a build whose Info.plist carries
+        // the feed updates itself hourly in the background.  A build without
+        // the feed is a silent no-op (see AutoUpdateAvailability).
+        AppUpdater.shared.start()
         // Headless UI smoke test.  Runs before anything else touches the app so
         // it is not racing the sampler, the bandwidth timer, or the screenshot
         // hook.  See UISmokeTest for why this exists.
@@ -102,6 +106,7 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
 struct HogHunterApp: App {
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
     @StateObject private var store = HogStore()
+    @ObservedObject private var updater = AppUpdater.shared
 
     init() {
         // Sentry first, so early-launch crashes are captured.  A build
@@ -137,6 +142,7 @@ struct HogHunterApp: App {
             .accessibilityValue(store.menuBarAccessibilityValue)
         }
         .menuBarExtraStyle(.window)
+        .commands { commands }
 
         Settings {
             SettingsView()
@@ -158,5 +164,15 @@ struct HogHunterApp: App {
             .environmentObject(store)
         }
         .defaultSize(width: 540, height: 560)
+    }
+
+    /// "Check For Updates…" sits after About in the app menu.  It is greyed
+    /// out while Sparkle is busy, and on a build that cannot update itself
+    /// (Settings ▸ About says why).
+    var commands: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check For Updates…") { updater.checkForUpdates() }
+                .disabled(!updater.canCheckForUpdates)
+        }
     }
 }
