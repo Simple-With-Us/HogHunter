@@ -1,8 +1,18 @@
-name: Hog Hunter iOS TestFlight (manual)
+name: Hog Hunter iOS TestFlight
 
-# Preparation only until replacement signing material is installed.
-# No push, schedule, or PR event can archive or upload a build.
+# Auto-ship: every merge to main that touches the iOS app archives and uploads
+# to TestFlight.  workflow_dispatch keeps the manual lane (optional build
+# number, optional upload).  The HH_IOS_TESTFLIGHT_ENABLED repo variable and
+# the main-ref gate stay in force for both events.
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - 'Assets.xcassets'
+      - 'project.yml'
+      - 'scripts/ios-*'
+      - '.github/workflows/ios-testflight.yml'
   workflow_dispatch:
     inputs:
       build_number:
@@ -24,16 +34,24 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.HH_IOS_TESTFLIGHT_ENABLED == 'true'
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/main' && vars.HH_IOS_TESTFLIGHT_ENABLED == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-      HH_TESTFLIGHT_UPLOAD: ${{ inputs.upload }}
       HH_BUILD_NUMBER_INPUT: ${{ inputs.build_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # Push ships always upload; a manual dispatch keeps its input.
+      - name: Resolve ship flags
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "HH_TESTFLIGHT_UPLOAD=true" >> "$GITHUB_ENV"
+          else
+            echo "HH_TESTFLIGHT_UPLOAD=${{ inputs.upload }}" >> "$GITHUB_ENV"
+          fi
 
       - name: Validate release inputs and tools
         run: |

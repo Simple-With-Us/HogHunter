@@ -19,7 +19,7 @@ jobs:
 
       - name: Check manual release scripts without signing credentials
         run: |
-          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh
+          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh scripts/mac-release-build.sh scripts/make_appcast.sh
           bash scripts/test-ios-stage-asc-key.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py

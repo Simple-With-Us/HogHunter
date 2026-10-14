@@ -599,6 +599,10 @@ private struct PairingCodeField: View {
 // MARK: - About Tab
 
 private struct AboutSettingsTab: View {
+    // Sparkle self-update state.  Observing keeps "Automatic updates" and the
+    // check button in step with the updater without touching HogStore.
+    @ObservedObject private var updater = AppUpdater.shared
+
     var body: some View {
         Form {
             Section("About") {
@@ -626,6 +630,21 @@ private struct AboutSettingsTab: View {
                 Text("Storage and Network are tabs in the menu bar panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+            }
+
+            // Sparkle 2 self-update (see docs/AUTO-UPDATE.md).  A build whose
+            // Info.plist carries the update feed and signing key checks
+            // hourly and installs while the app is idle; anything else says
+            // Off and explains why.
+            Section("Software Update") {
+                HStack {
+                    Text("Automatic updates")
+                    Spacer(minLength: 0)
+                    Text(updater.availability.summary)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Check For Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
             }
         }
         .formStyle(.grouped)
