@@ -796,6 +796,87 @@ class TestHogHunterReclaimStep(_EngineHome):
         self.assertIn("--budget-sec=600", run.call_args.args[0])
 
 
+class TestCleanMyMacStep(_EngineHome):
+    """The CleanMyMac CLI step is opt-in, invoke-only, and never required:
+    off until the owner turns it on, a skip when the CLI is absent, and a
+    failure with the tail when a sweep exits non-zero."""
+
+    def engine_with(self, runner):
+        from vacuum.engine import VacuumEngine
+
+        return VacuumEngine(self.cfg, home=self.home, runner=runner)
+
+    @staticmethod
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout="done\n", stderr="")
+
+    def test_off_by_default_and_full_only_when_enabled(self):
+        from vacuum.config import STEP_CATALOG, step_enabled, steps_for_trigger
+
+        self.assertIn("cleanmymac_cli", STEP_CATALOG)
+        self.assertEqual(STEP_CATALOG["cleanmymac_cli"]["triggers"], ["full"])
+        fresh = load_config(home=self.home)
+        self.assertFalse(step_enabled(fresh, "cleanmymac_cli"))
+        self.assertNotIn("cleanmymac_cli", steps_for_trigger(fresh, "full"))
+        fresh.setdefault("steps", {})["cleanmymac_cli"] = {"enabled": True}
+        self.assertTrue(step_enabled(fresh, "cleanmymac_cli"))
+        self.assertIn("cleanmymac_cli", steps_for_trigger(fresh, "full"))
+        self.assertNotIn("cleanmymac_cli", steps_for_trigger(fresh, "janitor"))
+
+    def test_missing_cli_is_a_skip(self):
+        engine = self.engine_with(self.ok_runner)
+        with patch("vacuum.engine.shutil.which", return_value=None):
+            with patch.object(sys, "platform", "darwin"):
+                _freed, reason, status = engine._cleanmymac_cli()
+        self.assertEqual(status, StepStatus.SKIPPED)
+        self.assertIn("not installed", reason)
+
+    def test_success_runs_both_sweeps(self):
+        seen = []
+
+        def fake(argv, **kwargs):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="done\n", stderr="")
+
+        engine = self.engine_with(fake)
+        with patch("vacuum.engine.shutil.which", return_value="/opt/homebrew/bin/cleanmymac"):
+            with patch.object(sys, "platform", "darwin"):
+                freed, reason, status = engine._cleanmymac_cli()
+        self.assertEqual((freed, status), (0, StepStatus.RAN))
+        self.assertEqual(seen, [
+            ["cleanmymac", "clean", "junk", "--force"],
+            ["cleanmymac", "optimize", "purgeable"],
+        ])
+        self.assertIn("clean junk --force", reason)
+
+    def test_nonzero_exit_fails_with_the_tail(self):
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 2, stdout="", stderr="line one\nboom\n")
+
+        engine = self.engine_with(fake)
+        with patch("vacuum.engine.shutil.which", return_value="/opt/homebrew/bin/cleanmymac"):
+            with patch.object(sys, "platform", "darwin"):
+                _freed, reason, status = engine._cleanmymac_cli()
+        self.assertEqual(status, StepStatus.FAILED)
+        self.assertIn("boom", reason)
+
+    def test_never_runs_anything_real(self):
+        """No test may launch the real CLI: with no `cleanmymac` on PATH the
+        step skips before any runner is touched, and dry runs skip too."""
+        from vacuum.engine import VacuumEngine
+
+        engine = VacuumEngine(self.cfg, home=self.home, runner=Mock(side_effect=AssertionError("must not run")))
+        with patch("vacuum.engine.shutil.which", return_value=None):
+            with patch.object(sys, "platform", "darwin"):
+                _freed, _reason, status = engine._cleanmymac_cli()
+        self.assertEqual(status, StepStatus.SKIPPED)
+        self.cfg.setdefault("steps", {})["cleanmymac_cli"] = {"enabled": True}
+        with patch.object(sys, "platform", "darwin"):
+            _freed, reason, status = self.engine._dispatch("cleanmymac_cli", False, "cheap", {}, "normal", dry_run=True)
+        self.assertEqual(status, StepStatus.SKIPPED)
+        self.assertIn("dry run", reason)
+
+
 class TestStepReasonsArePlural(_EngineHome):
     """The Robotic Vacuum shows each step's reason to a person.  It read "1 threshold hit(s)", "removed 1 of 1
     item(s)" and "truncated 0 log(s)"; each count now takes the right form of its noun."""

@@ -321,10 +321,15 @@ final class CompanionModel {
         switch error as? CompanionClientError {
         case .unauthorized?:
             return "That code does not match this Mac."
+        case .busy?:
+            return "The Mac is already showing a pairing request.  Answer it there, then try again."
+        case .timedOut?:
+            return "The Mac did not answer in time.  Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
         case .throttled?, .forbidden?, .rejected?, .tooOld?, .untrustedNetwork?:
             return describe(error)
         default:
-            return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on."
+            if let hint = transportHint(error) { return hint }
+            return "The Mac did not answer.  Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
         }
     }
 
@@ -386,7 +391,33 @@ final class CompanionModel {
         case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
         case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
         case .throttled?, .tooOld?, .rejected?, .untrustedNetwork?: return describe(error)
-        default: return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
+        default:
+            if let hint = transportHint(error) { return hint }
+            return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
+        }
+    }
+
+    /// Names the transport failure behind a pairing attempt, so a refused
+    /// connection, a dead address, or a misspelled Tailscale name does not
+    /// all read as "the Mac did not answer".
+    private static func transportHint(_ error: Error) -> String? {
+        guard let nw = error as? NWError else { return nil }
+        switch nw {
+        case .posix(let code):
+            switch code {
+            case .ECONNREFUSED:
+                return "The Mac refused the connection.  Open Hog Hunter on it and turn on Share With iPhone in Settings."
+            case .ETIMEDOUT:
+                return "Nothing answered at that address.  Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
+            case .EHOSTUNREACH, .EHOSTDOWN, .ENETUNREACH, .ENETDOWN:
+                return "That address cannot be reached from here.  If you connect over Tailscale, check it is connected on both devices."
+            default:
+                return nil
+            }
+        case .dns:
+            return "That name did not resolve.  Check the spelling of the Tailscale name or domain."
+        default:
+            return nil
         }
     }
 
@@ -834,7 +865,11 @@ final class CompanionModel {
             remoteConnectError = Self.approvalMessage(for: error)
         } catch {
             guard !Task.isCancelled else { return }
-            remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
+            if let hint = Self.transportHint(error) {
+                remoteConnectError = hint
+            } else {
+                remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
+            }
         }
     }
 
@@ -880,7 +915,11 @@ final class CompanionModel {
         } catch {
             if snapshot == nil {
                 phase = .offline
-                statusLine = saved.remoteHost != nil ? "The Mac at \(saved.remoteHost!) did not answer." : "The Mac did not answer."
+                if let host = saved.remoteHost {
+                    statusLine = "The Mac at \(host) did not answer.  Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
+                } else {
+                    statusLine = "The Mac did not answer."
+                }
             }
         }
     }
@@ -1108,7 +1147,10 @@ final class CompanionModel {
                 try await CompanionConnection.fetch(endpoint: endpoint, token: token)
             }
             group.addTask {
-                try await Task.sleep(for: .seconds(4))
+                // Longer than the connection's own 5 second snapshot limit, so
+                // a first paint over a slow Tailscale relay still lands instead
+                // of reading as "the Mac did not answer".
+                try await Task.sleep(for: .seconds(10))
                 throw CompanionClientError.timedOut
             }
             guard let value = try await group.next() else {
@@ -1214,7 +1256,7 @@ final class CompanionModel {
         ),
         cpuHistory: [22, 24, 31, 28, 35, 42, 57, 61, 48, 39, 36, 33, 38, 44, 52, 66, 71, 58, 49, 41, 37, 35, 34, 38, 36, 35, 37, 39, 38, 37],
         settings: CompanionSettingsSummary(
-            refreshInterval: 3,
+            refreshInterval: 5,
             alertsEnabled: true,
             alertThresholdPercent: 300,
             alertSustainedMinutes: 5,
