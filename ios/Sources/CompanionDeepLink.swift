@@ -27,6 +27,31 @@ enum CompanionDeepLink: Equatable {
     var requestsCleanConfirmation: Bool { self == .confirmClean }
 }
 
+/// The Clean link may open a confirmation.  It may not start a clean, and it
+/// may not offer one unless the Mac has already opted in.
+enum CleanLinkPolicy {
+    static let cleanOffNote = "Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac."
+
+    /// Same gate as the in-app Clean button.  Nil and false both stay off.
+    static func mayOfferCleanConfirmation(remoteCleanAllowed: Bool?) -> Bool {
+        remoteCleanAllowed == true
+    }
+
+    /// Persist and reload only when the shared container exists and the
+    /// snapshot encoded.  A missing App Group makes
+    /// `containerURL(forSecurityApplicationGroupIdentifier:)` nil.
+    /// `UserDefaults(suiteName:)` is not that signal.
+    static func shouldReloadWidget(
+        appGroupContainerAvailable: Bool,
+        snapshotEncoded: Bool,
+        cleanKeysChanged: Bool,
+        reloadDue: Bool
+    ) -> Bool {
+        guard appGroupContainerAvailable, snapshotEncoded else { return false }
+        return cleanKeysChanged || reloadDue
+    }
+}
+
 /// Whether a pending Clean confirmation is still the link that just arrived.
 enum CleanRequest {
     /// Long enough for a cold start to reach the dashboard, short enough that

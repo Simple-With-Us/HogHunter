@@ -445,7 +445,13 @@ struct DashboardView: View {
 
     private func consumeCleanRequest() {
         guard model.takeCleanRequest() else { return }
-        showCleanConfirm = true
+        // The link never calls triggerRemoteClean.  Offer the destructive
+        // confirmation only when the Mac has opted in.
+        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) {
+            showCleanConfirm = true
+        } else {
+            model.controlError = CleanLinkPolicy.cleanOffNote
+        }
     }
 
     private func confirmQuit(row: CompanionRow, force: Bool) {
@@ -576,8 +582,12 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button("Run Safe Clean", role: .destructive) {
-                // The only place a Clean deep link can reach the Mac.
-                // hoghunter://clean stops at this confirmation.
+                // The only place a Clean deep link can reach the Mac, and
+                // only after the Mac opt-in.  hoghunter://clean stops here.
+                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) else {
+                    model.controlError = CleanLinkPolicy.cleanOffNote
+                    return
+                }
                 Task { await model.triggerRemoteClean() }
             }
             Button("Cancel", role: .cancel) {}
@@ -1303,7 +1313,7 @@ struct DashboardView: View {
                 .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
 
                 if snapshot.remoteCleanAllowed != true {
-                    Text("Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac.")
+                    Text(CleanLinkPolicy.cleanOffNote)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

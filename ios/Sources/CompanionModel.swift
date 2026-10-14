@@ -880,13 +880,23 @@ final class CompanionModel {
     /// even when the throttle has not elapsed.
     private var lastCleanKeysForWidget: [String]?
 
+    /// Nil when this build has no App Group container.  `UserDefaults(suiteName:)`
+    /// can still return an object in that case, and those writes never reach
+    /// the widget, so they are not a reason to reload.
+    private func sharedWidgetDefaults() -> UserDefaults? {
+        guard FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil else {
+            return nil
+        }
+        return UserDefaults(suiteName: appGroupSuite)
+    }
+
     private func storeSnapshotForWidgets(_ fetched: CompanionSnapshot) {
-        // A write into a missing App Group is a silent no-op, so there is
-        // nothing to reload for.  The payload itself changes on every poll
-        // (sampledAt plus live CPU and memory), so comparing bytes cannot
-        // suppress the reload -- write every poll, but rate limit the reload.
-        guard let defaults = UserDefaults(suiteName: appGroupSuite),
-              let data = try? CompanionJSON.encode(fetched) else { return }
+        // The payload changes on every poll (sampledAt plus live CPU and
+        // memory), so comparing bytes cannot suppress the reload.  Write
+        // every poll the container can actually hold, and rate limit the reload.
+        let containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil
+        let data = try? CompanionJSON.encode(fetched)
+        guard let defaults = sharedWidgetDefaults(), let data else { return }
         defaults.set(data, forKey: "last_snapshot")
         let cleanKeys = [
             defaults.string(forKey: "clean_status") ?? "",
@@ -896,7 +906,12 @@ final class CompanionModel {
         let now = Date()
         let cleanChanged = cleanKeys != lastCleanKeysForWidget
         let dueForReload = lastWidgetReload.map { now.timeIntervalSince($0) >= Self.widgetReloadInterval } ?? true
-        guard cleanChanged || dueForReload else { return }
+        guard CleanLinkPolicy.shouldReloadWidget(
+            appGroupContainerAvailable: containerAvailable,
+            snapshotEncoded: true,
+            cleanKeysChanged: cleanChanged,
+            reloadDue: dueForReload
+        ) else { return }
         lastWidgetReload = now
         lastCleanKeysForWidget = cleanKeys
         WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
@@ -1035,10 +1050,16 @@ final class CompanionModel {
             isCleaning = false
             return
         }
+        // A deep link can reach this only after the person taps Run Safe
+        // Clean.  Refuse here too when the Mac has not opted in.
+        guard snapshot?.remoteCleanAllowed == true else {
+            controlError = CleanLinkPolicy.cleanOffNote
+            return
+        }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
         isCleaning = true
         cleanError = nil
-        let defaults = UserDefaults(suiteName: appGroupSuite)
+        let defaults = sharedWidgetDefaults()
         defaults?.set("Cleaning…", forKey: "clean_status")
 
         // Start high-frequency polling during clean execution so progress updates are relayed smoothly
