@@ -39,6 +39,40 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertNil(matched.skipReason)
     }
 
+    func testTempFilesRuleIsDecoupledFromTrash() {
+        func item(category: CleanCategory, title: String) -> CleanItem {
+            CleanItem(
+                category: category,
+                title: title,
+                subtitle: title,
+                url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-\(title)"),
+                bytes: 10,
+                fileCount: 1,
+                lastModified: nil,
+                isSelected: true,
+                detail: nil
+            )
+        }
+        let trash = item(category: .trash, title: "trash")
+        let temp = item(category: .tempFiles, title: "tmp")
+        XCTAssertEqual(CleanRegimenRunner.ruleName(for: trash), "temp-scratch")
+        XCTAssertEqual(CleanRegimenRunner.ruleName(for: temp), "tmp-files")
+
+        let onlyTrash = CleanRegimenRunner.pendingItems(from: [trash, temp], rules: ["temp-scratch"])
+        XCTAssertEqual(onlyTrash.items.map(\.title), ["trash"])
+        XCTAssertNil(onlyTrash.skipReason)
+
+        let onlyTemp = CleanRegimenRunner.pendingItems(from: [trash, temp], rules: ["tmp-files"])
+        XCTAssertEqual(onlyTemp.items.map(\.title), ["tmp"])
+        XCTAssertNil(onlyTemp.skipReason)
+
+        XCTAssertTrue(CleanRegimen.schedulableRules.contains("tmp-files"))
+        XCTAssertFalse(
+            CleanRegimen.defaultRules.contains("tmp-files"),
+            "temp files stay opt-in for unattended runs, like snapshots"
+        )
+    }
+
     func testRegimenIsOffByDefault() {
         // An unattended delete is a different promise than a button press.
         XCTAssertFalse(CleanRegimen().isEnabled)
