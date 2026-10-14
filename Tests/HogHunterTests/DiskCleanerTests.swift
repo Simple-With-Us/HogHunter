@@ -559,12 +559,20 @@ final class DiskCleanerTests: XCTestCase {
                 try! fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
             }
         }
-        func mkdir(_ name: String, stale: Bool) -> URL {
+        func mkdir(_ name: String, stale: Bool, nestedStale: Bool? = nil) -> URL {
             let url = root.appendingPathComponent(name, isDirectory: true)
             try! fm.createDirectory(at: url, withIntermediateDirectories: true)
-            try! "payload".write(to: url.appendingPathComponent("inner.bin"), atomically: true, encoding: .utf8)
+            let inner = url.appendingPathComponent("inner.bin")
+            try! "payload".write(to: inner, atomically: true, encoding: .utf8)
+            let old = Date().addingTimeInterval(-2 * 24 * 3600)
+            // A genuinely dead directory has dead contents.  `nestedStale:
+            // false` models the live case the top-level mtime misses: a
+            // directory whose own mtime has gone cold while a file inside it
+            // is still being written.
+            if nestedStale ?? stale {
+                try! fm.setAttributes([.modificationDate: old], ofItemAtPath: inner.path)
+            }
             if stale {
-                let old = Date().addingTimeInterval(-2 * 24 * 3600)
                 try! fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
             }
             return url
@@ -573,6 +581,8 @@ final class DiskCleanerTests: XCTestCase {
         // Provably dead: stale regular file and stale directory.
         write("dead-stale.txt", stale: true)
         _ = mkdir("dead-dir", stale: true)
+        // Live: a cold directory mtime over still-written contents.
+        _ = mkdir("active-dir", stale: true, nestedStale: false)
         // Live: fresh file touched just now.
         write("fresh.txt", stale: false)
 
@@ -609,6 +619,15 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(titles.contains("dead-stale.txt"), "stale temp file must be listed")
         XCTAssertTrue(titles.contains("dead-dir"), "stale temp directory must be listed")
         XCTAssertFalse(titles.contains("fresh.txt"), "fresh file must not be listed as dead")
+    }
+
+    func testScanTempFilesSkipsDirectoryWithLiveNestedContent() {
+        let (cleaner, _) = makeTempFixture()
+        let titles = Set(cleaner.scanTempFiles().map(\.title))
+        XCTAssertFalse(
+            titles.contains("active-dir"),
+            "a directory whose mtime is old but whose contents are still being written is not stale"
+        )
     }
 
     func testScanTempFilesSkipsWorktrees() {

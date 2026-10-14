@@ -727,6 +727,11 @@ final class DiskCleaner: @unchecked Sendable {
 
             let stats = directoryStats(at: url)
             guard stats.bytes > 0 else { continue }
+            // A directory's own mtime only moves when direct children are
+            // created, renamed, or removed; files written in place leave it
+            // alone.  Nested activity counts, so a directory holding live
+            // output is not stale even when its own mtime is old.
+            if isDir, let nested = stats.lastModified, nested >= staleCutoff { continue }
 
             items.append(CleanItem(
                 category: .tempFiles,
@@ -788,9 +793,13 @@ final class DiskCleaner: @unchecked Sendable {
         } catch {
             return []
         }
+        // Drain before waiting and close the read end: a full ~64 KB pipe
+        // buffer blocks the child on write(2), and an unclosed handle leaks.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        try? pipe.fileHandleForReading.close()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return [] }
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = String(data: data, encoding: .utf8) ?? ""
         return output
             .split(separator: "\n")
             .compactMap { line -> String? in
