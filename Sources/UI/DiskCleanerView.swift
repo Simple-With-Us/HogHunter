@@ -163,7 +163,7 @@ struct DiskCleanerView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(HogFormat.memory(store.totalSelectedBytes()))
+                            Text("\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))")
                                 .font(.system(size: 22, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.primary)
                             Text("ready to reclaim")
@@ -171,7 +171,7 @@ struct DiskCleanerView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
+                        Text("\(report.anyApproximate ? "at least " : "")\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -391,7 +391,7 @@ struct DiskCleanerView: View {
                 store.showConfirmation = true
             } label: {
                 let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(HogFormat.memory(selectedBytes))")
+                Text("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(selectedBytes))")
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 4)
             }

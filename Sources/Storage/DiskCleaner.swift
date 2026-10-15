@@ -475,6 +475,12 @@ struct CleanScanReport: Sendable {
         HogFormat.memory(totalBytes)
     }
 
+    /// True when any item's size walk hit its file cap, so totals built from
+    /// this report are lower bounds, not exact sizes.
+    var anyApproximate: Bool {
+        categories.contains { $0.anyApproximate }
+    }
+
     var formattedSelectedSize: String {
         HogFormat.memory(totalSelectedBytes)
     }
