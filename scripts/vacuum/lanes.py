@@ -367,19 +367,23 @@ def load_report(
     try:
         res = runner(argv, settings.timeout_seconds)
     except subprocess.TimeoutExpired:
+        seconds = max(clock() - started, 0.0)
         if cache_file is not None:
             cached = _load_cached_report(cache_file, settings, home, clock)
             if cached.ok:
                 cached.command = tuple(argv)
+                cached.seconds = seconds
                 return cached
-        return _fail(f"doctor timed out after {settings.timeout_seconds:g}s", command=tuple(argv))
+        return _fail(f"doctor timed out after {settings.timeout_seconds:g}s", command=tuple(argv), seconds=seconds)
     except (OSError, ValueError) as exc:
+        seconds = max(clock() - started, 0.0)
         if cache_file is not None:
             cached = _load_cached_report(cache_file, settings, home, clock)
             if cached.ok:
                 cached.command = tuple(argv)
+                cached.seconds = seconds
                 return cached
-        return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv))
+        return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv), seconds=seconds)
     seconds = max(clock() - started, 0.0)
     if res.returncode != 0:
         if cache_file is not None:

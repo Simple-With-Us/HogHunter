@@ -399,6 +399,17 @@ class TestReportGates(unittest.TestCase):
         cache.write_text(json.dumps(report), encoding="utf-8")
         return cache
 
+    def test_timeout_fallback_carries_the_elapsed_seconds(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row]))
+        base = time.time()
+        ticks = iter([base, base + 300.0, base + 300.0, base + 300.0])
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, self._timeout_runner(),
+            clock=lambda: next(ticks), cache_file=cache,
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertEqual(rep.seconds, 300.0)
+
     def test_timeout_without_a_cache_yields_nothing(self) -> None:
         rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner())
         self.assertFalse(rep.ok)
