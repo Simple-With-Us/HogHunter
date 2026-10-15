@@ -538,6 +538,73 @@ def test_cleanmymac_spent_budget_skips(hh):
     run.assert_not_called()
 
 
+def test_botfleet_rollback_lists_only_stale_versioned_copies(hh):
+    """A rollback is safe-tier 24h after its newest file, never before, and the
+    glob can never match the live tree (it needs the versioned infix plus a suffix)."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        apps = home / "apps"
+        apps.mkdir()
+        old = apps / ".botfleet-server.node_modules.rollback-old"
+        new = apps / ".botfleet-server.node_modules.rollback-new"
+        live = apps / ".botfleet-server"
+        for d in (old, new, live):
+            d.mkdir()
+            (d / "package.json").write_text("{}\n", encoding="utf-8")
+        ancient = hh.time.time() - 25 * 3600
+        for p in (old / "package.json",):
+            os.utime(p, (ancient, ancient))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            offered = hh.rule_botfleet_rollback()
+        assert [c.path for c in offered] == [str(old)], offered
+        assert offered[0].tier == "safe", "cheap band must pick this up with no flag"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ask_first_reports_dated_drive_copies_only(hh):
+    """The orphan glob matches 'GoogleDrive-<account> (<date> <time>)' with any
+    separator (the real one is a narrow no-break space), never the live folder,
+    and always as report-only."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cloud = home / "Library/CloudStorage"
+        cloud.mkdir(parents=True)
+        live = cloud / "GoogleDrive-user@gmail.com"
+        orphan = cloud / "GoogleDrive-user@gmail.com (10-14-26 12:59 AM)"
+        other = cloud / "Dropbox"
+        for d in (live, orphan, other):
+            d.mkdir()
+        with mock.patch.object(hh, "HOME", home):
+            found = {c.path: c for c in hh.rule_ask_first_inventory() if "orphaned Drive copy" in c.reason}
+        assert list(found) == [str(orphan)], found
+        assert found[str(orphan)].tier == "ask-first"
+        assert found[str(orphan)].op == "report", "an orphan is inventoried, never applied"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_staging_offers_idle_shipit_in_the_safe_tier(hh):
+    """Updater leftovers ride the cheap band: an idle ShipIt staging dir with no
+    owner process is a safe-tier candidate, so band=cheap already covers the
+    2.5 GB class the audit found."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        shipit = home / "Library/Caches/com.anthropic.claudefordesktop.ShipIt"
+        shipit.mkdir(parents=True)
+        pkg = shipit / "staging.pkg"
+        pkg.write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 2 * 3600
+        os.utime(pkg, (old, old))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            with mock.patch.object(hh.subprocess, "run", return_value=completed(1)):
+                offered = hh.rule_app_staging()
+        assert [c.path for c in offered] == [str(shipit)], offered
+        assert offered[0].tier == "safe"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
