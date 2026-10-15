@@ -17,6 +17,12 @@ Rules this module lives by:
   edits (skip-worktree, assume-unchanged), and nested git repositories inside ignored folders all refuse.
 * Removal is `git worktree remove` WITHOUT force.  remove_argv refuses any argv that carries a force flag.
 * Every function takes an injectable runner and clock so tests need no real processes except temp repos.
+* The doctor takes minutes across hundreds of lanes on a USB drive and times
+  out (300 s) on busy days.  A fresh report is always preferred, but when a
+  run fails the last good report on disk is reused if it is under
+  CACHED_REPORT_MAX_AGE_SECONDS old.  This stays safe because removal still
+  re-checks HEAD, branch, tree state and processes live: cached merged-PR
+  evidence only applies to the exact HEAD the re-check confirms.
 
 Python 3.9 compatible on purpose: launchd runs this under /usr/bin/python3.
 """
@@ -33,7 +39,7 @@ import signal
 import stat
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -98,6 +104,14 @@ FUTURE_SKEW_SECONDS = 300.0
 # Report and age limits.  Code constants, not knobs: config cannot loosen or tighten them (only the doctor
 # command is configurable).  Changing one is a code change with a test.
 REPORT_MAX_AGE_SECONDS = 900.0
+# A cached doctor report may be reused this long after it was generated when a
+# fresh run fails (timeout, non-zero exit, unreadable output).  The live
+# re-check at removal time re-validates HEAD, branch, tree state and
+# processes, so a cached report can only retire a lane that is still exactly
+# what the doctor saw.  A code constant like the rest: changing it is a code
+# change with a test.
+CACHED_REPORT_MAX_AGE_SECONDS = 24 * 3600.0
+DOCTOR_CACHE_NAME = "lane-doctor-report.json"
 MIN_SCHEMA = 2
 DOCTOR_TIMEOUT_SECONDS = 300.0
 RETIRE_MIN_DAYS = 7.0
@@ -239,7 +253,9 @@ def run_doctor_process(argv: list, timeout: float) -> "subprocess.CompletedProce
 @dataclass
 class LaneReport:
     """The doctor's report after the gates that apply to every use.  ok is False when ANY of them fails;
-    gh_ok is a separate gate because only removal (not dependency folders) needs the PR lookups."""
+    gh_ok is a separate gate because only removal (not dependency folders) needs the PR lookups.
+    cached is True when this came from the on-disk cache after a fresh run failed; generated_at_text
+    still names the report's own generation time, so the log shows how old the evidence is."""
 
     ok: bool
     reason: str = ""
@@ -251,6 +267,7 @@ class LaneReport:
     generated_at_text: str = ""
     command: tuple = ()
     seconds: float = 0.0
+    cached: bool = False
 
 
 def _fail(reason: str, **extra: Any) -> LaneReport:
@@ -273,13 +290,72 @@ def parse_timestamp(value: Any) -> Optional[float]:
     return parsed.timestamp()
 
 
+def doctor_cache_file(data_dir: Optional[Path]) -> Optional[Path]:
+    """Where the last good doctor report lives, or None when no data dir is configured."""
+    if data_dir is None:
+        return None
+    try:
+        return Path(data_dir) / DOCTOR_CACHE_NAME
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_doctor_cache(cache_file: Path, payload: str) -> None:
+    """Best-effort atomic save of a fresh doctor stdout.  Never raises."""
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_name(cache_file.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp, cache_file)
+    except (OSError, ValueError):
+        pass
+
+
+def _load_cached_report(
+    cache_file: Path,
+    settings: LaneSettings,
+    home: Path,
+    clock: Callable[[], float],
+) -> LaneReport:
+    """The last good report, validated with the relaxed cache age.  Anything
+    unreadable, too old, or failing the other gates is a fail-closed report."""
+    try:
+        payload = cache_file.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return _fail("doctor failed and no cached report is available")
+    try:
+        data = json.loads(payload or "")
+    except ValueError:
+        return _fail("doctor failed and the cached report is not valid JSON")
+    if not isinstance(data, dict):
+        return _fail("doctor failed and the cached report is not a JSON object")
+    relaxed = replace(settings, max_report_age_seconds=CACHED_REPORT_MAX_AGE_SECONDS)
+    report = validate_report(data, relaxed, home, clock)
+    if not report.ok:
+        return _fail(f"doctor failed and the cached report is unusable: {report.reason}")
+    try:
+        age = max(clock() - (report.generated_at or clock()), 0.0)
+    except (TypeError, ValueError):
+        age = 0.0
+    report.cached = True
+    report.reason = f"doctor report from cache ({age:.0f}s old)"
+    return report
+
+
 def load_report(
     settings: LaneSettings,
     home: Path,
     doctor_runner: Optional[DoctorRunner] = None,
     clock: Callable[[], float] = time.time,
+    cache_file: Optional[Path] = None,
+    cache_write: bool = True,
 ) -> LaneReport:
-    """Run the doctor and validate its report.  Never raises; any problem is a fail-closed LaneReport."""
+    """Run the doctor and validate its report.  Never raises; any problem is a fail-closed LaneReport.
+    When cache_file is given, a validated report is saved there on success, and a failed run falls back
+    to the cached report when one is young enough (CACHED_REPORT_MAX_AGE_SECONDS).  Only a report that
+    passes every gate may overwrite the cache, so a bad run can never poison it.  cache_write=False
+    (dry runs) reads the cache but never writes it: planning persists no state."""
     argv = list(settings.command)
     if not argv:
         return _fail("no doctor command configured")
@@ -291,20 +367,48 @@ def load_report(
     try:
         res = runner(argv, settings.timeout_seconds)
     except subprocess.TimeoutExpired:
-        return _fail(f"doctor timed out after {settings.timeout_seconds:g}s", command=tuple(argv))
+        seconds = max(clock() - started, 0.0)
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
+        return _fail(f"doctor timed out after {settings.timeout_seconds:g}s", command=tuple(argv), seconds=seconds)
     except (OSError, ValueError) as exc:
-        return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv))
+        seconds = max(clock() - started, 0.0)
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
+        return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv), seconds=seconds)
     seconds = max(clock() - started, 0.0)
     if res.returncode != 0:
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
         tail = " ".join((res.stderr or "").split())[:160]
         return _fail(f"doctor exited {res.returncode}" + (f": {tail}" if tail else ""), command=tuple(argv), seconds=seconds)
     try:
         data = json.loads(res.stdout or "")
     except ValueError:
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
         return _fail("doctor output is not valid JSON", command=tuple(argv), seconds=seconds)
     report = validate_report(data, settings, home, clock)
     report.command = tuple(argv)
     report.seconds = seconds
+    if report.ok and cache_file is not None and cache_write and isinstance(data, dict):
+        _save_doctor_cache(cache_file, res.stdout or "")
     return report
 
 

@@ -106,6 +106,7 @@ IDLE_MIN_OK = 90
 IDLE_MIN_SCRATCH = 180   # 3h for temp scratch
 IDLE_MIN_STAGING = 60    # 1h for app-update staging
 IDLE_MIN_ROLLBACK = 1440  # 24h for abandoned update/rollback copies
+IDLE_MIN_BUILD_OUTPUT = 7 * 24 * 60  # 7d for regenerable build output in main checkouts
 
 # Per-rule wall clock.  A scan that takes longer than the pressure it is
 # responding to is worse than no scan: under load 500+ a TMPDIR or ~/Code
@@ -389,6 +390,27 @@ def open_handles(path: str) -> int:
         log(f"lsof exited {p.returncode} for {path!r}; treating it as open")
         return 1
     return len(pids)
+
+
+def touched_since(path: str, days: float) -> bool:
+    """True when any file under path is newer than `days` days.
+
+    `newest_file_age_min` caps its walk, so a huge tree can hide a recent file
+    past the cap and read as idle.  find with -quit answers on the FIRST recent
+    file instead, which is fast exactly when it matters (an active tree), and
+    only walks everything when the tree is genuinely quiet.  A failed look
+    reads as touched: an unprovable tree is never called idle.
+    """
+    try:
+        proc = subprocess.run(
+            ["find", path, "-type", "f", "-newermt", f"-{days:g} days", "-print", "-quit"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return True
+    if proc.returncode != 0:
+        return True
+    return bool(proc.stdout.strip())
 
 
 def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
@@ -1164,6 +1186,35 @@ def rule_ask_first_inventory() -> list[Candidate]:
                 category="ask-first", path=str(g), bytes=size(str(g)),
                 reason="BotFleet update generation (non-newest)", tier="ask-first", op="report",
             ))
+    # Idle regenerable build output in main checkouts (report only): .build,
+    # build, .next and dist trees with no file touched in 7 days and no open
+    # files.  Main checkouts are never lanes, so the vacuum's lane logic never
+    # sees them; the names mirror REGENERABLE_NAMES in scripts/vacuum/lanes.py.
+    code = HOME / "Code"
+    if code.is_dir():
+        for repo in sorted(code.iterdir()):
+            if repo.is_symlink() or not repo.is_dir() or not (repo / ".git").exists():
+                continue
+            for dirname in (".build", "build", ".next", "dist"):
+                target = repo / dirname
+                if target.is_symlink() or not target.is_dir():
+                    continue
+                if is_forbidden(str(target)) or has_keep_sentinel(str(target)):
+                    continue
+                if open_handles(str(target)):
+                    continue
+                # Fast path first: a recent file inside the cap proves activity
+                # cheaply.  Only a quiet-looking tree pays for the uncapped
+                # find probe, which catches a recent file hiding past the cap.
+                if newest_file_age_min(str(target)) < IDLE_MIN_BUILD_OUTPUT:
+                    continue
+                if touched_since(str(target), IDLE_MIN_BUILD_OUTPUT / (24 * 60)):
+                    continue
+                cands.append(Candidate(
+                    category="ask-first", path=str(target), bytes=size(str(target)),
+                    reason=f"idle regenerable build output in {repo.name} (report only; rebuilds on demand)",
+                    tier="ask-first", op="report",
+                ))
     return cands
 
 
