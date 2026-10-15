@@ -440,6 +440,39 @@ class TestReportGates(unittest.TestCase):
         saved = json.loads(cache.read_text(encoding="utf-8"))
         self.assertEqual(saved["generated_at"], report["generated_at"])
 
+    def test_an_unvalidatable_fresh_report_never_overwrites_the_cache(self) -> None:
+        good = self.sb.report([self.row])
+        cache = self._seed_cache(good)
+        stale = self.sb.report([self.row], now=time.time() - 3600)
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning(stale), cache_file=cache
+        )
+        self.assertFalse(rep.ok)
+        self.assertIn("stale", rep.reason)
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(saved["generated_at"], good["generated_at"])
+
+    def test_a_dry_run_reads_but_never_writes_the_cache(self) -> None:
+        # Its own cache file: the class Sandbox (and _seed_cache) shares
+        # sb.root / "cache" across tests in this class.
+        cache = self.sb.root / "dryrun-cache" / "lane-doctor-report.json"
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning(self.sb.report([self.row])),
+            cache_file=cache, cache_write=False,
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertFalse(cache.exists(), "planning persists no state")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(self.sb.report([self.row])), encoding="utf-8")
+        before = cache.read_bytes()
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, self._timeout_runner(),
+            cache_file=cache, cache_write=False,
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertTrue(rep.cached)
+        self.assertEqual(cache.read_bytes(), before)
+
     def test_non_object_json_yields_nothing(self) -> None:
         _rep, scan = self.scan({}, text="[1, 2, 3]")
         self.assert_nothing(scan, "not a JSON object")

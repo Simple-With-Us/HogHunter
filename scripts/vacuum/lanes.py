@@ -349,10 +349,13 @@ def load_report(
     doctor_runner: Optional[DoctorRunner] = None,
     clock: Callable[[], float] = time.time,
     cache_file: Optional[Path] = None,
+    cache_write: bool = True,
 ) -> LaneReport:
     """Run the doctor and validate its report.  Never raises; any problem is a fail-closed LaneReport.
-    When cache_file is given, a fresh report is saved there on success, and a failed run falls back to
-    the cached report when one is young enough (CACHED_REPORT_MAX_AGE_SECONDS)."""
+    When cache_file is given, a validated report is saved there on success, and a failed run falls back
+    to the cached report when one is young enough (CACHED_REPORT_MAX_AGE_SECONDS).  Only a report that
+    passes every gate may overwrite the cache, so a bad run can never poison it.  cache_write=False
+    (dry runs) reads the cache but never writes it: planning persists no state."""
     argv = list(settings.command)
     if not argv:
         return _fail("no doctor command configured")
@@ -397,11 +400,11 @@ def load_report(
                 cached.seconds = seconds
                 return cached
         return _fail("doctor output is not valid JSON", command=tuple(argv), seconds=seconds)
-    if cache_file is not None and isinstance(data, dict):
-        _save_doctor_cache(cache_file, res.stdout or "")
     report = validate_report(data, settings, home, clock)
     report.command = tuple(argv)
     report.seconds = seconds
+    if report.ok and cache_file is not None and cache_write and isinstance(data, dict):
+        _save_doctor_cache(cache_file, res.stdout or "")
     return report
 
 
