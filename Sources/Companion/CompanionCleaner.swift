@@ -74,7 +74,7 @@ enum CompanionCleanerReport {
                 icon: categoryReport.category.icon,
                 isExtremeOnly: categoryReport.category.isExtremeOnly,
                 totalBytes: categoryReport.totalBytes,
-                totalText: HogFormat.memory(categoryReport.totalBytes),
+                totalText: (categoryReport.anyApproximate ? "at least " : "") + HogFormat.memory(categoryReport.totalBytes),
                 itemCount: categoryReport.itemCount,
                 items: items
             ))

@@ -113,6 +113,12 @@ final class CompanionCleanerReportTests: XCTestCase {
         let plain = try XCTUnwrap(built.categories[0].items.first { $0.title == "TestCacheExact" })
         XCTAssertFalse(plain.isApproximate)
         XCTAssertFalse(plain.sizeText.hasPrefix("at least "), plain.sizeText)
+        XCTAssertTrue(built.categories[0].totalText.hasPrefix("at least "), built.categories[0].totalText)
+    }
+
+    func testAnExactCategoryTotalCarriesNoPrefix() {
+        let built = CompanionCleanerReport.build(from: CleanerFixtures.report([(.userCaches, [CleanerFixtures.item(.userCaches, "TestCacheExact", bytes: 5_000)])]), id: "exact")
+        XCTAssertFalse(built.categories[0].totalText.hasPrefix("at least "), built.categories[0].totalText)
     }
 
     func testAnItemFromAnOlderMacWithoutTheFlagStillReads() throws {
