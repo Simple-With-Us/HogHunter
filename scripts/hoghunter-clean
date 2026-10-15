@@ -803,7 +803,10 @@ def rule_botfleet_rollback() -> list[Candidate]:
     An update moves the running tree to `.botfleet-server.node_modules.rollback-<stamp>`
     and swaps in a fresh copy.  The rollback is regenerable (a reinstall rebuilds
     it: zero re-download penalty), but the first day is a grace period in case the
-    new copy fails and the operator rolls back by hand.  The live tree never matches:
+    new copy fails and the operator rolls back by hand.  Age is the younger of the
+    newest file inside and the directory's own ctime: a moved-in old tree keeps its
+    file mtimes, and only the move (which refreshes ctime) proves it just arrived.
+    The live tree never matches:
     the glob needs the versioned `.node_modules.` infix with a suffix, and symlinks
     are skipped without following.
     """
@@ -811,12 +814,19 @@ def rule_botfleet_rollback() -> list[Candidate]:
     apps = HOME / "apps"
     if not apps.is_dir():
         return []
+    now = time.time()
     for path in sorted(apps.glob(".botfleet-server.node_modules.*")):
         if path.is_symlink() or not path.is_dir():
             continue
         if is_forbidden(str(path)) or has_keep_sentinel(str(path)):
             continue
+        try:
+            moved_at = path.stat().st_ctime
+        except OSError:
+            continue
         if newest_file_age_min(str(path)) < IDLE_MIN_ROLLBACK:
+            continue
+        if (now - moved_at) / 60.0 < IDLE_MIN_ROLLBACK:
             continue
         if open_handles(str(path)):
             continue

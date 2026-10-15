@@ -1379,6 +1379,13 @@ final class DiskCleaner: @unchecked Sendable {
                            Date().timeIntervalSince(modified) < 24 * 3600 {
                             continue
                         }
+                        // A moved-in old tree keeps its file mtimes, so the
+                        // file gate above cannot see the move.  The directory's
+                        // own ctime is refreshed by the rename, and only the
+                        // move proves the copy just arrived.
+                        if Self.directoryMovedWithin(url, within: 24 * 3600) {
+                            continue
+                        }
                         items.append(CleanItem(
                             category: .aiArtifacts,
                             title: name,
@@ -1674,6 +1681,21 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         return items.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// True when the directory itself was created, renamed, or had its metadata
+    /// changed within the window.  Reads the ctime (not mtime or birth time):
+    /// moving an old tree preserves every file mtime inside, and only the move
+    /// refreshes the directory's own ctime.  Fails closed: an unreadable path
+    /// reads as just moved, so it keeps its grace period.
+    static func directoryMovedWithin(_ url: URL, within interval: TimeInterval, now: Date = Date()) -> Bool {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return true }
+        let changed = Date(
+            timeIntervalSince1970: TimeInterval(info.st_ctimespec.tv_sec)
+                + TimeInterval(info.st_ctimespec.tv_nsec) / 1_000_000_000
+        )
+        return now.timeIntervalSince(changed) < interval
     }
 
     // MARK: - Cleaning Execution

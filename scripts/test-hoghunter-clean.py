@@ -554,10 +554,37 @@ def test_botfleet_rollback_lists_only_stale_versioned_copies(hh):
         ancient = hh.time.time() - 25 * 3600
         for p in (old / "package.json",):
             os.utime(p, (ancient, ancient))
+        # The fresh copy reads newer than the mocked clock below, so only the
+        # old copy passes both the file-age and the ctime grace gates.
+        ahead = hh.time.time() + 2 * 3600
+        os.utime(new / "package.json", (ahead, ahead))
         with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
-            offered = hh.rule_botfleet_rollback()
+            # The fixture directories were just created (ctime is now), so run
+            # the rule a day later: only then is the grace period over.
+            with mock.patch.object(hh.time, "time", return_value=hh.time.time() + 25 * 3600):
+                offered = hh.rule_botfleet_rollback()
         assert [c.path for c in offered] == [str(old)], offered
         assert offered[0].tier == "safe", "cheap band must pick this up with no flag"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_botfleet_rollback_holds_a_moved_in_old_tree(hh):
+    """A moved-in old tree keeps its file mtimes: only the directory's own
+    ctime (refreshed by the move) proves it just arrived, so it still gets
+    its grace day."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        apps = home / "apps"
+        apps.mkdir()
+        moved = apps / ".botfleet-server.node_modules.rollback-moved"
+        moved.mkdir()
+        old_file = moved / "package.json"
+        old_file.write_text("{}\n", encoding="utf-8")
+        ancient = hh.time.time() - 30 * 24 * 3600
+        os.utime(old_file, (ancient, ancient))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            assert hh.rule_botfleet_rollback() == [], "a just-moved tree is not listed on day zero"
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
