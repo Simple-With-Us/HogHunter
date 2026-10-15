@@ -73,6 +73,23 @@ final class CleanRegimenTests: XCTestCase {
         )
     }
 
+    func testStaleBackupsNeverScheduleUnattended() {
+        let backup = CleanItem(
+            category: .staleBackups,
+            title: "state.vscdb.bak-old",
+            subtitle: "backup",
+            url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-backup"),
+            bytes: 10,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        XCTAssertEqual(CleanRegimenRunner.ruleName(for: backup), "ask-first")
+        let pending = CleanRegimenRunner.pendingItems(from: [backup], rules: Set(CleanRegimen.schedulableRules))
+        XCTAssertTrue(pending.items.isEmpty, "no schedulable rule may take tool-made backups unattended")
+    }
+
     func testRegimenIsOffByDefault() {
         // An unattended delete is a different promise than a button press.
         XCTAssertFalse(CleanRegimen().isEnabled)
