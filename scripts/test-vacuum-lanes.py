@@ -387,6 +387,59 @@ class TestReportGates(unittest.TestCase):
         _rep, scan = self.scan({}, text="not json at all")
         self.assert_nothing(scan, "not valid JSON")
 
+    def _timeout_runner(self):
+        def run(argv, timeout):
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        return run
+
+    def _seed_cache(self, report) -> Path:
+        cache = self.sb.root / "cache" / "lane-doctor-report.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(report), encoding="utf-8")
+        return cache
+
+    def test_timeout_without_a_cache_yields_nothing(self) -> None:
+        rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner())
+        self.assertFalse(rep.ok)
+        self.assertIn("timed out", rep.reason)
+        self.assertEqual(lanes.removable_lanes(rep, self.sb.ctx()).choices, [])
+
+    def test_timeout_falls_back_to_a_fresh_enough_cache(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row]))
+        rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner(), cache_file=cache)
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertTrue(rep.cached)
+        scan = lanes.removable_lanes(rep, self.sb.ctx())
+        self.assertTrue(scan.ok, scan.reason)
+        self.assertEqual([c.path for c in scan.choices], [str(self.lane)])
+
+    def test_timeout_ignores_a_cache_older_than_a_day(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row], now=time.time() - 25 * 3600))
+        rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner(), cache_file=cache)
+        self.assertFalse(rep.ok)
+        # An unusable cache changes nothing: the original failure reason stands.
+        self.assertIn("timed out", rep.reason)
+
+    def test_bad_json_falls_back_to_the_cache(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row]))
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning({}, text="not json at all"), cache_file=cache
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertTrue(rep.cached)
+
+    def test_a_fresh_report_is_saved_to_the_cache(self) -> None:
+        cache = self.sb.root / "cache" / "lane-doctor-report.json"
+        report = self.sb.report([self.row])
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning(report), cache_file=cache
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertFalse(rep.cached)
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(saved["generated_at"], report["generated_at"])
+
     def test_non_object_json_yields_nothing(self) -> None:
         _rep, scan = self.scan({}, text="[1, 2, 3]")
         self.assert_nothing(scan, "not a JSON object")

@@ -644,10 +644,15 @@ class VacuumEngine:
         return freed, f"pruned {_plural(removed, 'folder')}", StepStatus.RAN
 
     def _lane_report(self) -> lanes.LaneReport:
-        """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice."""
+        """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice.
+        The last good report is cached on disk, so a timed-out doctor run falls back to recent evidence
+        instead of retiring nothing; removal still re-checks every lane live."""
         if self._lane_report_cache is None:
             settings = lanes.lane_settings(self.cfg, self.home)
-            self._lane_report_cache = lanes.load_report(settings, self.home, self._doctor_runner, self._clock)
+            cache_file = lanes.doctor_cache_file(data_dir_for(self.cfg, self.home))
+            self._lane_report_cache = lanes.load_report(
+                settings, self.home, self._doctor_runner, self._clock, cache_file=cache_file
+            )
         return self._lane_report_cache
 
     def _note(self, step_id: str, action: str, **fields: Any) -> dict[str, Any]:
