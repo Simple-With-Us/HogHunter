@@ -530,9 +530,12 @@ if action == "clean":
                 else:
                     # Path is an argv element, never interpolated into the script.
                     # Finder failure skips the item.  A direct rmtree here is permanent.
+                    # The as-alias coercion matters: without it Finder answers
+                    # error -1728 on most paths under ~/Library/Caches and the
+                    # item is left in place.
                     script = (
                         'on run argv\n'
-                        'tell application "Finder" to delete POSIX file (item 1 of argv)\n'
+                        'tell application "Finder" to delete ((POSIX file (item 1 of argv)) as alias)\n'
                         'end run'
                     )
                     res = subprocess.run(

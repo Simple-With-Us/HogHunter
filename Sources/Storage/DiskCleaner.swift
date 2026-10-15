@@ -24,6 +24,9 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     /// registered git worktrees, nested git checkouts, active conversion-batch
     /// staging, and fleet-locked files.
     case tempFiles
+    /// Stale tool-made backups an agent left behind (Cursor database backups
+    /// `state.vscdb.bak-*`), older than 7 days.  The live files are never listed.
+    case staleBackups
 
     var id: String { rawValue }
 
@@ -39,6 +42,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .largeAndOldFiles: return "Large & Old Files"
         case .apfsSnapshots: return "APFS Local Snapshots"
         case .tempFiles: return "Temp Files"
+        case .staleBackups: return "Stale Backups"
         }
     }
 
@@ -64,6 +68,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Local Time Machine backup snapshots pinning deleted disk blocks on APFS containers."
         case .tempFiles:
             return "Stale temporary files in /tmp untouched for 24+ hours.  Skips registered git worktrees, nested git checkouts, active conversion-batch staging, and fleet-locked files."
+        case .staleBackups:
+            return "Tool-made backups older than 7 days (Cursor database backups).  Live files are never listed."
         }
     }
 
@@ -79,6 +85,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .largeAndOldFiles: return "clock.arrow.circlepath"
         case .apfsSnapshots: return "camera.metering.matrix"
         case .tempFiles: return "timer"
+        case .staleBackups: return "archivebox"
         }
     }
 
@@ -94,13 +101,14 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .largeAndOldFiles: return 7
         case .apfsSnapshots: return 8
         case .tempFiles: return 9
+        case .staleBackups: return 10
         }
     }
 
     /// Whether this category is restricted to the Extreme Clean tier.
     var isExtremeOnly: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots, .tempFiles:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots, .tempFiles, .staleBackups:
             return false
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return true
@@ -110,7 +118,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     /// Whether this category is checked by default for one-click clean.
     var defaultSelected: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData, .staleBackups:
             return true
         case .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots, .tempFiles:
             // Large/old files, AI agent artifacts, local snapshots, and temp
@@ -612,6 +620,8 @@ final class DiskCleaner: @unchecked Sendable {
             return scanAPFSSnapshots()
         case .tempFiles:
             return scanTempFiles()
+        case .staleBackups:
+            return scanStaleBackups()
         }
     }
 
@@ -1388,6 +1398,12 @@ final class DiskCleaner: @unchecked Sendable {
                     if name.hasPrefix(".botfleet-server.node_modules.") {
                         let stats = directoryStats(at: url)
                         guard stats.bytes > 0 else { continue }
+                        // A fresh rollback may still be needed: the new copy
+                        // gets a day to prove itself before the old one is listed.
+                        if let modified = stats.lastModified,
+                           Date().timeIntervalSince(modified) < 24 * 3600 {
+                            continue
+                        }
                         items.append(CleanItem(
                             category: .aiArtifacts,
                             title: name,
@@ -1648,6 +1664,46 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+
+    /// Scans for stale tool-made backups an agent left behind: Cursor database
+    /// backups (`state.vscdb.bak-*`) older than 7 days.  The live `state.vscdb`
+    /// is never listed and never touched.
+    func scanStaleBackups() -> [CleanItem] {
+        let backupDir = userHomeURL
+            .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: backupDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        let staleCutoff = Date().addingTimeInterval(-7 * 24 * 3600)
+        var items: [CleanItem] = []
+        for url in contents {
+            if Task.isCancelled { break }
+            let name = url.lastPathComponent
+            // The live database has no .bak- suffix; only versioned backups match.
+            guard name.hasPrefix("state.vscdb.bak-") else { continue }
+            let stats = directoryStats(at: url)
+            guard stats.bytes > 0 else { continue }
+            guard let modified = stats.lastModified, modified < staleCutoff else { continue }
+            items.append(CleanItem(
+                category: .staleBackups,
+                title: name,
+                subtitle: url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"),
+                url: url,
+                bytes: stats.bytes,
+                fileCount: stats.fileCount,
+                lastModified: stats.lastModified,
+                isSelected: CleanCategory.staleBackups.defaultSelected,
+                detail: "Stale Cursor database backup"
+            ))
+        }
+
+        return items.sorted { $0.bytes > $1.bytes }
+    }
 
     // MARK: - Cleaning Execution
 
@@ -1935,6 +1991,13 @@ final class DiskCleaner: @unchecked Sendable {
             let tmpRoot = tempRootURL.path
             let resolved = Self.resolvedPath(path)
             return resolved.hasPrefix(tmpRoot + "/") && resolved != tmpRoot
+
+        case .staleBackups:
+            // Only versioned Cursor database backups under globalStorage.  The
+            // live state.vscdb has no .bak- suffix and can never match this.
+            let backupsPrefix = home + "/Library/Application Support/Cursor/User/globalStorage/"
+            guard path.hasPrefix(backupsPrefix) && path != backupsPrefix else { return false }
+            return url.lastPathComponent.hasPrefix("state.vscdb.bak-")
         }
     }
 
