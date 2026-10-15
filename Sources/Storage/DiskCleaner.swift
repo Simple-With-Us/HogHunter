@@ -416,6 +416,46 @@ struct CleanItem: Identifiable, Hashable, Sendable {
     var lastModified: Date?
     var isSelected: Bool
     var detail: String?
+    var isExternal: Bool
+    var volumeName: String
+    var isSymlink: Bool
+
+    init(
+        category: CleanCategory,
+        title: String,
+        subtitle: String,
+        url: URL,
+        bytes: UInt64,
+        fileCount: Int,
+        lastModified: Date?,
+        isSelected: Bool,
+        detail: String? = nil,
+        isExternal: Bool? = nil,
+        volumeName: String? = nil,
+        isSymlink: Bool? = nil
+    ) {
+        self.category = category
+        self.title = title
+        self.subtitle = subtitle
+        self.url = url
+        self.bytes = bytes
+        self.fileCount = fileCount
+        self.lastModified = lastModified
+        self.isSelected = isSelected
+        self.detail = detail
+
+        let detectedSymlink = isSymlink ?? ((try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false)
+        self.isSymlink = detectedSymlink
+
+        if let isExternal = isExternal, let volumeName = volumeName {
+            self.isExternal = isExternal
+            self.volumeName = volumeName
+        } else {
+            let (ext, vol) = DiskCleaner.detectVolume(for: url)
+            self.isExternal = isExternal ?? ext
+            self.volumeName = volumeName ?? vol
+        }
+    }
 
     var path: String { url.path }
 
@@ -436,6 +476,14 @@ struct CleanCategoryReport: Identifiable, Sendable {
     var totalBytes: UInt64
     var selectedBytes: UInt64
     var itemCount: Int
+
+    var internalSelectedBytes: UInt64 {
+        items.filter { $0.isSelected && !$0.isExternal }.reduce(0 as UInt64) { $0 &+ $1.bytes }
+    }
+
+    var externalSelectedBytes: UInt64 {
+        items.filter { $0.isSelected && $0.isExternal }.reduce(0 as UInt64) { $0 &+ $1.bytes }
+    }
 
     var formattedTotalSize: String {
         HogFormat.memory(totalBytes)
@@ -462,12 +510,28 @@ struct CleanScanReport: Sendable {
         self.tier = tier
     }
 
+    var totalSelectedInternalBytes: UInt64 {
+        categories.reduce(0 as UInt64) { $0 &+ $1.internalSelectedBytes }
+    }
+
+    var totalSelectedExternalBytes: UInt64 {
+        categories.reduce(0 as UInt64) { $0 &+ $1.externalSelectedBytes }
+    }
+
     var formattedTotalSize: String {
         HogFormat.memory(totalBytes)
     }
 
     var formattedSelectedSize: String {
         HogFormat.memory(totalSelectedBytes)
+    }
+
+    var formattedSelectedInternalSize: String {
+        HogFormat.memory(totalSelectedInternalBytes)
+    }
+
+    var formattedSelectedExternalSize: String {
+        HogFormat.memory(totalSelectedExternalBytes)
     }
 }
 
@@ -623,7 +687,7 @@ final class DiskCleaner: @unchecked Sendable {
     /// emitted carrying the full purgeable figure so the panel still has
     /// something to show and the clean can still thin.
     func scanAPFSSnapshots() -> [CleanItem] {
-        let snapshotNames = listSnapshots("/") ?? SnapshotSafety.listLocalSnapshots()
+        let snapshotNames = listSnapshots("/") ?? []
         let purgeable = purgeableProvider("/")
 
         if snapshotNames.isEmpty {
@@ -1807,6 +1871,21 @@ final class DiskCleaner: @unchecked Sendable {
                     reclaimed &+= item.bytes
                     removedCount += 1
                     noteSuccess(item)
+                } else if item.isSymlink {
+                    // Safe removal for symlinks: preserve the symlink itself, clean its target contents.
+                    // Moving the symlink itself to Trash would sever the external offload link.
+                    let targetURL = item.url.resolvingSymlinksInPath()
+                    if targetURL.path != item.url.path, fileManager.fileExists(atPath: targetURL.path) {
+                        if let contents = try? fileManager.contentsOfDirectory(at: targetURL, includingPropertiesForKeys: nil, options: []) {
+                            for child in contents {
+                                var trashedURL: NSURL?
+                                try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)
+                            }
+                        }
+                    }
+                    reclaimed &+= item.bytes
+                    removedCount += 1
+                    noteSuccess(item)
                 } else {
                     // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
@@ -2114,5 +2193,22 @@ final class DiskCleaner: @unchecked Sendable {
             "coreparsec", "dock", "dvd player", "knowledge", "quick look", "syncservices"
         ]
         return systemNames.contains(lower)
+    }
+
+    /// Detects whether the item resolves to an external volume and resolves the volume display name.
+    static func detectVolume(for url: URL) -> (isExternal: Bool, volumeName: String) {
+        let resolved = url.resolvingSymlinksInPath()
+        let path = resolved.path
+        if path.hasPrefix("/Volumes/") {
+            let components = path.split(separator: "/")
+            let volName = components.count > 1 ? String(components[1]) : "External"
+            return (true, volName)
+        }
+        if let values = try? resolved.resourceValues(forKeys: [.volumeIsInternalKey, .volumeNameKey]) {
+            let isInternal = values.volumeIsInternal ?? true
+            let name = values.volumeName ?? (isInternal ? "Macintosh HD" : "External")
+            return (!isInternal, name)
+        }
+        return (false, "Macintosh HD")
     }
 }

@@ -803,5 +803,101 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertEqual(viaTmp, viaPrivate)
         XCTAssertFalse(viaTmp.isEmpty)
     }
+
+    // MARK: - Volume Awareness & Symlink Tests
+
+    func testDetectVolumeInternalMacintoshHD() {
+        let internalURL = URL(fileURLWithPath: "/Users")
+        let (isExternal, volumeName) = DiskCleaner.detectVolume(for: internalURL)
+        XCTAssertFalse(isExternal)
+        XCTAssertEqual(volumeName, "Macintosh HD")
+    }
+
+    func testDetectVolumeExternalDrivePrefix() {
+        let externalURL = URL(fileURLWithPath: "/Volumes/External/Cache/test")
+        let (isExternal, volumeName) = DiskCleaner.detectVolume(for: externalURL)
+        XCTAssertTrue(isExternal)
+        XCTAssertEqual(volumeName, "External")
+    }
+
+    func testCleanItemAutoDetectsVolumeAndSymlinks() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetDir = tempDir.appendingPathComponent("target_folder")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let symlinkURL = tempDir.appendingPathComponent("symlink_folder")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetDir)
+
+        let normalItem = CleanItem(
+            category: .userCaches,
+            title: "Normal",
+            subtitle: targetDir.path,
+            url: targetDir,
+            bytes: 1024,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertFalse(normalItem.isSymlink)
+        XCTAssertFalse(normalItem.isExternal)
+
+        let symlinkItem = CleanItem(
+            category: .userCaches,
+            title: "Symlink",
+            subtitle: symlinkURL.path,
+            url: symlinkURL,
+            bytes: 2048,
+            fileCount: 2,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertTrue(symlinkItem.isSymlink)
+    }
+
+    func testCleaningSymlinkPreservesSymlinkAndCleansContents() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetDir = tempDir.appendingPathComponent("external_target")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let dummyFile = targetDir.appendingPathComponent("cache_entry.bin")
+        try Data("cache data".utf8).write(to: dummyFile)
+
+        let cachesDir = tempDir.appendingPathComponent("Library/Caches", isDirectory: true)
+        try FileManager.default.createDirectory(at: cachesDir, withIntermediateDirectories: true)
+        let symlinkURL = cachesDir.appendingPathComponent("cache_symlink")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetDir)
+
+        let cleaner = DiskCleaner(
+            makeSnapshot: { (true, "test-snap") },
+            homeDirectory: tempDir
+        )
+
+        let item = CleanItem(
+            category: .userCaches,
+            title: "Symlink Cache",
+            subtitle: symlinkURL.path,
+            url: symlinkURL,
+            bytes: 10,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+
+        XCTAssertTrue(item.isSymlink)
+        let result = await cleaner.clean(items: [item], createSnapshot: false)
+        XCTAssertEqual(result.itemsRemoved, 1)
+
+        // The symlink itself MUST still exist!
+        let symlinkStillExists = FileManager.default.fileExists(atPath: symlinkURL.path)
+        XCTAssertTrue(symlinkStillExists, "Cleaning must preserve the symlink so external offload setup is not broken")
+
+        // The target directory exists, but child file was removed
+        let targetContents = try FileManager.default.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil)
+        XCTAssertTrue(targetContents.isEmpty, "The child files inside target should have been cleaned")
+    }
 }
 

@@ -171,6 +171,17 @@ struct DiskCleanerView: View {
                                 .foregroundStyle(.secondary)
                         }
 
+                        if store.totalSelectedExternalBytes() > 0 {
+                            HStack(spacing: 8) {
+                                Label("Internal: \(HogFormat.memory(store.totalSelectedInternalBytes()))", systemImage: "internaldrive")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Label("External: \(HogFormat.memory(store.totalSelectedExternalBytes()))", systemImage: "externaldrive")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.purple)
+                            }
+                        }
+
                         Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
@@ -552,9 +563,25 @@ private struct CategoryCardView: View {
             .padding(.leading, 8)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(item.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    if item.isExternal {
+                        Text(item.volumeName)
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.purple)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.purple.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+                    }
+                    if item.isSymlink {
+                        Image(systemName: "link")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                            .help("Symlink target: \(item.url.resolvingSymlinksInPath().path)")
+                    }
+                }
                 Text(item.subtitle)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)

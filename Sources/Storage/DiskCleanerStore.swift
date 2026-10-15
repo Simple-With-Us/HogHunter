@@ -257,6 +257,28 @@ final class DiskCleanerStore: ObservableObject {
         return sum
     }
 
+    func totalSelectedInternalBytes() -> UInt64 {
+        guard let report else { return 0 }
+        var sum: UInt64 = 0
+        for cat in report.categories {
+            for item in cat.items where selectedItemIds.contains(item.id) && !item.isExternal {
+                sum &+= item.bytes
+            }
+        }
+        return sum
+    }
+
+    func totalSelectedExternalBytes() -> UInt64 {
+        guard let report else { return 0 }
+        var sum: UInt64 = 0
+        for cat in report.categories {
+            for item in cat.items where selectedItemIds.contains(item.id) && item.isExternal {
+                sum &+= item.bytes
+            }
+        }
+        return sum
+    }
+
     func totalSelectedItemsCount() -> Int {
         selectedItemIds.count
     }
