@@ -12,6 +12,7 @@ struct SavedMac: Codable, Equatable {
     var token: String
     var remoteHost: String? = nil
     var remotePort: Int? = nil
+    var useTLS: Bool? = nil
 }
 
 struct DiscoveredMac: Identifiable, Equatable, Sendable {
@@ -171,8 +172,18 @@ final class CompanionModel {
     var remotePortDraft = "24240"
     var remoteTokenDraft = ""
     var remoteNameDraft = ""
+    var remoteUseTLS = false
     var remoteConnectError: String?
     var isConnectingRemote = false
+
+    /// Whether this saved Mac or remote connection uses HTTPS/TLS.
+    func isUsingTLS(for saved: SavedMac?) -> Bool {
+        guard let saved else { return remoteUseTLS }
+        if let explicit = saved.useTLS { return explicit }
+        if let port = saved.remotePort, port == 443 { return true }
+        if let host = saved.remoteHost, host.lowercased().hasPrefix("https://") { return true }
+        return false
+    }
     /// True while the Mac is showing its "Pair this iPhone?" alert.
     var isWaitingForApproval = false
     /// False when this iPhone has no Wi-Fi path, so Bonjour cannot find a
@@ -337,10 +348,10 @@ final class CompanionModel {
     /// Trades the typed pairing code for this phone's own token, so the Mac
     /// can list it and cut it off alone.  A Mac that predates tokens answers
     /// 404; the code itself then stays the credential, as it always was.
-    private static func credential(forCode code: String, endpoint: NWEndpoint) async throws -> String {
+    private static func credential(forCode code: String, endpoint: NWEndpoint, useTLS: Bool? = nil) async throws -> String {
         let name = await deviceName()
         do {
-            return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name)
+            return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name, useTLS: useTLS)
         } catch CompanionClientError.tooOld {
             return code
         } catch CompanionClientError.untrustedNetwork {
@@ -398,10 +409,10 @@ final class CompanionModel {
         }
     }
 
-    private static func approve(endpoint: NWEndpoint) async throws -> String {
+    private static func approve(endpoint: NWEndpoint, useTLS: Bool? = nil) async throws -> String {
         let name = await deviceName()
         return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await CompanionConnection.requestPair(endpoint: endpoint, deviceName: name) }
+            group.addTask { try await CompanionConnection.requestPair(endpoint: endpoint, deviceName: name, useTLS: useTLS) }
             group.addTask {
                 try await Task.sleep(for: approvalTimeout)
                 throw CompanionClientError.timedOut
@@ -524,7 +535,7 @@ final class CompanionModel {
             return CompanionQuitResponse(status: "failed", pid: pid, name: row.name, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, force: force)
+            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, force: force, useTLS: isUsingTLS(for: saved))
             Task { await refresh() }
             return resp
         } catch {
@@ -551,7 +562,7 @@ final class CompanionModel {
             return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, action: action)
+            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, action: action, useTLS: isUsingTLS(for: saved))
             Task { await refresh() }
             return resp
         } catch {
@@ -575,7 +586,7 @@ final class CompanionModel {
             return CompanionSampleResponse(status: "failed", name: row.name, error: "Not connected to Mac.")
         }
         do {
-            return try await CompanionConnection.triggerSample(endpoint: endpoint, token: saved.token, rowId: row.id)
+            return try await CompanionConnection.triggerSample(endpoint: endpoint, token: saved.token, rowId: row.id, useTLS: isUsingTLS(for: saved))
         } catch {
             return CompanionSampleResponse(status: "failed", name: row.name, error: Self.describe(error))
         }
@@ -600,7 +611,7 @@ final class CompanionModel {
             return
         }
         do {
-            let res = try await CompanionConnection.triggerMaintainRun(endpoint: endpoint, token: saved.token)
+            let res = try await CompanionConnection.triggerMaintainRun(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             if res.status != "started" {
                 maintainError = res.error ?? res.message ?? "The Mac did not start a run."
             }
@@ -671,7 +682,7 @@ final class CompanionModel {
         settingsInFlight += 1
         defer { settingsInFlight -= 1 }
         do {
-            let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update)
+            let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
             if res.status == "ok" {
                 settingsNotice = res.message
             } else {
@@ -704,8 +715,8 @@ final class CompanionModel {
             }
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, toggleCategory: id)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, toggleCategory: id, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -724,8 +735,8 @@ final class CompanionModel {
             }
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, addPath: trimmed)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, addPath: trimmed, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -740,8 +751,8 @@ final class CompanionModel {
             snapshot?.storage = storage
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, removePath: path)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, removePath: path, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -751,8 +762,8 @@ final class CompanionModel {
             snapshot?.window = window
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, window: window)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, window: window, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -762,8 +773,8 @@ final class CompanionModel {
             snapshot?.grouping = grouping
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, grouping: grouping)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, grouping: grouping, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -773,21 +784,21 @@ final class CompanionModel {
             snapshot?.cpuScale = scale
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
 
     /// Runs one edit on the Mac and refreshes.  A failure lands in
     /// `controlError` for the dashboard to show, never in a silent catch.
-    private func sendControl(_ call: (_ endpoint: NWEndpoint, _ token: String) async throws -> (ok: Bool, message: String?)) async {
+    private func sendControl(_ call: (_ endpoint: NWEndpoint, _ token: String, _ useTLS: Bool?) async throws -> (ok: Bool, message: String?)) async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             controlError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
             return
         }
         do {
-            let outcome = try await call(endpoint, saved.token)
+            let outcome = try await call(endpoint, saved.token, isUsingTLS(for: saved))
             if !outcome.ok {
                 controlError = outcome.message ?? "The Mac did not accept that change."
             }
@@ -840,18 +851,47 @@ final class CompanionModel {
     }
 
     func connectRemote() async {
-        let host = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else {
+        var rawHost = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawHost.isEmpty else {
             remoteConnectError = "Enter a Tailscale MagicDNS name, IP address, or domain."
             return
         }
-        let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Self.defaultPort
+        var explicitTLS: Bool? = remoteUseTLS ? true : nil
+        if rawHost.lowercased().hasPrefix("https://") {
+            explicitTLS = true
+            rawHost = String(rawHost.dropFirst("https://".count))
+        } else if rawHost.lowercased().hasPrefix("http://") {
+            explicitTLS = false
+            rawHost = String(rawHost.dropFirst("http://".count))
+        }
+        if let slashIdx = rawHost.firstIndex(of: "/") {
+            rawHost = String(rawHost[..<slashIdx])
+        }
+
+        let host: String
+        var resolvedPort = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? (explicitTLS == true ? 443 : Self.defaultPort)
+        if let colonIdx = rawHost.lastIndex(of: ":") {
+            let hostPart = String(rawHost[..<colonIdx])
+            let portPart = String(rawHost[rawHost.index(after: colonIdx)...])
+            if let p = Int(portPart) {
+                host = hostPart
+                resolvedPort = p
+            } else {
+                host = rawHost
+            }
+        } else {
+            host = rawHost
+        }
+        if resolvedPort == 443 {
+            explicitTLS = true
+        }
+
         let typed = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
         guard typed.isEmpty || typed.count >= 8 else {
             remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
             return
         }
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(portNum)) else {
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(resolvedPort)) else {
             remoteConnectError = "Invalid port number."
             return
         }
@@ -873,17 +913,17 @@ final class CompanionModel {
             if typed.isEmpty {
                 isWaitingForApproval = true
                 defer { isWaitingForApproval = false }
-                token = try await Self.approve(endpoint: endpoint)
+                token = try await Self.approve(endpoint: endpoint, useTLS: explicitTLS)
             } else {
-                token = try await Self.credential(forCode: typed, endpoint: endpoint)
+                token = try await Self.credential(forCode: typed, endpoint: endpoint, useTLS: explicitTLS)
             }
             guard !Task.isCancelled else { return }
-            let fetched = try await Self.fetch(endpoint: endpoint, token: token)
+            let fetched = try await Self.fetch(endpoint: endpoint, token: token, useTLS: explicitTLS)
             guard !Task.isCancelled else { return }
             let trimmedName = remoteNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayName = trimmedName.isEmpty ? fetched.hostName : trimmedName
-            let peerID = "remote-\(host):\(portNum)"
-            saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: portNum)
+            let peerID = "remote-\(host):\(resolvedPort)"
+            saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: resolvedPort, useTLS: explicitTLS)
             persistSaved()
             pairingDismissed = false
             codeFailure = nil
@@ -901,7 +941,7 @@ final class CompanionModel {
             if let hint = Self.transportHint(error) {
                 remoteConnectError = hint
             } else {
-                remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
+                remoteConnectError = "Could not reach \(host) on port \(resolvedPort).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale or Cloudflare Tunnel is connected."
             }
         }
     }
@@ -964,7 +1004,7 @@ final class CompanionModel {
         }
         if case .code = phase { return }
         do {
-            let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token)
+            let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             pairingDismissed = false
             codeFailure = nil
             snapshot = fetched
@@ -1016,7 +1056,7 @@ final class CompanionModel {
               let endpoint = activeEndpoint(for: current) else { return }
         lastUpgradeAttempt = Date()
         do {
-            let token = try await CompanionConnection.enroll(endpoint: endpoint, code: current.token, deviceName: await Self.deviceName())
+            let token = try await CompanionConnection.enroll(endpoint: endpoint, code: current.token, deviceName: await Self.deviceName(), useTLS: isUsingTLS(for: current))
             // Pairing may have changed while the Mac answered.
             guard var latest = saved, latest.peerID == current.peerID, latest.token == current.token else { return }
             latest.token = token
@@ -1115,7 +1155,7 @@ final class CompanionModel {
         }
 
         do {
-            let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token)
+            let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             lastCleanResult = res
             defaults?.set("Cleaned", forKey: "clean_status")
             defaults?.set(Date().timeIntervalSince1970, forKey: "last_clean_date")
@@ -1229,10 +1269,10 @@ final class CompanionModel {
     /// not answer".  Passed through to the connection so both limits agree.
     private static let snapshotFetchTimeout: TimeInterval = 10
 
-    private static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
+    private static func fetch(endpoint: NWEndpoint, token: String, useTLS: Bool? = nil) async throws -> CompanionSnapshot {
         try await withThrowingTaskGroup(of: CompanionSnapshot.self) { group in
             group.addTask {
-                try await CompanionConnection.fetch(endpoint: endpoint, token: token, timeout: Self.snapshotFetchTimeout)
+                try await CompanionConnection.fetch(endpoint: endpoint, token: token, timeout: Self.snapshotFetchTimeout, useTLS: useTLS)
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(Self.snapshotFetchTimeout))

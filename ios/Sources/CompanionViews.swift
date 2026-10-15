@@ -13,6 +13,19 @@ enum CompanionSort: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum CompanionNetworkSort: String, CaseIterable, Identifiable {
+    case connections = "Active"
+    case hosts = "Hosts"
+    var id: String { rawValue }
+}
+
+enum CompanionAppStorageSort: String, CaseIterable, Identifiable {
+    case total = "Total Size"
+    case hidden = "Hidden Clutter"
+    case bundle = "App Bundle"
+    var id: String { rawValue }
+}
+
 /// Live read of the iPhone's own storage volume, used by the iOS Storage
 /// tab alongside the existing Mac-disk section.  Pulls once via
 /// `URL.resourceValues(forKeys:)`, which works inside the iOS sandbox without
@@ -413,6 +426,8 @@ struct DashboardView: View {
     @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
+    @State private var networkSortOrder: CompanionNetworkSort = .connections
+    @State private var appStorageSortOrder: CompanionAppStorageSort = .total
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
     @State private var isForceQuit = false
@@ -522,6 +537,38 @@ struct DashboardView: View {
             }
         })
         return sortAscending ? sorted.reversed() : sorted
+    }
+
+    private var sortedNetworkRows: [CompanionNetworkRow] {
+        guard let rows = snapshot.network else { return [] }
+        switch networkSortOrder {
+        case .connections:
+            return rows.sorted { a, b in
+                if a.establishedCount != b.establishedCount {
+                    return a.establishedCount > b.establishedCount
+                }
+                return a.uniqueRemoteHosts > b.uniqueRemoteHosts
+            }
+        case .hosts:
+            return rows.sorted { a, b in
+                if a.uniqueRemoteHosts != b.uniqueRemoteHosts {
+                    return a.uniqueRemoteHosts > b.uniqueRemoteHosts
+                }
+                return a.establishedCount > b.establishedCount
+            }
+        }
+    }
+
+    private var sortedAppStorageRows: [CompanionAppStorageRow] {
+        guard let apps = snapshot.storage?.topApps else { return [] }
+        switch appStorageSortOrder {
+        case .total:
+            return apps.sorted { $0.totalBytes > $1.totalBytes }
+        case .hidden:
+            return apps.sorted { $0.hiddenBytes > $1.hiddenBytes }
+        case .bundle:
+            return apps.sorted { $0.bundleBytes > $1.bundleBytes }
+        }
     }
 
     var body: some View {
@@ -1133,7 +1180,7 @@ struct DashboardView: View {
 
         if let apps = snapshot.storage?.topApps, !apps.isEmpty {
             Section {
-                ForEach(apps) { app in
+                ForEach(sortedAppStorageRows) { app in
                     macAppStorageRow(app)
                 }
                 if let scanned = snapshot.storage?.topAppsScannedAt {
@@ -1147,15 +1194,22 @@ struct DashboardView: View {
             } header: {
                 HStack {
                     Text("Mac Storage by App")
-                    if let top = snapshot.storage?.topApps, top.contains(where: { $0.isHiddenHeavy }) {
+                    if apps.contains(where: { $0.isHiddenHeavy }) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.caption2)
                     }
                     Spacer()
+                    Picker("Sort", selection: $appStorageSortOrder) {
+                        ForEach(CompanionAppStorageSort.allCases) { sort in
+                            Text(sort.rawValue).tag(sort)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.caption)
                 }
             } footer: {
-                Text("Top apps on \(snapshot.hostName), sorted by total on-disk size.  Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).  Open the Storage pane on the Mac for the full list and cleanup.")
+                Text("Top apps on \(snapshot.hostName), sorted by \(appStorageSortOrder.rawValue.lowercased()).  Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).  Open the Storage pane on the Mac for the full list and cleanup.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1489,9 +1543,9 @@ struct DashboardView: View {
             }
         }
 
-        Section("Active Network Connections") {
-            if let networkRows = snapshot.network, !networkRows.isEmpty {
-                ForEach(networkRows) { row in
+        Section {
+            if !sortedNetworkRows.isEmpty {
+                ForEach(sortedNetworkRows) { row in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Image(systemName: "network")
@@ -1529,6 +1583,20 @@ struct DashboardView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
+            }
+        } header: {
+            HStack {
+                Text("Active Network Connections")
+                Spacer()
+                if let rows = snapshot.network, rows.count > 1 {
+                    Picker("Sort", selection: $networkSortOrder) {
+                        ForEach(CompanionNetworkSort.allCases) { sort in
+                            Text(sort.rawValue).tag(sort)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 160)
+                }
             }
         }
     }
@@ -1781,10 +1849,12 @@ struct RemoteConnectSheet: View {
                             .multilineTextAlignment(.trailing)
                             .font(.body.monospacedDigit())
                     }
+
+                    Toggle("Use HTTPS / Cloudflare Tunnel", isOn: $model.remoteUseTLS)
                 } header: {
                     Text("Mac Address")
                 } footer: {
-                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  A VPN or a tunnel that lands on the Mac itself pairs like the local network.  Do not forward this port from your router: the link is not encrypted.  An HTTPS tunnel needs app TLS first, which is still to come.")
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net on port \(CompanionModel.defaultPort)), or a remote Cloudflare Tunnel hostname over HTTPS (port 443 with TLS).  Both Tailscale and Cloudflare Tunnels have full access to process control, disk cleaner, and robotic vacuum.")
                 }
 
                 Section {
@@ -1846,6 +1916,21 @@ struct RemoteConnectSheet: View {
             .onChange(of: model.isRemoteSheetPresented) { _, isPresented in
                 if !isPresented {
                     dismiss()
+                }
+            }
+            .onChange(of: model.remoteUseTLS) { _, isTLS in
+                if isTLS && model.remotePortDraft == "\(CompanionModel.defaultPort)" {
+                    model.remotePortDraft = "443"
+                } else if !isTLS && model.remotePortDraft == "443" {
+                    model.remotePortDraft = "\(CompanionModel.defaultPort)"
+                }
+            }
+            .onChange(of: model.remoteHostDraft) { _, newHost in
+                if newHost.lowercased().hasPrefix("https://") && !model.remoteUseTLS {
+                    model.remoteUseTLS = true
+                    if model.remotePortDraft == "\(CompanionModel.defaultPort)" {
+                        model.remotePortDraft = "443"
+                    }
                 }
             }
             .onDisappear {

@@ -20,17 +20,48 @@ enum CompanionConnection {
     /// model allows for that person to answer.
     static let pairTimeout: TimeInterval = 100
 
+    // MARK: - Helpers
+
+    static func hostHeader(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(let host, let port):
+            let name: String
+            switch host {
+            case .name(let n, _): name = n
+            case .ipv4(let addr): name = "\(addr)"
+            case .ipv6(let addr): name = "\(addr)"
+            @unknown default: name = "hoghunter"
+            }
+            if port.rawValue == 80 || port.rawValue == 443 {
+                return name
+            } else {
+                return "\(name):\(port.rawValue)"
+            }
+        default:
+            return "hoghunter"
+        }
+    }
+
+    static func shouldUseTLS(for endpoint: NWEndpoint, explicitlyRequested: Bool? = nil) -> Bool {
+        if let requested = explicitlyRequested { return requested }
+        if case .hostPort(_, let port) = endpoint, port.rawValue == 443 {
+            return true
+        }
+        return false
+    }
+
     // MARK: - Calls
 
     /// Asks the Mac to approve this phone.  The Mac shows an alert, so the
     /// reply can take as long as the person takes; the caller sets the limit.
     /// Returns the pairing code the Mac hands back on Allow.
-    static func requestPair(endpoint: NWEndpoint, deviceName: String) async throws -> String {
+    static func requestPair(endpoint: NWEndpoint, deviceName: String, useTLS: Bool? = nil) async throws -> String {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.pairRequest(deviceName: deviceName),
+            request: CompanionHTTP.pairRequest(deviceName: deviceName, host: hostHeader(for: endpoint)),
             timeout: pairTimeout,
-            qos: .userInitiated
+            qos: .userInitiated,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         let json = (try? JSONSerialization.jsonObject(with: reply.body)) as? [String: Any]
         switch reply.status {
@@ -50,11 +81,12 @@ enum CompanionConnection {
 
     /// Trades the Mac's pairing code for a token of this phone's own.  A Mac
     /// that predates per-phone tokens answers 404 (`tooOld`).
-    static func enroll(endpoint: NWEndpoint, code: String, deviceName: String) async throws -> String {
+    static func enroll(endpoint: NWEndpoint, code: String, deviceName: String, useTLS: Bool? = nil) async throws -> String {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.enrollRequest(code: code, deviceName: deviceName),
-            timeout: defaultTimeout
+            request: CompanionHTTP.enrollRequest(code: code, deviceName: deviceName, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         let json = (try? JSONSerialization.jsonObject(with: reply.body)) as? [String: Any]
         switch reply.status {
@@ -77,40 +109,44 @@ enum CompanionConnection {
         }
     }
 
-    static func fetch(endpoint: NWEndpoint, token: String, timeout: TimeInterval = snapshotTimeout) async throws -> CompanionSnapshot {
+    static func fetch(endpoint: NWEndpoint, token: String, timeout: TimeInterval = snapshotTimeout, useTLS: Bool? = nil) async throws -> CompanionSnapshot {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.request(token: token),
-            timeout: timeout
+            request: CompanionHTTP.request(token: token, host: hostHeader(for: endpoint)),
+            timeout: timeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionSnapshot.self, from: reply, decoder: CompanionJSON.decoder())
     }
 
     /// Starts a Standard clean and waits for the Mac to finish it.  The Mac
     /// answers 409 when a clean is already running.
-    static func triggerClean(endpoint: NWEndpoint, token: String) async throws -> CompanionCleanResponse {
+    static func triggerClean(endpoint: NWEndpoint, token: String, useTLS: Bool? = nil) async throws -> CompanionCleanResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.cleanRequest(token: token),
-            timeout: cleanTimeout
+            request: CompanionHTTP.cleanRequest(token: token, host: hostHeader(for: endpoint)),
+            timeout: cleanTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionCleanResponse.self, from: reply)
     }
 
-    static func triggerQuit(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, force: Bool = false) async throws -> CompanionQuitResponse {
+    static func triggerQuit(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, force: Bool = false, useTLS: Bool? = nil) async throws -> CompanionQuitResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.quitRequest(token: token, pid: pid, rowId: rowId, force: force),
-            timeout: defaultTimeout
+            request: CompanionHTTP.quitRequest(token: token, pid: pid, rowId: rowId, force: force, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionQuitResponse.self, from: reply)
     }
 
-    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, action: String = "tame") async throws -> CompanionTameResponse {
+    static func triggerTame(endpoint: NWEndpoint, token: String, pid: Int32, rowId: String? = nil, action: String = "tame", useTLS: Bool? = nil) async throws -> CompanionTameResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.tameRequest(token: token, pid: pid, rowId: rowId, action: action),
-            timeout: defaultTimeout
+            request: CompanionHTTP.tameRequest(token: token, pid: pid, rowId: rowId, action: action, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionTameResponse.self, from: reply)
     }
@@ -120,12 +156,14 @@ enum CompanionConnection {
         token: String,
         toggleCategory: String? = nil,
         addPath: String? = nil,
-        removePath: String? = nil
+        removePath: String? = nil,
+        useTLS: Bool? = nil
     ) async throws -> CompanionExclusionsUpdateResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.exclusionsRequest(token: token, toggleCategory: toggleCategory, addPath: addPath, removePath: removePath),
-            timeout: defaultTimeout
+            request: CompanionHTTP.exclusionsRequest(token: token, toggleCategory: toggleCategory, addPath: addPath, removePath: removePath, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionExclusionsUpdateResponse.self, from: reply)
     }
@@ -135,12 +173,14 @@ enum CompanionConnection {
         token: String,
         window: String? = nil,
         grouping: String? = nil,
-        cpuScale: String? = nil
+        cpuScale: String? = nil,
+        useTLS: Bool? = nil
     ) async throws -> CompanionViewUpdateResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.viewRequest(token: token, window: window, grouping: grouping, cpuScale: cpuScale),
-            timeout: defaultTimeout
+            request: CompanionHTTP.viewRequest(token: token, window: window, grouping: grouping, cpuScale: cpuScale, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionViewUpdateResponse.self, from: reply)
     }
@@ -150,12 +190,14 @@ enum CompanionConnection {
     static func triggerSettingsUpdate(
         endpoint: NWEndpoint,
         token: String,
-        update: CompanionSettingsUpdateRequest
+        update: CompanionSettingsUpdateRequest,
+        useTLS: Bool? = nil
     ) async throws -> CompanionSettingsUpdateResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.settingsRequest(token: token, update: update),
-            timeout: defaultTimeout
+            request: CompanionHTTP.settingsRequest(token: token, update: update, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionSettingsUpdateResponse.self, from: reply)
     }
@@ -163,43 +205,47 @@ enum CompanionConnection {
     /// Starts a scan on the Mac for the chosen tier.  The Mac answers at once
     /// (`scanning`, or `busy` while another scan or a clean is running) and
     /// the phone reads progress from the report.
-    static func startCleanScan(endpoint: NWEndpoint, token: String, tier: String, acknowledgedExtreme: Bool) async throws -> CompanionCleanScanResponse {
+    static func startCleanScan(endpoint: NWEndpoint, token: String, tier: String, acknowledgedExtreme: Bool, useTLS: Bool? = nil) async throws -> CompanionCleanScanResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.cleanScanRequest(token: token, tier: tier, acknowledgedExtreme: acknowledgedExtreme),
-            timeout: defaultTimeout
+            request: CompanionHTTP.cleanScanRequest(token: token, tier: tier, acknowledgedExtreme: acknowledgedExtreme, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionCleanScanResponse.self, from: reply)
     }
 
     /// The Mac's last scan, its progress and the cleanup history.
-    static func fetchCleanReport(endpoint: NWEndpoint, token: String) async throws -> CompanionCleanReport {
+    static func fetchCleanReport(endpoint: NWEndpoint, token: String, useTLS: Bool? = nil) async throws -> CompanionCleanReport {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.cleanReportRequest(token: token),
-            timeout: defaultTimeout
+            request: CompanionHTTP.cleanReportRequest(token: token, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionCleanReport.self, from: reply, decoder: CompanionJSON.decoder())
     }
 
     /// Cleans the items the person chose from a scan the Mac is holding, and
     /// waits for the Mac to finish.
-    static func triggerClean(endpoint: NWEndpoint, token: String, request: CompanionCleanRequest) async throws -> CompanionCleanResponse {
+    static func triggerClean(endpoint: NWEndpoint, token: String, request: CompanionCleanRequest, useTLS: Bool? = nil) async throws -> CompanionCleanResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.cleanRequest(token: token, request: request),
-            timeout: cleanTimeout
+            request: CompanionHTTP.cleanRequest(token: token, request: request, host: hostHeader(for: endpoint)),
+            timeout: cleanTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionCleanResponse.self, from: reply)
     }
 
     /// Runs Sample for 3 Seconds on a row.  The Mac answers once the report
     /// is written, a few seconds later.
-    static func triggerSample(endpoint: NWEndpoint, token: String, rowId: String) async throws -> CompanionSampleResponse {
+    static func triggerSample(endpoint: NWEndpoint, token: String, rowId: String, useTLS: Bool? = nil) async throws -> CompanionSampleResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.sampleRequest(token: token, rowId: rowId),
-            timeout: sampleTimeout
+            request: CompanionHTTP.sampleRequest(token: token, rowId: rowId, host: hostHeader(for: endpoint)),
+            timeout: sampleTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionSampleResponse.self, from: reply)
     }
@@ -207,11 +253,12 @@ enum CompanionConnection {
     /// Starts a full Maintain run on the Mac.  The Mac answers at once,
     /// "started" or "busy" (409), and carries the run on by itself: the run
     /// takes minutes, so the phone watches the snapshot instead of waiting.
-    static func triggerMaintainRun(endpoint: NWEndpoint, token: String, kind: String = "full") async throws -> CompanionMaintainRunResponse {
+    static func triggerMaintainRun(endpoint: NWEndpoint, token: String, kind: String = "full", useTLS: Bool? = nil) async throws -> CompanionMaintainRunResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.maintainRunRequest(token: token, kind: kind),
-            timeout: defaultTimeout
+            request: CompanionHTTP.maintainRunRequest(token: token, kind: kind, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionMaintainRunResponse.self, from: reply)
     }
@@ -257,9 +304,11 @@ enum CompanionConnection {
         endpoint: NWEndpoint,
         request: Data,
         timeout: TimeInterval,
-        qos: DispatchQoS.QoSClass = .utility
+        qos: DispatchQoS.QoSClass = .utility,
+        useTLS: Bool = false
     ) async throws -> CompanionReply {
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        let parameters: NWParameters = useTLS ? .tls : .tcp
+        let connection = NWConnection(to: endpoint, using: parameters)
         let exchange = CompanionExchange(connection: connection)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in

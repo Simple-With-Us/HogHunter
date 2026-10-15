@@ -1,3 +1,4 @@
+import Network
 import XCTest
 
 @testable import HogHunter
@@ -314,5 +315,41 @@ final class CompanionServerHardeningTests: XCTestCase {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: parsed.body) as? [String: Any])
         XCTAssertEqual(json["retryAfter"] as? Int, 30)
         XCTAssertEqual(CompanionHTTP.statusCode(of: CompanionHTTP.throttledReply(retryAfter: 30)), 429)
+    }
+
+    func testHostHeaderFormatting() {
+        XCTAssertEqual(CompanionHTTP.hostHeaderLine(nil), "Host: hoghunter")
+        XCTAssertEqual(CompanionHTTP.hostHeaderLine("tunnel.simplewithus.com"), "Host: tunnel.simplewithus.com")
+        XCTAssertEqual(CompanionHTTP.hostHeaderLine("tunnel.simplewithus.com:443"), "Host: tunnel.simplewithus.com:443")
+
+        let req = CompanionHTTP.request(token: "TEST1234", host: "tunnel.simplewithus.com")
+        let text = String(decoding: req, as: UTF8.self)
+        XCTAssertTrue(text.contains("Host: tunnel.simplewithus.com\r\n"))
+    }
+
+    func testForwardedClientIPExtraction() {
+        let cfReq = Data("GET /v1/snapshot HTTP/1.1\r\nHost: tunnel.simplewithus.com\r\nCF-Connecting-IP: 203.0.113.195\r\n\r\n".utf8)
+        XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: cfReq), "203.0.113.195")
+        XCTAssertTrue(CompanionHTTP.isForwardedTunnel(in: cfReq))
+
+        let xffReq = Data("GET /v1/snapshot HTTP/1.1\r\nX-Forwarded-For: 198.51.100.10, 10.0.0.1\r\n\r\n".utf8)
+        XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: xffReq), "198.51.100.10")
+
+        let loopbackPeer = CompanionPeer(key: "127.0.0.1", isTrusted: true)
+        let effective = loopbackPeer.withForwardedClientIP("203.0.113.195")
+        XCTAssertEqual(effective.key, "203.0.113.195")
+        // Public IP forwarded via tunnel is untrusted for controls
+        XCTAssertFalse(effective.isTrusted)
+    }
+
+    func testTrustedEndpointIncludesPort443TLS() {
+        let httpsEndpoint = NWEndpoint.hostPort(host: "hoghunter.simplewithus.com", port: 443)
+        XCTAssertTrue(CompanionPeer.isTrustedEndpoint(httpsEndpoint))
+
+        let httpEndpoint = NWEndpoint.hostPort(host: "hoghunter.simplewithus.com", port: 80)
+        XCTAssertFalse(CompanionPeer.isTrustedEndpoint(httpEndpoint))
+
+        let tailscaleEndpoint = NWEndpoint.hostPort(host: "my-mac.tailnet.ts.net", port: 24240)
+        XCTAssertTrue(CompanionPeer.isTrustedEndpoint(tailscaleEndpoint))
     }
 }

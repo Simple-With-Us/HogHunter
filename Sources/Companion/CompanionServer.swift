@@ -282,16 +282,22 @@ final class CompanionServer: @unchecked Sendable {
                     connection.send(content: CompanionHTTP.payloadTooLargeReply(), completion: .contentProcessed { _ in connection.cancel() })
                     return
                 }
+                let effectivePeer: CompanionPeer
+                if peer.isTrusted, let forwarded = CompanionHTTP.forwardedClientIP(in: buffer) {
+                    effectivePeer = peer.withForwardedClientIP(forwarded)
+                } else {
+                    effectivePeer = peer
+                }
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
-                    self.handlePair(connection, deviceName: deviceName, peer: peer)
+                    self.handlePair(connection, deviceName: deviceName, peer: effectivePeer)
                     return
                 }
                 if let enrollment = CompanionHTTP.enrollParams(in: buffer) {
-                    let reply = self.enroll(code: enrollment.code, deviceName: enrollment.deviceName, peer: peer)
+                    let reply = self.enroll(code: enrollment.code, deviceName: enrollment.deviceName, peer: effectivePeer)
                     connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
                     return
                 }
-                switch self.disposition(for: buffer, peer: peer) {
+                switch self.disposition(for: buffer, peer: effectivePeer) {
                 case .reply(let response):
                     connection.send(content: response, completion: .contentProcessed { _ in
                         connection.cancel()

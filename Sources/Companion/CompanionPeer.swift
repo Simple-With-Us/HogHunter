@@ -38,18 +38,30 @@ struct CompanionPeer: Equatable, Sendable {
         }
     }
 
+    /// Replaces the peer key with the forwarded client IP if the direct
+    /// connection arrives from a trusted proxy (loopback or LAN).
+    func withForwardedClientIP(_ clientIP: String?) -> CompanionPeer {
+        guard isTrusted, let clientIP, !clientIP.isEmpty else { return self }
+        if let v4 = IPv4Address(clientIP) {
+            return CompanionPeer(key: clientIP, isTrusted: Self.isTrustedIPv4([UInt8](v4.rawValue)))
+        }
+        if let v6 = IPv6Address(clientIP) {
+            return CompanionPeer(key: clientIP, isTrusted: Self.isTrustedIPv6([UInt8](v6.rawValue)))
+        }
+        return CompanionPeer(key: clientIP, isTrusted: false)
+    }
+
     /// Whether the phone should treat the Mac it is about to send a secret to
-    /// as being on the local network or Tailscale.  A Bonjour service was found
-    /// on the local link; an address is judged like a peer's; a name is trusted
-    /// only if it is a MagicDNS or `.local` name, because any other name can
-    /// point anywhere.  The Mac refuses controls from outside regardless, but
-    /// it reads a request before it can refuse it, so a secret must not be sent
-    /// to a Mac that is only reachable over the public internet.
+    /// as being on the local network or Tailscale, or reached securely over TLS.
+    /// A Bonjour service was found on the local link; port 443 is an HTTPS/TLS
+    /// Cloudflare Tunnel; an address is judged like a peer's; a name is trusted
+    /// if it is a MagicDNS, `.local` or localhost name.
     static func isTrustedEndpoint(_ endpoint: NWEndpoint) -> Bool {
         switch endpoint {
         case .service:
             return true
-        case .hostPort(let host, _):
+        case .hostPort(let host, let port):
+            if port.rawValue == 443 { return true }
             if case .name(let name, _) = host {
                 // A fully qualified name may end in a dot ("studio.local.").  Only
                 // that dot is dropped: a leading one is not part of a real name.
