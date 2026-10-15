@@ -247,6 +247,11 @@ final class CleanRegimenRunner: ObservableObject {
             return "snapshots"
         case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
             return "xcode-artifacts"
+        case .staleBackups:
+            // No engine rule owns tool-made backups: a regimen must never take
+            // them unattended, and "ask-first" is not schedulable, so items in
+            // this category stay a Standard one-click choice only.
+            return "ask-first"
         }
     }
 
