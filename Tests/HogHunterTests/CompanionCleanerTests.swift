@@ -102,6 +102,28 @@ final class CompanionCleanerReportTests: XCTestCase {
         XCTAssertEqual(built.totalItems, 4)
     }
 
+    func testACappedWalkReachesThePhoneAsAtLeast() throws {
+        var approx = CleanerFixtures.item(.userCaches, "TestCacheCapped", bytes: 5_000)
+        approx.isApproximate = true
+        let exact = CleanerFixtures.item(.userCaches, "TestCacheExact", bytes: 5_000)
+        let built = CompanionCleanerReport.build(from: CleanerFixtures.report([(.userCaches, [approx, exact])]), id: "capped")
+        let capped = try XCTUnwrap(built.categories[0].items.first { $0.title == "TestCacheCapped" })
+        XCTAssertTrue(capped.isApproximate)
+        XCTAssertTrue(capped.sizeText.hasPrefix("at least "), capped.sizeText)
+        let plain = try XCTUnwrap(built.categories[0].items.first { $0.title == "TestCacheExact" })
+        XCTAssertFalse(plain.isApproximate)
+        XCTAssertFalse(plain.sizeText.hasPrefix("at least "), plain.sizeText)
+    }
+
+    func testAnItemFromAnOlderMacWithoutTheFlagStillReads() throws {
+        // An older Mac sends no isApproximate key; the report must still decode, reading as exact.
+        let json = """
+        {"id":"0.0","title":"OldCache","subtitle":"~/Library/Caches/OldCache","bytes":100,"sizeText":"100 B","fileCount":2,"isSelected":true}
+        """.data(using: .utf8)!
+        let item = try JSONDecoder().decode(CompanionCleanItem.self, from: json)
+        XCTAssertFalse(item.isApproximate)
+    }
+
     func testAnItemStartsTickedOnlyWhenTheMacsCleanerWouldTickIt() {
         let built = scan()
         XCTAssertEqual(built.categories[0].items.first { $0.title == "TestCacheBig" }?.isSelected, true)

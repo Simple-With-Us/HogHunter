@@ -261,6 +261,13 @@ final class DiskCleanerStore: ObservableObject {
         selectedItemIds.count
     }
 
+    /// True when any selected item's size walk hit its file cap, so the
+    /// selected total is a lower bound, not an exact size.
+    func selectionIsApproximate() -> Bool {
+        guard let report else { return false }
+        return report.categories.flatMap { $0.items }.contains { $0.isApproximate && selectedItemIds.contains($0.id) }
+    }
+
     func totalDiscoveredBytes() -> UInt64 {
         report?.totalBytes ?? 0
     }

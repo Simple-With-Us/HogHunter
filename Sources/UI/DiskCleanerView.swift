@@ -44,12 +44,12 @@ struct DiskCleanerView: View {
             isPresented: $store.showConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
+            Button("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
                 store.cleanSelected(createSnapshot: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(CleanerCopy.confirmationMessage(sizeText: HogFormat.memory(store.totalSelectedBytes()), itemCount: store.totalSelectedItemsCount()))
+            Text(CleanerCopy.confirmationMessage(sizeText: "\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))", itemCount: store.totalSelectedItemsCount()))
         }
     }
 
@@ -455,7 +455,7 @@ private struct CategoryCardView: View {
 
                 Spacer()
 
-                Text(catReport.formattedTotalSize)
+                Text(catReport.anyApproximate ? "at least \(catReport.formattedTotalSize)" : catReport.formattedTotalSize)
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
                     .padding(.horizontal, 6)
@@ -569,7 +569,7 @@ private struct CategoryCardView: View {
 
             Spacer()
 
-            Text(item.formattedSize)
+            Text(item.isApproximate ? "at least \(item.formattedSize)" : item.formattedSize)
                 .font(.system(size: 10.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)

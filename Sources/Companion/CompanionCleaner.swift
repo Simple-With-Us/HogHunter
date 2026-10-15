@@ -60,10 +60,11 @@ enum CompanionCleanerReport {
                     title: item.title,
                     subtitle: item.subtitle,
                     bytes: item.bytes,
-                    sizeText: HogFormat.memory(item.bytes),
+                    sizeText: item.isApproximate ? "at least \(HogFormat.memory(item.bytes))" : HogFormat.memory(item.bytes),
                     fileCount: item.fileCount,
                     detail: item.detail,
-                    isSelected: categoryReport.category.defaultSelected && item.isSelected
+                    isSelected: categoryReport.category.defaultSelected && item.isSelected,
+                    isApproximate: item.isApproximate
                 ))
             }
             categories.append(CompanionCleanCategory(

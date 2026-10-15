@@ -349,6 +349,23 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertEqual(stats.fileCount, 3)
         XCTAssertGreaterThanOrEqual(stats.bytes, 14336) // 2048 + 4096 + 8192
         XCTAssertNotNil(stats.lastModified)
+        XCTAssertFalse(stats.isApproximate)
+    }
+
+    func testDirectoryStatsFlagsACappedWalkAsApproximate() throws {
+        // Ten 1 KB files; a cap of 4 counts 5 files (the file that trips the
+        // cap is seen but not sized) and reports a lower bound, flagged.
+        for index in 0..<10 {
+            try Data(repeating: 0x41, count: 1024).write(to: tempDirectory.appendingPathComponent("file\(index).txt"))
+        }
+
+        let full = cleaner.directoryStats(at: tempDirectory)
+        XCTAssertFalse(full.isApproximate)
+        XCTAssertEqual(full.fileCount, 10)
+
+        let capped = cleaner.directoryStats(at: tempDirectory, fileCap: 4)
+        XCTAssertTrue(capped.isApproximate)
+        XCTAssertLessThan(capped.bytes, full.bytes)
     }
 
     // MARK: - Formatting & Report Tests

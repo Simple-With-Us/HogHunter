@@ -126,17 +126,18 @@ def format_bytes(b):
 def get_dir_size(path, file_cap=25000):
     total = 0
     count = 0
+    capped = False
     try:
         if os.path.islink(path):
-            return 0, 0
+            return 0, 0, False
         if os.path.isfile(path):
-            return os.path.getsize(path), 1
+            return os.path.getsize(path), 1, False
         for root, dirs, files in os.walk(path):
             if ".git" in dirs:
                 dirs.remove(".git")
             for f in files:
                 if count >= file_cap:
-                    return total, count
+                    return total, count, True
                 fp = os.path.join(root, f)
                 try:
                     if not os.path.islink(fp):
@@ -146,7 +147,7 @@ def get_dir_size(path, file_cap=25000):
                     pass
     except Exception:
         pass
-    return total, count
+    return total, count, capped
 
 # 1. User Caches
 def scan_user_caches():
@@ -161,9 +162,9 @@ def scan_user_caches():
             if "hoghunter" in entry.lower():
                 continue
             p = os.path.join(caches_dir, entry)
-            size, count = get_dir_size(p)
+            size, count, capped = get_dir_size(p)
             if size > 0:
-                items.append({"title": entry, "path": p, "bytes": size, "count": count})
+                items.append({"title": entry, "path": p, "bytes": size, "count": count, "capped": capped})
     return items
 
 # 2. Logs & Diagnostics
@@ -175,15 +176,15 @@ def scan_logs():
             if entry.startswith(".") or "hoghunter" in entry.lower():
                 continue
             p = os.path.join(logs_dir, entry)
-            size, count = get_dir_size(p)
+            size, count, capped = get_dir_size(p)
             if size > 0:
-                items.append({"title": entry, "path": p, "bytes": size, "count": count})
+                items.append({"title": entry, "path": p, "bytes": size, "count": count, "capped": capped})
     
     crash_dir = os.path.join(home, "Library/Application Support/CrashReporter")
     if os.path.exists(crash_dir):
-        size, count = get_dir_size(crash_dir)
+        size, count, capped = get_dir_size(crash_dir)
         if size > 0:
-            items.append({"title": "CrashReporter Logs", "path": crash_dir, "bytes": size, "count": count})
+            items.append({"title": "CrashReporter Logs", "path": crash_dir, "bytes": size, "count": count, "capped": capped})
     return items
 
 # 3. Trash
@@ -195,9 +196,9 @@ def scan_trash():
             if entry.startswith(".DS_Store"):
                 continue
             p = os.path.join(trash_dir, entry)
-            size, count = get_dir_size(p)
+            size, count, capped = get_dir_size(p)
             if size > 0:
-                items.append({"title": entry, "path": p, "bytes": size, "count": count})
+                items.append({"title": entry, "path": p, "bytes": size, "count": count, "capped": capped})
     return items
 
 # 4. Developer
@@ -224,9 +225,9 @@ def scan_developer():
     for name, rel in targets:
         p = os.path.join(home, rel)
         if os.path.exists(p):
-            size, count = get_dir_size(p)
+            size, count, capped = get_dir_size(p)
             if size > 0:
-                items.append({"title": name, "path": p, "bytes": size, "count": count})
+                items.append({"title": name, "path": p, "bytes": size, "count": count, "capped": capped})
     return items
 
 # Shared vendor folders hold several live products; they are not one uninstalled app.
@@ -293,9 +294,9 @@ def scan_orphans():
             if entry.lower() in installed_ids:
                 continue
             p = os.path.join(containers_dir, entry)
-            size, count = get_dir_size(p)
+            size, count, capped = get_dir_size(p)
             if size > 0:
-                items.append({"title": f"Container: {entry}", "path": p, "bytes": size, "count": count})
+                items.append({"title": f"Container: {entry}", "path": p, "bytes": size, "count": count, "capped": capped})
 
     app_supp = os.path.join(home, "Library/Application Support")
     if os.path.exists(app_supp):
@@ -317,9 +318,9 @@ def scan_orphans():
                 child_names = []
             if holds_installed_product(child_names, installed_ids, installed_names):
                 continue
-            size, count = get_dir_size(p)
+            size, count, capped = get_dir_size(p)
             if size > 0:
-                items.append({"title": f"AppSupport: {entry}", "path": p, "bytes": size, "count": count})
+                items.append({"title": f"AppSupport: {entry}", "path": p, "bytes": size, "count": count, "capped": capped})
     return items
 
 # 6. AI Agent Artifacts & Transcripts (> 7 days inactive) (Extreme tier)
@@ -336,9 +337,9 @@ def scan_ai_artifacts():
                 try:
                     mtime = datetime.fromtimestamp(os.path.getmtime(p))
                     if mtime < seven_days_ago:
-                        size, count = get_dir_size(p)
+                        size, count, capped = get_dir_size(p)
                         if size > 0:
-                            items.append({"title": f"Gemini/AG Brain: {entry[:8]}…", "path": p, "bytes": size, "count": count})
+                            items.append({"title": f"Gemini/AG Brain: {entry[:8]}…", "path": p, "bytes": size, "count": count, "capped": capped})
                 except Exception:
                     pass
 
@@ -350,9 +351,9 @@ def scan_ai_artifacts():
             try:
                 mtime = datetime.fromtimestamp(os.path.getmtime(p))
                 if mtime < seven_days_ago:
-                    size, count = get_dir_size(p)
+                    size, count, capped = get_dir_size(p)
                     if size > 0:
-                        items.append({"title": f"Grok Session: {entry[:12]}…", "path": p, "bytes": size, "count": count})
+                        items.append({"title": f"Grok Session: {entry[:12]}…", "path": p, "bytes": size, "count": count, "capped": capped})
             except Exception:
                 pass
 
@@ -364,9 +365,9 @@ def scan_ai_artifacts():
             try:
                 mtime = datetime.fromtimestamp(os.path.getmtime(p))
                 if mtime < seven_days_ago:
-                    size, count = get_dir_size(p)
+                    size, count, capped = get_dir_size(p)
                     if size > 0:
-                        items.append({"title": f"Codex Archive: {entry[:12]}…", "path": p, "bytes": size, "count": count})
+                        items.append({"title": f"Codex Archive: {entry[:12]}…", "path": p, "bytes": size, "count": count, "capped": capped})
             except Exception:
                 pass
 
@@ -379,9 +380,9 @@ def scan_ai_artifacts():
                     try:
                         mtime = datetime.fromtimestamp(os.path.getmtime(p))
                         if mtime < seven_days_ago:
-                            size, count = get_dir_size(p)
+                            size, count, capped = get_dir_size(p)
                             if size > 0:
-                                items.append({"title": f"BotFleet Temp: {entry}", "path": p, "bytes": size, "count": count})
+                                items.append({"title": f"BotFleet Temp: {entry}", "path": p, "bytes": size, "count": count, "capped": capped})
                     except Exception:
                         pass
         except Exception:
@@ -463,7 +464,8 @@ for cat_name, items in categories.items():
     items_sorted = sorted(items, key=lambda x: x["bytes"], reverse=True)
     for it in items_sorted[:6]:
         rel_path = it["path"].replace(home, "~")
-        print(f"   • {it['title']} — {format_bytes(it['bytes'])} ({rel_path})")
+        size_text = ("at least " if it.get("capped") else "") + format_bytes(it["bytes"])
+        print(f"   • {it['title']} — {size_text} ({rel_path})")
     if len(items_sorted) > 6:
         print(f"   ... and {len(items_sorted) - 6} more items")
 
