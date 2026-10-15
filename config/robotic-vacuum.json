@@ -9,7 +9,7 @@
   "history_max_runs": 500,
   "state_dir": "~/.claude-disk-janitor",
   "housekeeper_lock": "~/.claude-disk-janitor/.housekeeper.lock",
-  "data_dir": "~/Library/Application Support/HogHunter/RoboticVacuum",
+  "data_dir": "~/Library/Application Support/HogHunter/Maintain",
   "hoghunter_clean": "",
   "hoghunter_clean_budget_sec": 600,
   "repos": [],

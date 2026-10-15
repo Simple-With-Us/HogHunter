@@ -99,7 +99,8 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
-DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
+DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/Maintain"
+LEGACY_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
 # How many runs history.json keeps.  Every run is a record, the five minute watch tick included (about 290 a day, with
 # about 55 janitor and full runs), and the Mac's Recent Runs line counts "checks today" from this file.  The cap has to
 # reach back past local midnight (see test_default_cap_reaches_back_past_midnight), so a janitor or full run also stays
@@ -118,7 +119,7 @@ DEFAULT_LANES: dict[str, Any] = {
 # Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
 # docs/DEV-CLEANUP-PLAYBOOK.md: it re-downloads only when that device is attached again.  The CleanMyMac CLI is
 # MacPaw closed-source software: invoke-only when installed, never vendored, and only with the owner's opt-in.
-DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support", "cleanmymac_cli"})
+DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support", "cleanmymac_cli", "coolify_remote"})
 
 # Seat suffixes the keep regex protects in flat lanes (~/apps/<prefix>-<suffix>).  Order is part of the pattern.
 KEEP_SEAT_SUFFIXES: tuple[str, ...] = (
@@ -197,9 +198,34 @@ def default_repos(home: Path) -> list[str]:
     return repos
 
 
+def migrate_legacy_support_if_needed(home: Path) -> Path:
+    """Pre-rename builds used RoboticVacuum/.  Move JSON state once so history survives."""
+    new_root = expand_path(DEFAULT_DATA_DIR, home)
+    legacy_root = expand_path(LEGACY_DATA_DIR, home)
+    new_status = new_root / "status.json"
+    if new_status.is_file():
+        return new_root
+    legacy_status = legacy_root / "status.json"
+    if not legacy_status.is_file():
+        return new_root
+    new_root.mkdir(parents=True, exist_ok=True)
+    for name in ("status.json", "history.json", "config.json", "scheduler-state.json", "alert-state.json"):
+        src = legacy_root / name
+        dest = new_root / name
+        if src.is_file() and not dest.exists():
+            try:
+                src.rename(dest)
+            except OSError:
+                pass
+    return new_root
+
+
 def load_config(path: Path | None = None, home: Path | None = None) -> dict[str, Any]:
     home = home or Path.home()
-    path = path or (expand_path("~/Library/Application Support/HogHunter/RoboticVacuum/config.json", home))
+    maintain_config = expand_path(f"{DEFAULT_DATA_DIR}/config.json", home)
+    legacy_config = expand_path(f"{LEGACY_DATA_DIR}/config.json", home)
+    path = path or (maintain_config if maintain_config.is_file() else legacy_config)
+    migrate_legacy_support_if_needed(home)
     base: dict[str, Any] = {}
     if DEFAULT_POLICY.is_file():
         base = json.loads(DEFAULT_POLICY.read_text(encoding="utf-8"))
@@ -207,6 +233,8 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
         user = json.loads(path.read_text(encoding="utf-8"))
         base = _deep_merge(base, user)
     if not str(base.get("data_dir") or "").strip():
+        base["data_dir"] = DEFAULT_DATA_DIR
+    elif str(base.get("data_dir") or "").strip() == LEGACY_DATA_DIR:
         base["data_dir"] = DEFAULT_DATA_DIR
     if not str(base.get("housekeeper_lock") or "").strip():
         base["housekeeper_lock"] = DEFAULT_HOUSEKEEPER_LOCK
@@ -232,6 +260,8 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
     steps = base.setdefault("steps", {})
     for step_id in STEP_CATALOG:
         steps.setdefault(step_id, {"enabled": step_id not in DEFAULT_OFF_STEPS})
+    if not str(base.get("coolify_ssh_host") or "").strip():
+        steps.setdefault("coolify_remote", {})["enabled"] = False
     return base
 
 

@@ -40,7 +40,7 @@ final class MaintainLayoutTests: XCTestCase {
             step("npm_cache", "Trim npm download cache", "skipped", "skipped: xcodebuild is running"),
             step("xcode_derived_data", "Clear Xcode build cache", "skipped", "path missing"),
             step("simctl_delete_unavailable", "Remove unavailable Simulator runtimes", "skipped", "not run: it would delete simulator devices in CoreSimulator/Devices, which no cleanup step touches"),
-            step("coolify_remote", "Remote server maintenance", "skipped", "coolify_ssh_host not configured"),
+            step("coolify_remote", "Remote server maintenance", "skipped", "No remote servers are set up"),
         ]
         let status = MaintainStatus(
             health: "healthy",

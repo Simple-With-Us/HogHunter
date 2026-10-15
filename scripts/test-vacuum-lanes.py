@@ -602,7 +602,7 @@ class TestReportGates(unittest.TestCase):
 
 
 class TestSettings(unittest.TestCase):
-    CONSTANTS = (900.0, 300.0, 2, 7.0, 24.0)
+    CONSTANTS = (900.0, 420.0, 2, 7.0, 24.0)
 
     @staticmethod
     def limits(settings) -> tuple:
@@ -634,6 +634,14 @@ class TestSettings(unittest.TestCase):
     def test_shipped_config_numbers_have_no_effect(self) -> None:
         cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"))
         self.assertEqual(self.limits(lanes.lane_settings(cfg, Path("/h"), env={})), self.CONSTANTS)
+
+    def test_adaptive_doctor_timeout_grows_after_a_slow_success(self) -> None:
+        settings = lanes.lane_settings({}, Path("/h"), env={})
+        cache = Path("/tmp/hh-doctor-cache-test.json")
+        lanes.record_doctor_duration(cache, 350.0)
+        timeout = lanes.adaptive_doctor_timeout(settings, cache)
+        self.assertGreater(timeout, settings.timeout_seconds)
+        self.assertLessEqual(timeout, lanes.DOCTOR_TIMEOUT_MAX_SECONDS)
 
     def test_a_stale_report_stays_stale_whatever_the_config_says(self) -> None:
         sb = Sandbox(self)
