@@ -538,6 +538,35 @@ def test_cleanmymac_spent_budget_skips(hh):
     run.assert_not_called()
 
 
+def test_ask_first_reports_idle_build_output_only(hh):
+    """Main checkouts are never lanes, so .build/.next trees idle 7 days with
+    no open files are inventoried report-only.  Fresh trees, non-repos, and
+    symlinks stay out."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        repo = home / "Code" / "FakeRepo"
+        (repo / ".git").mkdir(parents=True)
+        idle = repo / ".build"
+        busy = repo / ".next"
+        for d in (idle, busy):
+            d.mkdir(parents=True)
+            (d / "out.o").write_text("x\n", encoding="utf-8")
+        plain = home / "Code" / "NotARepo"
+        plainbuild = plain / ".build"
+        plainbuild.mkdir(parents=True)
+        (plainbuild / "out.o").write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 8 * 24 * 3600
+        for p in (idle / "out.o", plainbuild / "out.o"):
+            os.utime(p, (old, old))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            found = {c.path: c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason}
+        assert list(found) == [str(idle)], found
+        assert found[str(idle)].tier == "ask-first"
+        assert found[str(idle)].op == "report", "build output is inventoried, never applied"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
