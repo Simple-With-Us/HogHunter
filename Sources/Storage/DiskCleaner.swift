@@ -1480,7 +1480,7 @@ final class DiskCleaner: @unchecked Sendable {
                         fileCount: 1,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Ollama Model Weights (\(HogFormat.memory(stats.bytes)))"
+                        detail: "Ollama Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1507,7 +1507,7 @@ final class DiskCleaner: @unchecked Sendable {
                         isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Hugging Face Model Snapshot (\(HogFormat.memory(stats.bytes)))"
+                        detail: "Hugging Face Model Snapshot (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1533,7 +1533,7 @@ final class DiskCleaner: @unchecked Sendable {
                         isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "LM Studio Model Weights (\(HogFormat.memory(stats.bytes)))"
+                        detail: "LM Studio Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1557,7 +1557,7 @@ final class DiskCleaner: @unchecked Sendable {
                         isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Whisper Model Weights (\(HogFormat.memory(stats.bytes)))"
+                        detail: "Whisper Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
