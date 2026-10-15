@@ -604,6 +604,7 @@ private struct CategoryCardView: View {
         case .largeAndOldFiles: color = .teal
         case .apfsSnapshots: color = .cyan
         case .tempFiles: color = .brown
+        case .staleBackups: color = .gray
         }
 
         return ZStack {

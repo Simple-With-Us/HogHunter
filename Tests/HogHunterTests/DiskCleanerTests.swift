@@ -133,6 +133,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertFalse(CleanCategory.localAIModels.defaultSelected, "Local AI models must require explicit user review")
         XCTAssertFalse(CleanCategory.largeAndOldFiles.defaultSelected, "Large & old user files must never be selected by default")
         XCTAssertFalse(CleanCategory.apfsSnapshots.defaultSelected, "APFS local snapshots must require explicit user review")
+        XCTAssertTrue(CleanCategory.staleBackups.defaultSelected, "Stale tool-made backups clean through Trash plus snapshot")
     }
 
     func testCleanTiers() {
@@ -142,6 +143,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.trash))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.developer))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.apfsSnapshots))
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.staleBackups))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.orphanedData))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.localAIModels))
@@ -154,6 +156,55 @@ final class DiskCleanerTests: XCTestCase {
 
         XCTAssertEqual(CleanTier.standard.badge, "Safe / Reversible")
         XCTAssertEqual(CleanTier.extreme.badge, "Deep / AI Artifacts")
+    }
+
+    func testStaleBackupsListsOnlyOldVersionedBackups() throws {
+        let fm = FileManager.default
+        let storage = tempDirectory
+            .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
+        try fm.createDirectory(at: storage, withIntermediateDirectories: true)
+        let live = storage.appendingPathComponent("state.vscdb")
+        let old = storage.appendingPathComponent("state.vscdb.bak-old")
+        let fresh = storage.appendingPathComponent("state.vscdb.bak-fresh")
+        let other = storage.appendingPathComponent("notes.txt")
+        for url in [live, old, fresh, other] {
+            try Data(repeating: 0x41, count: 1024).write(to: url)
+        }
+        let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
+        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: old.path)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let items = cleaner.scanStaleBackups()
+        XCTAssertEqual(items.map(\.title), ["state.vscdb.bak-old"])
+        XCTAssertEqual(items.first?.category, .staleBackups)
+    }
+
+    func testStaleBackupsSafetyGuardsTheLiveDatabase() {
+        let home = NSHomeDirectory()
+        let dir = URL(fileURLWithPath: home + "/Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
+        let bak = URL(fileURLWithPath: home + "/Library/Application Support/Cursor/User/globalStorage/state.vscdb.bak-old")
+        let live = URL(fileURLWithPath: home + "/Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: bak, category: .staleBackups))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: live, category: .staleBackups), "the live database is never listed nor touched")
+        XCTAssertFalse(cleaner.isSafeToDelete(url: dir, category: .staleBackups), "the folder itself is never the item")
+    }
+
+    func testRollbackGracePeriodHoldsFreshCopies() throws {
+        let fm = FileManager.default
+        let apps = tempDirectory.appendingPathComponent("apps", isDirectory: true)
+        let fresh = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-fresh", isDirectory: true)
+        let old = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-old", isDirectory: true)
+        for dir in [fresh, old] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(repeating: 0x41, count: 1024).write(to: dir.appendingPathComponent("package.json"))
+        }
+        let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
+        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: old.appendingPathComponent("package.json").path)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let titles = cleaner.scanAIArtifacts().map(\.title)
+        XCTAssertTrue(titles.contains(".botfleet-server.node_modules.rollback-old"))
+        XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-fresh"), "a fresh rollback may still be needed")
     }
 
     // MARK: - Safety Guard Tests
