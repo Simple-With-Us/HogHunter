@@ -138,6 +138,39 @@ def default_registry(repo_root: Path, home: Path, cfg: Mapping[str, Any] | None 
     }
 
 
+_DERIVED_ENTRY_KEYS = ("path", "argv", "mode", "scope", "owner")
+
+
+def _reconcile_registry(current: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]:
+    """Refresh config-derived fields on shipped entries; leave custom scripts untouched."""
+    desired_by_id: dict[str, dict[str, Any]] = {}
+    for entry in desired.get("scripts") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            desired_by_id[entry["id"]] = entry
+    scripts_out: list[Any] = []
+    changed = False
+    for entry in current.get("scripts") or []:
+        if not isinstance(entry, dict):
+            scripts_out.append(entry)
+            continue
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or entry_id not in desired_by_id:
+            scripts_out.append(entry)
+            continue
+        template = desired_by_id[entry_id]
+        merged = dict(entry)
+        for key in _DERIVED_ENTRY_KEYS:
+            if key in template and merged.get(key) != template[key]:
+                merged[key] = template[key]
+                changed = True
+        scripts_out.append(merged)
+    if not changed:
+        return current
+    out = dict(current)
+    out["scripts"] = scripts_out
+    return out
+
+
 def bootstrap_registry(home: Path, repo_root: Path, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Write the registry when missing or older than the shipped schema.  Never drops owner edits."""
     desired = default_registry(repo_root, home, cfg)
@@ -145,7 +178,10 @@ def bootstrap_registry(home: Path, repo_root: Path, cfg: Mapping[str, Any] | Non
     if int(current.get("version") or 0) < REGISTRY_VERSION or not current.get("scripts"):
         save_registry(home, desired)
         return desired
-    return current
+    reconciled = _reconcile_registry(current, desired)
+    if reconciled is not current:
+        save_registry(home, reconciled)
+    return reconciled
 
 
 def summary_for_status(home: Path) -> list[dict[str, str]]:

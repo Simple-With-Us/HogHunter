@@ -1253,6 +1253,37 @@ class TestMaintainSurface(unittest.TestCase):
             self.assertTrue((new_root / "status.json").is_file())
             self.assertFalse((legacy / "status.json").exists())
 
+    def test_load_config_reads_migrated_legacy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            legacy = home / "Library/Application Support/HogHunter/RoboticVacuum"
+            legacy.mkdir(parents=True)
+            (legacy / "config.json").write_text(
+                '{"coolify_ssh_host":"fleet.example","steps":{"coolify_remote":{"enabled":true}}}',
+                encoding="utf-8",
+            )
+            cfg = load_config(home=home)
+            self.assertEqual(cfg.get("coolify_ssh_host"), "fleet.example")
+            self.assertTrue(cfg["steps"]["coolify_remote"]["enabled"])
+
+    def test_registry_reconciles_coolify_when_host_changes(self) -> None:
+        from vacuum.script_registry import bootstrap_registry, load_registry, save_registry
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bootstrap_registry(home, REPO, {})
+            reg = load_registry(home)
+            for entry in reg["scripts"]:
+                if entry.get("id") == "coolify_remote":
+                    entry["mode"] = "observed"
+                    entry["owner"] = "stale"
+            save_registry(home, reg)
+            bootstrap_registry(home, REPO, {"coolify_ssh_host": "coolify.local"})
+            reg = load_registry(home)
+            coolify = next(e for e in reg["scripts"] if e["id"] == "coolify_remote")
+            self.assertEqual(coolify["mode"], "owned")
+            self.assertIn("coolify.local", coolify["owner"])
+
     def test_coolify_remote_stays_off_without_host(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cfg = load_config(home=Path(td))

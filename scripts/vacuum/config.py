@@ -222,10 +222,11 @@ def migrate_legacy_support_if_needed(home: Path) -> Path:
 
 def load_config(path: Path | None = None, home: Path | None = None) -> dict[str, Any]:
     home = home or Path.home()
-    maintain_config = expand_path(f"{DEFAULT_DATA_DIR}/config.json", home)
-    legacy_config = expand_path(f"{LEGACY_DATA_DIR}/config.json", home)
-    path = path or (maintain_config if maintain_config.is_file() else legacy_config)
     migrate_legacy_support_if_needed(home)
+    if path is None:
+        maintain_config = expand_path(f"{DEFAULT_DATA_DIR}/config.json", home)
+        legacy_config = expand_path(f"{LEGACY_DATA_DIR}/config.json", home)
+        path = maintain_config if maintain_config.is_file() else legacy_config
     base: dict[str, Any] = {}
     if DEFAULT_POLICY.is_file():
         base = json.loads(DEFAULT_POLICY.read_text(encoding="utf-8"))
