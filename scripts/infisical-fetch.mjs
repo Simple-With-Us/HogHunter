@@ -137,6 +137,9 @@ async function resolveVaultValues({ siteUrl, projectId, clientId, clientSecret, 
   }
   try {
     const token = await loginUniversalAuth({ siteUrl, clientId, clientSecret, fetchImpl });
+    // The access token rides in an Authorization header below and is never
+    // printed; mask it anyway so no future error path can surface it.
+    maskValue(token, log);
     return await listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl });
   } catch (err) {
     // Never interpolate the raw error body -- Infisical error payloads have

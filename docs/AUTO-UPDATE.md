@@ -19,10 +19,10 @@ The iOS companion ships on the same trigger: `.github/workflows/ios-testflight.y
 | Piece | Role |
 |---|---|
 | `project.yml` | Sparkle 2 (`https://github.com/sparkle-project/Sparkle`, from 2.10.0) as an xcodegen package dependency of the `HogHunter` Mac target only. |
-| `Sources/App/AutoUpdate.swift` | `AutoUpdateAvailability` (should this build run Sparkle at all), `UpdateRelaunchMarker` (keep the post-update relaunch from pulling focus), `AppUpdater` (owns `SPUStandardUpdaterController`, installs as soon as the app is idle). |
+| `Sources/App/AutoUpdate.swift` | `AutoUpdateAvailability` (should this build run Sparkle at all) and `AppUpdater` (owns `SPUStandardUpdaterController`, installs as soon as the app is idle). |
 | `Sources/App/HogHunterApp.swift` | Starts the updater first thing at launch, adds **Check For Updates…** to the app menu. |
 | `Sources/UI/SettingsView.swift` | Settings ▸ About shows "Automatic updates: On/Off · reason" and the check button. |
-| `Tests/HogHunterTests/AutoUpdateTests.swift` | The availability gate and the relaunch marker. |
+| `Tests/HogHunterTests/AutoUpdateTests.swift` | The availability gate. |
 | `scripts/mac-release-build.sh` | xcodegen + xcodebuild a universal Release, embed and assert `Sparkle.framework`, write the Sparkle Info.plist keys, sign inside-out, run `codesign --verify --deep --strict`, notarize with an App Store Connect API key when `NOTARY_KEY_*` are set, and run `spctl --assess` on the stapled app and DMG. |
 | `scripts/make_appcast.sh` | Runs Sparkle's `generate_appcast` over one archive and checks the result: one item, EdDSA-signed, pointing at the right URL. |
 | `.github/workflows/mac-release.yml` | The release job.  Also builds and verifies (never publishes) on PRs that touch the bundle. |
