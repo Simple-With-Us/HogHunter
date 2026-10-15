@@ -1253,6 +1253,23 @@ class TestMaintainSurface(unittest.TestCase):
             self.assertTrue((new_root / "status.json").is_file())
             self.assertFalse((legacy / "status.json").exists())
 
+    def test_legacy_migration_continues_after_swift_moved_status(self) -> None:
+        from vacuum.config import migrate_legacy_support_if_needed
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            legacy = home / "Library/Application Support/HogHunter/RoboticVacuum"
+            maintain = home / "Library/Application Support/HogHunter/Maintain"
+            legacy.mkdir(parents=True)
+            maintain.mkdir(parents=True)
+            (maintain / "status.json").write_text('{"health":"healthy"}', encoding="utf-8")
+            (legacy / "scheduler-state.json").write_text(
+                '{"last_full":"2026-10-01T00:00:00Z"}', encoding="utf-8"
+            )
+            new_root = migrate_legacy_support_if_needed(home)
+            self.assertTrue((new_root / "scheduler-state.json").is_file())
+            self.assertFalse((legacy / "scheduler-state.json").exists())
+
     def test_load_config_reads_migrated_legacy_config(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)

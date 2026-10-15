@@ -199,14 +199,14 @@ def default_repos(home: Path) -> list[str]:
 
 
 def migrate_legacy_support_if_needed(home: Path) -> Path:
-    """Pre-rename builds used RoboticVacuum/.  Move JSON state once so history survives."""
+    """Pre-rename builds used RoboticVacuum/.  Move JSON state once so history survives.
+
+    Idempotent per file: the Swift migrator may move status/history/config before the
+    first Python tick, so we must still pick up scheduler-state.json and alert-state.json.
+    """
     new_root = expand_path(DEFAULT_DATA_DIR, home)
     legacy_root = expand_path(LEGACY_DATA_DIR, home)
-    new_status = new_root / "status.json"
-    if new_status.is_file():
-        return new_root
-    legacy_status = legacy_root / "status.json"
-    if not legacy_status.is_file():
+    if not legacy_root.is_dir():
         return new_root
     new_root.mkdir(parents=True, exist_ok=True)
     for name in ("status.json", "history.json", "config.json", "scheduler-state.json", "alert-state.json"):

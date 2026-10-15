@@ -25,5 +25,5 @@ Linear HH-142.  Board `63c5458b`.  Python, docs, and a small Swift pass; launchd
 
 ## Verify
 
-- `python3 scripts/test-hoghunter-clean.py`
-- `python3 scripts/test-robotic-vacuum.py` (includes lane doctor suite)
+- `python3 scripts/test-hoghunter-clean.py` -> ok
+- `python3 scripts/test-robotic-vacuum.py` -> ok (includes lane doctor suite)
