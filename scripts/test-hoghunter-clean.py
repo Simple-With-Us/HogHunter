@@ -538,6 +538,74 @@ def test_cleanmymac_spent_budget_skips(hh):
     run.assert_not_called()
 
 
+def test_ask_first_reports_idle_build_output_only(hh):
+    """Main checkouts are never lanes, so .build/.next trees idle 7 days with
+    no open files are inventoried report-only.  Fresh trees, non-repos, and
+    symlinks stay out."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        repo = home / "Code" / "FakeRepo"
+        (repo / ".git").mkdir(parents=True)
+        idle = repo / ".build"
+        busy = repo / ".next"
+        for d in (idle, busy):
+            d.mkdir(parents=True)
+            (d / "out.o").write_text("x\n", encoding="utf-8")
+        plain = home / "Code" / "NotARepo"
+        plainbuild = plain / ".build"
+        plainbuild.mkdir(parents=True)
+        (plainbuild / "out.o").write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 8 * 24 * 3600
+        for p in (idle / "out.o", plainbuild / "out.o"):
+            os.utime(p, (old, old))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            found = {c.path: c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason}
+        assert list(found) == [str(idle)], found
+        assert found[str(idle)].tier == "ask-first"
+        assert found[str(idle)].op == "report", "build output is inventoried, never applied"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_touched_since_catches_a_recent_file_past_the_walk_cap(hh):
+    """newest_file_age_min stops at 4000 entries, so a recent file past the cap
+    reads as idle.  The find probe has no cap: it answers on the first recent
+    file, and a failed look reads as touched."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        old_dir = home / "old-build"
+        old_dir.mkdir()
+        old_file = old_dir / "out.o"
+        old_file.write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 8 * 24 * 3600
+        os.utime(old_file, (old, old))
+        assert hh.touched_since(str(old_dir), 7) is False
+        fresh_dir = home / "fresh-build"
+        fresh_dir.mkdir()
+        (fresh_dir / "out.o").write_text("x\n", encoding="utf-8")
+        assert hh.touched_since(str(fresh_dir), 7) is True
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_idle_build_output_survives_a_blind_capped_walk(hh):
+    """Even when the capped walk swears a tree is idle, the uncapped find probe
+    still refuses a tree holding a recent file."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        repo = home / "Code" / "FakeRepo"
+        build = repo / ".build"
+        build.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (build / "out.o").write_text("x\n", encoding="utf-8")
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            with mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9):
+                found = [c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason]
+        assert found == [], "the probe overrules a blind capped walk"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
