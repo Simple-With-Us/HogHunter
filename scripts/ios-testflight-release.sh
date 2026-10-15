@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Manual hosted-runner release only.  No credentials are printed or uploaded as artifacts.
+# Hosted-runner release only (manual dispatch or automatic push to main).
+# No credentials are printed or uploaded as artifacts.
 set +o xtrace
 set -euo pipefail
 umask 077
 
-[[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_EVENT_NAME:-}" == workflow_dispatch && "${GITHUB_REF:-}" == refs/heads/main ]] || {
-  echo 'error: run the guarded manual workflow on main; local release is disabled' >&2
+[[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_REF:-}" == refs/heads/main ]] || {
+  echo 'error: run the guarded release workflow on main; local release is disabled' >&2
+  exit 1
+}
+[[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch || "${GITHUB_EVENT_NAME:-}" == push ]] || {
+  echo 'error: unsupported event for the release lane' >&2
   exit 1
 }
 : "${ASC_KEY_ID:?ASC_KEY_ID required}"
