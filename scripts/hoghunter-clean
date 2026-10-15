@@ -391,6 +391,27 @@ def open_handles(path: str) -> int:
     return len(pids)
 
 
+def touched_since(path: str, days: float) -> bool:
+    """True when any file under path is newer than `days` days.
+
+    `newest_file_age_min` caps its walk, so a huge tree can hide a recent file
+    past the cap and read as idle.  find with -quit answers on the FIRST recent
+    file instead, which is fast exactly when it matters (an active tree), and
+    only walks everything when the tree is genuinely quiet.  A failed look
+    reads as touched: an unprovable tree is never called idle.
+    """
+    try:
+        proc = subprocess.run(
+            ["find", path, "-type", "f", "-newermt", f"-{days:g} days", "-print", "-quit"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return True
+    if proc.returncode != 0:
+        return True
+    return bool(proc.stdout.strip())
+
+
 def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
     """Age in minutes of the newest file under path.
 
@@ -1120,9 +1141,14 @@ def rule_ask_first_inventory() -> list[Candidate]:
                     continue
                 if is_forbidden(str(target)) or has_keep_sentinel(str(target)):
                     continue
+                if open_handles(str(target)):
+                    continue
+                # Fast path first: a recent file inside the cap proves activity
+                # cheaply.  Only a quiet-looking tree pays for the uncapped
+                # find probe, which catches a recent file hiding past the cap.
                 if newest_file_age_min(str(target)) < IDLE_MIN_BUILD_OUTPUT:
                     continue
-                if open_handles(str(target)):
+                if touched_since(str(target), IDLE_MIN_BUILD_OUTPUT / (24 * 60)):
                     continue
                 cands.append(Candidate(
                     category="ask-first", path=str(target), bytes=size(str(target)),
