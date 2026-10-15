@@ -172,7 +172,9 @@ final class MaintainStore: ObservableObject {
     nonisolated static func pythonLauncher(repoRoot: URL) -> Launcher {
         { arguments in
             guard !isRunningUnderTest else { throw LauncherRefused() }
-            let script = repoRoot.appendingPathComponent("scripts/maintain.py")
+            let maintain = repoRoot.appendingPathComponent("scripts/maintain.py")
+            let legacy = repoRoot.appendingPathComponent("scripts/robotic-vacuum.py")
+            let script = FileManager.default.fileExists(atPath: maintain.path) ? maintain : legacy
             return try await withCheckedThrowingContinuation { continuation in
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
@@ -230,11 +232,26 @@ final class MaintainStore: ObservableObject {
     /// Steps the engine keeps off until the owner turns them on.  Mirrors
     /// `DEFAULT_OFF_STEPS` in scripts/vacuum/config.py: the toggle must read
     /// off on a fresh install, or the tab promises a sweep the run skips.
-    nonisolated static let defaultOffSteps: Set<String> = ["cleanmymac_cli"]
+    nonisolated static let defaultOffSteps: Set<String> = ["cleanmymac_cli", "coolify_remote"]
+
+    /// Steps shown in the Maintain tab.  Remote server maintenance stays hidden until a host is configured.
+    var visibleCatalog: [MaintainStepCatalogEntry] {
+        guard coolifyRemoteConfigured else {
+            return Self.catalog.filter { $0.id != "coolify_remote" }
+        }
+        return Self.catalog
+    }
+
+    private var coolifyRemoteConfigured: Bool {
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        let host = json["coolify_ssh_host"] as? String ?? ""
+        return !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private func loadStepToggles() -> [String: Bool] {
         var toggles: [String: Bool] = [:]
-        for entry in Self.catalog {
+        for entry in visibleCatalog {
             toggles[entry.id] = !Self.defaultOffSteps.contains(entry.id)
         }
         guard let data = try? Data(contentsOf: configURL),
@@ -258,7 +275,10 @@ final class MaintainStore: ObservableObject {
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Code/HogHunter"),
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("apps/HogHunter"),
         ] {
-            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("scripts/maintain.py").path) {
+            let maintain = candidate.appendingPathComponent("scripts/maintain.py")
+            let legacy = candidate.appendingPathComponent("scripts/robotic-vacuum.py")
+            if FileManager.default.fileExists(atPath: maintain.path)
+                || FileManager.default.fileExists(atPath: legacy.path) {
                 return candidate
             }
         }

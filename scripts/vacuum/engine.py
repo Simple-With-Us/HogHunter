@@ -737,7 +737,7 @@ class VacuumEngine:
     def _coolify_remote(self) -> tuple[int, str, StepStatus]:
         host_value = self.cfg.get("coolify_ssh_host")
         if not isinstance(host_value, str) or not host_value.strip():
-            return 0, "coolify_ssh_host not configured", StepStatus.SKIPPED
+            return 0, "No remote servers are set up", StepStatus.SKIPPED
         host = host_value.strip()
         check = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", host, "exit 0"],

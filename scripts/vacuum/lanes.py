@@ -113,7 +113,12 @@ REPORT_MAX_AGE_SECONDS = 900.0
 CACHED_REPORT_MAX_AGE_SECONDS = 24 * 3600.0
 DOCTOR_CACHE_NAME = "lane-doctor-report.json"
 MIN_SCHEMA = 2
-DOCTOR_TIMEOUT_SECONDS = 300.0
+DOCTOR_TIMEOUT_SECONDS = 420.0
+DOCTOR_TIMEOUT_MIN_SECONDS = 300.0
+DOCTOR_TIMEOUT_MAX_SECONDS = 900.0
+DOCTOR_TIMEOUT_MARGIN = 1.25
+DOCTOR_TIMEOUT_PAD_SECONDS = 45.0
+DOCTOR_LAST_RUN_NAME = "doctor-last-run.json"
 RETIRE_MIN_DAYS = 7.0
 DEPS_MIN_HOURS = 24.0
 LSOF_CACHE_SECONDS = 30.0
@@ -290,6 +295,40 @@ def parse_timestamp(value: Any) -> Optional[float]:
     return parsed.timestamp()
 
 
+def _doctor_last_run_path(cache_file: Optional[Path]) -> Optional[Path]:
+    if cache_file is None:
+        return None
+    return cache_file.parent / DOCTOR_LAST_RUN_NAME
+
+
+def record_doctor_duration(cache_file: Optional[Path], seconds: float) -> None:
+    path = _doctor_last_run_path(cache_file)
+    if path is None or seconds <= 0:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"seconds": round(seconds, 3)}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def adaptive_doctor_timeout(settings: LaneSettings, cache_file: Optional[Path]) -> float:
+    """Raise the wait when the last successful doctor run was slow, capped so a tick never exceeds 900 s."""
+    base = float(settings.timeout_seconds)
+    path = _doctor_last_run_path(cache_file)
+    if path is None or not path.is_file():
+        return base
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        last = float(raw.get("seconds") or 0)
+    except (OSError, ValueError, TypeError):
+        return base
+    if last <= 0:
+        return base
+    scaled = last * DOCTOR_TIMEOUT_MARGIN + DOCTOR_TIMEOUT_PAD_SECONDS
+    return min(DOCTOR_TIMEOUT_MAX_SECONDS, max(base, scaled))
+
+
 def doctor_cache_file(data_dir: Optional[Path]) -> Optional[Path]:
     """Where the last good doctor report lives, or None when no data dir is configured."""
     if data_dir is None:
@@ -364,8 +403,9 @@ def load_report(
         return _fail(f"doctor command missing: {exe}", command=tuple(argv))
     runner = doctor_runner or run_doctor_process
     started = clock()
+    timeout = adaptive_doctor_timeout(settings, cache_file)
     try:
-        res = runner(argv, settings.timeout_seconds)
+        res = runner(argv, timeout)
     except subprocess.TimeoutExpired:
         seconds = max(clock() - started, 0.0)
         if cache_file is not None:
@@ -374,7 +414,7 @@ def load_report(
                 cached.command = tuple(argv)
                 cached.seconds = seconds
                 return cached
-        return _fail(f"doctor timed out after {settings.timeout_seconds:g}s", command=tuple(argv), seconds=seconds)
+        return _fail(f"doctor timed out after {timeout:g}s", command=tuple(argv), seconds=seconds)
     except (OSError, ValueError) as exc:
         seconds = max(clock() - started, 0.0)
         if cache_file is not None:
@@ -409,6 +449,7 @@ def load_report(
     report.seconds = seconds
     if report.ok and cache_file is not None and cache_write and isinstance(data, dict):
         _save_doctor_cache(cache_file, res.stdout or "")
+        record_doctor_duration(cache_file, seconds)
     return report
 
 
