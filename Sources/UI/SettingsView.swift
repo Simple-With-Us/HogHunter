@@ -1081,7 +1081,7 @@ private struct AdvancedSettingsTab: View {
     var body: some View {
         Form {
             Section("Infisical Settings Sync") {
-                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the Keychain, never in the app or its files.")
+                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the secure App Group container (mode 0600), never logged or shared across apps.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1125,7 +1125,7 @@ private struct AdvancedSettingsTab: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
-                    Button("Save to Keychain") { saveCredential() }
+                    Button("Save Credential") { saveCredential() }
                         .disabled(clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || UUID(uuidString: projectId.trimmingCharacters(in: .whitespacesAndNewlines)) == nil || isWorking || infisical.isSaving)
                     Button("Clear") { clearCredential() }
                         .disabled(!infisical.isConfigured || isWorking)
@@ -1161,7 +1161,7 @@ private struct AdvancedSettingsTab: View {
             do {
                 try await infisical.saveCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
                 clientSecret = ""
-                notice = "Connection verified and saved to the Keychain."
+                notice = "Connection verified and saved to App Group storage."
             } catch {
                 notice = "Save failed: \(InfisicalSettings.safeMessage(for: error))"
             }
