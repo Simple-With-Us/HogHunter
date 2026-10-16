@@ -26,6 +26,17 @@ final class MaintainStore: ObservableObject {
     @Published private(set) var isRunningNow = false
     @Published var lastError: String?
 
+    // Custom scripts & plugins
+    @Published private(set) var customScripts: [MaintainScriptEntry] = []
+
+    // Maintenance tuning knobs
+    @Published var lowFreeGiB: Double = 80.0
+    @Published var pm2LogsCapMB: Int = 50
+    @Published var retireMinDays: Int = 7
+    @Published var coolifySSHHost: String = ""
+    @Published var customDerivedDataPath: String = ""
+    @Published var toolPaths: [String: String] = [:]
+
     private var timer: Timer?
     private let statusURL: URL
     private let historyURL: URL
@@ -94,6 +105,70 @@ final class MaintainStore: ObservableObject {
         status = loadStatus()
         history = loadHistory()
         stepToggles = loadStepToggles()
+        customScripts = MaintainRegistryStore.loadScripts()
+        loadMaintainConfig()
+    }
+
+    private func loadMaintainConfig() {
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let jan = json["janitor"] as? [String: Any], let low = jan["low_free_gib"] as? Double {
+            lowFreeGiB = low
+        }
+        if let cap = json["pm2_logs_cap_mb"] as? Int {
+            pm2LogsCapMB = cap
+        }
+        if let lanes = json["lanes"] as? [String: Any], let days = lanes["retire_min_days"] as? Int {
+            retireMinDays = days
+        }
+        if let host = json["coolify_ssh_host"] as? String {
+            coolifySSHHost = host
+        }
+        if let xcode = json["xcode_derived_data_path"] as? String {
+            customDerivedDataPath = xcode
+        }
+        if let paths = json["tool_paths"] as? [String: String] {
+            toolPaths = paths
+        }
+    }
+
+    func saveMaintainConfig() {
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: configURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        }
+        var jan = json["janitor"] as? [String: Any] ?? [:]
+        jan["low_free_gib"] = lowFreeGiB
+        json["janitor"] = jan
+
+        var lanes = json["lanes"] as? [String: Any] ?? [:]
+        lanes["retire_min_days"] = retireMinDays
+        json["lanes"] = lanes
+
+        json["pm2_logs_cap_mb"] = pm2LogsCapMB
+        json["coolify_ssh_host"] = coolifySSHHost
+        json["xcode_derived_data_path"] = customDerivedDataPath
+        json["tool_paths"] = toolPaths
+
+        if let outData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+            try? outData.write(to: configURL, options: .atomic)
+        }
+        refresh()
+    }
+
+    func setToolPath(toolId: String, path: String) {
+        toolPaths[toolId] = path
+        saveMaintainConfig()
+    }
+
+    func revealScriptsFolder() {
+        MaintainRegistryStore.ensureDirectoriesExist()
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: MaintainRegistryStore.scriptsDirectory.path)
+    }
+
+    func openRegistryFile() {
+        NSWorkspace.shared.open(MaintainRegistryStore.registryURL)
     }
 
     /// Reads the files only when the last read is older than `maxAge`.  The
@@ -179,6 +254,19 @@ final class MaintainStore: ObservableObject {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
                 proc.arguments = [script.path] + arguments
+                var env = ProcessInfo.processInfo.environment
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                let extraPaths = [
+                    "/opt/homebrew/bin",
+                    "/opt/homebrew/sbin",
+                    "/usr/local/bin",
+                    "/usr/local/sbin",
+                    "\(home)/.local/bin"
+                ]
+                let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = (extraPaths + [existing]).joined(separator: ":")
+                proc.environment = env
+
                 let errPipe = Pipe()
                 proc.standardOutput = FileHandle.nullDevice
                 proc.standardError = errPipe
@@ -227,27 +315,31 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(
             id: "janitor_cache_reclaim",
             title: "Reclaim Caches Under Low Disk",
-            description: "Prunes developer and build caches when free disk drops below 80 GB."
+            description: "Prunes developer and build caches when free disk drops below threshold."
         ),
         MaintainStepCatalogEntry(
             id: "pm2_logs",
             title: "Cap Oversized PM2 Logs",
-            description: "Truncates PM2 daemon logs exceeding 10 MB to prevent unbounded disk usage."
+            description: "Truncates PM2 daemon logs exceeding the configured cap to prevent unbounded disk usage.",
+            associatedTool: ToolCatalog.pm2
         ),
         MaintainStepCatalogEntry(
             id: "npm_cache",
             title: "Trim npm Download Cache",
-            description: "Cleans npm download cache and unreferenced npx temporary binaries."
+            description: "Cleans npm download cache and unreferenced npx temporary binaries.",
+            associatedTool: ToolCatalog.npm
         ),
         MaintainStepCatalogEntry(
             id: "xcode_derived_data",
             title: "Clear Xcode Build Cache",
-            description: "Cleans Xcode DerivedData caches that have not been modified recently."
+            description: "Cleans Xcode DerivedData caches that have not been modified recently.",
+            associatedTool: ToolCatalog.xcode
         ),
         MaintainStepCatalogEntry(
             id: "simctl_delete_unavailable",
             title: "Remove Unavailable Simulator Runtimes",
-            description: "Cleans orphaned simulator runtimes while protecting user device state."
+            description: "Protects simulator devices and containers; runtime caches are safely cleared by the Simulator cache step.",
+            associatedTool: ToolCatalog.xcode
         ),
         MaintainStepCatalogEntry(
             id: "coolify_remote",
@@ -257,7 +349,8 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(
             id: "cleanmymac_cli",
             title: "CleanMyMac CLI Sweep",
-            description: "Runs non-interactive junk and purgeable sweeps using CleanMyMac CLI when installed."
+            description: "Runs non-interactive junk and purgeable sweeps using CleanMyMac CLI when installed.",
+            associatedTool: ToolCatalog.cleanMyMac
         ),
     ]
 

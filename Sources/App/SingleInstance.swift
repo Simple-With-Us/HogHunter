@@ -63,8 +63,15 @@ enum HarnessArgument {
 enum RunningCopies {
     static func otherPIDs(bundleIdentifier: String?, ownPID: pid_t) -> [pid_t] {
         guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return [] }
-        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-            .map(\.processIdentifier)
-            .filter { $0 != ownPID }
+        var pids = Set(
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+                .map(\.processIdentifier)
+        )
+        // Also check pre-migration legacy bundle identifier
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.jayservices.HogHunter") {
+            pids.insert(app.processIdentifier)
+        }
+        pids.remove(ownPID)
+        return Array(pids)
     }
 }

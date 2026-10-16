@@ -23,6 +23,24 @@ from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 _HEAVY_LANE_STEPS = ("janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps")
 
 
+def ensure_standard_mac_paths() -> None:
+    standard_paths = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        str(Path.home() / ".local/bin"),
+    ]
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    for p in reversed(standard_paths):
+        if p not in current and os.path.isdir(p):
+            current.insert(0, p)
+    os.environ["PATH"] = os.pathsep.join(current)
+
+
+ensure_standard_mac_paths()
+
+
 def _plural(count: int, noun: str, plural: Optional[str] = None) -> str:
     """The count with the right form of the noun: "1 log", "0 logs", "2 folders".  Step reasons are shown to a
     person in the Robotic Vacuum, so none of them hedges the plural in parentheses."""
@@ -363,11 +381,37 @@ class VacuumEngine:
             self.home / "Library/Developer/Xcode/iOS DeviceSupport", _DEVICE_SUPPORT_IDLE_SECONDS, "DeviceSupport version"
         )
 
+    def _xcode_derived_data_path(self) -> Path:
+        """Finds Xcode DerivedData: checks custom config first, then default home, then Xcode preferences."""
+        cfg_path = self.cfg.get("xcode_derived_data_path")
+        if cfg_path and str(cfg_path).strip():
+            p = expand_path(str(cfg_path), self.home)
+            if p.is_dir():
+                return p
+        default_home = self.home / "Library/Developer/Xcode/DerivedData"
+        if default_home.is_dir():
+            return default_home
+        try:
+            res = subprocess.run(
+                ["defaults", "read", "com.apple.dt.Xcode", "IDECustomDerivedDataLocation"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                custom = Path(res.stdout.strip())
+                if custom.is_dir():
+                    return custom
+        except Exception:
+            pass
+        return default_home
+
     def _xcode_derived_data(self) -> tuple[int, str, StepStatus]:
         """Per project folder, untouched 90 minutes, and never while a build runs."""
-        return self._clear_idle_children(
-            self.home / "Library/Developer/Xcode/DerivedData", _DERIVED_DATA_IDLE_SECONDS, "DerivedData project"
-        )
+        path = self._xcode_derived_data_path()
+        if not path.is_dir():
+            return 0, f"DerivedData path missing ({path})", StepStatus.SKIPPED
+        return self._clear_idle_children(path, _DERIVED_DATA_IDLE_SECONDS, "DerivedData project")
 
     def _core_simulator_caches(self) -> tuple[int, str, StepStatus]:
         return self._clear_glob_children(self.home / "Library/Developer/CoreSimulator/Caches")
@@ -508,7 +552,8 @@ class VacuumEngine:
         return max(30, budget)
 
     def _pm2_logs(self) -> tuple[int, str, StepStatus]:
-        cap = 50 * 1024 * 1024
+        cap_mb = int(self.cfg.get("pm2_logs_cap_mb", 50))
+        cap = cap_mb * 1024 * 1024
         truncated = 0
         freed = 0
         logs_dir = self.home / ".pm2/logs"

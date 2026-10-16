@@ -35,6 +35,24 @@ from vacuum.script_registry import bootstrap_registry  # noqa: E402
 from vacuum.store import VacuumStore  # noqa: E402
 
 
+def ensure_standard_mac_paths() -> None:
+    standard_paths = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        str(Path.home() / ".local/bin"),
+    ]
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    for p in reversed(standard_paths):
+        if p not in current and os.path.isdir(p):
+            current.insert(0, p)
+    os.environ["PATH"] = os.pathsep.join(current)
+
+
+ensure_standard_mac_paths()
+
+
 def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:
     """Plan-only run.  Stdout is one JSON document and nothing else; nothing is persisted.
 
@@ -68,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON (with --status)")
     parser.add_argument("--check-alerts", action="store_true", help="Evaluate alerts and notify")
     parser.add_argument("--set-step", nargs=2, metavar=("STEP_ID", "on|off"), help="Toggle a cleaning step")
+    parser.add_argument("--set-config", nargs=2, metavar=("KEY", "VALUE"), help="Set a maintain config value")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -77,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.dry_run and (args.set_step or args.status or args.check_alerts):
+    if args.dry_run and (args.set_step or args.set_config or args.status or args.check_alerts):
         parser.error("--dry-run only combines with --tick or --run-now")
 
     store = VacuumStore.open()
@@ -91,6 +110,26 @@ def main(argv: list[str] | None = None) -> int:
         enabled = flag.lower() in ("on", "1", "true", "yes")
         store.save_step_toggles({step_id: enabled})
         print(f"{step_id} -> {'enabled' if enabled else 'disabled'}")
+        return 0
+
+    if args.set_config:
+        key, value = args.set_config
+        # Coerce numeric/bool if possible
+        val: Any = value
+        if value.lower() in ("true", "yes"):
+            val = True
+        elif value.lower() in ("false", "no"):
+            val = False
+        else:
+            try:
+                val = int(value)
+            except ValueError:
+                try:
+                    val = float(value)
+                except ValueError:
+                    val = value
+        store.save_config_value(key, val)
+        print(f"config {key} -> {val}")
         return 0
 
     if args.dry_run:

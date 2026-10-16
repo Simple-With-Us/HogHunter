@@ -146,6 +146,27 @@ struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
     var description: String = ""
+    let associatedTool: ToolInfo?
+
+    init(id: String, title: String, description: String = "", associatedTool: ToolInfo? = nil) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.associatedTool = associatedTool ?? ToolCatalog.tool(for: id)
+    }
+
+    var isToolRequired: Bool {
+        associatedTool != nil
+    }
+
+    var isInstalled: Bool {
+        guard let tool = associatedTool else { return true }
+        return tool.isInstalled
+    }
+
+    var installedPaths: [String] {
+        associatedTool?.installedPaths ?? []
+    }
 }
 
 struct StepOutcomeSample: Identifiable, Equatable {

@@ -38,6 +38,7 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         NSApp.terminate(nil)
+        exit(0)
     }
 
     private func screenshotLog(_ message: String) {
