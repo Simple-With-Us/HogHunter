@@ -13,7 +13,10 @@ final class DetachedWindowManager {
 
     /// Opens or brings forward the standalone Hog Hunter window.
     func openDetachedWindow(store: HogStore) {
-        if let existing = window, existing.isVisible {
+        if let existing = window {
+            if existing.isMiniaturized {
+                existing.deminiaturize(nil)
+            }
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -26,6 +29,7 @@ final class DetachedWindowManager {
             backing: .buffered,
             defer: false
         )
+        win.isReleasedWhenClosed = false
         win.title = "Hog Hunter"
         win.contentMinSize = NSSize(width: 580, height: 600)
 
