@@ -46,6 +46,10 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Sparkle self-update starts first: a build whose Info.plist carries
+        // the feed updates itself hourly in the background.  A build without
+        // the feed is a silent no-op (see AutoUpdateAvailability).
+        AppUpdater.shared.start()
         // Headless UI smoke test.  Runs before anything else touches the app so
         // it is not racing the sampler, the bandwidth timer, or the screenshot
         // hook.  See UISmokeTest for why this exists.
@@ -102,6 +106,7 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
 struct HogHunterApp: App {
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
     @StateObject private var store = HogStore()
+    @ObservedObject private var updater = AppUpdater.shared
 
     init() {
         // Sentry first, so early-launch crashes are captured.  A build
@@ -116,8 +121,12 @@ struct HogHunterApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            HogHunterPanel()
-                .environmentObject(store)
+            if store.dockedToMenuBar {
+                HogHunterPanel()
+                    .environmentObject(store)
+            } else {
+                DetachedMenuBarPopover(store: store)
+            }
         } label: {
             HStack(spacing: 5) {
                 Image("HogProfile")
@@ -137,6 +146,7 @@ struct HogHunterApp: App {
             .accessibilityValue(store.menuBarAccessibilityValue)
         }
         .menuBarExtraStyle(.window)
+        .commands { commands }
 
         Settings {
             SettingsView()
@@ -159,4 +169,65 @@ struct HogHunterApp: App {
         }
         .defaultSize(width: 540, height: 560)
     }
+
+    /// "Check For Updates…" sits after About in the app menu.  It is greyed
+    /// out while Sparkle is busy, and on a build that cannot update itself
+    /// (Settings ▸ About says why).
+    var commands: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check For Updates…") { updater.checkForUpdates() }
+                .disabled(!updater.canCheckForUpdates)
+        }
+    }
 }
+
+/// Compact menu bar popover displayed when Hog Hunter is running in detached
+/// window mode.  Provides instant access to bring the window forward or re-attach.
+struct DetachedMenuBarPopover: View {
+    @ObservedObject var store: HogStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 18, height: 15)
+                Text("Hog Hunter")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("Detached")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.blue.opacity(0.15)))
+                    .foregroundStyle(.blue)
+            }
+            Text("Hog Hunter is running in standalone window mode.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Divider()
+            HStack(spacing: 8) {
+                Button("Show Window") {
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button("Attach to Menu Bar") {
+                    store.dockedToMenuBar = true
+                    DetachedWindowManager.shared.closeDetachedWindow()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(14)
+        .frame(width: 280)
+        .onAppear {
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        }
+    }
+}
+

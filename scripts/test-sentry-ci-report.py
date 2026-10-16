@@ -46,7 +46,7 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(reporter.find_cron_schedule_drift(reporter.discover_workflow_names()), [])
 
     def test_monitor_slug_stays_under_fifty_chars(self):
-        slug = reporter.monitor_slug("hoghunter", "Hog Hunter iOS TestFlight (manual)")
+        slug = reporter.monitor_slug("hoghunter", "Hog Hunter iOS TestFlight")
         self.assertLessEqual(len(slug), reporter.MONITOR_SLUG_MAX_LEN)
         self.assertTrue(slug.startswith("ci-hoghunter-"))
 
@@ -144,7 +144,7 @@ class WorkflowNameTests(unittest.TestCase):
         self.assertIsNotNone(names)
         self.assertIn("CI", names)
         self.assertIn("Sentry CI Report", names)
-        self.assertIn("Hog Hunter iOS TestFlight (manual)", names)
+        self.assertIn("Hog Hunter iOS TestFlight", names)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from .config import load_config
@@ -139,6 +140,9 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
         health = "failed"
 
     from .alerts import launchd_loaded
+    from .script_registry import bootstrap_registry, summary_for_status
+
+    bootstrap_registry(store.home, Path(__file__).resolve().parents[2], cfg)
 
     # The latest result of each step, from whichever run last ran it.  The last record alone is almost always a
     # watch tick (every five minutes), whose only steps are the disk and memory check, so the UI would show
@@ -161,4 +165,5 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
         "step_last_results": step_states,
         "history_count": len(history),
         "launchd_loaded": launchd_loaded(),
+        "maintenance_scripts": summary_for_status(store.home),
     }

@@ -133,6 +133,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertFalse(CleanCategory.localAIModels.defaultSelected, "Local AI models must require explicit user review")
         XCTAssertFalse(CleanCategory.largeAndOldFiles.defaultSelected, "Large & old user files must never be selected by default")
         XCTAssertFalse(CleanCategory.apfsSnapshots.defaultSelected, "APFS local snapshots must require explicit user review")
+        XCTAssertTrue(CleanCategory.staleBackups.defaultSelected, "Stale tool-made backups clean through Trash plus snapshot")
     }
 
     func testCleanTiers() {
@@ -142,6 +143,7 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.trash))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.developer))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.apfsSnapshots))
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.staleBackups))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.orphanedData))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.localAIModels))
@@ -154,6 +156,61 @@ final class DiskCleanerTests: XCTestCase {
 
         XCTAssertEqual(CleanTier.standard.badge, "Safe / Reversible")
         XCTAssertEqual(CleanTier.extreme.badge, "Deep / AI Artifacts")
+    }
+
+    func testStaleBackupsListsOnlyOldVersionedBackups() throws {
+        let fm = FileManager.default
+        let storage = tempDirectory
+            .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
+        try fm.createDirectory(at: storage, withIntermediateDirectories: true)
+        let live = storage.appendingPathComponent("state.vscdb")
+        let old = storage.appendingPathComponent("state.vscdb.bak-old")
+        let fresh = storage.appendingPathComponent("state.vscdb.bak-fresh")
+        let other = storage.appendingPathComponent("notes.txt")
+        for url in [live, old, fresh, other] {
+            try Data(repeating: 0x41, count: 1024).write(to: url)
+        }
+        let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
+        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: old.path)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let items = cleaner.scanStaleBackups()
+        XCTAssertEqual(items.map(\.title), ["state.vscdb.bak-old"])
+        XCTAssertEqual(items.first?.category, .staleBackups)
+    }
+
+    func testStaleBackupsSafetyGuardsTheLiveDatabase() {
+        let home = NSHomeDirectory()
+        let dir = URL(fileURLWithPath: home + "/Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
+        let bak = URL(fileURLWithPath: home + "/Library/Application Support/Cursor/User/globalStorage/state.vscdb.bak-old")
+        let live = URL(fileURLWithPath: home + "/Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: bak, category: .staleBackups))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: live, category: .staleBackups), "the live database is never listed nor touched")
+        XCTAssertFalse(cleaner.isSafeToDelete(url: dir, category: .staleBackups), "the folder itself is never the item")
+    }
+
+    func testRollbackGracePeriodHoldsFreshCopies() throws {
+        let fm = FileManager.default
+        let apps = tempDirectory.appendingPathComponent("apps", isDirectory: true)
+        let fresh = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-fresh", isDirectory: true)
+        let moved = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-moved", isDirectory: true)
+        for dir in [fresh, moved] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(repeating: 0x41, count: 1024).write(to: dir.appendingPathComponent("package.json"))
+        }
+        let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
+        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: moved.appendingPathComponent("package.json").path)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let titles = cleaner.scanAIArtifacts().map(\.title)
+        XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-fresh"), "a fresh rollback may still be needed")
+        // The moved copy holds eight-day-old files, but the directory itself
+        // was just created (ctime is now), so it still gets its grace day.  A
+        // copy old enough to list cannot be fabricated without waiting out the
+        // clock; the listing path is covered by the vacuum rule's mocked-clock
+        // test in test-hoghunter-clean.py.
+        XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-moved"))
+        XCTAssertTrue(DiskCleaner.directoryMovedWithin(moved, within: 24 * 3600))
     }
 
     // MARK: - Safety Guard Tests
@@ -349,6 +406,23 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertEqual(stats.fileCount, 3)
         XCTAssertGreaterThanOrEqual(stats.bytes, 14336) // 2048 + 4096 + 8192
         XCTAssertNotNil(stats.lastModified)
+        XCTAssertFalse(stats.isApproximate)
+    }
+
+    func testDirectoryStatsFlagsACappedWalkAsApproximate() throws {
+        // Ten 1 KB files; a cap of 4 counts 5 files (the file that trips the
+        // cap is seen but not sized) and reports a lower bound, flagged.
+        for index in 0..<10 {
+            try Data(repeating: 0x41, count: 1024).write(to: tempDirectory.appendingPathComponent("file\(index).txt"))
+        }
+
+        let full = cleaner.directoryStats(at: tempDirectory)
+        XCTAssertFalse(full.isApproximate)
+        XCTAssertEqual(full.fileCount, 10)
+
+        let capped = cleaner.directoryStats(at: tempDirectory, fileCap: 4)
+        XCTAssertTrue(capped.isApproximate)
+        XCTAssertLessThan(capped.bytes, full.bytes)
     }
 
     // MARK: - Formatting & Report Tests
@@ -751,6 +825,102 @@ final class DiskCleanerTests: XCTestCase {
         let viaPrivate = DiskCleaner.resolvedPath("/private/tmp")
         XCTAssertEqual(viaTmp, viaPrivate)
         XCTAssertFalse(viaTmp.isEmpty)
+    }
+
+    // MARK: - Volume Awareness & Symlink Tests
+
+    func testDetectVolumeInternalMacintoshHD() {
+        let internalURL = URL(fileURLWithPath: "/Users")
+        let (isExternal, volumeName) = DiskCleaner.detectVolume(for: internalURL)
+        XCTAssertFalse(isExternal)
+        XCTAssertEqual(volumeName, "Macintosh HD")
+    }
+
+    func testDetectVolumeExternalDrivePrefix() {
+        let externalURL = URL(fileURLWithPath: "/Volumes/External/Cache/test")
+        let (isExternal, volumeName) = DiskCleaner.detectVolume(for: externalURL)
+        XCTAssertTrue(isExternal)
+        XCTAssertEqual(volumeName, "External")
+    }
+
+    func testCleanItemAutoDetectsVolumeAndSymlinks() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetDir = tempDir.appendingPathComponent("target_folder")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let symlinkURL = tempDir.appendingPathComponent("symlink_folder")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetDir)
+
+        let normalItem = CleanItem(
+            category: .userCaches,
+            title: "Normal",
+            subtitle: targetDir.path,
+            url: targetDir,
+            bytes: 1024,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertFalse(normalItem.isSymlink)
+        XCTAssertFalse(normalItem.isExternal)
+
+        let symlinkItem = CleanItem(
+            category: .userCaches,
+            title: "Symlink",
+            subtitle: symlinkURL.path,
+            url: symlinkURL,
+            bytes: 2048,
+            fileCount: 2,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertTrue(symlinkItem.isSymlink)
+    }
+
+    func testCleaningSymlinkPreservesSymlinkAndCleansContents() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetDir = tempDir.appendingPathComponent("external_target")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let dummyFile = targetDir.appendingPathComponent("cache_entry.bin")
+        try Data("cache data".utf8).write(to: dummyFile)
+
+        let cachesDir = tempDir.appendingPathComponent("Library/Caches", isDirectory: true)
+        try FileManager.default.createDirectory(at: cachesDir, withIntermediateDirectories: true)
+        let symlinkURL = cachesDir.appendingPathComponent("cache_symlink")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetDir)
+
+        let cleaner = DiskCleaner(
+            makeSnapshot: { (true, "test-snap") },
+            homeDirectory: tempDir
+        )
+
+        let item = CleanItem(
+            category: .userCaches,
+            title: "Symlink Cache",
+            subtitle: symlinkURL.path,
+            url: symlinkURL,
+            bytes: 10,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+
+        XCTAssertTrue(item.isSymlink)
+        let result = await cleaner.clean(items: [item], createSnapshot: false)
+        XCTAssertEqual(result.itemsRemoved, 1)
+
+        // The symlink itself MUST still exist!
+        let symlinkStillExists = FileManager.default.fileExists(atPath: symlinkURL.path)
+        XCTAssertTrue(symlinkStillExists, "Cleaning must preserve the symlink so external offload setup is not broken")
+
+        // The target directory exists, but child file was removed
+        let targetContents = try FileManager.default.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil)
+        XCTAssertTrue(targetContents.isEmpty, "The child files inside target should have been cleaned")
     }
 }
 

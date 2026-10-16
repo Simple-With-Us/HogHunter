@@ -488,4 +488,38 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertFalse(settings.isConfigured)
         XCTAssertEqual(reads, 1)
     }
+
+    @MainActor
+    func testAppGroupStoragePathResolves() {
+        let appGroupURL = InfisicalSettings.appGroupStorageURL
+        XCTAssertNotNil(appGroupURL)
+        XCTAssertTrue(appGroupURL?.path.contains("group.com.simplewithus.hoghunter") ?? false)
+        XCTAssertEqual(appGroupURL?.lastPathComponent, "infisical.json")
+
+        let appSupportURL = InfisicalSettings.applicationSupportStorageURL
+        XCTAssertTrue(appSupportURL.path.contains("HogHunter"))
+        XCTAssertEqual(appSupportURL.lastPathComponent, "infisical.json")
+    }
+
+    @MainActor
+    func testCredentialSerializationAndPermissions() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let testFile = tempDir.appendingPathComponent("infisical.json")
+        let cred = InfisicalCredential(clientId: "test-id", clientSecret: "test-sec", projectId: "11111111-2222-3333-4444-555555555555")
+        let data = try JSONEncoder().encode(cred)
+        try data.write(to: testFile, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: testFile.path)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: testFile.path)
+        let perms = attrs[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.intValue, 0o600)
+
+        let readData = try Data(contentsOf: testFile)
+        let decoded = try JSONDecoder().decode(InfisicalCredential.self, from: readData)
+        XCTAssertEqual(decoded.clientId, "test-id")
+        XCTAssertEqual(decoded.effectiveProjectId, "11111111-2222-3333-4444-555555555555")
+    }
 }

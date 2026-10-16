@@ -4,7 +4,7 @@
 
 Mac panel swaps figures with the sort (HH-144):
 
-- Sorting the main window by Memory now puts the RAM amount on top in the large style, with %CPU small beneath it, instead of always leading with %CPU.  Sorting by CPU keeps %CPU large with its severity color.  The iPhone rows learned this in HH-143; the Mac panel never had it until now.
+- Sorting the main window by Memory puts the RAM amount on top in the large style, with %CPU small beneath it; sorting by CPU keeps %CPU large with its severity color.  The Mac rows did not do this before: `HogRowView` always led with %CPU, and the HH-143 notes wrongly said the Mac already swapped.  The swap itself reached `main` with the panel overhaul (#158), which carries the same row change this issue called for; HH-144 corrects the HH-143 notes and records the check.
 
 Owner batch (HH-143, full context in `docs/rollouts/2026-10-14-hh-143-owner-batch.md`):
 

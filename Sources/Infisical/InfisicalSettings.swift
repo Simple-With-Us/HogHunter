@@ -410,9 +410,9 @@ final class InfisicalSettings: ObservableObject {
         self.client = client
         self.store = store
         self.credentialProvider = credentialProvider
-        self.keychainReader = { InfisicalSettings.readCredentialFromKeychain() }
-        self.credentialWriter = credentialWriter ?? Self.writeCredentialToKeychain
-        self.credentialRemover = credentialRemover ?? Self.removeCredentialFromKeychain
+        self.keychainReader = { InfisicalSettings.readCredential() }
+        self.credentialWriter = credentialWriter ?? Self.writeCredential
+        self.credentialRemover = credentialRemover ?? Self.removeCredential
     }
 
     // MARK: - Lifecycle
@@ -631,24 +631,62 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    private static func writeCredentialToKeychain(_ credential: InfisicalCredential) throws {
+    // MARK: - Credential Storage (App Group & Secure File with Silent Keychain Migration)
+
+    private static let appGroupIdentifier = "group.com.simplewithus.hoghunter"
+    private static let fileName = "infisical.json"
+
+    static var appGroupStorageURL: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)?
+            .appendingPathComponent(fileName)
+    }
+
+    static var applicationSupportStorageURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("HogHunter", isDirectory: true)
+        return dir.appendingPathComponent(fileName)
+    }
+
+    private static func writeCredential(_ credential: InfisicalCredential) throws {
+        try writeCredentialToFile(credential)
+        // Clean up any legacy Keychain item so it doesn't cause ACL partition mismatch prompts
+        try? removeCredentialFromKeychain()
+    }
+
+    private static func writeCredentialToFile(_ credential: InfisicalCredential) throws {
         let data = try JSONEncoder().encode(credential)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-        ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var add = query
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            status = SecItemAdd(add as CFDictionary, nil)
+        var wroteAtLeastOne = false
+
+        if let appGroupURL = appGroupStorageURL {
+            do {
+                try writeToFile(data, at: appGroupURL)
+                wroteAtLeastOne = true
+            } catch {
+                // If App Group container directory cannot be written, fall back to Application Support
+            }
         }
-        guard status == errSecSuccess else {
-            throw InfisicalError.decoding("Keychain save failed (OSStatus \(status))")
+
+        let appSupportURL = applicationSupportStorageURL
+        let dir = appSupportURL.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
         }
+        try writeToFile(data, at: appSupportURL)
+        wroteAtLeastOne = true
+
+        guard wroteAtLeastOne else {
+            throw InfisicalError.decoding("Could not save credential to App Group or Application Support")
+        }
+    }
+
+    private static func writeToFile(_ data: Data, at url: URL) throws {
+        let parentDir = url.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: parentDir.path) {
+            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true, attributes: nil)
+        }
+        try data.write(to: url, options: .atomic)
+        // Set POSIX permissions 0600 (owner read/write only)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     func clearCredential() throws {
@@ -666,6 +704,14 @@ final class InfisicalSettings: ObservableObject {
         lastRefresh = nil
         lastError = nil
         NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
+    }
+
+    private static func removeCredential() throws {
+        if let appGroupURL = appGroupStorageURL {
+            try? FileManager.default.removeItem(at: appGroupURL)
+        }
+        try? FileManager.default.removeItem(at: applicationSupportStorageURL)
+        try? removeCredentialFromKeychain()
     }
 
     private static func removeCredentialFromKeychain() throws {
@@ -688,7 +734,40 @@ final class InfisicalSettings: ObservableObject {
         status == errSecSuccess || status == errSecItemNotFound
     }
 
-    private static func readCredentialFromKeychain() -> KeychainCredentialRead {
+    private static func readCredential() -> KeychainCredentialRead {
+        // 1. Check App Group container file
+        if let appGroupURL = appGroupStorageURL,
+           let data = try? Data(contentsOf: appGroupURL),
+           let cred = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
+           cred.isComplete {
+            return KeychainCredentialRead(credential: cred, terminal: true)
+        }
+
+        // 2. Check Application Support file
+        let appSupportURL = applicationSupportStorageURL
+        if let data = try? Data(contentsOf: appSupportURL),
+           let cred = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
+           cred.isComplete {
+            // Mirror to App Group if possible
+            if let appGroupURL = appGroupStorageURL {
+                try? writeToFile(data, at: appGroupURL)
+            }
+            return KeychainCredentialRead(credential: cred, terminal: true)
+        }
+
+        // 3. Fallback to Keychain read strictly without UI (interactionNotAllowed = true)
+        let legacyRead = readCredentialFromKeychainSilently()
+        if let cred = legacyRead.credential, cred.isComplete {
+            // Migrate to secure file storage and purge the legacy Keychain item so it never prompts again
+            try? writeCredentialToFile(cred)
+            try? removeCredentialFromKeychain()
+            return KeychainCredentialRead(credential: cred, terminal: true)
+        }
+
+        return legacyRead
+    }
+
+    private static func readCredentialFromKeychainSilently() -> KeychainCredentialRead {
         let context = LAContext()
         context.interactionNotAllowed = true
         let query: [String: Any] = [
@@ -713,7 +792,6 @@ final class InfisicalSettings: ObservableObject {
         }
         if credential.projectId == nil || credential.effectiveProjectId.isEmpty {
             credential.projectId = InfisicalClient.projectId
-            try? writeCredentialToKeychain(credential)
         }
         guard credential.isComplete else {
             return KeychainCredentialRead(credential: nil, terminal: true)

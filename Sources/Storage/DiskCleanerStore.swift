@@ -257,8 +257,37 @@ final class DiskCleanerStore: ObservableObject {
         return sum
     }
 
+    func totalSelectedInternalBytes() -> UInt64 {
+        guard let report else { return 0 }
+        var sum: UInt64 = 0
+        for cat in report.categories {
+            for item in cat.items where selectedItemIds.contains(item.id) && !item.isExternal {
+                sum &+= item.bytes
+            }
+        }
+        return sum
+    }
+
+    func totalSelectedExternalBytes() -> UInt64 {
+        guard let report else { return 0 }
+        var sum: UInt64 = 0
+        for cat in report.categories {
+            for item in cat.items where selectedItemIds.contains(item.id) && item.isExternal {
+                sum &+= item.bytes
+            }
+        }
+        return sum
+    }
+
     func totalSelectedItemsCount() -> Int {
         selectedItemIds.count
+    }
+
+    /// True when any selected item's size walk hit its file cap, so the
+    /// selected total is a lower bound, not an exact size.
+    func selectionIsApproximate() -> Bool {
+        guard let report else { return false }
+        return report.categories.flatMap { $0.items }.contains { $0.isApproximate && selectedItemIds.contains($0.id) }
     }
 
     func totalDiscoveredBytes() -> UInt64 {

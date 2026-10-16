@@ -28,6 +28,13 @@ packages:
     # (`from`, `minorVersion`, `exactVersion`) fails to resolve.  A
     # commit pin is the requirement SPM will accept.
     revision: 4f135c52afeeb1d6937eb93824c7ec1cddcaa372
+  # 2026-10-14 — Sparkle 2: every merge to main ships a signed Mac release
+  # and installed copies update themselves (docs/AUTO-UPDATE.md, the fleet
+  # pattern piloted by CodeCaps).  Mac target only: Sparkle is AppKit-only
+  # and must never link into the iOS companion.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.10.0
 
 settings:
   base:
@@ -50,6 +57,10 @@ targets:
     dependencies:
       - package: Sentry
         product: Sentry
+      # Sparkle 2 self-update (Mac only).  Xcode embeds the framework into
+      # Contents/Frameworks; scripts/mac-release-build.sh asserts that.
+      - package: Sparkle
+        product: Sparkle
       - sdk: ServiceManagement.framework
       - sdk: UserNotifications.framework
       - sdk: libsqlite3.tbd

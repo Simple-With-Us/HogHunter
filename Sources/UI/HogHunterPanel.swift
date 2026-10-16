@@ -19,6 +19,8 @@ struct HogHunterPanel: View {
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage: Bool = false
     @State private var hasVisitedNetwork: Bool = false
+    @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
+    @State private var panelInstanceId = UUID()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -70,9 +72,19 @@ struct HogHunterPanel: View {
             // out past the edge and clipped on both sides instead of wrapping.
             .frame(width: Self.contentWidth, alignment: .leading)
         }
-        .padding(Self.inset)
+        .padding(.horizontal, Self.inset)
+        .padding(.bottom, Self.inset)
+        .padding(.top, (store.dockedToMenuBar ? 8 : 0) + Self.inset)
         .frame(width: Self.panelWidth, height: Self.panelHeight)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(
+            DockedPanelShape(beakX: beakX, isDocked: store.dockedToMenuBar)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            DockedPanelShape(beakX: beakX, isDocked: store.dockedToMenuBar)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .background(MenuBarAnchorFinder { x in beakX = x })
         .preferredColorScheme(store.appearance.colorScheme)
         .onChange(of: selectedTab) { newTab in
             if newTab == .storage {
@@ -82,7 +94,7 @@ struct HogHunterPanel: View {
             }
         }
         .onAppear {
-            store.panelVisible = true
+            store.registerPanelVisible(panelInstanceId)
             if selectedTab == .storage {
                 hasVisitedStorage = true
             } else if selectedTab == .network {
@@ -90,7 +102,7 @@ struct HogHunterPanel: View {
             }
         }
         .onDisappear {
-            store.panelVisible = false
+            store.unregisterPanelVisible(panelInstanceId)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : (selectedTab == .storage ? "Hog Hunter — storage and disk cleaner" : "Hog Hunter — network activity"))
@@ -197,6 +209,17 @@ struct HogHunterPanel: View {
             Toggle("Launch at Login", isOn: Binding(
                 get: { store.launchesAtLogin },
                 set: { _ in store.toggleLoginItem() }
+            ))
+            Toggle("Attach to Menu Bar", isOn: Binding(
+                get: { store.dockedToMenuBar },
+                set: { newValue in
+                    store.dockedToMenuBar = newValue
+                    if !newValue {
+                        DetachedWindowManager.shared.openDetachedWindow(store: store)
+                    } else {
+                        DetachedWindowManager.shared.closeDetachedWindow()
+                    }
+                }
             ))
             Divider()
             Button("Quit Hog Hunter") {
@@ -497,8 +520,8 @@ struct HogHunterPanel: View {
                         row: row,
                         scale: store.cpuScale,
                         coreCount: store.pulse.coreCount,
-                        sort: store.sort,
-                        store: store
+                        store: store,
+                        sort: store.sort
                     ) {
                         pendingQuit = row
                     }
@@ -529,3 +552,106 @@ struct HogHunterPanel: View {
         }
     }
 }
+
+/// The outline of the Hog Hunter panel.  When docked to the menu bar, the top
+/// edge features a smooth curved triangular beak (anchor notch) pointing up to
+/// touch the menu bar item, with the shoulders inset by 8 pt.  When detached,
+/// it draws a standard rounded rectangle.
+struct DockedPanelShape: Shape {
+    var beakX: CGFloat
+    var isDocked: Bool
+    var cornerRadius: CGFloat = 10
+    var beakHeight: CGFloat = 8
+    var beakHalfWidth: CGFloat = 14
+
+    func path(in rect: CGRect) -> Path {
+        guard isDocked else {
+            return Path(roundedRect: rect, cornerRadius: cornerRadius)
+        }
+        var path = Path()
+        let bx = min(max(beakX, 35), rect.width - 35)
+        let topY = rect.minY + beakHeight
+
+        // Top edge left segment: starts at corner
+        path.move(to: CGPoint(x: rect.minX + cornerRadius, y: topY))
+
+        // Line to left base of beak
+        path.addLine(to: CGPoint(x: bx - beakHalfWidth, y: topY))
+
+        // Smooth curve up to rounded apex of beak
+        path.addCurve(
+            to: CGPoint(x: bx, y: rect.minY),
+            control1: CGPoint(x: bx - beakHalfWidth * 0.5, y: topY),
+            control2: CGPoint(x: bx - beakHalfWidth * 0.2, y: rect.minY)
+        )
+
+        // Smooth curve down from apex to right base of beak
+        path.addCurve(
+            to: CGPoint(x: bx + beakHalfWidth, y: topY),
+            control1: CGPoint(x: bx + beakHalfWidth * 0.2, y: rect.minY),
+            control2: CGPoint(x: bx + beakHalfWidth * 0.5, y: topY)
+        )
+
+        // Line to top right corner
+        path.addLine(to: CGPoint(x: rect.maxX - cornerRadius, y: topY))
+
+        // Top right rounded corner
+        path.addArc(tangent1End: CGPoint(x: rect.maxX, y: topY),
+                    tangent2End: CGPoint(x: rect.maxX, y: topY + cornerRadius),
+                    radius: cornerRadius)
+
+        // Right edge
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - cornerRadius))
+
+        // Bottom right rounded corner
+        path.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.maxY),
+                    tangent2End: CGPoint(x: rect.maxX - cornerRadius, y: rect.maxY),
+                    radius: cornerRadius)
+
+        // Bottom edge
+        path.addLine(to: CGPoint(x: rect.minX + cornerRadius, y: rect.maxY))
+
+        // Bottom left rounded corner
+        path.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.maxY),
+                    tangent2End: CGPoint(x: rect.minX, y: rect.maxY - cornerRadius),
+                    radius: cornerRadius)
+
+        // Left edge
+        path.addLine(to: CGPoint(x: rect.minX, y: topY + cornerRadius))
+
+        // Top left rounded corner
+        path.addArc(tangent1End: CGPoint(x: rect.minX, y: topY),
+                    tangent2End: CGPoint(x: rect.minX + cornerRadius, y: topY),
+                    radius: cornerRadius)
+
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// Locates the horizontal coordinate of the menu bar status item relative to the
+/// window frame so the anchor beak points directly at the Hog Hunter icon.
+struct MenuBarAnchorFinder: NSViewRepresentable {
+    var onPosition: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            let winX = window.frame.origin.x
+            let winW = window.frame.width
+            // Capture click position at open time; if off-screen or unattached, default to center.
+            let mouseX = NSEvent.mouseLocation.x
+            let relX = mouseX - winX
+            let initialX = (relX >= 0 && relX <= winW) ? relX : (winW / 2)
+            let clampedX = min(max(initialX, 35), winW - 35)
+            onPosition(clampedX)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Deliberate no-op: the anchor is fixed at open time and must not follow the cursor.
+    }
+}
+

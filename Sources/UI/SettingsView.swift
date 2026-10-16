@@ -122,19 +122,30 @@ private struct GeneralSettingsTab: View {
     @EnvironmentObject private var store: HogStore
 
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
+    @AppStorage(HogStore.Key.backgroundRefreshInterval) private var backgroundRefreshInterval: Double = 10
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
     var body: some View {
         Form {
             Section("Sampling & Display") {
-                Picker("Refresh Every", selection: $refreshInterval) {
+                Picker("Active Refresh (When Open)", selection: $refreshInterval) {
                     Text("2 Seconds").tag(2.0)
                     Text("3 Seconds").tag(3.0)
                     Text("5 Seconds").tag(5.0)
+                }
+
+                Picker("Background Refresh (When Closed)", selection: $backgroundRefreshInterval) {
+                    Text("5 Seconds").tag(5.0)
                     Text("10 Seconds").tag(10.0)
                     Text("15 Seconds").tag(15.0)
+                    Text("30 Seconds").tag(30.0)
                 }
+
+                Text("Faster refresh when the panel is open keeps live numbers responsive.\u{00A0} A slower cadence in the background saves compute and battery while building history and serving the iPhone companion.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
                     ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }
@@ -599,6 +610,10 @@ private struct PairingCodeField: View {
 // MARK: - About Tab
 
 private struct AboutSettingsTab: View {
+    // Sparkle self-update state.  Observing keeps "Automatic updates" and the
+    // check button in step with the updater without touching HogStore.
+    @ObservedObject private var updater = AppUpdater.shared
+
     var body: some View {
         Form {
             Section("About") {
@@ -626,6 +641,21 @@ private struct AboutSettingsTab: View {
                 Text("Storage and Network are tabs in the menu bar panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+            }
+
+            // Sparkle 2 self-update (see docs/AUTO-UPDATE.md).  A build whose
+            // Info.plist carries the update feed and signing key checks
+            // hourly and installs while the app is idle; anything else says
+            // Off and explains why.
+            Section("Software Update") {
+                HStack {
+                    Text("Automatic updates")
+                    Spacer(minLength: 0)
+                    Text(updater.availability.summary)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Check For Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
             }
         }
         .formStyle(.grouped)
@@ -734,7 +764,7 @@ private struct AdvancedSettingsTab: View {
     var body: some View {
         Form {
             Section("Infisical Settings Sync") {
-                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the Keychain, never in the app or its files.")
+                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the secure App Group container (mode 0600), never logged or shared across apps.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -778,7 +808,7 @@ private struct AdvancedSettingsTab: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
-                    Button("Save to Keychain") { saveCredential() }
+                    Button("Save Credential") { saveCredential() }
                         .disabled(clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || UUID(uuidString: projectId.trimmingCharacters(in: .whitespacesAndNewlines)) == nil || isWorking || infisical.isSaving)
                     Button("Clear") { clearCredential() }
                         .disabled(!infisical.isConfigured || isWorking)
@@ -814,7 +844,7 @@ private struct AdvancedSettingsTab: View {
             do {
                 try await infisical.saveCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
                 clientSecret = ""
-                notice = "Connection verified and saved to the Keychain."
+                notice = "Connection verified and saved to App Group storage."
             } catch {
                 notice = "Save failed: \(InfisicalSettings.safeMessage(for: error))"
             }

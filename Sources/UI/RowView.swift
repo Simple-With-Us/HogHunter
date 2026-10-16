@@ -8,12 +8,10 @@ struct HogRowView: View {
     let row: HogRow
     let scale: CpuScale
     let coreCount: Int
-    /// Which figure stands large on the right.  Follows the list's sort, so
-    /// sorting by Memory puts the RAM amount on top instead of %CPU.
-    let sort: HogSort
     /// Used only to report a failed action; the row does not observe it, so a
     /// store update never redraws twenty-five rows.
     let store: HogStore
+    var sort: HogSort = .cpu
     let onQuit: () -> Void
 
     /// History rows describe a key that may be long gone, so they offer none

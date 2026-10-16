@@ -244,11 +244,19 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertFalse(uploaded)
         self.assertIn("unexpected app build number", result.stderr)
 
-    def test_push_event_is_rejected(self):
+    def test_push_event_is_accepted_as_auto_ship(self):
+        # Push to main is the automatic TestFlight lane: the guard must let it
+        # through and the validated export must upload.
         result, uploaded = self.run_release(upload=True, event="push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(uploaded)
+        self.assertIn("Upload command succeeded", result.stdout)
+
+    def test_unsupported_event_is_rejected(self):
+        result, uploaded = self.run_release(upload=True, event="schedule")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(uploaded)
-        self.assertIn("guarded manual workflow", result.stderr)
+        self.assertIn("unsupported event for the release lane", result.stderr)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ name: Sentry CI Report
 #
 # workflows observed (from `ls .github/workflows/` — see each file's `name:`):
 #   CI,
-#   Hog Hunter iOS TestFlight (manual),
+#   Hog Hunter iOS TestFlight,
 #   iOS Screenshots,
 #   Secret scanning
 #
@@ -38,7 +38,7 @@ on:
   workflow_run:
     workflows:
       - CI
-      - Hog Hunter iOS TestFlight (manual)
+      - Hog Hunter iOS TestFlight
       - iOS Screenshots
       - Secret scanning
     types: [completed]
