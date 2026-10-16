@@ -132,8 +132,12 @@ struct HogHunterApp: App {
 
     var body: some Scene {
         MenuBarExtra(isInserted: .constant(!Self.isRunningUnderTest)) {
-            HogHunterPanel()
-                .environmentObject(store)
+            if store.dockedToMenuBar {
+                HogHunterPanel()
+                    .environmentObject(store)
+            } else {
+                DetachedMenuBarPopover(store: store)
+            }
         } label: {
             HStack(spacing: 5) {
                 Image("HogProfile")
@@ -187,3 +191,54 @@ struct HogHunterApp: App {
         }
     }
 }
+
+/// Compact menu bar popover displayed when Hog Hunter is running in detached
+/// window mode.  Provides instant access to bring the window forward or re-attach.
+struct DetachedMenuBarPopover: View {
+    @ObservedObject var store: HogStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 18, height: 15)
+                Text("Hog Hunter")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("Detached")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.blue.opacity(0.15)))
+                    .foregroundStyle(.blue)
+            }
+            Text("Hog Hunter is running in standalone window mode.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Divider()
+            HStack(spacing: 8) {
+                Button("Show Window") {
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button("Attach to Menu Bar") {
+                    store.dockedToMenuBar = true
+                    DetachedWindowManager.shared.closeDetachedWindow()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(14)
+        .frame(width: 280)
+        .onAppear {
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        }
+    }
+}
+
