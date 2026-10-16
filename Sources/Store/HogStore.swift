@@ -55,8 +55,12 @@ final class HogStore: ObservableObject {
     /// all history aggregation are gated on this.
     @Published var panelVisible = false {
         didSet {
-            guard panelVisible, panelVisible != oldValue else { return }
-            refreshHistory()
+            guard panelVisible != oldValue else { return }
+            restartTimer()
+            if panelVisible {
+                refreshHistory()
+                _ = tick()
+            }
         }
     }
 
@@ -82,6 +86,20 @@ final class HogStore: ObservableObject {
             restartTimer()
             writeThroughInfisical(key: InfisicalKey.refreshInterval, value: String(refreshInterval))
         }
+    }
+    @Published var backgroundRefreshInterval: TimeInterval = 10 {
+        didSet {
+            persist()
+            restartTimer()
+        }
+    }
+    @Published var dockedToMenuBar: Bool = true {
+        didSet {
+            persist()
+        }
+    }
+    var effectiveRefreshInterval: TimeInterval {
+        panelVisible ? refreshInterval : backgroundRefreshInterval
     }
     @Published var alertsEnabled = false {
         didSet {
@@ -234,6 +252,8 @@ final class HogStore: ObservableObject {
         static let menuBarLabelMode = "menuBarLabelMode"
         static let infisicalProjectId = "infisicalProjectId"
         static let refreshInterval = "refreshInterval"
+        static let backgroundRefreshInterval = "backgroundRefreshInterval"
+        static let dockedToMenuBar = "dockedToMenuBar"
         static let alertsEnabled = "alertsEnabled"
         static let alertThresholdPercent = "alertThresholdPercent"
         static let alertSustainedMinutes = "alertSustainedMinutes"
@@ -411,7 +431,7 @@ final class HogStore: ObservableObject {
     private func restartTimer() {
         guard started else { return }
         timer?.invalidate()
-        let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: effectiveRefreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshStaleness()
                 self?.tick()
@@ -433,7 +453,7 @@ final class HogStore: ObservableObject {
         source.setEventHandler { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                guard Date().timeIntervalSince(self.lastTickAt) >= self.refreshInterval else { return }
+                guard Date().timeIntervalSince(self.lastTickAt) >= self.effectiveRefreshInterval else { return }
                 // `tick()` no-ops when a sample is already in flight, in which
                 // case the timer that would otherwise fire on schedule must be
                 // left alone -- restarting it here would delay that pending
@@ -1150,6 +1170,11 @@ final class HogStore: ObservableObject {
         allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
         allowRemoteEdit = defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
         allowRemoteMaintain = defaults.object(forKey: Key.allowRemoteMaintain) as? Bool ?? false
+        let bgInterval = defaults.double(forKey: Key.backgroundRefreshInterval)
+        if bgInterval >= 1 { backgroundRefreshInterval = bgInterval }
+        if defaults.object(forKey: Key.dockedToMenuBar) != nil {
+            dockedToMenuBar = defaults.bool(forKey: Key.dockedToMenuBar)
+        }
         migrateRenamedKeys()
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
@@ -1259,6 +1284,8 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
         defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
         defaults.set(allowRemoteMaintain, forKey: Key.allowRemoteMaintain)
+        defaults.set(backgroundRefreshInterval, forKey: Key.backgroundRefreshInterval)
+        defaults.set(dockedToMenuBar, forKey: Key.dockedToMenuBar)
     }
 
     // MARK: - Test hooks
@@ -1315,6 +1342,14 @@ final class HogStore: ObservableObject {
             let interval = self.defaults.double(forKey: Key.refreshInterval)
             if self.migratedSettingsReady, interval >= 1, interval != self.refreshInterval {
                 self.refreshInterval = interval
+            }
+            let bgInterval = self.defaults.double(forKey: Key.backgroundRefreshInterval)
+            if bgInterval >= 1, bgInterval != self.backgroundRefreshInterval {
+                self.backgroundRefreshInterval = bgInterval
+            }
+            if let docked = self.defaults.object(forKey: Key.dockedToMenuBar) as? Bool,
+               docked != self.dockedToMenuBar {
+                self.dockedToMenuBar = docked
             }
             let enabled = self.defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
             if enabled != self.alertsEnabled {
@@ -2265,7 +2300,8 @@ final class HogStore: ObservableObject {
 
     /// Called by the panel's timer-free redraws; cheap enough to run often.
     func refreshStaleness(now: Date = Date()) {
+        let cadence = max(refreshInterval, backgroundRefreshInterval)
         isStale = pulse.sampledAt != .distantPast
-            && now.timeIntervalSince(pulse.sampledAt) > 3 * refreshInterval
+            && now.timeIntervalSince(pulse.sampledAt) > 3 * cadence
     }
 }
