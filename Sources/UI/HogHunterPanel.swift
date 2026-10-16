@@ -637,26 +637,20 @@ struct MenuBarAnchorFinder: NSViewRepresentable {
         let view = NSView()
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-            let mouseX = NSEvent.mouseLocation.x
             let winX = window.frame.origin.x
             let winW = window.frame.width
+            // Capture click position at open time; if off-screen or unattached, default to center.
+            let mouseX = NSEvent.mouseLocation.x
             let relX = mouseX - winX
-            let clampedX = min(max(relX, 35), winW - 35)
+            let initialX = (relX >= 0 && relX <= winW) ? relX : (winW / 2)
+            let clampedX = min(max(initialX, 35), winW - 35)
             onPosition(clampedX)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            guard let window = nsView.window else { return }
-            let mouseX = NSEvent.mouseLocation.x
-            let winX = window.frame.origin.x
-            let winW = window.frame.width
-            let relX = mouseX - winX
-            let clampedX = min(max(relX, 35), winW - 35)
-            onPosition(clampedX)
-        }
+        // Deliberate no-op: the anchor is fixed at open time and must not follow the cursor.
     }
 }
 

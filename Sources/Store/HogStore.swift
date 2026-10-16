@@ -2300,8 +2300,7 @@ final class HogStore: ObservableObject {
 
     /// Called by the panel's timer-free redraws; cheap enough to run often.
     func refreshStaleness(now: Date = Date()) {
-        let cadence = max(refreshInterval, backgroundRefreshInterval)
         isStale = pulse.sampledAt != .distantPast
-            && now.timeIntervalSince(pulse.sampledAt) > 3 * cadence
+            && now.timeIntervalSince(pulse.sampledAt) > 3 * effectiveRefreshInterval
     }
 }

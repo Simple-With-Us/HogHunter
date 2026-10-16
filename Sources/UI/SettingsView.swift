@@ -142,7 +142,7 @@ private struct GeneralSettingsTab: View {
                     Text("30 Seconds").tag(30.0)
                 }
 
-                Text("Faster refresh when the panel is open keeps live numbers responsive.  A slower cadence in the background saves compute and battery while building history and serving the iPhone companion.")
+                Text("Faster refresh when the panel is open keeps live numbers responsive.\u{00A0} A slower cadence in the background saves compute and battery while building history and serving the iPhone companion.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
