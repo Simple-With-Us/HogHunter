@@ -101,9 +101,6 @@ struct StorageView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: selectedTab == .diskCleaner ? "sparkles" : (selectedTab == .maintain ? "fanblades.fill" : "internaldrive"))
-                .font(.system(size: 20))
-                .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
                 Text(headerTitle)
                     .font(.system(size: 17, weight: .semibold))

@@ -22,6 +22,7 @@ struct MaintainView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 2)
+                .padding(.trailing, 4)
             }
         }
         .onAppear { store.startPolling() }
@@ -145,10 +146,12 @@ struct MaintainView: View {
                 Text(history.lastRunDate != nil ? "Last run \(formatDate(history.lastRunDate))" : "Not run yet")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
                 Text(format24hSummary(history))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             timelineBar(history)
@@ -196,15 +199,16 @@ struct MaintainView: View {
     }
 
     private func timelineBar(_ history: Step24hHistory) -> some View {
-        HStack(spacing: 3) {
-            if history.recentOutcomes.isEmpty {
+        let displayOutcomes = Array(history.recentOutcomes.suffix(24))
+        return HStack(spacing: 3) {
+            if displayOutcomes.isEmpty {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.secondary.opacity(0.15))
                     .frame(height: 5)
                     .frame(maxWidth: .infinity)
                     .help("No runs in past 24 hours")
             } else {
-                ForEach(history.recentOutcomes) { sample in
+                ForEach(displayOutcomes) { sample in
                     RoundedRectangle(cornerRadius: 2)
                         .fill(sampleColor(sample.status))
                         .frame(height: 6)
@@ -341,9 +345,11 @@ struct MaintainView: View {
             Text(label)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             Spacer()
             Text(value)
                 .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
         }
     }
 
