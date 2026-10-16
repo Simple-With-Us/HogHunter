@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 enum PanelTab: String, CaseIterable, Identifiable {
@@ -564,12 +565,19 @@ struct DockedPanelShape: Shape {
     var beakHeight: CGFloat = 8
     var beakHalfWidth: CGFloat = 14
 
+    var animatableData: CGFloat {
+        get { beakX }
+        set { beakX = newValue }
+    }
+
     func path(in rect: CGRect) -> Path {
         guard isDocked else {
             return Path(roundedRect: rect, cornerRadius: cornerRadius)
         }
         var path = Path()
-        let bx = min(max(beakX, 35), rect.width - 35)
+        let minX = rect.minX + cornerRadius + beakHalfWidth + 4
+        let maxX = rect.maxX - cornerRadius - beakHalfWidth - 4
+        let bx = min(max(beakX, minX), maxX)
         let topY = rect.minY + beakHeight
 
         // Top edge left segment: starts at corner
@@ -630,28 +638,159 @@ struct DockedPanelShape: Shape {
 }
 
 /// Locates the horizontal coordinate of the menu bar status item relative to the
-/// window frame so the anchor beak points directly at the Hog Hunter icon.
+/// window frame so the anchor beak points directly at Hog Hunter's logo and % in the menu bar.
 struct MenuBarAnchorFinder: NSViewRepresentable {
     var onPosition: (CGFloat) -> Void
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
-            let winX = window.frame.origin.x
-            let winW = window.frame.width
-            // Capture click position at open time; if off-screen or unattached, default to center.
-            let mouseX = NSEvent.mouseLocation.x
-            let relX = mouseX - winX
-            let initialX = (relX >= 0 && relX <= winW) ? relX : (winW / 2)
-            let clampedX = min(max(initialX, 35), winW - 35)
-            onPosition(clampedX)
-        }
+    func makeNSView(context: Context) -> MenuBarAnchorView {
+        let view = MenuBarAnchorView()
+        view.onPosition = onPosition
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        // Deliberate no-op: the anchor is fixed at open time and must not follow the cursor.
+    func updateNSView(_ nsView: MenuBarAnchorView, context: Context) {
+        nsView.onPosition = onPosition
+    }
+}
+
+final class MenuBarAnchorView: NSView {
+    var onPosition: ((CGFloat) -> Void)?
+    private var moveObserver: NSObjectProtocol?
+    private var lastReportedX: CGFloat?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let observer = moveObserver {
+            NotificationCenter.default.removeObserver(observer)
+            moveObserver = nil
+        }
+        guard let window = self.window else { return }
+
+        moveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resolveAnchor()
+        }
+
+        resolveAnchor()
+        DispatchQueue.main.async { [weak self] in
+            self?.resolveAnchor()
+        }
+    }
+
+    deinit {
+        if let observer = moveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    func resolveAnchor() {
+        guard let window = self.window, window.frame.width > 0 else { return }
+        let winX = window.frame.origin.x
+        let winW = window.frame.width
+
+        let targetX: CGFloat
+        if let itemMidX = Self.findStatusItemMidX() {
+            let relX = itemMidX - winX
+            // Verify relX is plausibly within or near the window
+            if relX >= 20 && relX <= winW - 20 {
+                targetX = relX
+            } else {
+                targetX = winW - 55
+            }
+        } else if let statusWindow = NSApp.windows.first(where: {
+            $0.className.contains("StatusBar") && $0.frame.width < winW && $0.frame.origin.x > 0
+        }) {
+            let relX = statusWindow.frame.midX - winX
+            if relX >= 20 && relX <= winW - 20 {
+                targetX = relX
+            } else {
+                targetX = winW - 55
+            }
+        } else {
+            // Default anchor position: Hog Hunter menu bar item sits on the right side
+            // of the 620pt panel, ~55pt from the right edge.
+            targetX = winW - 55
+        }
+
+        let minSafeX: CGFloat = 28
+        let maxSafeX: CGFloat = winW - 28
+        let clampedX = min(max(targetX, minSafeX), maxSafeX)
+
+        if let last = lastReportedX, abs(last - clampedX) < 0.5 { return }
+        lastReportedX = clampedX
+        onPosition?(clampedX)
+    }
+
+    static func findStatusItemMidX() -> CGFloat? {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let appAX = AXUIElementCreateApplication(pid)
+
+        var extrasMenuBarRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appAX, "AXExtrasMenuBar" as CFString, &extrasMenuBarRef) == .success,
+              let extras = extrasMenuBarRef else {
+            return nil
+        }
+
+        let extrasElement = extras as! AXUIElement
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(extrasElement, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement], !children.isEmpty else {
+            return nil
+        }
+
+        for item in children {
+            var titleRef: CFTypeRef?
+            var title: String?
+            if AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &titleRef) == .success,
+               let str = titleRef as? String {
+                title = str
+            }
+
+            if children.count == 1 || title == "Hog Hunter" || (title?.contains("Hog") ?? false) {
+                var posValue: CFTypeRef?
+                var sizeValue: CFTypeRef?
+                var point = CGPoint.zero
+                var size = CGSize.zero
+
+                if AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &posValue) == .success,
+                   let val = posValue {
+                    AXValueGetValue(val as! AXValue, .cgPoint, &point)
+                }
+                if AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &sizeValue) == .success,
+                   let val = sizeValue {
+                    AXValueGetValue(val as! AXValue, .cgSize, &size)
+                }
+
+                if size.width > 0 {
+                    return point.x + size.width / 2.0
+                }
+            }
+        }
+
+        if let first = children.first {
+            var posValue: CFTypeRef?
+            var sizeValue: CFTypeRef?
+            var point = CGPoint.zero
+            var size = CGSize.zero
+
+            if AXUIElementCopyAttributeValue(first, kAXPositionAttribute as CFString, &posValue) == .success,
+               let val = posValue {
+                AXValueGetValue(val as! AXValue, .cgPoint, &point)
+            }
+            if AXUIElementCopyAttributeValue(first, kAXSizeAttribute as CFString, &sizeValue) == .success,
+               let val = sizeValue {
+                AXValueGetValue(val as! AXValue, .cgSize, &size)
+            }
+
+            if size.width > 0 {
+                return point.x + size.width / 2.0
+            }
+        }
+
+        return nil
     }
 }
 

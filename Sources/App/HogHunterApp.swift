@@ -114,6 +114,15 @@ struct HogHunterApp: App {
             || NSClassFromString("XCTestCase") != nil
     }
 
+    static var isHarnessLaunch: Bool {
+        ProcessInfo.processInfo.arguments.contains(HarnessArgument.uiSmoke)
+            || ProcessInfo.processInfo.arguments.contains(HarnessArgument.screenshot)
+    }
+
+    static var shouldInsertMenuBarExtra: Bool {
+        !isRunningUnderTest && !isHarnessLaunch
+    }
+
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
     @StateObject private var store = HogStore(startImmediately: !HogHunterApp.isRunningUnderTest)
     @ObservedObject private var updater = AppUpdater.shared
@@ -131,7 +140,7 @@ struct HogHunterApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra(isInserted: .constant(!Self.isRunningUnderTest)) {
+        MenuBarExtra(isInserted: .constant(Self.shouldInsertMenuBarExtra)) {
             if store.dockedToMenuBar {
                 HogHunterPanel()
                     .environmentObject(store)
