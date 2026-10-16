@@ -179,12 +179,25 @@ final class MaintainStore: ObservableObject {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
                 proc.arguments = [script.path] + arguments
-                // Not pipes: nothing reads them, and a script that writes
-                // enough to fill one would stall for good.
+                let errPipe = Pipe()
                 proc.standardOutput = FileHandle.nullDevice
-                proc.standardError = FileHandle.nullDevice
+                proc.standardError = errPipe
                 proc.terminationHandler = { finished in
-                    continuation.resume(returning: finished.terminationStatus == 0)
+                    if finished.terminationStatus == 0 {
+                        continuation.resume(returning: true)
+                    } else {
+                        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                        let raw = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        if !raw.isEmpty {
+                            continuation.resume(throwing: NSError(
+                                domain: "MaintainStore",
+                                code: Int(finished.terminationStatus),
+                                userInfo: [NSLocalizedDescriptionKey: raw]
+                            ))
+                        } else {
+                            continuation.resume(returning: false)
+                        }
+                    }
                 }
                 do {
                     try proc.run()
@@ -196,16 +209,56 @@ final class MaintainStore: ObservableObject {
     }
 
     nonisolated static let catalog: [MaintainStepCatalogEntry] = [
-        MaintainStepCatalogEntry(id: "resource_sample", title: "Check disk and memory"),
-        MaintainStepCatalogEntry(id: "hoghunter_reclaim", title: "Hog Hunter disk reclaim"),
-        MaintainStepCatalogEntry(id: "janitor_worktree_retire", title: "Retire old merged git worktrees"),
-        MaintainStepCatalogEntry(id: "janitor_cache_reclaim", title: "Reclaim caches when disk is low"),
-        MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs"),
-        MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache"),
-        MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache"),
-        MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes"),
-        MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance"),
-        MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)"),
+        MaintainStepCatalogEntry(
+            id: "resource_sample",
+            title: "Check Disk and Memory",
+            description: "Samples CPU load, memory pressure, and free disk space against safety thresholds."
+        ),
+        MaintainStepCatalogEntry(
+            id: "hoghunter_reclaim",
+            title: "Hog Hunter Disk Reclaim",
+            description: "Reclaims disk bloat according to Hog Hunter's automated rules."
+        ),
+        MaintainStepCatalogEntry(
+            id: "janitor_worktree_retire",
+            title: "Retire Old Merged Git Worktrees",
+            description: "Safely cleans up stale git worktrees whose branches are merged into main."
+        ),
+        MaintainStepCatalogEntry(
+            id: "janitor_cache_reclaim",
+            title: "Reclaim Caches Under Low Disk",
+            description: "Prunes developer and build caches when free disk drops below 80 GB."
+        ),
+        MaintainStepCatalogEntry(
+            id: "pm2_logs",
+            title: "Cap Oversized PM2 Logs",
+            description: "Truncates PM2 daemon logs exceeding 10 MB to prevent unbounded disk usage."
+        ),
+        MaintainStepCatalogEntry(
+            id: "npm_cache",
+            title: "Trim npm Download Cache",
+            description: "Cleans npm download cache and unreferenced npx temporary binaries."
+        ),
+        MaintainStepCatalogEntry(
+            id: "xcode_derived_data",
+            title: "Clear Xcode Build Cache",
+            description: "Cleans Xcode DerivedData caches that have not been modified recently."
+        ),
+        MaintainStepCatalogEntry(
+            id: "simctl_delete_unavailable",
+            title: "Remove Unavailable Simulator Runtimes",
+            description: "Cleans orphaned simulator runtimes while protecting user device state."
+        ),
+        MaintainStepCatalogEntry(
+            id: "coolify_remote",
+            title: "Remote Server Maintenance",
+            description: "Performs remote Docker and system maintenance on configured Coolify host."
+        ),
+        MaintainStepCatalogEntry(
+            id: "cleanmymac_cli",
+            title: "CleanMyMac CLI Sweep",
+            description: "Runs non-interactive junk and purgeable sweeps using CleanMyMac CLI when installed."
+        ),
     ]
 
     private func loadStatus() -> MaintainStatus? {
@@ -240,6 +293,17 @@ final class MaintainStore: ObservableObject {
             return Self.catalog.filter { $0.id != "coolify_remote" }
         }
         return Self.catalog
+    }
+
+    func isStepEnabled(_ stepId: String) -> Bool {
+        if let explicit = stepToggles[stepId] {
+            return explicit
+        }
+        return !Self.defaultOffSteps.contains(stepId)
+    }
+
+    var activeCatalog: [MaintainStepCatalogEntry] {
+        visibleCatalog.filter { isStepEnabled($0.id) }
     }
 
     private var coolifyRemoteConfigured: Bool {
@@ -284,4 +348,42 @@ final class MaintainStore: ObservableObject {
         }
         return bundle
     }
+
+    func history24h(for stepId: String, now: Date = Date()) -> Step24hHistory {
+        let dayAgo = now.timeIntervalSince1970 - 86400
+        let runsIn24h = history.filter { $0.startedAt >= dayAgo }
+        var samples: [StepOutcomeSample] = []
+        var successes = 0
+        var skips = 0
+        var fails = 0
+        var lastDate: Date? = nil
+
+        // history is newest first
+        for run in runsIn24h {
+            if let stepResult = run.steps.first(where: { $0.stepId == stepId }) {
+                let date = run.finishedOrStartedAt ?? Date(timeIntervalSince1970: run.startedAt)
+                if lastDate == nil {
+                    lastDate = date
+                }
+                if stepResult.status == "ran" {
+                    successes += 1
+                } else if stepResult.status == "failed" {
+                    fails += 1
+                } else {
+                    skips += 1
+                }
+                samples.append(StepOutcomeSample(timestamp: date, status: stepResult.status, reason: stepResult.reason))
+            }
+        }
+
+        return Step24hHistory(
+            runsCount: samples.count,
+            successCount: successes,
+            skipCount: skips,
+            failCount: fails,
+            lastRunDate: lastDate,
+            recentOutcomes: samples.reversed()
+        )
+    }
 }
+

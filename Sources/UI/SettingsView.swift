@@ -68,6 +68,13 @@ struct SettingsView: View {
                 }
                 .tag(SettingsTab.cleaner)
 
+            MaintenanceSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("Maintenance", systemImage: "wrench.and.screwdriver")
+                }
+                .tag(SettingsTab.maintenance)
+
             IPhoneSettingsTab()
                 .environmentObject(store)
                 .tabItem {
@@ -96,12 +103,26 @@ struct SettingsView: View {
         .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme)
         .background(WindowActivator(role: .settings))
         .onAppear { WindowActivator.front() }
+        .onReceive(NotificationCenter.default.publisher(for: .selectSettingsTab)) { note in
+            if let tab = note.object as? SettingsTab {
+                selection = tab
+            }
+        }
     }
 
-    /// Wide enough that eight tabs fit on one row without the labels truncating,
+    static let selectSettingsTabNotification = NSNotification.Name("hoghunter.selectSettingsTab")
+}
+
+extension NSNotification.Name {
+    static let selectSettingsTab = NSNotification.Name("hoghunter.selectSettingsTab")
+}
+
+extension SettingsView {
+
+    /// Wide enough that nine tabs fit on one row without the labels truncating,
     /// and short enough that the shortest tab has no scroll bar.
-    static let windowWidth: CGFloat = 720
-    static let windowHeight: CGFloat = 430
+    static let windowWidth: CGFloat = 800
+    static let windowHeight: CGFloat = 460
 
     static var versionString: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -113,7 +134,7 @@ struct SettingsView: View {
 /// Selection identity for the Settings tabs.  Explicit rather than raw strings
 /// so the default tab is written once and cannot drift out of sync with a tab.
 enum SettingsTab: Hashable {
-    case general, alerts, startup, theme, cleaner, iphone, about, advanced
+    case general, alerts, startup, theme, cleaner, maintenance, iphone, about, advanced
 }
 
 // MARK: - General Tab
@@ -348,6 +369,53 @@ private struct CleanerSettingsTab: View {
         .onAppear {
             exclusions = CleanerExclusions.load()
         }
+    }
+}
+
+// MARK: - Maintenance Tab
+
+private struct MaintenanceSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+
+    var body: some View {
+        Form {
+            Section("Scheduled Maintenance Steps") {
+                Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.  Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(store.maintain.visibleCatalog) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(isOn: Binding(
+                            get: { store.maintain.stepToggles[entry.id] ?? (!MaintainStore.defaultOffSteps.contains(entry.id)) },
+                            set: { store.maintain.setStepEnabled(entry.id, enabled: $0) }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.title)
+                                    .font(.system(size: 12, weight: .medium))
+                                if !entry.description.isEmpty {
+                                    Text(entry.description)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                if let err = store.maintain.lastError {
+                    Text(err)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsView.windowWidth - 80)
     }
 }
 

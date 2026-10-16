@@ -46,6 +46,10 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let isRunningTests = NSClassFromString("XCTestCase") != nil
+            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        guard !isRunningTests else { return }
+
         // Sparkle self-update starts first: a build whose Info.plist carries
         // the feed updates itself hourly in the background.  A build without
         // the feed is a silent no-op (see AutoUpdateAvailability).
@@ -104,11 +108,17 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct HogHunterApp: App {
+    static var isRunningUnderTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
-    @StateObject private var store = HogStore()
+    @StateObject private var store = HogStore(startImmediately: !HogHunterApp.isRunningUnderTest)
     @ObservedObject private var updater = AppUpdater.shared
 
     init() {
+        guard !Self.isRunningUnderTest else { return }
         // Sentry first, so early-launch crashes are captured.  A build
         // without a baked-in DSN is a silent no-op.  See SentryTelemetry.
         SentryTelemetry.start()
@@ -120,7 +130,7 @@ struct HogHunterApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: .constant(!Self.isRunningUnderTest)) {
             HogHunterPanel()
                 .environmentObject(store)
         } label: {

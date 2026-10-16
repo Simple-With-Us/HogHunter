@@ -145,4 +145,22 @@ struct MaintainStepResult: Codable, Equatable, Identifiable {
 struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
+    var description: String = ""
 }
+
+struct StepOutcomeSample: Identifiable, Equatable {
+    let id = UUID()
+    let timestamp: Date
+    let status: String
+    let reason: String
+}
+
+struct Step24hHistory: Equatable {
+    let runsCount: Int
+    let successCount: Int
+    let skipCount: Int
+    let failCount: Int
+    let lastRunDate: Date?
+    let recentOutcomes: [StepOutcomeSample]
+}
+

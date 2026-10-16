@@ -215,7 +215,7 @@ final class InfisicalSettingsTests: XCTestCase {
             switch request.url?.path {
             case "/api/v1/auth/universal-auth/login":
                 return (200, self.json(["accessToken": "test-token"]))
-            case "/api/v3/secrets/hoghunter.refreshInterval":
+            case "/api/v3/secrets/raw/hoghunter.refreshInterval":
                 // The cache must NOT have the new value yet: Infisical first.
                 StubURLProtocol.note(
                     store.string(for: "hoghunter.refreshInterval") ?? "<nil>",
@@ -238,14 +238,44 @@ final class InfisicalSettingsTests: XCTestCase {
         let calls = StubURLProtocol.takeRecorded()
         let patches = calls.filter { $0.method == "PATCH" }
         XCTAssertEqual(patches.count, 1)
-        XCTAssertEqual(patches[0].path, "/api/v3/secrets/hoghunter.refreshInterval")
+        XCTAssertEqual(patches[0].path, "/api/v3/secrets/raw/hoghunter.refreshInterval")
         XCTAssertEqual(patches[0].body?["secretValue"] as? String, "9")
         XCTAssertEqual(patches[0].body?["environment"] as? String, "prod")
+        XCTAssertEqual(patches[0].body?["secretPath"] as? String, "/")
         XCTAssertEqual(
             patches[0].body?["workspaceId"] as? String,
             "00000000-1111-2222-3333-444444444444"
         )
         XCTAssertEqual(store.string(for: "hoghunter.refreshInterval"), "9")
+        XCTAssertNil(settings.lastError)
+    }
+
+    @MainActor
+    func testWriteThroughFallsBackToPostOn404() async throws {
+        let store = InfisicalStore()
+        StubURLProtocol.handler = { [weak self] request in
+            guard let self else { return (500, Data()) }
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/v1/auth/universal-auth/login"):
+                return (200, self.json(["accessToken": "test-token"]))
+            case ("PATCH", "/api/v3/secrets/raw/hoghunter.refreshInterval"):
+                return (404, self.json(["message": "secret not found"]))
+            case ("POST", "/api/v3/secrets/raw/hoghunter.refreshInterval"):
+                return (200, self.json(["secret": ["secretKey": "hoghunter.refreshInterval"]]))
+            default:
+                return (500, Data())
+            }
+        }
+        let settings = makeSettings(store: store)
+
+        try await settings.set("5", forKey: "hoghunter.refreshInterval")
+
+        let calls = StubURLProtocol.takeRecorded()
+        let posts = calls.filter { $0.method == "POST" && $0.path?.contains("secrets/raw") == true }
+        XCTAssertEqual(posts.count, 1)
+        XCTAssertEqual(posts[0].body?["type"] as? String, "shared")
+        XCTAssertEqual(posts[0].body?["secretValue"] as? String, "5")
+        XCTAssertEqual(store.string(for: "hoghunter.refreshInterval"), "5")
         XCTAssertNil(settings.lastError)
     }
 

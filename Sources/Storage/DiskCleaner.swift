@@ -172,7 +172,7 @@ enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
 
 /// User exclusions for disk scanning and cleaning.
 struct CleanerExclusions: Codable, Equatable, Sendable {
-    var excludedCategories: Set<String> = []
+    var excludedCategories: Set<String> = [CleanCategory.apfsSnapshots.rawValue]
     var excludedPaths: [String] = []
 
     static let defaultsKey = "hoghunter.cleaner.exclusions"
@@ -638,7 +638,7 @@ final class DiskCleaner: @unchecked Sendable {
     /// emitted carrying the full purgeable figure so the panel still has
     /// something to show and the clean can still thin.
     func scanAPFSSnapshots() -> [CleanItem] {
-        let snapshotNames = listSnapshots("/") ?? SnapshotSafety.listLocalSnapshots()
+        let snapshotNames = listSnapshots("/") ?? []
         let purgeable = purgeableProvider("/")
 
         if snapshotNames.isEmpty {

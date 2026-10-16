@@ -237,6 +237,17 @@ enum HogActions {
     }
 
     @MainActor
+    static func openSettings(tab: SettingsTab? = nil) {
+        if let tab {
+            NotificationCenter.default.post(name: .selectSettingsTab, object: tab)
+        }
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector("showSettingsWindow:"), to: nil, from: nil)
+        scheduleFrontSettingsWindow()
+    }
+
+    @MainActor
     static func openStorageWindow(openWindow: OpenWindowAction) {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: "hoghunter.storage")

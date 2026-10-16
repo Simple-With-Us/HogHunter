@@ -310,8 +310,8 @@ final class CompanionModel {
 
     func submitCode() async {
         guard case let .code(peerID) = phase, let mac = discovered.first(where: { $0.id == peerID }) else { return }
-        let token = codeDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
-        guard token.count >= 8 else {
+        let token = CompanionToken.normalizeCode(codeDraft)
+        guard token.count == 8 else {
             codeError = "Enter the 8 character code from Hog Hunter Settings on your Mac."
             codeFailure = .other
             return
@@ -846,8 +846,9 @@ final class CompanionModel {
             return
         }
         let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Self.defaultPort
-        let typed = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
-        guard typed.isEmpty || typed.count >= 8 else {
+        let rawDraft = remoteTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = rawDraft.isEmpty ? "" : CompanionToken.normalizeCode(rawDraft)
+        guard typed.isEmpty || typed.count == 8 else {
             remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
             return
         }
