@@ -413,6 +413,9 @@ struct CleanItem: Identifiable, Hashable, Sendable {
     var url: URL
     var bytes: UInt64
     var fileCount: Int
+    /// True when the size walk hit its file cap, so `bytes` is a lower
+    /// bound ("at least N"), not an exact size.
+    var isApproximate: Bool = false
     var lastModified: Date?
     var isSelected: Bool
     var detail: String?
@@ -489,6 +492,12 @@ struct CleanCategoryReport: Identifiable, Sendable {
         HogFormat.memory(totalBytes)
     }
 
+    /// True when any item's size walk hit its file cap, so the category
+    /// total is a lower bound, not an exact size.
+    var anyApproximate: Bool {
+        items.contains { $0.isApproximate }
+    }
+
     var formattedSelectedSize: String {
         HogFormat.memory(selectedBytes)
     }
@@ -520,6 +529,12 @@ struct CleanScanReport: Sendable {
 
     var formattedTotalSize: String {
         HogFormat.memory(totalBytes)
+    }
+
+    /// True when any item's size walk hit its file cap, so totals built from
+    /// this report are lower bounds, not exact sizes.
+    var anyApproximate: Bool {
+        categories.contains { $0.anyApproximate }
     }
 
     var formattedSelectedSize: String {
@@ -823,6 +838,7 @@ final class DiskCleaner: @unchecked Sendable {
                 url: itemURL,
                 bytes: stats.bytes,
                 fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
                 isSelected: CleanCategory.tempFiles.defaultSelected,
                 detail: "Stale temporary file — untouched for 24+ hours"
@@ -991,6 +1007,7 @@ final class DiskCleaner: @unchecked Sendable {
                 url: url,
                 bytes: stats.bytes,
                 fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
                 isSelected: isHighChurn ? false : CleanCategory.userCaches.defaultSelected,
                 detail: itemDetail
@@ -1021,6 +1038,7 @@ final class DiskCleaner: @unchecked Sendable {
                     url: url,
                     bytes: stats.bytes,
                     fileCount: stats.fileCount,
+                    isApproximate: stats.isApproximate,
                     lastModified: stats.lastModified,
                     isSelected: CleanCategory.logsAndDiagnostics.defaultSelected,
                     detail: "Log files & diagnostic data"
@@ -1042,6 +1060,7 @@ final class DiskCleaner: @unchecked Sendable {
                     url: diagReportsURL,
                     bytes: stats.bytes,
                     fileCount: stats.fileCount,
+                    isApproximate: stats.isApproximate,
                     lastModified: stats.lastModified,
                     isSelected: CleanCategory.logsAndDiagnostics.defaultSelected,
                     detail: "System crash dumps and diagnostic traces"
@@ -1063,6 +1082,7 @@ final class DiskCleaner: @unchecked Sendable {
                     url: crashReportsURL,
                     bytes: stats.bytes,
                     fileCount: stats.fileCount,
+                    isApproximate: stats.isApproximate,
                     lastModified: stats.lastModified,
                     isSelected: CleanCategory.logsAndDiagnostics.defaultSelected,
                     detail: "Application crash logs"
@@ -1096,6 +1116,7 @@ final class DiskCleaner: @unchecked Sendable {
                 url: url,
                 bytes: stats.bytes,
                 fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
                 isSelected: CleanCategory.trash.defaultSelected,
                 detail: "Sitting in Trash"
@@ -1144,6 +1165,7 @@ final class DiskCleaner: @unchecked Sendable {
                 url: url,
                 bytes: stats.bytes,
                 fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
                 isSelected: CleanCategory.developer.defaultSelected,
                 detail: target.detail
@@ -1166,6 +1188,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: simDevicesURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
                         detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
@@ -1191,6 +1214,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: coreDeviceURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
                         detail: "Symbols and support files from connected iOS devices.  Re-downloads when a device is connected."
@@ -1248,6 +1272,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: url,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: CleanCategory.orphanedData.defaultSelected,
                         detail: "Uninstalled application container"
@@ -1279,6 +1304,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: url,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: CleanCategory.orphanedData.defaultSelected,
                         detail: "Leftover application data from removed app"
@@ -1308,6 +1334,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: url,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: CleanCategory.orphanedData.defaultSelected,
                         detail: "Saved state from uninstalled app"
@@ -1346,6 +1373,7 @@ final class DiskCleaner: @unchecked Sendable {
                     url: folderURL,
                     bytes: stats.bytes,
                     fileCount: stats.fileCount,
+                    isApproximate: stats.isApproximate,
                     lastModified: modDate,
                     isSelected: false,
                     detail: "Agent session older than 7 days"
@@ -1371,6 +1399,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: folderURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: modDate,
                         isSelected: false,
                         detail: "Grok transcript older than 7 days"
@@ -1394,6 +1423,7 @@ final class DiskCleaner: @unchecked Sendable {
                         url: fileURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
                         detail: "Archived Codex transcript"
@@ -1418,6 +1448,7 @@ final class DiskCleaner: @unchecked Sendable {
                             url: url,
                             bytes: stats.bytes,
                             fileCount: stats.fileCount,
+                            isApproximate: stats.isApproximate,
                             lastModified: stats.lastModified,
                             isSelected: false,
                             detail: "Stale BotFleet update package"
@@ -1443,6 +1474,13 @@ final class DiskCleaner: @unchecked Sendable {
                            Date().timeIntervalSince(modified) < 24 * 3600 {
                             continue
                         }
+                        // A moved-in old tree keeps its file mtimes, so the
+                        // file gate above cannot see the move.  The directory's
+                        // own ctime is refreshed by the rename, and only the
+                        // move proves the copy just arrived.
+                        if Self.directoryMovedWithin(url, within: 24 * 3600) {
+                            continue
+                        }
                         items.append(CleanItem(
                             category: .aiArtifacts,
                             title: name,
@@ -1450,6 +1488,7 @@ final class DiskCleaner: @unchecked Sendable {
                             url: url,
                             bytes: stats.bytes,
                             fileCount: stats.fileCount,
+                            isApproximate: stats.isApproximate,
                             lastModified: stats.lastModified,
                             isSelected: true,
                             detail: "Abandoned BotFleet update/rollback package (zero re-download penalty)"
@@ -1534,7 +1573,7 @@ final class DiskCleaner: @unchecked Sendable {
                         fileCount: 1,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Ollama Model Weights (\(HogFormat.memory(stats.bytes)))"
+                        detail: "Ollama Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1558,9 +1597,10 @@ final class DiskCleaner: @unchecked Sendable {
                         url: repoURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Hugging Face Model Snapshot (\(HogFormat.memory(stats.bytes)))"
+                        detail: "Hugging Face Model Snapshot (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1583,9 +1623,10 @@ final class DiskCleaner: @unchecked Sendable {
                         url: modelURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "LM Studio Model Weights (\(HogFormat.memory(stats.bytes)))"
+                        detail: "LM Studio Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1606,9 +1647,10 @@ final class DiskCleaner: @unchecked Sendable {
                         url: modelURL,
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Whisper Model Weights (\(HogFormat.memory(stats.bytes)))"
+                        detail: "Whisper Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
                     ))
                 }
             }
@@ -1738,6 +1780,21 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         return items.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// True when the directory itself was created, renamed, or had its metadata
+    /// changed within the window.  Reads the ctime (not mtime or birth time):
+    /// moving an old tree preserves every file mtime inside, and only the move
+    /// refreshes the directory's own ctime.  Fails closed: an unreadable path
+    /// reads as just moved, so it keeps its grace period.
+    static func directoryMovedWithin(_ url: URL, within interval: TimeInterval, now: Date = Date()) -> Bool {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return true }
+        let changed = Date(
+            timeIntervalSince1970: TimeInterval(info.st_ctimespec.tv_sec)
+                + TimeInterval(info.st_ctimespec.tv_nsec) / 1_000_000_000
+        )
+        return now.timeIntervalSince(changed) < interval
     }
 
     // MARK: - Cleaning Execution
@@ -2053,11 +2110,21 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Directory Stats Helper
 
+    /// Allocated bytes, file count, and last modification date of a directory
+    /// or file.  `isApproximate` is true when the walk hit `fileCap`, so
+    /// `bytes` is a lower bound ("at least N"), never an exact size.
+    struct DirectoryStats: Sendable {
+        var bytes: UInt64
+        var fileCount: Int
+        var lastModified: Date?
+        var isApproximate: Bool = false
+    }
+
     /// Computes allocated bytes, file count, and last modification date of a directory or file.
-    func directoryStats(at url: URL, maxDepth: Int = 10, fileCap: Int = 25_000) -> (bytes: UInt64, fileCount: Int, lastModified: Date?) {
+    func directoryStats(at url: URL, maxDepth: Int = 10, fileCap: Int = 25_000) -> DirectoryStats {
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else {
-            return (0, 0, nil)
+            return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
         }
 
         let keys: Set<URLResourceKey> = [
@@ -2069,11 +2136,11 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         if !isDir.boolValue {
-            guard let values = try? url.resourceValues(forKeys: keys) else { return (0, 0, nil) }
+            guard let values = try? url.resourceValues(forKeys: keys) else { return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil) }
             let allocated = values.fileAllocatedSize ?? 0
             let logical = values.fileSize ?? 0
             let bytes = allocated > 0 ? UInt64(allocated) : UInt64(logical)
-            return (bytes, 1, values.contentModificationDate)
+            return DirectoryStats(bytes: bytes, fileCount: 1, lastModified: values.contentModificationDate)
         }
 
         guard let enumerator = fileManager.enumerator(
@@ -2081,20 +2148,21 @@ final class DiskCleaner: @unchecked Sendable {
             includingPropertiesForKeys: Array(keys),
             options: [.skipsPackageDescendants]
         ) else {
-            return (0, 0, nil)
+            return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
         }
 
         var totalBytes: UInt64 = 0
         var totalCount = 0
         var latestDate: Date?
+        var hitCap = false
 
         for case let fileURL as URL in enumerator {
-            if Task.isCancelled { return (0, 0, nil) }
+            if Task.isCancelled { return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil) }
             guard let values = try? fileURL.resourceValues(forKeys: keys) else { continue }
             if values.isDirectory == true { continue }
 
             totalCount += 1
-            if totalCount > fileCap { break }
+            if totalCount > fileCap { hitCap = true; break }
 
             let allocated = values.fileAllocatedSize ?? 0
             let logical = values.fileSize ?? 0
@@ -2107,7 +2175,7 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        return (totalBytes, totalCount, latestDate)
+        return DirectoryStats(bytes: totalBytes, fileCount: totalCount, lastModified: latestDate, isApproximate: hitCap)
     }
 
     // MARK: - Internal Helpers

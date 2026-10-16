@@ -193,18 +193,24 @@ final class DiskCleanerTests: XCTestCase {
         let fm = FileManager.default
         let apps = tempDirectory.appendingPathComponent("apps", isDirectory: true)
         let fresh = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-fresh", isDirectory: true)
-        let old = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-old", isDirectory: true)
-        for dir in [fresh, old] {
+        let moved = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-moved", isDirectory: true)
+        for dir in [fresh, moved] {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             try Data(repeating: 0x41, count: 1024).write(to: dir.appendingPathComponent("package.json"))
         }
         let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
-        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: old.appendingPathComponent("package.json").path)
+        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: moved.appendingPathComponent("package.json").path)
 
         let cleaner = DiskCleaner(homeDirectory: tempDirectory)
         let titles = cleaner.scanAIArtifacts().map(\.title)
-        XCTAssertTrue(titles.contains(".botfleet-server.node_modules.rollback-old"))
         XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-fresh"), "a fresh rollback may still be needed")
+        // The moved copy holds eight-day-old files, but the directory itself
+        // was just created (ctime is now), so it still gets its grace day.  A
+        // copy old enough to list cannot be fabricated without waiting out the
+        // clock; the listing path is covered by the vacuum rule's mocked-clock
+        // test in test-hoghunter-clean.py.
+        XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-moved"))
+        XCTAssertTrue(DiskCleaner.directoryMovedWithin(moved, within: 24 * 3600))
     }
 
     // MARK: - Safety Guard Tests
@@ -400,6 +406,23 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertEqual(stats.fileCount, 3)
         XCTAssertGreaterThanOrEqual(stats.bytes, 14336) // 2048 + 4096 + 8192
         XCTAssertNotNil(stats.lastModified)
+        XCTAssertFalse(stats.isApproximate)
+    }
+
+    func testDirectoryStatsFlagsACappedWalkAsApproximate() throws {
+        // Ten 1 KB files; a cap of 4 counts 5 files (the file that trips the
+        // cap is seen but not sized) and reports a lower bound, flagged.
+        for index in 0..<10 {
+            try Data(repeating: 0x41, count: 1024).write(to: tempDirectory.appendingPathComponent("file\(index).txt"))
+        }
+
+        let full = cleaner.directoryStats(at: tempDirectory)
+        XCTAssertFalse(full.isApproximate)
+        XCTAssertEqual(full.fileCount, 10)
+
+        let capped = cleaner.directoryStats(at: tempDirectory, fileCap: 4)
+        XCTAssertTrue(capped.isApproximate)
+        XCTAssertLessThan(capped.bytes, full.bytes)
     }
 
     // MARK: - Formatting & Report Tests

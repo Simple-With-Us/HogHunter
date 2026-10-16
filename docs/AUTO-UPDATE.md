@@ -26,7 +26,7 @@ The iOS companion ships on the same trigger: `.github/workflows/ios-testflight.y
 | `scripts/mac-release-build.sh` | xcodegen + xcodebuild a universal Release, embed and assert `Sparkle.framework`, write the Sparkle Info.plist keys, sign inside-out, run `codesign --verify --deep --strict`, notarize with an App Store Connect API key when `NOTARY_KEY_*` are set, and run `spctl --assess` on the stapled app and DMG. |
 | `scripts/make_appcast.sh` | Runs Sparkle's `generate_appcast` over one archive and checks the result: one item, EdDSA-signed, pointing at the right URL. |
 | `.github/workflows/mac-release.yml` | The release job.  Also builds and verifies (never publishes) on PRs that touch the bundle. |
-| `.github/actions/infisical-secrets`, `scripts/infisical-fetch.mjs` | Reads the signing certificate and the Sparkle private key from the HogHunter Infisical project (prod), with same-named repository secrets as the fallback. |
+| `.github/actions/infisical-secrets`, `scripts/infisical-fetch.mjs` | Reads the signing certificate from Fleet-OPS "Fleet Secrets" (prod, `/mac-certs`) and the Sparkle private key from the HogHunter Infisical project (prod), with same-named repository secrets as the fallback. |
 
 ## Info.plist Keys
 
@@ -46,7 +46,7 @@ The iOS companion ships on the same trigger: `.github/workflows/ios-testflight.y
 
 Names only; no value is ever printed:
 
-- `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD` — the Developer ID Application certificate for team `CC8UTF7ATG`, in the HogHunter Infisical project (`prod`), same-named GitHub repository secrets as fallback.
+- `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD` — the Developer ID Application certificate for team `CC8UTF7ATG`, in Fleet-OPS ("Fleet Secrets") `prod` at path `/mac-certs`, read at workflow runtime with the org Infisical credentials (`INFISICAL_FLEET_OPS_PROJECT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID` / `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET`); same-named GitHub repository secrets as fallback.
 - `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` — the App Store Connect API key; `notarytool` signs in with it.
 - `SPARKLE_ED_PRIVATE_KEY` — the EdDSA private key (base64 of the 32-byte seed) that signs each update archive; in the HogHunter Infisical project (`prod`), same-named repository secret as fallback.  Generated 2026-10-14 for Hog Hunter; the matching public key is committed above.
 

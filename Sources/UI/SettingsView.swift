@@ -122,19 +122,30 @@ private struct GeneralSettingsTab: View {
     @EnvironmentObject private var store: HogStore
 
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
+    @AppStorage(HogStore.Key.backgroundRefreshInterval) private var backgroundRefreshInterval: Double = 10
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
     var body: some View {
         Form {
             Section("Sampling & Display") {
-                Picker("Refresh Every", selection: $refreshInterval) {
+                Picker("Active Refresh (When Open)", selection: $refreshInterval) {
                     Text("2 Seconds").tag(2.0)
                     Text("3 Seconds").tag(3.0)
                     Text("5 Seconds").tag(5.0)
+                }
+
+                Picker("Background Refresh (When Closed)", selection: $backgroundRefreshInterval) {
+                    Text("5 Seconds").tag(5.0)
                     Text("10 Seconds").tag(10.0)
                     Text("15 Seconds").tag(15.0)
+                    Text("30 Seconds").tag(30.0)
                 }
+
+                Text("Faster refresh when the panel is open keeps live numbers responsive.\u{00A0} A slower cadence in the background saves compute and battery while building history and serving the iPhone companion.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
                     ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }

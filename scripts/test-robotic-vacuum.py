@@ -1218,6 +1218,106 @@ class TestHistoryRetention(unittest.TestCase):
             self.assertEqual(history[-1]["run_id"], f"r{DEFAULT_HISTORY_MAX_RUNS + 1}")
 
 
+class TestMaintainSurface(unittest.TestCase):
+    def test_maintain_py_is_the_canonical_entry(self) -> None:
+        maintain = REPO / "scripts" / "maintain.py"
+        self.assertTrue(maintain.is_file())
+        text = maintain.read_text(encoding="utf-8")
+        self.assertIn("def main(", text)
+
+    def test_robotic_vacuum_aliases_maintain(self) -> None:
+        shim = (REPO / "scripts" / "robotic-vacuum.py").read_text(encoding="utf-8")
+        self.assertIn("maintain.py", shim)
+
+    def test_registry_marks_shims_observed(self) -> None:
+        from vacuum.script_registry import bootstrap_registry, is_invokable, load_registry
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bootstrap_registry(home, REPO, {})
+            reg = load_registry(home)
+            by_id = {e["id"]: e for e in reg["scripts"]}
+            self.assertEqual(by_id["shim_janitor"]["mode"], "observed")
+            self.assertFalse(is_invokable(by_id["shim_janitor"]))
+            self.assertTrue(is_invokable(by_id["maintain_scheduler"]))
+
+    def test_legacy_data_dir_migrates_to_maintain(self) -> None:
+        from vacuum.config import migrate_legacy_support_if_needed
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            legacy = home / "Library/Application Support/HogHunter/RoboticVacuum"
+            legacy.mkdir(parents=True)
+            (legacy / "status.json").write_text('{"health":"healthy"}', encoding="utf-8")
+            new_root = migrate_legacy_support_if_needed(home)
+            self.assertTrue((new_root / "status.json").is_file())
+            self.assertFalse((legacy / "status.json").exists())
+
+    def test_legacy_migration_continues_after_swift_moved_status(self) -> None:
+        from vacuum.config import migrate_legacy_support_if_needed
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            legacy = home / "Library/Application Support/HogHunter/RoboticVacuum"
+            maintain = home / "Library/Application Support/HogHunter/Maintain"
+            legacy.mkdir(parents=True)
+            maintain.mkdir(parents=True)
+            (maintain / "status.json").write_text('{"health":"healthy"}', encoding="utf-8")
+            (legacy / "scheduler-state.json").write_text(
+                '{"last_full":"2026-10-01T00:00:00Z"}', encoding="utf-8"
+            )
+            new_root = migrate_legacy_support_if_needed(home)
+            self.assertTrue((new_root / "scheduler-state.json").is_file())
+            self.assertFalse((legacy / "scheduler-state.json").exists())
+
+    def test_load_config_reads_migrated_legacy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            legacy = home / "Library/Application Support/HogHunter/RoboticVacuum"
+            legacy.mkdir(parents=True)
+            (legacy / "config.json").write_text(
+                '{"coolify_ssh_host":"fleet.example","steps":{"coolify_remote":{"enabled":true}}}',
+                encoding="utf-8",
+            )
+            cfg = load_config(home=home)
+            self.assertEqual(cfg.get("coolify_ssh_host"), "fleet.example")
+            self.assertTrue(cfg["steps"]["coolify_remote"]["enabled"])
+
+    def test_registry_reconciles_coolify_when_host_changes(self) -> None:
+        from vacuum.script_registry import bootstrap_registry, load_registry, save_registry
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bootstrap_registry(home, REPO, {})
+            reg = load_registry(home)
+            for entry in reg["scripts"]:
+                if entry.get("id") == "coolify_remote":
+                    entry["mode"] = "observed"
+                    entry["owner"] = "stale"
+            save_registry(home, reg)
+            bootstrap_registry(home, REPO, {"coolify_ssh_host": "coolify.local"})
+            reg = load_registry(home)
+            coolify = next(e for e in reg["scripts"] if e["id"] == "coolify_remote")
+            self.assertEqual(coolify["mode"], "owned")
+            self.assertIn("coolify.local", coolify["owner"])
+
+    def test_coolify_remote_stays_off_without_host(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = load_config(home=Path(td))
+            self.assertFalse(cfg["steps"]["coolify_remote"]["enabled"])
+
+    def test_status_includes_maintenance_scripts(self) -> None:
+        from vacuum.scheduler import build_status
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = load_config(home=home)
+            store = VacuumStore(cfg, home=home)
+            status = build_status(store, cfg)
+            self.assertIn("maintenance_scripts", status)
+            self.assertTrue(any(row.get("id") == "maintain_scheduler" for row in status["maintenance_scripts"]))
+
+
 def load_tests(loader, tests, pattern):
     """CI runs only this file, so load the lane doctor tests beside the others."""
     import importlib.util

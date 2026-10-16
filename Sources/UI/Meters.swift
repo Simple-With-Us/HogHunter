@@ -16,7 +16,7 @@ struct Meter: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
             ProgressView(value: min(max(value / 100, 0), 1))
                 .tint(severity.color)
             Text(caption)

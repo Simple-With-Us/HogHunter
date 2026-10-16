@@ -105,6 +105,8 @@ PROBE_FAILED = 10 ** 6
 IDLE_MIN_OK = 90
 IDLE_MIN_SCRATCH = 180   # 3h for temp scratch
 IDLE_MIN_STAGING = 60    # 1h for app-update staging
+IDLE_MIN_ROLLBACK = 1440  # 24h for abandoned update/rollback copies
+IDLE_MIN_BUILD_OUTPUT = 7 * 24 * 60  # 7d for regenerable build output in main checkouts
 
 # Per-rule wall clock.  A scan that takes longer than the pressure it is
 # responding to is worse than no scan: under load 500+ a TMPDIR or ~/Code
@@ -388,6 +390,27 @@ def open_handles(path: str) -> int:
         log(f"lsof exited {p.returncode} for {path!r}; treating it as open")
         return 1
     return len(pids)
+
+
+def touched_since(path: str, days: float) -> bool:
+    """True when any file under path is newer than `days` days.
+
+    `newest_file_age_min` caps its walk, so a huge tree can hide a recent file
+    past the cap and read as idle.  find with -quit answers on the FIRST recent
+    file instead, which is fast exactly when it matters (an active tree), and
+    only walks everything when the tree is genuinely quiet.  A failed look
+    reads as touched: an unprovable tree is never called idle.
+    """
+    try:
+        proc = subprocess.run(
+            ["find", path, "-type", "f", "-newermt", f"-{days:g} days", "-print", "-quit"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return True
+    if proc.returncode != 0:
+        return True
+    return bool(proc.stdout.strip())
 
 
 def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
@@ -796,6 +819,46 @@ def rule_app_staging() -> list[Candidate]:
     return cands
 
 
+def rule_botfleet_rollback() -> list[Candidate]:
+    """Abandoned BotFleet server update/rollback copies.
+
+    An update moves the running tree to `.botfleet-server.node_modules.rollback-<stamp>`
+    and swaps in a fresh copy.  The rollback is regenerable (a reinstall rebuilds
+    it: zero re-download penalty), but the first day is a grace period in case the
+    new copy fails and the operator rolls back by hand.  Age is the younger of the
+    newest file inside and the directory's own ctime: a moved-in old tree keeps its
+    file mtimes, and only the move (which refreshes ctime) proves it just arrived.
+    The live tree never matches:
+    the glob needs the versioned `.node_modules.` infix with a suffix, and symlinks
+    are skipped without following.
+    """
+    cands: list[Candidate] = []
+    apps = HOME / "apps"
+    if not apps.is_dir():
+        return []
+    now = time.time()
+    for path in sorted(apps.glob(".botfleet-server.node_modules.*")):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if is_forbidden(str(path)) or has_keep_sentinel(str(path)):
+            continue
+        try:
+            moved_at = path.stat().st_ctime
+        except OSError:
+            continue
+        if newest_file_age_min(str(path)) < IDLE_MIN_ROLLBACK:
+            continue
+        if (now - moved_at) / 60.0 < IDLE_MIN_ROLLBACK:
+            continue
+        if open_handles(str(path)):
+            continue
+        cands.append(Candidate(
+            category="botfleet-rollback", path=str(path), bytes=dir_bytes(str(path)),
+            reason="abandoned BotFleet update/rollback copy, idle 24h+, no open files",
+        ))
+    return cands
+
+
 def rule_dev_caches() -> list[Candidate]:
     """Package-manager and toolchain download caches.
 
@@ -1095,6 +1158,25 @@ def rule_ask_first_inventory() -> list[Candidate]:
                     category="ask-first", path=str(b), bytes=size(str(b)),
                     reason="Claude VM bundle (Monet / Parall)", tier="ask-first", op="report",
                 ))
+    # Orphaned Google Drive local copies, left behind when Drive for desktop is
+    # disconnected and reconnected ("GoogleDrive-<account> (<date> <time>)").
+    # Report only, never auto-delete: an orphan can hold files the live Drive
+    # lacks.  The live folder ("GoogleDrive-<account>") has no " (" suffix, so
+    # it never matches.  The date separator before AM/PM is a narrow no-break
+    # space, so match on the parenthesis, never on a literal timestamp.
+    cloud = HOME / "Library/CloudStorage"
+    if cloud.is_dir():
+        for entry in sorted(cloud.iterdir()):
+            name = entry.name
+            if not (name.startswith("GoogleDrive-") and " (" in name):
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            cands.append(Candidate(
+                category="ask-first", path=str(entry), bytes=size(str(entry)),
+                reason="orphaned Drive copy (report only; may hold files the live Drive lacks)",
+                tier="ask-first", op="report",
+            ))
     # BotFleet update generations -- ask once a pending update exists.
     gens = HOME / "Library/Caches/BotFleet/updates"
     if gens.is_dir():
@@ -1104,6 +1186,35 @@ def rule_ask_first_inventory() -> list[Candidate]:
                 category="ask-first", path=str(g), bytes=size(str(g)),
                 reason="BotFleet update generation (non-newest)", tier="ask-first", op="report",
             ))
+    # Idle regenerable build output in main checkouts (report only): .build,
+    # build, .next and dist trees with no file touched in 7 days and no open
+    # files.  Main checkouts are never lanes, so the vacuum's lane logic never
+    # sees them; the names mirror REGENERABLE_NAMES in scripts/vacuum/lanes.py.
+    code = HOME / "Code"
+    if code.is_dir():
+        for repo in sorted(code.iterdir()):
+            if repo.is_symlink() or not repo.is_dir() or not (repo / ".git").exists():
+                continue
+            for dirname in (".build", "build", ".next", "dist"):
+                target = repo / dirname
+                if target.is_symlink() or not target.is_dir():
+                    continue
+                if is_forbidden(str(target)) or has_keep_sentinel(str(target)):
+                    continue
+                if open_handles(str(target)):
+                    continue
+                # Fast path first: a recent file inside the cap proves activity
+                # cheaply.  Only a quiet-looking tree pays for the uncapped
+                # find probe, which catches a recent file hiding past the cap.
+                if newest_file_age_min(str(target)) < IDLE_MIN_BUILD_OUTPUT:
+                    continue
+                if touched_since(str(target), IDLE_MIN_BUILD_OUTPUT / (24 * 60)):
+                    continue
+                cands.append(Candidate(
+                    category="ask-first", path=str(target), bytes=size(str(target)),
+                    reason=f"idle regenerable build output in {repo.name} (report only; rebuilds on demand)",
+                    tier="ask-first", op="report",
+                ))
     return cands
 
 
@@ -1111,6 +1222,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "snapshots": (rule_snapshots, "APFS / Time Machine local snapshots"),
     "temp-scratch": (rule_temp_scratch, "Orphaned per-user temp scratch"),
     "app-staging": (rule_app_staging, "Extracted but unused app updaters"),
+    "botfleet-rollback": (rule_botfleet_rollback, "Abandoned BotFleet update/rollback copies"),
     "dev-caches": (rule_dev_caches, "Package manager and toolchain caches"),
     "xcode-artifacts": (rule_xcode_artifacts, "DerivedData and device support"),
     "simulator-runtimes": (rule_simulator_runtimes, "iOS simulator runtimes"),
