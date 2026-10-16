@@ -430,6 +430,7 @@ struct CleanItem: Identifiable, Hashable, Sendable {
         url: URL,
         bytes: UInt64,
         fileCount: Int,
+        isApproximate: Bool = false,
         lastModified: Date?,
         isSelected: Bool,
         detail: String? = nil,
@@ -443,6 +444,7 @@ struct CleanItem: Identifiable, Hashable, Sendable {
         self.url = url
         self.bytes = bytes
         self.fileCount = fileCount
+        self.isApproximate = isApproximate
         self.lastModified = lastModified
         self.isSelected = isSelected
         self.detail = detail
