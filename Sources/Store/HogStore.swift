@@ -51,6 +51,8 @@ final class HogStore: ObservableObject {
         resolver.lookup(pid)
     }
 
+    private var visiblePanelTokens = Set<UUID>()
+
     /// Set by the panel.  Metadata resolution beyond the menu bar's top hog and
     /// all history aggregation are gated on this.
     @Published var panelVisible = false {
@@ -62,6 +64,16 @@ final class HogStore: ObservableObject {
                 _ = tick()
             }
         }
+    }
+
+    func registerPanelVisible(_ token: UUID) {
+        visiblePanelTokens.insert(token)
+        panelVisible = true
+    }
+
+    func unregisterPanelVisible(_ token: UUID) {
+        visiblePanelTokens.remove(token)
+        panelVisible = !visiblePanelTokens.isEmpty
     }
 
     // MARK: - Persisted choices

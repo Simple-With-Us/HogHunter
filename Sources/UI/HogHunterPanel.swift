@@ -20,6 +20,7 @@ struct HogHunterPanel: View {
     @State private var hasVisitedStorage: Bool = false
     @State private var hasVisitedNetwork: Bool = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
+    @State private var panelInstanceId = UUID()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -93,7 +94,7 @@ struct HogHunterPanel: View {
             }
         }
         .onAppear {
-            store.panelVisible = true
+            store.registerPanelVisible(panelInstanceId)
             if selectedTab == .storage {
                 hasVisitedStorage = true
             } else if selectedTab == .network {
@@ -101,7 +102,7 @@ struct HogHunterPanel: View {
             }
         }
         .onDisappear {
-            store.panelVisible = false
+            store.unregisterPanelVisible(panelInstanceId)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : (selectedTab == .storage ? "Hog Hunter — storage and disk cleaner" : "Hog Hunter — network activity"))
