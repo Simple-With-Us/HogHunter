@@ -145,4 +145,5 @@ struct MaintainStepResult: Codable, Equatable, Identifiable {
 struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
+    var tooltip: String = ""
 }
