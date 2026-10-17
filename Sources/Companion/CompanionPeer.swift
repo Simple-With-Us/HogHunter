@@ -173,6 +173,36 @@ struct CompanionPeer: Equatable, Sendable {
         if b[0..<15].allSatisfy({ $0 == 0 }), b[15] == 1 { return true }   // ::1
         if b[0] == 0xfe, (b[1] & 0xc0) == 0x80 { return true }              // fe80::/10 link-local
         if (b[0] & 0xfe) == 0xfc { return true }                            // fc00::/7 unique-local, includes Tailscale's fd7a:115c:a1e0::/48
+        // Home Wi-Fi with global unicast IPv6 (2000::/3): check if client shares a /64 prefix with any local interface
+        if (b[0] & 0xe0) == 0x20 {
+            let prefixes = localIPv6Prefixes()
+            if prefixes.contains(where: { b.starts(with: $0) }) { return true }
+        }
         return false
+    }
+
+    private static func localIPv6Prefixes() -> [[UInt8]] {
+        var prefixes: [[UInt8]] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(first) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = ptr {
+            let flags = Int32(current.pointee.ifa_flags)
+            if (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0 && (flags & IFF_LOOPBACK) == 0,
+               let sa = current.pointee.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET6) {
+                sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                    var bytes = [UInt8](repeating: 0, count: 16)
+                    withUnsafeBytes(of: sin6.pointee.sin6_addr) { raw in
+                        for i in 0..<min(16, raw.count) { bytes[i] = raw[i] }
+                    }
+                    if (bytes[0] & 0xe0) == 0x20 {
+                        prefixes.append(Array(bytes.prefix(8)))
+                    }
+                }
+            }
+            ptr = current.pointee.ifa_next
+        }
+        return prefixes
     }
 }

@@ -23,6 +23,24 @@ from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 _HEAVY_LANE_STEPS = ("janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps")
 
 
+def ensure_standard_mac_paths() -> None:
+    standard_paths = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        str(Path.home() / ".local/bin"),
+    ]
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    for p in reversed(standard_paths):
+        if p not in current and os.path.isdir(p):
+            current.insert(0, p)
+    os.environ["PATH"] = os.pathsep.join(current)
+
+
+ensure_standard_mac_paths()
+
+
 def _plural(count: int, noun: str, plural: Optional[str] = None) -> str:
     """The count with the right form of the noun: "1 log", "0 logs", "2 folders".  Step reasons are shown to a
     person in the Robotic Vacuum, so none of them hedges the plural in parentheses."""
@@ -370,11 +388,65 @@ class VacuumEngine:
             self.home / "Library/Developer/Xcode/iOS DeviceSupport", _DEVICE_SUPPORT_IDLE_SECONDS, "DeviceSupport version"
         )
 
+    def _derived_data_dir_problem(self, path: Path) -> str:
+        """Why path cannot be the DerivedData folder, or "" when it can.  The step deletes every idle child of
+        the folder it is given, so a path typed in Settings > Maintenance (or reported by Xcode) has to be an
+        absolute, real folder named DerivedData, and never the home folder or one of its parents."""
+        if not path.is_absolute():
+            return "not an absolute path"
+        if path.is_symlink():
+            return "a symlink"
+        if not path.is_dir():
+            return "not a folder"
+        if path.name.lower() != "deriveddata":
+            return "not a folder named DerivedData"
+        try:
+            real = path.resolve()
+            home = self.home.resolve()
+        except OSError as exc:
+            return f"cannot resolve ({type(exc).__name__})"
+        if real == home or real in home.parents or real == Path(real.anchor):
+            return "the home folder or one of its parents"
+        return ""
+
+    def _xcode_derived_data_path(self) -> tuple[Optional[Path], str]:
+        """Finds Xcode DerivedData: the path set in Settings > Maintenance first, then the default under home,
+        then Xcode's IDECustomDerivedDataLocation.  A configured path that fails _derived_data_dir_problem is a
+        skip with the reason (None, why), never a silent fall back to another folder; an Xcode-reported one that
+        fails it is ignored."""
+        cfg_path = str(self.cfg.get("xcode_derived_data_path") or "").strip()
+        if cfg_path:
+            p = expand_path(cfg_path, self.home)
+            problem = self._derived_data_dir_problem(p)
+            if problem:
+                return None, f"configured DerivedData path refused: {problem} ({p})"
+            return p, ""
+        default_home = self.home / "Library/Developer/Xcode/DerivedData"
+        if default_home.is_dir():
+            return default_home, ""
+        try:
+            res = subprocess.run(
+                ["defaults", "read", "com.apple.dt.Xcode", "IDECustomDerivedDataLocation"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                custom = Path(res.stdout.strip()).expanduser()
+                if not self._derived_data_dir_problem(custom):
+                    return custom, ""
+        except Exception:
+            pass
+        return default_home, ""
+
     def _xcode_derived_data(self) -> tuple[int, str, StepStatus]:
         """Per project folder, untouched 90 minutes, and never while a build runs."""
-        return self._clear_idle_children(
-            self.home / "Library/Developer/Xcode/DerivedData", _DERIVED_DATA_IDLE_SECONDS, "DerivedData project"
-        )
+        path, refused = self._xcode_derived_data_path()
+        if path is None:
+            return 0, refused, StepStatus.SKIPPED
+        if not path.is_dir():
+            return 0, f"DerivedData path missing ({path})", StepStatus.SKIPPED
+        return self._clear_idle_children(path, _DERIVED_DATA_IDLE_SECONDS, "DerivedData project")
 
     def _core_simulator_caches(self) -> tuple[int, str, StepStatus]:
         return self._clear_glob_children(self.home / "Library/Developer/CoreSimulator/Caches")
@@ -388,6 +460,17 @@ class VacuumEngine:
             "not run: it would delete simulator devices in CoreSimulator/Devices, which no cleanup step touches",
             StepStatus.SKIPPED,
         )
+
+    def _tool_command(self, tool_id: str, name: str) -> Optional[str]:
+        """The command to run for an external tool: the installation picked under Connected CLI in Settings >
+        Maintenance (`tool_paths`) when it is an absolute path to an executable file, otherwise the bare name
+        for PATH to resolve.  None when neither exists, which the caller reports as not installed."""
+        picked_paths = self.cfg.get("tool_paths")
+        if isinstance(picked_paths, dict):
+            picked = str(picked_paths.get(tool_id) or "").strip()
+            if picked and os.path.isabs(picked) and os.path.isfile(picked) and os.access(picked, os.X_OK):
+                return picked
+        return name if shutil.which(name) else None
 
     def _shutdown_simulators(self, dry_run: bool = False) -> tuple[int, str, StepStatus]:
         """Shut down booted Xcode iOS Simulators when no build, test, or Simulator.app is active.  When Bitrig is
@@ -459,14 +542,15 @@ class VacuumEngine:
         return 0, reason, StepStatus.RAN if shut else StepStatus.SKIPPED
 
     def _npm_cache(self) -> tuple[int, str, StepStatus]:
-        if not shutil.which("npm"):
+        npm = self._tool_command("npm", "npm")
+        if not npm:
             return 0, "npm not installed", StepStatus.SKIPPED
         if self._install_running("npm (install|ci|update|prune)"):
             return 0, self._skip_busy("npm install in progress"), StepStatus.SKIPPED
         busy = self._build_running()
         if busy:
             return 0, f"skipped: {busy}", StepStatus.SKIPPED
-        subprocess.run(["npm", "cache", "clean", "--force"], capture_output=True, timeout=300)
+        subprocess.run([npm, "cache", "clean", "--force"], capture_output=True, timeout=300)
         npx = self.home / ".npm/_npx"
         if npx.is_symlink() or not npx.is_dir():
             return 0, "npm cache cleaned", StepStatus.RAN
@@ -502,13 +586,14 @@ class VacuumEngine:
     def _brew_cleanup(self) -> tuple[int, str, StepStatus]:
         """The brew rule of config/reclaim-policy.json: `brew cleanup --prune=all`, skipped while brew or node-gyp
         runs."""
-        if not shutil.which("brew"):
+        brew = self._tool_command("brew", "brew")
+        if not brew:
             return 0, "brew not installed", StepStatus.SKIPPED
         if self._install_running(r"brew(\.sh|\.rb)? (install|upgrade|reinstall|update|cleanup|bundle|fetch|uninstall)"):
             return 0, self._skip_busy("brew install in progress"), StepStatus.SKIPPED
         if self._install_running("node-gyp"):
             return 0, self._skip_busy("node-gyp build in progress"), StepStatus.SKIPPED
-        subprocess.run(["brew", "cleanup", "--prune=all"], capture_output=True, timeout=600)
+        subprocess.run([brew, "cleanup", "--prune=all"], capture_output=True, timeout=600)
         return 0, "brew cleanup --prune=all finished", StepStatus.RAN
 
     def _hoghunter_reclaim(self, band: str) -> tuple[int, str, StepStatus]:
@@ -554,11 +639,12 @@ class VacuumEngine:
         closed-source software, so this step only invokes it, never vendors it, and only after the owner turns
         the step on.  Mirrors the --cleanmymac path in scripts/hoghunter-clean; keep the two command lists in
         sync.  A missing CLI is a skip, not a failure; a non-zero exit or a timeout is a failure with the tail."""
-        if shutil.which("cleanmymac") is None:
+        cleanmymac = self._tool_command("cleanmymac", "cleanmymac")
+        if cleanmymac is None:
             return 0, "CleanMyMac CLI not installed", StepStatus.SKIPPED
         commands = (
-            (["cleanmymac", "clean", "junk", "--force"], 600),
-            (["cleanmymac", "optimize", "purgeable"], 300),
+            ([cleanmymac, "clean", "junk", "--force"], 600),
+            ([cleanmymac, "optimize", "purgeable"], 300),
         )
         ran: list[str] = []
         for argv, timeout in commands:
@@ -584,7 +670,8 @@ class VacuumEngine:
         return max(30, budget)
 
     def _pm2_logs(self) -> tuple[int, str, StepStatus]:
-        cap = 50 * 1024 * 1024
+        cap_mb = int(self.cfg.get("pm2_logs_cap_mb", 50))
+        cap = cap_mb * 1024 * 1024
         truncated = 0
         freed = 0
         logs_dir = self.home / ".pm2/logs"

@@ -145,5 +145,45 @@ struct MaintainStepResult: Codable, Equatable, Identifiable {
 struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
+    var description: String = ""
     var tooltip: String = ""
+    let associatedTool: ToolInfo?
+
+    init(id: String, title: String, description: String = "", tooltip: String = "", associatedTool: ToolInfo? = nil) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.tooltip = tooltip
+        self.associatedTool = associatedTool ?? ToolCatalog.tool(for: id)
+    }
+
+    var isToolRequired: Bool {
+        associatedTool != nil
+    }
+
+    var isInstalled: Bool {
+        guard let tool = associatedTool else { return true }
+        return tool.isInstalled
+    }
+
+    var installedPaths: [String] {
+        associatedTool?.installedPaths ?? []
+    }
 }
+
+struct StepOutcomeSample: Identifiable, Equatable {
+    let id = UUID()
+    let timestamp: Date
+    let status: String
+    let reason: String
+}
+
+struct Step24hHistory: Equatable {
+    let runsCount: Int
+    let successCount: Int
+    let skipCount: Int
+    let failCount: Int
+    let lastRunDate: Date?
+    let recentOutcomes: [StepOutcomeSample]
+}
+

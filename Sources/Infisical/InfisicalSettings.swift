@@ -274,10 +274,10 @@ final class InfisicalClient: InfisicalServing {
     }
 
     /// Write-through: create-or-update a single secret.  The secret name goes
-    /// in the path (PATCH /api/v3/secrets/{name}); the caller must already
-    /// hold a valid access token.
+    /// in the path (PATCH /api/v3/secrets/raw/{name}), falling back to POST
+    /// with `type: "shared"` on a 404 if the secret does not exist yet.
     func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String) async throws {
-        var url = baseURL.appendingPathComponent("/api/v3/secrets")
+        var url = baseURL.appendingPathComponent("/api/v3/secrets/raw")
         url.appendPathComponent(key)
         var request = URLRequest(url: url)
         request.httpMethod = "PATCH"
@@ -286,9 +286,26 @@ final class InfisicalClient: InfisicalServing {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "workspaceId": projectId,
             "environment": environment,
+            "secretPath": "/",
             "secretValue": value,
         ])
         let (data, response) = try await perform(request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+            var postRequest = URLRequest(url: url)
+            postRequest.httpMethod = "POST"
+            postRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            postRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            postRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+                "workspaceId": projectId,
+                "environment": environment,
+                "secretPath": "/",
+                "secretValue": value,
+                "type": "shared",
+            ])
+            let (postData, postResponse) = try await perform(postRequest)
+            try check(postResponse, data: postData)
+            return
+        }
         try check(response, data: data)
     }
 
@@ -485,13 +502,15 @@ final class InfisicalSettings: ObservableObject {
             NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
         }
         startRefreshTimer()
-        becomeActiveObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.refreshIfStale(minimumGap: 30)
+        if !MaintainStore.isRunningUnderTest {
+            becomeActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.refreshIfStale(minimumGap: 30)
+                }
             }
         }
     }
@@ -805,9 +824,15 @@ final class InfisicalSettings: ObservableObject {
         // 3. Fallback to Keychain read strictly without UI (interactionNotAllowed = true)
         let legacyRead = readCredentialFromKeychainSilently()
         if let cred = legacyRead.credential, cred.isComplete {
-            // Migrate to secure file storage and purge the legacy Keychain item so it never prompts again
-            try? writeCredentialToFile(cred)
-            try? removeCredentialFromKeychain()
+            // Migrate to secure file storage and purge the legacy Keychain item so it never prompts again.
+            // Purge only after the file write succeeded: if it throws, the Keychain item is the only copy,
+            // so it stays and the next launch retries the migration.
+            do {
+                try writeCredentialToFile(cred)
+                try? removeCredentialFromKeychain()
+            } catch {
+                // Keep the Keychain copy; the credential is still returned for this launch.
+            }
             return KeychainCredentialRead(credential: cred, terminal: true)
         }
 

@@ -172,7 +172,7 @@ enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
 
 /// User exclusions for disk scanning and cleaning.
 struct CleanerExclusions: Codable, Equatable, Sendable {
-    var excludedCategories: Set<String> = []
+    var excludedCategories: Set<String> = [CleanCategory.apfsSnapshots.rawValue]
     var excludedPaths: [String] = []
 
     static let defaultsKey = "hoghunter.cleaner.exclusions"

@@ -604,9 +604,18 @@ enum CompanionToken {
         String((0..<length).compactMap { _ in alphabet.randomElement() })
     }
 
+    static func normalizeCode(_ raw: String) -> String {
+        if isDeviceToken(raw) { return raw.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .filter { $0 != "-" && $0 != " " }
+            .uppercased()
+    }
+
     static func matches(_ lhs: String, _ rhs: String) -> Bool {
-        let a = Array(lhs.utf8)
-        let b = Array(rhs.utf8)
+        let normA = normalizeCode(lhs)
+        let normB = normalizeCode(rhs)
+        let a = Array(normA.utf8)
+        let b = Array(normB.utf8)
         guard a.count == b.count, !a.isEmpty else { return false }
         var diff: UInt8 = 0
         for index in a.indices {

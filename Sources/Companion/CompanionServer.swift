@@ -236,6 +236,11 @@ final class CompanionServer: @unchecked Sendable {
             send(CompanionHTTP.pairResponse(approvedToken: nil))
             return
         }
+        // If a previous pair prompt was pending for more than 90 seconds, clear it so
+        // an expired/abandoned request cannot permanently block future pairing attempts.
+        if pairPending && Date().timeIntervalSince(lastPairPromptAt) >= 90.0 {
+            pairPending = false
+        }
         guard !pairPending, Date().timeIntervalSince(lastPairPromptAt) >= 5.0 else {
             send(CompanionHTTP.pairBusyResponse())
             return

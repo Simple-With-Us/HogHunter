@@ -26,6 +26,16 @@ final class MaintainStore: ObservableObject {
     @Published private(set) var isRunningNow = false
     @Published var lastError: String?
 
+    // Custom scripts & plugins
+    @Published private(set) var customScripts: [MaintainScriptEntry] = []
+
+    // Maintenance tuning knobs
+    @Published var lowFreeGiB: Double = 80.0
+    @Published var pm2LogsCapMB: Int = 50
+    @Published var coolifySSHHost: String = ""
+    @Published var customDerivedDataPath: String = ""
+    @Published var toolPaths: [String: String] = [:]
+
     private var timer: Timer?
     private let statusURL: URL
     private let historyURL: URL
@@ -121,7 +131,78 @@ final class MaintainStore: ObservableObject {
         lastRefreshAt = Date()
         status = loadStatus()
         history = loadHistory()
+        // The config first: loadStepToggles walks visibleCatalog, which reads
+        // coolifyHost, so the host has to be current before the toggles load.
+        loadMaintainConfig()
         stepToggles = loadStepToggles()
+        customScripts = MaintainRegistryStore.loadScripts()
+    }
+
+    private func loadMaintainConfig() {
+        let json = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        // Set even when the file or key is missing, so a host removed on disk
+        // reads empty here too, as the old read-on-every-access getter did.
+        // Infisical is the source of truth: a non-empty host there wins once
+        // the settings are configured, and the file is the fallback.
+        let fileHost = (json?["coolify_ssh_host"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let infisicalHost = infisical.isConfigured
+            ? (infisicalStore.string(for: InfisicalKey.maintainCoolifySshHost) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+        let host = infisicalHost.isEmpty ? fileHost : infisicalHost
+        if coolifyHost != host { coolifyHost = host }
+        // The Maintenance tab's host field edits this copy and saves it
+        // through setCoolifyHost, so it shows the same resolved host.
+        if coolifySSHHost != host { coolifySSHHost = host }
+        guard let json else { return }
+        if let jan = json["janitor"] as? [String: Any], let low = jan["low_free_gib"] as? Double {
+            lowFreeGiB = low
+        }
+        if let cap = json["pm2_logs_cap_mb"] as? Int {
+            pm2LogsCapMB = cap
+        }
+        if let xcode = json["xcode_derived_data_path"] as? String {
+            customDerivedDataPath = xcode
+        }
+        if let paths = json["tool_paths"] as? [String: String] {
+            toolPaths = paths
+        }
+    }
+
+    func saveMaintainConfig() {
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: configURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        }
+        var jan = json["janitor"] as? [String: Any] ?? [:]
+        jan["low_free_gib"] = lowFreeGiB
+        json["janitor"] = jan
+
+        json["pm2_logs_cap_mb"] = pm2LogsCapMB
+        // No coolify_ssh_host here: a host save goes through setCoolifyHost,
+        // which writes Infisical first and only then the local file.
+        json["xcode_derived_data_path"] = customDerivedDataPath
+        json["tool_paths"] = toolPaths
+
+        if let outData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+            try? outData.write(to: configURL, options: .atomic)
+        }
+        refresh()
+    }
+
+    func setToolPath(toolId: String, path: String) {
+        toolPaths[toolId] = path
+        saveMaintainConfig()
+    }
+
+    func revealScriptsFolder() {
+        MaintainRegistryStore.ensureDirectoriesExist()
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: MaintainRegistryStore.scriptsDirectory.path)
+    }
+
+    func openRegistryFile() {
+        NSWorkspace.shared.open(MaintainRegistryStore.registryURL)
     }
 
     /// Reads the files only when the last read is older than `maxAge`.  The
@@ -233,16 +314,69 @@ final class MaintainStore: ObservableObject {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
                 proc.arguments = [script.path] + arguments
-                // Not pipes: nothing reads them, and a script that writes
-                // enough to fill one would stall for good.
+                var env = ProcessInfo.processInfo.environment
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                let extraPaths = [
+                    "/opt/homebrew/bin",
+                    "/opt/homebrew/sbin",
+                    "/usr/local/bin",
+                    "/usr/local/sbin",
+                    "\(home)/.local/bin"
+                ]
+                let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = (extraPaths + [existing]).joined(separator: ":")
+                proc.environment = env
+
+                // stderr goes to a temporary file, not a pipe: a pipe nobody
+                // drains fills at 64 KB and blocks the script on its next
+                // write, so it never exits and this continuation never
+                // resumes.  A file never blocks the writer, and a background
+                // child that inherits the descriptor cannot hold the read open.
+                let errURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("hoghunter-maintain-\(UUID().uuidString).stderr")
+                let errHandle: FileHandle
+                do {
+                    guard FileManager.default.createFile(atPath: errURL.path, contents: nil) else {
+                        throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: errURL.path])
+                    }
+                    errHandle = try FileHandle(forWritingTo: errURL)
+                } catch {
+                    // createFile may already have made the empty file before
+                    // the open threw; removing a missing file is a no-op.
+                    try? FileManager.default.removeItem(at: errURL)
+                    continuation.resume(throwing: error)
+                    return
+                }
                 proc.standardOutput = FileHandle.nullDevice
-                proc.standardError = FileHandle.nullDevice
+                proc.standardError = errHandle
                 proc.terminationHandler = { finished in
-                    continuation.resume(returning: finished.terminationStatus == 0)
+                    try? errHandle.close()
+                    let errData = (try? Data(contentsOf: errURL)) ?? Data()
+                    try? FileManager.default.removeItem(at: errURL)
+                    if finished.terminationStatus == 0 {
+                        continuation.resume(returning: true)
+                    } else {
+                        // The tail carries the traceback's last line; a whole
+                        // 64 KB log is not an error message.
+                        let raw = String(String(decoding: errData.suffix(4096), as: UTF8.self)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .suffix(2000))
+                        if !raw.isEmpty {
+                            continuation.resume(throwing: NSError(
+                                domain: "MaintainStore",
+                                code: Int(finished.terminationStatus),
+                                userInfo: [NSLocalizedDescriptionKey: raw]
+                            ))
+                        } else {
+                            continuation.resume(returning: false)
+                        }
+                    }
                 }
                 do {
                     try proc.run()
                 } catch {
+                    try? errHandle.close()
+                    try? FileManager.default.removeItem(at: errURL)
                     continuation.resume(throwing: error)
                 }
             }
@@ -250,17 +384,78 @@ final class MaintainStore: ObservableObject {
     }
 
     nonisolated static let catalog: [MaintainStepCatalogEntry] = [
-        MaintainStepCatalogEntry(id: "resource_sample", title: "Check disk and memory", tooltip: "Samples host disk, memory, and CPU metrics against alert thresholds."),
-        MaintainStepCatalogEntry(id: "hoghunter_reclaim", title: "Hog Hunter disk reclaim", tooltip: "Runs Hog Hunter's built-in disk cleanup rules."),
-        MaintainStepCatalogEntry(id: "janitor_worktree_retire", title: "Retire old merged git worktrees", tooltip: "Cleans up merged and idle git worktrees older than policy."),
-        MaintainStepCatalogEntry(id: "janitor_cache_reclaim", title: "Reclaim caches when disk is low", tooltip: "Frees build and temporary caches when disk space is tight."),
-        MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs", tooltip: "Truncates oversized PM2 background process logs in place."),
-        MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache", tooltip: "Trims global package manager caches when no builds are active."),
-        MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache", tooltip: "Prunes stale Xcode DerivedData and module caches."),
-        MaintainStepCatalogEntry(id: "shutdown_simulators", title: "Shut down Xcode Simulators", tooltip: "Shuts down booted iOS Simulators when no build is running (preserving 1 simulator for Bitrig)."),
-        MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", tooltip: "Removes unavailable iOS simulator runtime remnants."),
-        MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance", tooltip: "Runs /etc/cron.daily/coolify-auto-maintenance over SSH to clean Docker containers, images, and container logs on your remote Coolify server (e.g. using SSH alias 'coolify', IP, or domain)."),
-        MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)", tooltip: "Invokes the CleanMyMac CLI tool if installed locally."),
+        MaintainStepCatalogEntry(
+            id: "resource_sample",
+            title: "Check Disk and Memory",
+            description: "Samples CPU load, memory pressure, and free disk space against safety thresholds.",
+            tooltip: "Samples host disk, memory, and CPU metrics against alert thresholds."
+        ),
+        MaintainStepCatalogEntry(
+            id: "hoghunter_reclaim",
+            title: "Hog Hunter Disk Reclaim",
+            description: "Reclaims disk bloat according to Hog Hunter's automated rules.",
+            tooltip: "Runs Hog Hunter's built-in disk cleanup rules."
+        ),
+        MaintainStepCatalogEntry(
+            id: "janitor_worktree_retire",
+            title: "Retire Old Merged Git Worktrees",
+            description: "Safely cleans up stale git worktrees whose branches are merged into main.",
+            tooltip: "Cleans up merged and idle git worktrees older than policy."
+        ),
+        MaintainStepCatalogEntry(
+            id: "janitor_cache_reclaim",
+            title: "Reclaim Caches Under Low Disk",
+            description: "Prunes developer and build caches when free disk drops below threshold.",
+            tooltip: "Frees build and temporary caches when disk space is tight."
+        ),
+        MaintainStepCatalogEntry(
+            id: "pm2_logs",
+            title: "Cap Oversized PM2 Logs",
+            description: "Truncates PM2 daemon logs exceeding the configured cap to prevent unbounded disk usage.",
+            tooltip: "Truncates oversized PM2 background process logs in place.",
+            associatedTool: ToolCatalog.pm2
+        ),
+        MaintainStepCatalogEntry(
+            id: "npm_cache",
+            title: "Trim npm Download Cache",
+            description: "Cleans npm download cache and unreferenced npx temporary binaries.",
+            tooltip: "Trims global package manager caches when no builds are active.",
+            associatedTool: ToolCatalog.npm
+        ),
+        MaintainStepCatalogEntry(
+            id: "xcode_derived_data",
+            title: "Clear Xcode Build Cache",
+            description: "Cleans Xcode DerivedData caches that have not been modified recently.",
+            tooltip: "Prunes stale Xcode DerivedData and module caches.",
+            associatedTool: ToolCatalog.xcode
+        ),
+        MaintainStepCatalogEntry(
+            id: "shutdown_simulators",
+            title: "Shut Down Xcode Simulators",
+            description: "Shuts down booted iOS Simulators when no build, test, or Simulator.app is running.",
+            tooltip: "Shuts down booted iOS Simulators when no build is running (preserving 1 simulator for Bitrig).",
+            associatedTool: ToolCatalog.xcode
+        ),
+        MaintainStepCatalogEntry(
+            id: "simctl_delete_unavailable",
+            title: "Remove Unavailable Simulator Runtimes",
+            description: "Protects simulator devices and containers; runtime caches are safely cleared by the Simulator cache step.",
+            tooltip: "Removes unavailable iOS simulator runtime remnants.",
+            associatedTool: ToolCatalog.xcode
+        ),
+        MaintainStepCatalogEntry(
+            id: "coolify_remote",
+            title: "Remote Server Maintenance",
+            description: "Performs remote Docker and system maintenance on configured Coolify host.",
+            tooltip: "Runs /etc/cron.daily/coolify-auto-maintenance over SSH to clean Docker containers, images, and container logs on your remote Coolify server (e.g. using SSH alias 'coolify', IP, or domain)."
+        ),
+        MaintainStepCatalogEntry(
+            id: "cleanmymac_cli",
+            title: "CleanMyMac CLI Sweep",
+            description: "Runs non-interactive junk and purgeable sweeps using CleanMyMac CLI when installed.",
+            tooltip: "Invokes the CleanMyMac CLI tool if installed locally.",
+            associatedTool: ToolCatalog.cleanMyMac
+        ),
     ]
 
     private func loadStatus() -> MaintainStatus? {
@@ -297,17 +492,24 @@ final class MaintainStore: ObservableObject {
         return Self.catalog
     }
 
-    var coolifyHost: String {
-        if infisical.isConfigured,
-           let configured = infisicalStore.string(for: InfisicalKey.maintainCoolifySshHost),
-           !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return configured.trimmingCharacters(in: .whitespacesAndNewlines)
+    func isStepEnabled(_ stepId: String) -> Bool {
+        if let explicit = stepToggles[stepId] {
+            return explicit
         }
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        let host = json["coolify_ssh_host"] as? String ?? ""
-        return host.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !Self.defaultOffSteps.contains(stepId)
     }
+
+    var activeCatalog: [MaintainStepCatalogEntry] {
+        visibleCatalog.filter { isStepEnabled($0.id) }
+    }
+
+    /// The remote server SSH host, trimmed, as of the last `refresh()`:
+    /// Infisical's `hoghunter.maintain.coolifySshHost` when the settings are
+    /// configured and it is set, else `coolify_ssh_host` from config.json.
+    /// Held in memory because the Settings view and
+    /// `visibleCatalog` read it on every render, which re-read and parsed the
+    /// file each time; `setCoolifyHost` refreshes it once the save lands.
+    @Published private(set) var coolifyHost: String = ""
 
     private var coolifyHostTask: Task<Void, Never>?
 
@@ -315,8 +517,17 @@ final class MaintainStore: ObservableObject {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let launcher = self.launcher
         let infisical = self.infisical
-        coolifyHostTask?.cancel()
+        // Cancelling a Task does not stop a script it already launched, so a
+        // save waits for the previous one to finish before it launches its
+        // own: an older run can never land after a newer one and overwrite
+        // it.  The cancel still drops a save that has not launched yet.
+        let previous = coolifyHostTask
+        previous?.cancel()
         coolifyHostTask = Task { [weak self] in
+            _ = await previous?.value
+            // A newer save superseded this one while it waited: drop it before
+            // it writes its older value to Infisical.
+            if Task.isCancelled { return }
             if infisical.isConfigured {
                 let gen = infisical.connectionGeneration
                 do {
@@ -407,4 +618,42 @@ final class MaintainStore: ObservableObject {
         }
         return bundle
     }
+
+    func history24h(for stepId: String, now: Date = Date()) -> Step24hHistory {
+        let dayAgo = now.timeIntervalSince1970 - 86400
+        let runsIn24h = history.filter { $0.startedAt >= dayAgo }
+        var samples: [StepOutcomeSample] = []
+        var successes = 0
+        var skips = 0
+        var fails = 0
+        var lastDate: Date? = nil
+
+        // history is newest first
+        for run in runsIn24h {
+            if let stepResult = run.steps.first(where: { $0.stepId == stepId }) {
+                let date = run.finishedOrStartedAt ?? Date(timeIntervalSince1970: run.startedAt)
+                if lastDate == nil {
+                    lastDate = date
+                }
+                if stepResult.status == "ran" {
+                    successes += 1
+                } else if stepResult.status == "failed" {
+                    fails += 1
+                } else {
+                    skips += 1
+                }
+                samples.append(StepOutcomeSample(timestamp: date, status: stepResult.status, reason: stepResult.reason))
+            }
+        }
+
+        return Step24hHistory(
+            runsCount: samples.count,
+            successCount: successes,
+            skipCount: skips,
+            failCount: fails,
+            lastRunDate: lastDate,
+            recentOutcomes: samples.reversed()
+        )
+    }
 }
+

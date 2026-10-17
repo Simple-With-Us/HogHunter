@@ -124,6 +124,20 @@ class VacuumStore:
         self._locked_json_update(cfg_path, {}, updater)
         self.cfg = load_config(cfg_path, self.home)
 
+    def save_config_value(self, key_path: str, value: Any) -> None:
+        cfg_path = self.data_dir / "config.json"
+
+        def updater(user_cfg: dict[str, Any]) -> dict[str, Any]:
+            keys = key_path.split(".")
+            d = user_cfg
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
+            return user_cfg
+
+        self._locked_json_update(cfg_path, {}, updater)
+        self.cfg = load_config(cfg_path, self.home)
+
     def save_coolify_host(self, host: str) -> None:
         cfg_path = self.data_dir / "config.json"
 

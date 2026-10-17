@@ -96,7 +96,7 @@ final class HogStore: ObservableObject {
         didSet {
             persist()
             restartTimer()
-            writeThroughInfisical(key: InfisicalKey.refreshInterval, value: String(refreshInterval))
+            writeThroughInfisical(key: InfisicalKey.refreshInterval, value: String(Int(refreshInterval)))
         }
     }
     @Published var backgroundRefreshInterval: TimeInterval = 10 {

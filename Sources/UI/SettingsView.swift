@@ -69,6 +69,13 @@ struct SettingsView: View {
                 }
                 .tag(SettingsTab.cleaner)
 
+            MaintenanceSettingsTab()
+                .environmentObject(store)
+                .tabItem {
+                    Label("Maintenance", systemImage: "wrench.and.screwdriver")
+                }
+                .tag(SettingsTab.maintenance)
+
             IPhoneSettingsTab()
                 .environmentObject(store)
                 .tabItem {
@@ -96,13 +103,33 @@ struct SettingsView: View {
         // A stored value nobody recognises falls back to nil -- i.e. follow the Mac.
         .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme)
         .background(WindowActivator(role: .settings))
-        .onAppear { WindowActivator.front() }
+        .onAppear {
+            WindowActivator.front()
+            // A tab asked for before this window existed (the notification
+            // had no subscriber yet) is picked up here.
+            if let tab = HogActions.takePendingSettingsTab() { selection = tab }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectSettingsTab)) { note in
+            if let tab = note.object as? SettingsTab {
+                selection = tab
+                _ = HogActions.takePendingSettingsTab()
+            }
+        }
     }
 
-    /// Wide enough that eight tabs fit on one row without the labels truncating,
+    static let selectSettingsTabNotification = NSNotification.Name("hoghunter.selectSettingsTab")
+}
+
+extension NSNotification.Name {
+    static let selectSettingsTab = NSNotification.Name("hoghunter.selectSettingsTab")
+}
+
+extension SettingsView {
+
+    /// Wide enough that nine tabs fit on one row without the labels truncating,
     /// and short enough that the shortest tab has no scroll bar.
-    static let windowWidth: CGFloat = 720
-    static let windowHeight: CGFloat = 430
+    static let windowWidth: CGFloat = 800
+    static let windowHeight: CGFloat = 460
 
     static var versionString: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -114,7 +141,7 @@ struct SettingsView: View {
 /// Selection identity for the Settings tabs.  Explicit rather than raw strings
 /// so the default tab is written once and cannot drift out of sync with a tab.
 enum SettingsTab: Hashable {
-    case general, alerts, startup, theme, cleaner, iphone, about, advanced
+    case general, alerts, startup, theme, cleaner, maintenance, iphone, about, advanced
 }
 
 // MARK: - General Tab
@@ -391,6 +418,313 @@ private struct CleanerSettingsTab: View {
             exclusions = CleanerExclusions.load()
             coolifyHost = store.maintain.coolifyHost
         }
+    }
+}
+
+// MARK: - Maintenance Tab
+
+private struct MaintenanceSettingsTab: View {
+    @EnvironmentObject private var store: HogStore
+
+    var body: some View {
+        MaintenanceSettingsContent(maintain: store.maintain)
+    }
+}
+
+private struct MaintenanceSettingsContent: View {
+    @ObservedObject var maintain: MaintainStore
+
+    /// Mirrors `RETIRE_MIN_DAYS` in `scripts/vacuum/lanes.py`, a code
+    /// constant the engine never reads from the config.
+    static let worktreeRetireMinDays = 7
+
+    var body: some View {
+        Form {
+            Section("Scheduled Maintenance Steps") {
+                Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.  Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(maintain.visibleCatalog) { entry in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top) {
+                            Toggle(isOn: Binding(
+                                get: { maintain.stepToggles[entry.id] ?? (!MaintainStore.defaultOffSteps.contains(entry.id)) },
+                                set: { maintain.setStepEnabled(entry.id, enabled: $0) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(entry.title)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(entry.isInstalled ? Color.primary : Color.secondary)
+
+                                        if !entry.isInstalled {
+                                            if let tool = entry.associatedTool {
+                                                Link(destination: URL(string: tool.installUrl)!) {
+                                                    HStack(spacing: 3) {
+                                                        Image(systemName: "arrow.up.right.square")
+                                                            .font(.system(size: 10))
+                                                        Text("Install \(tool.name)")
+                                                            .font(.system(size: 11, weight: .medium))
+                                                            .italic()
+                                                    }
+                                                    .foregroundStyle(.blue)
+                                                }
+                                                .help("Run in Terminal: \(tool.installCommand)")
+
+                                                Text("• Not Installed")
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundStyle(.orange)
+                                                    .italic()
+                                            }
+                                        }
+                                    }
+
+                                    if !entry.description.isEmpty {
+                                        Text(entry.description)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                            .disabled(!entry.isInstalled)
+                            .opacity(entry.isInstalled ? 1.0 : 0.65)
+                        }
+
+                        // If multiple installations of this tool exist, let the user select which one to connect
+                        if let tool = entry.associatedTool, tool.hasMultipleInstallations,
+                           ToolCatalog.engineRunsPickedPath(tool) {
+                            HStack(spacing: 6) {
+                                Text("Connected CLI:")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Picker("", selection: Binding(
+                                    get: { maintain.toolPaths[tool.id] ?? tool.installedPaths.first ?? "" },
+                                    set: { maintain.setToolPath(toolId: tool.id, path: $0) }
+                                )) {
+                                    ForEach(tool.installedPaths, id: \.self) { path in
+                                        Text(path).tag(path)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .font(.system(size: 11))
+                            }
+                            .padding(.leading, 24)
+                        }
+
+                        // Recent 24h history for this task
+                        stepHistoryView(for: entry.id)
+                            .padding(.leading, 24)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                if let err = maintain.lastError {
+                    Text(err)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Section("Maintenance Sweeps & Thresholds") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Cache Reclaim Disk Threshold:")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Text("\(Int(maintain.lowFreeGiB)) GB")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    Slider(value: $maintain.lowFreeGiB, in: 30...200, step: 5)
+                        .onChange(of: maintain.lowFreeGiB) { _ in maintain.saveMaintainConfig() }
+                    Text("Trigger cache reclaim when available disk space falls below this limit (default 80 GB).")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("PM2 Log Truncation Cap:")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Text("\(maintain.pm2LogsCapMB) MB")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    Slider(value: Binding(
+                        get: { Double(maintain.pm2LogsCapMB) },
+                        set: { maintain.pm2LogsCapMB = Int($0) }
+                    ), in: 10...200, step: 10)
+                        .onChange(of: maintain.pm2LogsCapMB) { _ in maintain.saveMaintainConfig() }
+                    Text("Truncate Node.js PM2 process manager logs in ~/.pm2/logs that exceed this file size.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Merged Git Worktree Retention:")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Text("\(Self.worktreeRetireMinDays) days")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    // Read-only on purpose: the engine's lane_settings ignores
+                    // numeric `lanes` keys in the config, so a stray value can
+                    // neither loosen nor tighten this safety floor.
+                    Text("A merged lane worktree must sit idle at least this long before automated retirement.\u{00A0} This is a fixed safety limit, not a setting.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Remote Server Maintenance Host:")
+                        .font(.system(size: 12, weight: .medium))
+                    HStack {
+                        TextField("e.g. root@coolify.jays.services", text: $maintain.coolifySSHHost)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { maintain.setCoolifyHost(maintain.coolifySSHHost) }
+                        Button("Save") {
+                            maintain.setCoolifyHost(maintain.coolifySSHHost)
+                        }
+                    }
+                    Text("SSH destination for remote server maintenance sweeps. Leave blank to disable.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Xcode DerivedData Path:")
+                        .font(.system(size: 12, weight: .medium))
+                    HStack {
+                        TextField("Auto-detected or custom path", text: $maintain.customDerivedDataPath)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { maintain.saveMaintainConfig() }
+                        Button("Save") {
+                            maintain.saveMaintainConfig()
+                        }
+                        Button("Auto") {
+                            maintain.customDerivedDataPath = ""
+                            maintain.saveMaintainConfig()
+                        }
+                    }
+                    Text("Auto-detects custom IDECustomDerivedDataLocation from Xcode (e.g. /Volumes/External/Excluded/Xcode/DerivedData).")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+
+            Section("Custom Maintenance Scripts & Plugins") {
+                Text("Extend Hog Hunter with custom shell scripts, Python utilities, or observed system jobs. Place executables in ~/.hoghunter/maintenance/scripts/ or register them in registry.json.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if maintain.customScripts.isEmpty {
+                    Text("No custom scripts or plugins found.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(maintain.customScripts) { script in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(script.displayName)
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(script.mode.uppercased())
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(script.isOwned ? Color.blue.opacity(0.15) : Color.gray.opacity(0.15), in: Capsule())
+                                        .foregroundStyle(script.isOwned ? .blue : .secondary)
+                                    Text(script.scope.capitalized)
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text(script.path)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                if !script.owner.isEmpty {
+                                    Text(script.owner)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
+                HStack {
+                    Button("Open Scripts Folder") {
+                        maintain.revealScriptsFolder()
+                    }
+                    Button("Open Registry JSON") {
+                        maintain.openRegistryFile()
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsView.windowWidth - 80)
+    }
+
+    private func stepHistoryView(for stepId: String) -> some View {
+        let history24h = maintain.history24h(for: stepId)
+        return HStack(spacing: 8) {
+            if let last = history24h.lastRunDate {
+                Text("Last ran \(relativeDate(last))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Not run yet")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("•")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 10))
+
+            Text("\(history24h.runsCount) runs in 24h (\(history24h.successCount) done, \(history24h.failCount) failed)")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            if !history24h.recentOutcomes.isEmpty {
+                HStack(spacing: 2) {
+                    ForEach(history24h.recentOutcomes.suffix(10)) { sample in
+                        Capsule()
+                            .fill(statusColor(sample.status))
+                            .frame(width: 4, height: 10)
+                            .help("\(sample.status.capitalized): \(sample.reason)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func statusColor(_ status: String) -> Color {
+        switch status {
+        case "ran": return .green
+        case "failed": return .red
+        default: return Color.secondary.opacity(0.3)
+        }
+    }
+
+    private func relativeDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

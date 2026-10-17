@@ -142,6 +142,10 @@ sleep 5
 if pgrep -x HogHunter >/dev/null 2>&1; then
   echo "Hog Hunter is still running.  Forcing it to quit."
   pkill -x HogHunter || true
+  sleep 1
+  if pgrep -x HogHunter >/dev/null 2>&1; then
+    pkill -9 -x HogHunter || true
+  fi
 fi
 
 echo "Installing to $INSTALLED_PATH."
