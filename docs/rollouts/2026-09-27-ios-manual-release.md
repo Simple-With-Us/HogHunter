@@ -10,10 +10,9 @@ No signing or upload was performed while preparing it.
 > the iOS app also archives and uploads (see [`../AUTO-UPDATE.md`](../AUTO-UPDATE.md)),
 > in addition to manual dispatch.  The credential hold is cleared by the owner
 > ruling of 2026-10-17: signing and App Store Connect credentials for all apps
-> are in Infisical, project Fleet-OPS, path `/asc` (see
-> [`INFISICAL.md`](../../INFISICAL.md)).  Where the text below says the workflow
-> is manual-only, stays disabled, or waits on replacement credentials, read it
-> as superseded.
+> are in Infisical (see [`INFISICAL.md`](../../INFISICAL.md)).  Where the text
+> below says the workflow is manual-only, stays disabled, or waits on
+> replacement credentials, read it as superseded.
 
 ## Current state and remaining blockers
 
