@@ -387,12 +387,82 @@ enum CompanionHTTP {
         return jsonReply(status: 403, body: body)
     }
 
+    /// The `Host` value for a host and port (RFC 7230 §5.4, RFC 3986 §3.2.2).
+    /// An IPv6 literal is bracketed and loses its zone id, so
+    /// `fd7a:115c:a1e0::1` on 24240 is `[fd7a:115c:a1e0::1]:24240`, never
+    /// `fd7a:115c:a1e0::1:24240`.  Ports 80 and 443 are left off.
+    static func hostHeaderValue(host: String, port: UInt16) -> String {
+        var name = host
+        if name.contains(":") {
+            if name.hasPrefix("[") && name.hasSuffix("]") {
+                name = String(name.dropFirst().dropLast())
+            }
+            if let zone = name.firstIndex(of: "%") { name = String(name[..<zone]) }
+            name = "[\(name)]"
+        }
+        return port == 80 || port == 443 ? name : "\(name):\(port)"
+    }
+
+    static func hostHeaderLine(_ host: String?) -> String {
+        let trimmed = host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "Host: \(trimmed.isEmpty ? "hoghunter" : trimmed)"
+    }
+
+    /// Reads the client address a tunnel daemon on this Mac forwarded:
+    /// `CF-Connecting-IP` (Cloudflare Tunnel, which overwrites any value the
+    /// client sent), otherwise the rightmost `X-Forwarded-For` entry.  Proxies
+    /// append to `X-Forwarded-For`, so only the last entry was written by the
+    /// hop that connected here; anything to its left came from the client and
+    /// could name a trusted address.  Callers honour this only for a loopback
+    /// peer (`CompanionPeer.resolvingForwardedClient(in:)`).
+    static func forwardedClientIP(in request: Data) -> String? {
+        let text = String(data: request.prefix(maxHeadBytes), encoding: .isoLatin1) ?? ""
+        let head = text.components(separatedBy: "\r\n\r\n").first ?? text
+        let lines = head.components(separatedBy: "\r\n")
+        for line in lines where line.lowercased().hasPrefix("cf-connecting-ip:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2 {
+                let ip = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ip.isEmpty { return ip }
+            }
+        }
+        // A proxy may add its own X-Forwarded-For line rather than extend the
+        // client's, so the last line's last entry is the nearest hop's.
+        var nearest: String?
+        for line in lines where line.lowercased().hasPrefix("x-forwarded-for:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let last = parts[1].split(separator: ",").last.map(String.init) ?? ""
+            let ip = last.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ip.isEmpty { nearest = ip }
+        }
+        return nearest
+    }
+
+    /// Whether the request carries the marks of a Cloudflare Tunnel or an HTTPS
+    /// proxy.  A loopback request with these marks but no readable client
+    /// address is not trusted (`CompanionPeer.resolvingForwardedClient(in:)`).
+    static func isForwardedTunnel(in request: Data) -> Bool {
+        let text = String(data: request.prefix(maxHeadBytes), encoding: .isoLatin1) ?? ""
+        let head = text.components(separatedBy: "\r\n\r\n").first ?? text
+        for line in head.components(separatedBy: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("cf-ray:") || lower.hasPrefix("cf-connecting-ip:") || lower.hasPrefix("cf-visitor:") {
+                return true
+            }
+            if lower.hasPrefix("x-forwarded-proto:") && lower.contains("https") {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Trading the code for a token
 
-    static func enrollRequest(code: String, deviceName: String) -> Data {
+    static func enrollRequest(code: String, deviceName: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.enrollPath)?code=\(queryAllowedValue(code))&device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Accept: application/json",
             "Connection: close",
             "",
@@ -482,10 +552,10 @@ enum CompanionHTTP {
         return parts[1].split(separator: "?", maxSplits: 1).first.map(String.init) == CompanionService.path
     }
 
-    static func request(token: String) -> Data {
+    static func request(token: String, host: String? = nil) -> Data {
         let lines = [
             "GET \(CompanionService.path) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -504,10 +574,10 @@ enum CompanionHTTP {
     /// Longest device name the Mac will show in the approval alert.
     static let maxDeviceNameLength = 40
 
-    static func pairRequest(deviceName: String) -> Data {
+    static func pairRequest(deviceName: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.pairPath)?device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Accept: application/json",
             "Connection: close",
             "",
@@ -561,10 +631,10 @@ enum CompanionHTTP {
         return message(status: 429, reason: "Too Many Requests", body: body, type: "application/json; charset=utf-8")
     }
 
-    static func cleanRequest(token: String) -> Data {
+    static func cleanRequest(token: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.cleanPath) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -575,18 +645,18 @@ enum CompanionHTTP {
 
     /// A clean from a scan the Mac is holding: the scan's id, the tier, the
     /// references to clean, and the Extreme acknowledgement.
-    static func cleanRequest(token: String, request: CompanionCleanRequest) -> Data {
+    static func cleanRequest(token: String, request: CompanionCleanRequest, host: String? = nil) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = (try? encoder.encode(request)) ?? Data("{}".utf8)
-        return jsonPostRequest(path: CompanionService.cleanRunPath, token: token, body: body)
+        return jsonPostRequest(path: CompanionService.cleanRunPath, token: token, body: body, host: host)
     }
 
-    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool) -> Data {
+    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool, host: String? = nil) -> Data {
         let ack = acknowledgedExtreme ? "&ack=1" : ""
         let lines = [
             "POST \(CompanionService.cleanScanPath)?tier=\(queryAllowedValue(tier))\(ack) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -595,10 +665,10 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func cleanReportRequest(token: String) -> Data {
+    static func cleanReportRequest(token: String, host: String? = nil) -> Data {
         let lines = [
             "GET \(CompanionService.cleanReportPath) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -641,11 +711,11 @@ enum CompanionHTTP {
         return result
     }
 
-    static func quitRequest(token: String, pid: Int32, rowId: String? = nil, force: Bool = false) -> Data {
+    static func quitRequest(token: String, pid: Int32, rowId: String? = nil, force: Bool = false, host: String? = nil) -> Data {
         let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
             "POST \(CompanionService.quitPath)?pid=\(pid)\(rowParam)&force=\(force) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -654,11 +724,11 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func tameRequest(token: String, pid: Int32, rowId: String? = nil, action: String = "tame") -> Data {
+    static func tameRequest(token: String, pid: Int32, rowId: String? = nil, action: String = "tame", host: String? = nil) -> Data {
         let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
             "POST \(CompanionService.tamePath)?pid=\(pid)\(rowParam)&action=\(queryAllowedValue(action)) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -674,7 +744,7 @@ enum CompanionHTTP {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    static func exclusionsRequest(token: String, toggleCategory: String? = nil, addPath: String? = nil, removePath: String? = nil) -> Data {
+    static func exclusionsRequest(token: String, toggleCategory: String? = nil, addPath: String? = nil, removePath: String? = nil, host: String? = nil) -> Data {
         var queryItems: [String] = []
         if let toggleCategory { queryItems.append("toggleCategory=\(queryAllowedValue(toggleCategory))") }
         if let addPath {
@@ -686,7 +756,7 @@ enum CompanionHTTP {
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
         let lines = [
             "POST \(CompanionService.exclusionsPath)\(queryString) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -695,7 +765,7 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func viewRequest(token: String, window: String? = nil, grouping: String? = nil, cpuScale: String? = nil) -> Data {
+    static func viewRequest(token: String, window: String? = nil, grouping: String? = nil, cpuScale: String? = nil, host: String? = nil) -> Data {
         var queryItems: [String] = []
         if let window { queryItems.append("window=\(queryAllowedValue(window))") }
         if let grouping { queryItems.append("grouping=\(queryAllowedValue(grouping))") }
@@ -703,7 +773,7 @@ enum CompanionHTTP {
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
         let lines = [
             "POST \(CompanionService.viewPath)\(queryString) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -714,10 +784,10 @@ enum CompanionHTTP {
 
     /// A request with a JSON body.  The body is sent in the same write as the
     /// headers, and the Mac waits for `Content-Length` bytes either way.
-    private static func jsonPostRequest(path: String, token: String, body: Data) -> Data {
+    private static func jsonPostRequest(path: String, token: String, body: Data, host: String? = nil) -> Data {
         let lines = [
             "POST \(path) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Content-Type: application/json",
@@ -731,17 +801,17 @@ enum CompanionHTTP {
         return data
     }
 
-    static func settingsRequest(token: String, update: CompanionSettingsUpdateRequest) -> Data {
+    static func settingsRequest(token: String, update: CompanionSettingsUpdateRequest, host: String? = nil) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
-        return jsonPostRequest(path: CompanionService.settingsPath, token: token, body: body)
+        return jsonPostRequest(path: CompanionService.settingsPath, token: token, body: body, host: host)
     }
 
-    static func sampleRequest(token: String, rowId: String) -> Data {
+    static func sampleRequest(token: String, rowId: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.samplePath)?row=\(queryAllowedValue(rowId)) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -750,10 +820,10 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func maintainRunRequest(token: String, kind: String = "full") -> Data {
+    static func maintainRunRequest(token: String, kind: String = "full", host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.maintainRunPath)?kind=\(queryAllowedValue(kind)) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
