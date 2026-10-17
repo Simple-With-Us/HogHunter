@@ -155,7 +155,7 @@ class VacuumEngine:
                                 self.cfg,
                                 self.home,
                                 self._runner,
-                                report=self._lane_report,
+                                report=lambda: self._lane_report(write=not dry_run),
                                 clock=self._clock,
                                 dry_run=dry_run,
                             )
@@ -643,11 +643,18 @@ class VacuumEngine:
                     pass
         return freed, f"pruned {_plural(removed, 'folder')}", StepStatus.RAN
 
-    def _lane_report(self) -> lanes.LaneReport:
-        """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice."""
+    def _lane_report(self, write: bool = True) -> lanes.LaneReport:
+        """One doctor run per engine run, shared by every lane step.  The doctor takes minutes; never run it twice.
+        The last good report is cached on disk, so a timed-out doctor run falls back to recent evidence
+        instead of retiring nothing; removal still re-checks every lane live.  Dry runs pass write=False:
+        planning may read the cache but never persists state."""
         if self._lane_report_cache is None:
             settings = lanes.lane_settings(self.cfg, self.home)
-            self._lane_report_cache = lanes.load_report(settings, self.home, self._doctor_runner, self._clock)
+            cache_file = lanes.doctor_cache_file(data_dir_for(self.cfg, self.home))
+            self._lane_report_cache = lanes.load_report(
+                settings, self.home, self._doctor_runner, self._clock,
+                cache_file=cache_file, cache_write=write,
+            )
         return self._lane_report_cache
 
     def _note(self, step_id: str, action: str, **fields: Any) -> dict[str, Any]:
@@ -668,7 +675,7 @@ class VacuumEngine:
         nested git repository is kept."""
         step = "pressure_apps_deps"
         keep_re = keep_regex(self.cfg)
-        report = self._lane_report()
+        report = self._lane_report(write=not dry_run)
         if not report.ok:
             return 0, f"lane doctor unusable: {report.reason}; nothing removed", StepStatus.SKIPPED
         ctx = lanes.LaneContext(self.home, keep_re, lanes.lane_settings(self.cfg, self.home), self._runner, self._clock)
@@ -730,7 +737,7 @@ class VacuumEngine:
     def _coolify_remote(self) -> tuple[int, str, StepStatus]:
         host_value = self.cfg.get("coolify_ssh_host")
         if not isinstance(host_value, str) or not host_value.strip():
-            return 0, "coolify_ssh_host not configured", StepStatus.SKIPPED
+            return 0, "No remote servers are set up", StepStatus.SKIPPED
         host = host_value.strip()
         check = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", host, "exit 0"],
@@ -751,7 +758,9 @@ class VacuumEngine:
         plan = self._planned_retire_plan
         if plan is None:
             plan = plan_retire_worktrees(
-                self.cfg, self.home, self._runner, report=self._lane_report, clock=self._clock, dry_run=dry_run
+                self.cfg, self.home, self._runner,
+                report=lambda: self._lane_report(write=not dry_run),
+                clock=self._clock, dry_run=dry_run,
             )
         outcome = retire_worktrees(
             self.cfg,

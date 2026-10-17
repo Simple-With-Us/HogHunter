@@ -80,6 +80,39 @@ struct CompanionCleanItem: Codable, Equatable, Identifiable, Sendable {
     var detail: String? = nil
     /// Whether the Mac's own cleaner would start with this item ticked.
     var isSelected: Bool
+    /// True when the Mac's size walk hit its file cap, so `bytes` is a
+    /// lower bound ("at least N").  Decoded tolerantly: a Mac that predates
+    /// the flag sends no key, which reads as false.
+    var isApproximate: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, subtitle, bytes, sizeText, fileCount, detail, isSelected, isApproximate
+    }
+
+    init(id: String, title: String, subtitle: String, bytes: UInt64, sizeText: String, fileCount: Int, detail: String? = nil, isSelected: Bool, isApproximate: Bool = false) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.bytes = bytes
+        self.sizeText = sizeText
+        self.fileCount = fileCount
+        self.detail = detail
+        self.isSelected = isSelected
+        self.isApproximate = isApproximate
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        subtitle = try container.decode(String.self, forKey: .subtitle)
+        bytes = try container.decode(UInt64.self, forKey: .bytes)
+        sizeText = try container.decode(String.self, forKey: .sizeText)
+        fileCount = try container.decode(Int.self, forKey: .fileCount)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        isSelected = try container.decode(Bool.self, forKey: .isSelected)
+        isApproximate = try container.decodeIfPresent(Bool.self, forKey: .isApproximate) ?? false
+    }
 }
 
 struct CompanionCleanCategory: Codable, Equatable, Identifiable, Sendable {

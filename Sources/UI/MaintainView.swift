@@ -76,7 +76,7 @@ struct MaintainView: View {
                 Text("Turn steps off if you want them skipped on the next run.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                ForEach(MaintainStore.catalog) { entry in
+                ForEach(store.visibleCatalog) { entry in
                     HStack {
                         Toggle(isOn: Binding(
                             get: { store.stepToggles[entry.id] ?? true },

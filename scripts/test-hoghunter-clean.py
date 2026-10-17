@@ -538,6 +538,168 @@ def test_cleanmymac_spent_budget_skips(hh):
     run.assert_not_called()
 
 
+def test_botfleet_rollback_lists_only_stale_versioned_copies(hh):
+    """A rollback is safe-tier 24h after its newest file, never before, and the
+    glob can never match the live tree (it needs the versioned infix plus a suffix)."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        apps = home / "apps"
+        apps.mkdir()
+        old = apps / ".botfleet-server.node_modules.rollback-old"
+        new = apps / ".botfleet-server.node_modules.rollback-new"
+        live = apps / ".botfleet-server"
+        for d in (old, new, live):
+            d.mkdir()
+            (d / "package.json").write_text("{}\n", encoding="utf-8")
+        ancient = hh.time.time() - 25 * 3600
+        for p in (old / "package.json",):
+            os.utime(p, (ancient, ancient))
+        # The fresh copy reads newer than the mocked clock below, so only the
+        # old copy passes both the file-age and the ctime grace gates.
+        ahead = hh.time.time() + 2 * 3600
+        os.utime(new / "package.json", (ahead, ahead))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            # The fixture directories were just created (ctime is now), so run
+            # the rule a day later: only then is the grace period over.
+            with mock.patch.object(hh.time, "time", return_value=hh.time.time() + 25 * 3600):
+                offered = hh.rule_botfleet_rollback()
+        assert [c.path for c in offered] == [str(old)], offered
+        assert offered[0].tier == "safe", "cheap band must pick this up with no flag"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ask_first_reports_idle_build_output_only(hh):
+    """Main checkouts are never lanes, so .build/.next trees idle 7 days with
+    no open files are inventoried report-only.  Fresh trees, non-repos, and
+    symlinks stay out."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        repo = home / "Code" / "FakeRepo"
+        (repo / ".git").mkdir(parents=True)
+        idle = repo / ".build"
+        busy = repo / ".next"
+        for d in (idle, busy):
+            d.mkdir(parents=True)
+            (d / "out.o").write_text("x\n", encoding="utf-8")
+        plain = home / "Code" / "NotARepo"
+        plainbuild = plain / ".build"
+        plainbuild.mkdir(parents=True)
+        (plainbuild / "out.o").write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 8 * 24 * 3600
+        for p in (idle / "out.o", plainbuild / "out.o"):
+            os.utime(p, (old, old))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            found = {c.path: c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason}
+        assert list(found) == [str(idle)], found
+        assert found[str(idle)].tier == "ask-first"
+        assert found[str(idle)].op == "report", "build output is inventoried, never applied"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_botfleet_rollback_holds_a_moved_in_old_tree(hh):
+    """A moved-in old tree keeps its file mtimes: only the directory's own
+    ctime (refreshed by the move) proves it just arrived, so it still gets
+    its grace day."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        apps = home / "apps"
+        apps.mkdir()
+        moved = apps / ".botfleet-server.node_modules.rollback-moved"
+        moved.mkdir()
+        old_file = moved / "package.json"
+        old_file.write_text("{}\n", encoding="utf-8")
+        ancient = hh.time.time() - 30 * 24 * 3600
+        os.utime(old_file, (ancient, ancient))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            assert hh.rule_botfleet_rollback() == [], "a just-moved tree is not listed on day zero"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ask_first_reports_dated_drive_copies_only(hh):
+    """The orphan glob matches 'GoogleDrive-<account> (<date> <time>)' with any
+    separator (the real one is a narrow no-break space), never the live folder,
+    and always as report-only."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cloud = home / "Library/CloudStorage"
+        cloud.mkdir(parents=True)
+        live = cloud / "GoogleDrive-user@gmail.com"
+        orphan = cloud / "GoogleDrive-user@gmail.com (10-14-26 12:59 AM)"
+        other = cloud / "Dropbox"
+        for d in (live, orphan, other):
+            d.mkdir()
+        with mock.patch.object(hh, "HOME", home):
+            found = {c.path: c for c in hh.rule_ask_first_inventory() if "orphaned Drive copy" in c.reason}
+        assert list(found) == [str(orphan)], found
+        assert found[str(orphan)].tier == "ask-first"
+        assert found[str(orphan)].op == "report", "an orphan is inventoried, never applied"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_staging_offers_idle_shipit_in_the_safe_tier(hh):
+    """Updater leftovers ride the cheap band: an idle ShipIt staging dir with no
+    owner process is a safe-tier candidate, so band=cheap already covers the
+    2.5 GB class the audit found."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        shipit = home / "Library/Caches/com.anthropic.claudefordesktop.ShipIt"
+        shipit.mkdir(parents=True)
+        pkg = shipit / "staging.pkg"
+        pkg.write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 2 * 3600
+        os.utime(pkg, (old, old))
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            with mock.patch.object(hh.subprocess, "run", return_value=completed(1)):
+                offered = hh.rule_app_staging()
+        assert [c.path for c in offered] == [str(shipit)], offered
+        assert offered[0].tier == "safe"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_touched_since_catches_a_recent_file_past_the_walk_cap(hh):
+    """newest_file_age_min stops at 4000 entries, so a recent file past the cap
+    reads as idle.  The find probe has no cap: it answers on the first recent
+    file, and a failed look reads as touched."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        old_dir = home / "old-build"
+        old_dir.mkdir()
+        old_file = old_dir / "out.o"
+        old_file.write_text("x\n", encoding="utf-8")
+        old = hh.time.time() - 8 * 24 * 3600
+        os.utime(old_file, (old, old))
+        assert hh.touched_since(str(old_dir), 7) is False
+        fresh_dir = home / "fresh-build"
+        fresh_dir.mkdir()
+        (fresh_dir / "out.o").write_text("x\n", encoding="utf-8")
+        assert hh.touched_since(str(fresh_dir), 7) is True
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_idle_build_output_survives_a_blind_capped_walk(hh):
+    """Even when the capped walk swears a tree is idle, the uncapped find probe
+    still refuses a tree holding a recent file."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        repo = home / "Code" / "FakeRepo"
+        build = repo / ".build"
+        build.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (build / "out.o").write_text("x\n", encoding="utf-8")
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+            with mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9):
+                found = [c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason]
+        assert found == [], "the probe overrules a blind capped walk"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

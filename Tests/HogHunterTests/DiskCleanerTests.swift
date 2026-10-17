@@ -193,18 +193,24 @@ final class DiskCleanerTests: XCTestCase {
         let fm = FileManager.default
         let apps = tempDirectory.appendingPathComponent("apps", isDirectory: true)
         let fresh = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-fresh", isDirectory: true)
-        let old = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-old", isDirectory: true)
-        for dir in [fresh, old] {
+        let moved = apps.appendingPathComponent(".botfleet-server.node_modules.rollback-moved", isDirectory: true)
+        for dir in [fresh, moved] {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             try Data(repeating: 0x41, count: 1024).write(to: dir.appendingPathComponent("package.json"))
         }
         let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
-        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: old.appendingPathComponent("package.json").path)
+        try fm.setAttributes([.modificationDate: eightDaysAgo], ofItemAtPath: moved.appendingPathComponent("package.json").path)
 
         let cleaner = DiskCleaner(homeDirectory: tempDirectory)
         let titles = cleaner.scanAIArtifacts().map(\.title)
-        XCTAssertTrue(titles.contains(".botfleet-server.node_modules.rollback-old"))
         XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-fresh"), "a fresh rollback may still be needed")
+        // The moved copy holds eight-day-old files, but the directory itself
+        // was just created (ctime is now), so it still gets its grace day.  A
+        // copy old enough to list cannot be fabricated without waiting out the
+        // clock; the listing path is covered by the vacuum rule's mocked-clock
+        // test in test-hoghunter-clean.py.
+        XCTAssertFalse(titles.contains(".botfleet-server.node_modules.rollback-moved"))
+        XCTAssertTrue(DiskCleaner.directoryMovedWithin(moved, within: 24 * 3600))
     }
 
     // MARK: - Safety Guard Tests
@@ -400,6 +406,23 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertEqual(stats.fileCount, 3)
         XCTAssertGreaterThanOrEqual(stats.bytes, 14336) // 2048 + 4096 + 8192
         XCTAssertNotNil(stats.lastModified)
+        XCTAssertFalse(stats.isApproximate)
+    }
+
+    func testDirectoryStatsFlagsACappedWalkAsApproximate() throws {
+        // Ten 1 KB files; a cap of 4 counts 5 files (the file that trips the
+        // cap is seen but not sized) and reports a lower bound, flagged.
+        for index in 0..<10 {
+            try Data(repeating: 0x41, count: 1024).write(to: tempDirectory.appendingPathComponent("file\(index).txt"))
+        }
+
+        let full = cleaner.directoryStats(at: tempDirectory)
+        XCTAssertFalse(full.isApproximate)
+        XCTAssertEqual(full.fileCount, 10)
+
+        let capped = cleaner.directoryStats(at: tempDirectory, fileCap: 4)
+        XCTAssertTrue(capped.isApproximate)
+        XCTAssertLessThan(capped.bytes, full.bytes)
     }
 
     // MARK: - Formatting & Report Tests
@@ -802,6 +825,102 @@ final class DiskCleanerTests: XCTestCase {
         let viaPrivate = DiskCleaner.resolvedPath("/private/tmp")
         XCTAssertEqual(viaTmp, viaPrivate)
         XCTAssertFalse(viaTmp.isEmpty)
+    }
+
+    // MARK: - Volume Awareness & Symlink Tests
+
+    func testDetectVolumeInternalMacintoshHD() {
+        let internalURL = URL(fileURLWithPath: "/Users")
+        let (isExternal, volumeName) = DiskCleaner.detectVolume(for: internalURL)
+        XCTAssertFalse(isExternal)
+        XCTAssertEqual(volumeName, "Macintosh HD")
+    }
+
+    func testDetectVolumeExternalDrivePrefix() {
+        let externalURL = URL(fileURLWithPath: "/Volumes/External/Cache/test")
+        let (isExternal, volumeName) = DiskCleaner.detectVolume(for: externalURL)
+        XCTAssertTrue(isExternal)
+        XCTAssertEqual(volumeName, "External")
+    }
+
+    func testCleanItemAutoDetectsVolumeAndSymlinks() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetDir = tempDir.appendingPathComponent("target_folder")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let symlinkURL = tempDir.appendingPathComponent("symlink_folder")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetDir)
+
+        let normalItem = CleanItem(
+            category: .userCaches,
+            title: "Normal",
+            subtitle: targetDir.path,
+            url: targetDir,
+            bytes: 1024,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertFalse(normalItem.isSymlink)
+        XCTAssertFalse(normalItem.isExternal)
+
+        let symlinkItem = CleanItem(
+            category: .userCaches,
+            title: "Symlink",
+            subtitle: symlinkURL.path,
+            url: symlinkURL,
+            bytes: 2048,
+            fileCount: 2,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertTrue(symlinkItem.isSymlink)
+    }
+
+    func testCleaningSymlinkPreservesSymlinkAndCleansContents() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetDir = tempDir.appendingPathComponent("external_target")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let dummyFile = targetDir.appendingPathComponent("cache_entry.bin")
+        try Data("cache data".utf8).write(to: dummyFile)
+
+        let cachesDir = tempDir.appendingPathComponent("Library/Caches", isDirectory: true)
+        try FileManager.default.createDirectory(at: cachesDir, withIntermediateDirectories: true)
+        let symlinkURL = cachesDir.appendingPathComponent("cache_symlink")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetDir)
+
+        let cleaner = DiskCleaner(
+            makeSnapshot: { (true, "test-snap") },
+            homeDirectory: tempDir
+        )
+
+        let item = CleanItem(
+            category: .userCaches,
+            title: "Symlink Cache",
+            subtitle: symlinkURL.path,
+            url: symlinkURL,
+            bytes: 10,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+
+        XCTAssertTrue(item.isSymlink)
+        let result = await cleaner.clean(items: [item], createSnapshot: false)
+        XCTAssertEqual(result.itemsRemoved, 1)
+
+        // The symlink itself MUST still exist!
+        let symlinkStillExists = FileManager.default.fileExists(atPath: symlinkURL.path)
+        XCTAssertTrue(symlinkStillExists, "Cleaning must preserve the symlink so external offload setup is not broken")
+
+        // The target directory exists, but child file was removed
+        let targetContents = try FileManager.default.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil)
+        XCTAssertTrue(targetContents.isEmpty, "The child files inside target should have been cleaned")
     }
 }
 

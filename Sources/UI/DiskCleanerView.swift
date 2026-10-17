@@ -44,12 +44,12 @@ struct DiskCleanerView: View {
             isPresented: $store.showConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
+            Button("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
                 store.cleanSelected(createSnapshot: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(CleanerCopy.confirmationMessage(sizeText: HogFormat.memory(store.totalSelectedBytes()), itemCount: store.totalSelectedItemsCount()))
+            Text(CleanerCopy.confirmationMessage(sizeText: "\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))", itemCount: store.totalSelectedItemsCount()))
         }
     }
 
@@ -163,7 +163,7 @@ struct DiskCleanerView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(HogFormat.memory(store.totalSelectedBytes()))
+                            Text("\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))")
                                 .font(.system(size: 22, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.primary)
                             Text("ready to reclaim")
@@ -171,7 +171,18 @@ struct DiskCleanerView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
+                        if store.totalSelectedExternalBytes() > 0 {
+                            HStack(spacing: 8) {
+                                Label("Internal: \(HogFormat.memory(store.totalSelectedInternalBytes()))", systemImage: "internaldrive")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Label("External: \(HogFormat.memory(store.totalSelectedExternalBytes()))", systemImage: "externaldrive")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.purple)
+                            }
+                        }
+
+                        Text("\(report.anyApproximate ? "at least " : "")\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -391,7 +402,7 @@ struct DiskCleanerView: View {
                 store.showConfirmation = true
             } label: {
                 let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(HogFormat.memory(selectedBytes))")
+                Text("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(selectedBytes))")
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 4)
             }
@@ -455,7 +466,7 @@ private struct CategoryCardView: View {
 
                 Spacer()
 
-                Text(catReport.formattedTotalSize)
+                Text(catReport.anyApproximate ? "at least \(catReport.formattedTotalSize)" : catReport.formattedTotalSize)
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
                     .padding(.horizontal, 6)
@@ -552,9 +563,25 @@ private struct CategoryCardView: View {
             .padding(.leading, 8)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(item.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    if item.isExternal {
+                        Text(item.volumeName)
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.purple)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.purple.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+                    }
+                    if item.isSymlink {
+                        Image(systemName: "link")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                            .help("Symlink target: \(item.url.resolvingSymlinksInPath().path)")
+                    }
+                }
                 Text(item.subtitle)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -569,7 +596,7 @@ private struct CategoryCardView: View {
 
             Spacer()
 
-            Text(item.formattedSize)
+            Text(item.isApproximate ? "at least \(item.formattedSize)" : item.formattedSize)
                 .font(.system(size: 10.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
