@@ -868,19 +868,15 @@ final class CompanionModel {
             rawHost = String(rawHost[..<slashIdx])
         }
 
-        let host: String
         var resolvedPort = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? (explicitTLS == true ? 443 : Self.defaultPort)
-        if let colonIdx = rawHost.lastIndex(of: ":") {
-            let hostPart = String(rawHost[..<colonIdx])
-            let portPart = String(rawHost[rawHost.index(after: colonIdx)...])
-            if let p = Int(portPart) {
-                host = hostPart
-                resolvedPort = p
-            } else {
-                host = rawHost
-            }
-        } else {
-            host = rawHost
+        // A bare IPv6 literal keeps all its groups; it takes a port only in
+        // brackets (see `CompanionPeer.splitHostAndPort`).
+        let split = CompanionPeer.splitHostAndPort(rawHost)
+        let host = split.host
+        if let typedPort = split.port { resolvedPort = typedPort }
+        guard !host.isEmpty else {
+            remoteConnectError = "Enter a Tailscale MagicDNS name, IP address, or domain."
+            return
         }
         if resolvedPort == 443 {
             explicitTLS = true

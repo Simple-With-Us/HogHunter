@@ -1854,7 +1854,7 @@ struct RemoteConnectSheet: View {
                 } header: {
                     Text("Mac Address")
                 } footer: {
-                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net on port \(CompanionModel.defaultPort)), or a remote Cloudflare Tunnel hostname over HTTPS (port 443 with TLS).  Both Tailscale and Cloudflare Tunnels have full access to process control, disk cleaner, and robotic vacuum.")
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net on port \(CompanionModel.defaultPort)), or a Cloudflare Tunnel hostname over HTTPS on port 443.  Over Tailscale this iPhone can do everything the Mac allows it.  Over a Cloudflare Tunnel it shows the Mac's figures only: type the pairing code, because quitting, taming, cleaning, the Robotic Vacuum and settings changes need your local network or Tailscale.")
                 }
 
                 Section {

@@ -282,12 +282,9 @@ final class CompanionServer: @unchecked Sendable {
                     connection.send(content: CompanionHTTP.payloadTooLargeReply(), completion: .contentProcessed { _ in connection.cancel() })
                     return
                 }
-                let effectivePeer: CompanionPeer
-                if peer.isTrusted, let forwarded = CompanionHTTP.forwardedClientIP(in: buffer) {
-                    effectivePeer = peer.withForwardedClientIP(forwarded)
-                } else {
-                    effectivePeer = peer
-                }
+                // Only a loopback peer (a tunnel daemon on this Mac) may name
+                // its client in a forwarded header; other peers' are ignored.
+                let effectivePeer = peer.resolvingForwardedClient(in: buffer)
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
                     self.handlePair(connection, deviceName: deviceName, peer: effectivePeer)
                     return

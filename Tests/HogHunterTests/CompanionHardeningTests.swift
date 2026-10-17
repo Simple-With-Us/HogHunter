@@ -332,24 +332,91 @@ final class CompanionServerHardeningTests: XCTestCase {
         XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: cfReq), "203.0.113.195")
         XCTAssertTrue(CompanionHTTP.isForwardedTunnel(in: cfReq))
 
+        // Proxies append, so only the rightmost entry was written by the hop
+        // that connected here; the leftmost came from the client.
         let xffReq = Data("GET /v1/snapshot HTTP/1.1\r\nX-Forwarded-For: 198.51.100.10, 10.0.0.1\r\n\r\n".utf8)
-        XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: xffReq), "198.51.100.10")
+        XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: xffReq), "10.0.0.1")
+        XCTAssertFalse(CompanionHTTP.isForwardedTunnel(in: xffReq))
 
         let loopbackPeer = CompanionPeer(key: "127.0.0.1", isTrusted: true)
-        let effective = loopbackPeer.withForwardedClientIP("203.0.113.195")
+        let effective = loopbackPeer.resolvingForwardedClient(in: cfReq)
         XCTAssertEqual(effective.key, "203.0.113.195")
-        // Public IP forwarded via tunnel is untrusted for controls
+        // A public address forwarded by a tunnel on this Mac controls nothing.
         XCTAssertFalse(effective.isTrusted)
     }
 
-    func testTrustedEndpointIncludesPort443TLS() {
+    func testSpoofedLeftmostForwardedForDoesNotGrantTrust() {
+        // A client behind an appending proxy puts a LAN address first.
+        let spoofed = Data("GET /v1/snapshot HTTP/1.1\r\nX-Forwarded-For: 192.168.1.5, 203.0.113.9\r\n\r\n".utf8)
+        let effective = CompanionPeer(key: "127.0.0.1", isTrusted: true).resolvingForwardedClient(in: spoofed)
+        XCTAssertEqual(effective.key, "203.0.113.9")
+        XCTAssertFalse(effective.isTrusted)
+
+        // A proxy that adds its own line: the last line's entry wins.
+        let twoLines = Data("GET /v1/snapshot HTTP/1.1\r\nX-Forwarded-For: 192.168.1.5\r\nX-Forwarded-For: 203.0.113.9\r\n\r\n".utf8)
+        XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: twoLines), "203.0.113.9")
+    }
+
+    func testForwardedHeadersFromLANOrTailscalePeerAreIgnored() {
+        // A LAN phone naming another LAN address must keep its own throttle
+        // key, so it cannot lock that address out or rotate keys.
+        let poison = Data("POST /v1/enroll?code=WRONGCOD HTTP/1.1\r\nCF-Connecting-IP: 192.168.1.20\r\n\r\n".utf8)
+        let lan = CompanionPeer(key: "192.168.1.10", isTrusted: true)
+        XCTAssertEqual(lan.resolvingForwardedClient(in: poison), lan)
+
+        let tailscale = CompanionPeer(key: "100.101.102.103", isTrusted: true)
+        XCTAssertEqual(tailscale.resolvingForwardedClient(in: poison), tailscale)
+
+        // An outside peer's headers are ignored too; it stays untrusted.
+        let outside = CompanionPeer(key: "203.0.113.50", isTrusted: false)
+        XCTAssertEqual(outside.resolvingForwardedClient(in: poison), outside)
+    }
+
+    func testLoopbackTunnelRequestWithoutReadableClientIsUntrusted() {
+        let loopback = CompanionPeer(key: "127.0.0.1", isTrusted: true)
+
+        let markOnly = Data("GET /v1/snapshot HTTP/1.1\r\nCF-Ray: 8a1b2c3d4e5f-DFW\r\n\r\n".utf8)
+        let noClient = loopback.resolvingForwardedClient(in: markOnly)
+        XCTAssertFalse(noClient.isTrusted)
+        XCTAssertEqual(noClient.key, CompanionPeer.unreadableForwardedKey)
+
+        let garbage = Data("GET /v1/snapshot HTTP/1.1\r\nCF-Connecting-IP: not-an-address\r\n\r\n".utf8)
+        XCTAssertFalse(loopback.resolvingForwardedClient(in: garbage).isTrusted)
+
+        // IPv6 loopback is a tunnel source as well.
+        let v6Loopback = CompanionPeer.make(ipv6: [UInt8](repeating: 0, count: 15) + [1])
+        XCTAssertTrue(v6Loopback.isLoopback)
+        let cfReq = Data("GET /v1/snapshot HTTP/1.1\r\nCF-Connecting-IP: 2001:db8::7\r\n\r\n".utf8)
+        XCTAssertFalse(v6Loopback.resolvingForwardedClient(in: cfReq).isTrusted)
+
+        // A plain loopback request with no forwarding marks stays as it was.
+        let plain = Data("GET /v1/snapshot HTTP/1.1\r\nHost: hoghunter\r\n\r\n".utf8)
+        XCTAssertEqual(loopback.resolvingForwardedClient(in: plain), loopback)
+    }
+
+    func testTrustedEndpointIgnoresPort443() {
+        // Port 443 proves neither encryption nor identity, so a public name on
+        // it is not trusted with a secret such as the webhook address.
         let httpsEndpoint = NWEndpoint.hostPort(host: "hoghunter.simplewithus.com", port: 443)
-        XCTAssertTrue(CompanionPeer.isTrustedEndpoint(httpsEndpoint))
+        XCTAssertFalse(CompanionPeer.isTrustedEndpoint(httpsEndpoint))
 
         let httpEndpoint = NWEndpoint.hostPort(host: "hoghunter.simplewithus.com", port: 80)
         XCTAssertFalse(CompanionPeer.isTrustedEndpoint(httpEndpoint))
 
         let tailscaleEndpoint = NWEndpoint.hostPort(host: "my-mac.tailnet.ts.net", port: 24240)
         XCTAssertTrue(CompanionPeer.isTrustedEndpoint(tailscaleEndpoint))
+
+        let tailscaleOn443 = NWEndpoint.hostPort(host: "my-mac.tailnet.ts.net", port: 443)
+        XCTAssertTrue(CompanionPeer.isTrustedEndpoint(tailscaleOn443))
+    }
+
+    func testSplitHostAndPortKeepsBareIPv6Whole() {
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("fd7a:115c:a1e0::1") == ("fd7a:115c:a1e0::1", nil))
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("[fd7a:115c:a1e0::1]:24240") == ("fd7a:115c:a1e0::1", 24240))
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("[fd7a:115c:a1e0::1]") == ("fd7a:115c:a1e0::1", nil))
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("my-mac.tailnet.ts.net:443") == ("my-mac.tailnet.ts.net", 443))
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("100.101.102.103:24240") == ("100.101.102.103", 24240))
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("my-mac.local") == ("my-mac.local", nil))
+        XCTAssertTrue(CompanionPeer.splitHostAndPort("my-mac.local:abc") == ("my-mac.local:abc", nil))
     }
 }

@@ -392,36 +392,40 @@ enum CompanionHTTP {
         return "Host: \(trimmed.isEmpty ? "hoghunter" : trimmed)"
     }
 
-    /// Reads client IP forwarded by Cloudflare Tunnel (CF-Connecting-IP) or a
-    /// trusted reverse proxy (X-Forwarded-For).
+    /// Reads the client address a tunnel daemon on this Mac forwarded:
+    /// `CF-Connecting-IP` (Cloudflare Tunnel, which overwrites any value the
+    /// client sent), otherwise the rightmost `X-Forwarded-For` entry.  Proxies
+    /// append to `X-Forwarded-For`, so only the last entry was written by the
+    /// hop that connected here; anything to its left came from the client and
+    /// could name a trusted address.  Callers honour this only for a loopback
+    /// peer (`CompanionPeer.resolvingForwardedClient(in:)`).
     static func forwardedClientIP(in request: Data) -> String? {
         let text = String(data: request.prefix(maxHeadBytes), encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
-        for line in head.components(separatedBy: "\r\n") {
-            let lower = line.lowercased()
-            if lower.hasPrefix("cf-connecting-ip:") {
-                let parts = line.split(separator: ":", maxSplits: 1)
-                if parts.count == 2 {
-                    let ip = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !ip.isEmpty { return ip }
-                }
+        let lines = head.components(separatedBy: "\r\n")
+        for line in lines where line.lowercased().hasPrefix("cf-connecting-ip:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2 {
+                let ip = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ip.isEmpty { return ip }
             }
         }
-        for line in head.components(separatedBy: "\r\n") {
-            let lower = line.lowercased()
-            if lower.hasPrefix("x-forwarded-for:") {
-                let parts = line.split(separator: ":", maxSplits: 1)
-                if parts.count == 2 {
-                    let first = parts[1].split(separator: ",").first.map(String.init) ?? String(parts[1])
-                    let ip = first.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !ip.isEmpty { return ip }
-                }
-            }
+        // A proxy may add its own X-Forwarded-For line rather than extend the
+        // client's, so the last line's last entry is the nearest hop's.
+        var nearest: String?
+        for line in lines where line.lowercased().hasPrefix("x-forwarded-for:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let last = parts[1].split(separator: ",").last.map(String.init) ?? ""
+            let ip = last.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ip.isEmpty { nearest = ip }
         }
-        return nil
+        return nearest
     }
 
-    /// Whether the request was forwarded through a Cloudflare Tunnel or HTTPS proxy.
+    /// Whether the request carries the marks of a Cloudflare Tunnel or an HTTPS
+    /// proxy.  A loopback request with these marks but no readable client
+    /// address is not trusted (`CompanionPeer.resolvingForwardedClient(in:)`).
     static func isForwardedTunnel(in request: Data) -> Bool {
         let text = String(data: request.prefix(maxHeadBytes), encoding: .isoLatin1) ?? ""
         let head = text.components(separatedBy: "\r\n\r\n").first ?? text
