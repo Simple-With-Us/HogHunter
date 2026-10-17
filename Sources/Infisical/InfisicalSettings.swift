@@ -62,6 +62,27 @@ enum InfisicalKey {
     static let regimenExpensiveTierFreeGb = "hoghunter.regimen.expensiveTierFreeGb"
     static let settingsRefreshMinutes = "hoghunter.settingsRefreshMinutes"
 
+    // Maintain step toggles and knobs
+    static let maintainStepPrefix = "hoghunter.maintain.step."
+    static let maintainStepShutdownSimulators = "hoghunter.maintain.step.shutdown_simulators"
+    static let maintainStepXcodeDerivedData = "hoghunter.maintain.step.xcode_derived_data"
+    static let maintainStepXcodeDeviceSupport = "hoghunter.maintain.step.xcode_device_support"
+    static let maintainStepCoreSimulatorCaches = "hoghunter.maintain.step.core_simulator_caches"
+    static let maintainStepCleanmymacCli = "hoghunter.maintain.step.cleanmymac_cli"
+    static let maintainStepCoolifyRemote = "hoghunter.maintain.step.coolify_remote"
+    static let maintainStepJanitorWorktreeRetire = "hoghunter.maintain.step.janitor_worktree_retire"
+    static let maintainStepJanitorCacheReclaim = "hoghunter.maintain.step.janitor_cache_reclaim"
+    static let maintainIntervalWatchSec = "hoghunter.maintain.interval.watchSec"
+    static let maintainIntervalJanitorSec = "hoghunter.maintain.interval.janitorSec"
+    static let maintainIntervalFullSec = "hoghunter.maintain.interval.fullSec"
+    static let maintainHistoryMaxRuns = "hoghunter.maintain.historyMaxRuns"
+    static let maintainCleanBudgetSec = "hoghunter.maintain.cleanBudgetSec"
+    static let maintainCoolifySshHost = "hoghunter.maintain.coolifySshHost"
+    static let maintainJanitorMaxLoadHard = "hoghunter.maintain.janitor.maxLoadHard"
+    static let maintainJanitorLowFreeGib = "hoghunter.maintain.janitor.lowFreeGib"
+    static let maintainWatchDiskFreeWarnGb = "hoghunter.maintain.watch.diskFreeWarnGb"
+    static let maintainWatchSwapUsedPct = "hoghunter.maintain.watch.swapUsedPct"
+
     /// Every non-secret key, for the Advanced tab's "push current values" seed.
     static let allNonSecret: [String] = [
         refreshInterval, alertThresholdPercent, alertSustainedMinutes, alertCooldownMinutes,
@@ -70,6 +91,14 @@ enum InfisicalKey {
         regimenIntervalHours, regimenTargetsPerChunk, regimenChunkPauseSeconds,
         regimenPressuredTargetsPerChunk, regimenPressuredChunkPauseSeconds,
         regimenExpensiveTierFreeGb, settingsRefreshMinutes,
+        maintainStepShutdownSimulators, maintainStepXcodeDerivedData,
+        maintainStepXcodeDeviceSupport, maintainStepCoreSimulatorCaches,
+        maintainStepCleanmymacCli, maintainStepCoolifyRemote,
+        maintainStepJanitorWorktreeRetire, maintainStepJanitorCacheReclaim,
+        maintainIntervalWatchSec, maintainIntervalJanitorSec, maintainIntervalFullSec,
+        maintainHistoryMaxRuns, maintainCleanBudgetSec, maintainCoolifySshHost,
+        maintainJanitorMaxLoadHard, maintainJanitorLowFreeGib,
+        maintainWatchDiskFreeWarnGb, maintainWatchSwapUsedPct,
     ]
 }
 
@@ -96,6 +125,24 @@ enum InfisicalDefaults {
         InfisicalKey.regimenPressuredChunkPauseSeconds: "10",
         InfisicalKey.regimenExpensiveTierFreeGb: "40",
         InfisicalKey.settingsRefreshMinutes: "5",
+        InfisicalKey.maintainStepShutdownSimulators: "true",
+        InfisicalKey.maintainStepXcodeDerivedData: "true",
+        InfisicalKey.maintainStepXcodeDeviceSupport: "false",
+        InfisicalKey.maintainStepCoreSimulatorCaches: "true",
+        InfisicalKey.maintainStepCleanmymacCli: "false",
+        InfisicalKey.maintainStepCoolifyRemote: "false",
+        InfisicalKey.maintainStepJanitorWorktreeRetire: "true",
+        InfisicalKey.maintainStepJanitorCacheReclaim: "true",
+        InfisicalKey.maintainIntervalWatchSec: "300",
+        InfisicalKey.maintainIntervalJanitorSec: "1800",
+        InfisicalKey.maintainIntervalFullSec: "14400",
+        InfisicalKey.maintainHistoryMaxRuns: "500",
+        InfisicalKey.maintainCleanBudgetSec: "600",
+        InfisicalKey.maintainCoolifySshHost: "",
+        InfisicalKey.maintainJanitorMaxLoadHard: "250",
+        InfisicalKey.maintainJanitorLowFreeGib: "80",
+        InfisicalKey.maintainWatchDiskFreeWarnGb: "25",
+        InfisicalKey.maintainWatchSwapUsedPct: "90",
     ]
 }
 

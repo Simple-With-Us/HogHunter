@@ -588,8 +588,9 @@ private struct MaintenanceSettingsContent: View {
                     HStack {
                         TextField("e.g. root@coolify.jays.services", text: $maintain.coolifySSHHost)
                             .textFieldStyle(.roundedBorder)
+                            .onSubmit { maintain.setCoolifyHost(maintain.coolifySSHHost) }
                         Button("Save") {
-                            maintain.saveMaintainConfig()
+                            maintain.setCoolifyHost(maintain.coolifySSHHost)
                         }
                     }
                     Text("SSH destination for remote server maintenance sweeps. Leave blank to disable.")

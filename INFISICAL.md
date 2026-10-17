@@ -44,6 +44,24 @@ Non-sensitive defaults were seeded into the `prod` environment from the values t
 | `hoghunter.regimen.pressuredChunkPauseSeconds` | `10` | Regimen pause between chunks under pressure |
 | `hoghunter.regimen.expensiveTierFreeGb` | `40` | Free space below which the expensive tier opens |
 | `hoghunter.settingsRefreshMinutes` | `5` | How often the app re-reads Infisical |
+| `hoghunter.maintain.step.shutdown_simulators` | `true` | Maintain step toggle: Shut down Xcode Simulators |
+| `hoghunter.maintain.step.xcode_derived_data` | `true` | Maintain step toggle: Clear Xcode build cache |
+| `hoghunter.maintain.step.xcode_device_support` | `false` | Maintain step toggle: Clear old iPhone debug symbols |
+| `hoghunter.maintain.step.core_simulator_caches` | `true` | Maintain step toggle: Clear Simulator cache folders |
+| `hoghunter.maintain.step.cleanmymac_cli` | `false` | Maintain step toggle: CleanMyMac CLI sweep |
+| `hoghunter.maintain.step.coolify_remote` | `false` | Maintain step toggle: Remote server maintenance |
+| `hoghunter.maintain.step.janitor_worktree_retire` | `true` | Maintain step toggle: Retire old merged git worktrees |
+| `hoghunter.maintain.step.janitor_cache_reclaim` | `true` | Maintain step toggle: Reclaim caches when disk is low |
+| `hoghunter.maintain.interval.watchSec` | `300` | Maintain cadence: resource watch tick interval, seconds |
+| `hoghunter.maintain.interval.janitorSec` | `1800` | Maintain cadence: disk janitor run interval, seconds |
+| `hoghunter.maintain.interval.fullSec` | `14400` | Maintain cadence: full clean run interval, seconds |
+| `hoghunter.maintain.historyMaxRuns` | `500` | Maintain history: maximum run records kept in history.json |
+| `hoghunter.maintain.cleanBudgetSec` | `600` | Maintain reclaim: per-run budget for hoghunter-clean, seconds |
+| `hoghunter.maintain.coolifySshHost` | `""` | Maintain host: SSH destination for remote Coolify maintenance |
+| `hoghunter.maintain.janitor.maxLoadHard` | `250` | Maintain threshold: janitor hard max 1-minute load average |
+| `hoghunter.maintain.janitor.lowFreeGib` | `80` | Maintain threshold: disk free space (GiB) triggering cache reclaim |
+| `hoghunter.maintain.watch.diskFreeWarnGb` | `25` | Maintain threshold: disk free warning threshold (GB) |
+| `hoghunter.maintain.watch.swapUsedPct` | `90` | Maintain threshold: swap memory usage percent warning threshold |
 
 ### Deliberately left out (and why)
 
@@ -71,13 +89,13 @@ These names are never fetched into `InfisicalStore`.  The DSN is baked into Info
 
 Never put a DSN or auth token in git, `project.yml`, Info.plist, a log, or a PR body.
 
-### Robotic Vacuum (Python, Not Migrated)
+### Maintain & Robotic Vacuum (Wired via Infisical & Environment)
 
-The Robotic Vacuum (`scripts/vacuum/`) is a Python helper with no Infisical reader.  Its config is `config/robotic-vacuum.json`, with a per-user override in Application Support.  It is not in the migrated table, and it is not one of the per-user exclusions above.  It is an open item, and no owner ruling is recorded.
+Maintain settings (step toggles, intervals, clean budget, remote host, and thresholds) are wired to Infisical.  The Swift Mac app reads Infisical via `InfisicalStore` and writes through on change; the Python engine (`scripts/vacuum/config.py`) consumes them through `apply_env_overrides()`, supporting both `hoghunter.maintain.*` and `HOGHUNTER_MAINTAIN_*` environment variables.
 
-- The lane doctor work of 2026-10-08 adds no tunable.  Report age (15 minutes), doctor schema (2), doctor timeout (5 minutes), the 7-day retire floor, and the 24-hour dependency floor are code constants in `scripts/vacuum/lanes.py`.  Config cannot change them in either direction, and the numeric keys still present in the shipped `lanes` block are ignored.
+- A Maintain save (a step toggle or the remote server SSH host) writes to Infisical first.  If that write fails, the save fails: the Mac shows the error, reloads the value Infisical still holds, and does not write the local `config.json`.  The local file is only written after Infisical accepted the value, so a refresh can never put a stale Infisical value over a newer local one.
+- The lane doctor settings in `scripts/vacuum/lanes.py` keep report age (15 minutes), doctor schema (2), doctor timeout (5 minutes), the 7-day retire floor, and the 24-hour dependency floor as code constants.  Config cannot change them in either direction.
 - `lanes.doctor_command` and the `HOGHUNTER_LANE_DOCTOR_COMMAND` override name where the lane doctor is installed on this Mac.  That is a machine-local path, like `hoghunter_clean` and `data_dir`, not a fleet knob.
-- The Vacuum's older settings (intervals, `janitor.*` and `resource_watch.*` thresholds, session ages) predate this change and stay in the JSON file.  Moving them to Infisical needs a reader on the Python side and an owner decision (`docs/rollouts/2026-10-08-lane-doctor-vacuum.md`, open question 9).
 
 ## The runtime contract
 

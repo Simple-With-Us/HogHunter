@@ -112,7 +112,7 @@ enum ToolCatalog {
         case "npm_cache": return npm
         case "pm2_logs": return pm2
         case "brew_cleanup": return brew
-        case "xcode_derived_data", "xcode_device_support", "simctl_delete_unavailable": return xcode
+        case "xcode_derived_data", "xcode_device_support", "simctl_delete_unavailable", "shutdown_simulators": return xcode
         default: return nil
         }
     }

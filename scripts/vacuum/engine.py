@@ -67,7 +67,13 @@ _PROTECTED_ERRNOS = (errno.EPERM, errno.EACCES)
 
 # Steps that interpret dry_run themselves (planning vs destructive apply).
 _DRY_RUN_AWARE_STEPS = frozenset(
-    {"resource_sample", "janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps"}
+    {
+        "resource_sample",
+        "janitor_worktree_retire",
+        "janitor_cache_reclaim",
+        "pressure_apps_deps",
+        "shutdown_simulators",
+    }
 )
 
 
@@ -280,6 +286,7 @@ class VacuumEngine:
             "xcode_derived_data": self._xcode_derived_data,
             "core_simulator_caches": self._core_simulator_caches,
             "simctl_delete_unavailable": self._simctl_delete_unavailable,
+            "shutdown_simulators": lambda: self._shutdown_simulators(dry_run),
             "npm_cache": self._npm_cache,
             "pnpm_store": self._pnpm_store,
             "yarn_cache": self._yarn_cache,
@@ -464,6 +471,75 @@ class VacuumEngine:
             if picked and os.path.isabs(picked) and os.path.isfile(picked) and os.access(picked, os.X_OK):
                 return picked
         return name if shutil.which(name) else None
+
+    def _shutdown_simulators(self, dry_run: bool = False) -> tuple[int, str, StepStatus]:
+        """Shut down booted Xcode iOS Simulators when no build, test, or Simulator.app is active.  When Bitrig is
+        running, 1 booted simulator is exempted so Bitrig can keep its single shared simulator across projects."""
+        if not shutil.which("xcrun"):
+            return 0, "xcrun not installed", StepStatus.SKIPPED
+        for proc_name, label in (
+            ("xcodebuild", "xcodebuild is running"),
+            ("xctest", "xctest is running"),
+            ("Simulator\\.app", "Simulator.app is open"),
+        ):
+            busy, reason = lanes.process_state(self._runner, proc_name, label)
+            if busy:
+                return 0, f"skipped: {reason}", StepStatus.SKIPPED
+        try:
+            proc = self._runner(
+                ["xcrun", "simctl", "list", "devices", "booted", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return 0, f"simctl list failed ({type(exc).__name__})", StepStatus.SKIPPED
+        if getattr(proc, "returncode", 1) != 0:
+            return 0, "simctl list failed", StepStatus.SKIPPED
+        try:
+            doc = json.loads(getattr(proc, "stdout", "") or "{}")
+        except ValueError:
+            return 0, "simctl list returned invalid JSON", StepStatus.SKIPPED
+        booted: list[dict[str, str]] = []
+        for items in (doc.get("devices") or {}).values():
+            for dev in items or []:
+                if isinstance(dev, dict) and dev.get("state") == "Booted" and dev.get("udid"):
+                    booted.append({"udid": str(dev["udid"]), "name": str(dev.get("name", ""))})
+        if not booted:
+            return 0, "0 booted simulators", StepStatus.SKIPPED
+        bitrig_busy, _ = lanes.process_state(self._runner, "Bitrig", "Bitrig is running")
+        if bitrig_busy:
+            if len(booted) == 1:
+                return 0, "skipped: Bitrig is running (1 simulator exempt)", StepStatus.SKIPPED
+            targets = booted[1:]
+        else:
+            targets = booted
+        suffix = ", kept 1 for Bitrig" if bitrig_busy else ""
+        if dry_run:
+            for dev in targets:
+                self.plan.append({"step": "shutdown_simulators", "action": "would_shutdown", "udid": dev["udid"], "name": dev["name"]})
+            return 0, f"would shut down {_plural(len(targets), 'booted simulator')}{suffix}", StepStatus.SKIPPED
+        shut = 0
+        failed = 0
+        for dev in targets:
+            try:
+                res = self._runner(
+                    ["xcrun", "simctl", "shutdown", dev["udid"]],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if getattr(res, "returncode", 1) == 0:
+                    shut += 1
+                    self.plan.append({"step": "shutdown_simulators", "action": "shutdown", "udid": dev["udid"], "name": dev["name"]})
+                else:
+                    failed += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+        reason = f"shut down {_plural(shut, 'booted simulator')}{suffix}"
+        if failed:
+            reason += f", {failed} failed"
+        return 0, reason, StepStatus.RAN if shut else StepStatus.SKIPPED
 
     def _npm_cache(self) -> tuple[int, str, StepStatus]:
         npm = self._tool_command("npm", "npm")

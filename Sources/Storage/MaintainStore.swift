@@ -41,14 +41,26 @@ final class MaintainStore: ObservableObject {
     private let historyURL: URL
     private let configURL: URL
     private let launcher: Launcher
+    /// The Infisical owner and its cache.  The app uses the shared pair; tests
+    /// inject their own so no test reads the app's real settings or the network.
+    private let infisical: InfisicalSettings
+    private let infisicalStore: InfisicalStore
     /// When the files were last read, so a caller that only wants fresh
     /// enough data can skip the read.
     private(set) var lastRefreshAt = Date.distantPast
 
-    /// `supportDirectory`, `repoRoot` and `launcher` exist for tests, which
-    /// point the store at a temporary folder and a stub.  The app uses the
+    /// `supportDirectory`, `repoRoot`, `launcher`, `infisical` and
+    /// `infisicalStore` exist for tests, which point the store at a temporary
+    /// folder, a stub script launcher and a stubbed Infisical.  The app uses the
     /// defaults.
-    init(supportDirectory: URL? = nil, repoRoot: URL? = nil, fileManager: FileManager = .default, launcher: Launcher? = nil) {
+    init(
+        supportDirectory: URL? = nil,
+        repoRoot: URL? = nil,
+        fileManager: FileManager = .default,
+        launcher: Launcher? = nil,
+        infisical: InfisicalSettings? = nil,
+        infisicalStore: InfisicalStore? = nil
+    ) {
         let support = supportDirectory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("HogHunter/Maintain", isDirectory: true)
         statusURL = support.appendingPathComponent("status.json")
@@ -57,6 +69,22 @@ final class MaintainStore: ObservableObject {
         MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
         self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
+        self.infisical = infisical ?? InfisicalSettings.shared
+        self.infisicalStore = infisicalStore ?? InfisicalStore.shared
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(infisicalDidRefresh),
+            name: .infisicalSettingsDidRefresh,
+            object: nil
+        )
+        refresh()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func infisicalDidRefresh() {
         refresh()
     }
 
@@ -103,9 +131,11 @@ final class MaintainStore: ObservableObject {
         lastRefreshAt = Date()
         status = loadStatus()
         history = loadHistory()
+        // The config first: loadStepToggles walks visibleCatalog, which reads
+        // coolifyHost, so the host has to be current before the toggles load.
+        loadMaintainConfig()
         stepToggles = loadStepToggles()
         customScripts = MaintainRegistryStore.loadScripts()
-        loadMaintainConfig()
     }
 
     private func loadMaintainConfig() {
@@ -113,17 +143,23 @@ final class MaintainStore: ObservableObject {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         // Set even when the file or key is missing, so a host removed on disk
         // reads empty here too, as the old read-on-every-access getter did.
-        let host = (json?["coolify_ssh_host"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // Infisical is the source of truth: a non-empty host there wins once
+        // the settings are configured, and the file is the fallback.
+        let fileHost = (json?["coolify_ssh_host"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let infisicalHost = infisical.isConfigured
+            ? (infisicalStore.string(for: InfisicalKey.maintainCoolifySshHost) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+        let host = infisicalHost.isEmpty ? fileHost : infisicalHost
         if coolifyHost != host { coolifyHost = host }
+        // The Maintenance tab's host field edits this copy and saves it
+        // through setCoolifyHost, so it shows the same resolved host.
+        if coolifySSHHost != host { coolifySSHHost = host }
         guard let json else { return }
         if let jan = json["janitor"] as? [String: Any], let low = jan["low_free_gib"] as? Double {
             lowFreeGiB = low
         }
         if let cap = json["pm2_logs_cap_mb"] as? Int {
             pm2LogsCapMB = cap
-        }
-        if let host = json["coolify_ssh_host"] as? String {
-            coolifySSHHost = host
         }
         if let xcode = json["xcode_derived_data_path"] as? String {
             customDerivedDataPath = xcode
@@ -144,7 +180,8 @@ final class MaintainStore: ObservableObject {
         json["janitor"] = jan
 
         json["pm2_logs_cap_mb"] = pm2LogsCapMB
-        json["coolify_ssh_host"] = coolifySSHHost
+        // No coolify_ssh_host here: a host save goes through setCoolifyHost,
+        // which writes Infisical first and only then the local file.
         json["xcode_derived_data_path"] = customDerivedDataPath
         json["tool_paths"] = toolPaths
 
@@ -208,7 +245,27 @@ final class MaintainStore: ObservableObject {
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
         let launcher = self.launcher
+        let infisical = self.infisical
         Task { [weak self] in
+            if infisical.isConfigured {
+                let gen = infisical.connectionGeneration
+                do {
+                    try await infisical.set(
+                        enabled ? "true" : "false",
+                        forKey: "\(InfisicalKey.maintainStepPrefix)\(stepId)",
+                        expectedGeneration: gen
+                    )
+                } catch {
+                    // Infisical is the source of truth, so a failed write-through is a
+                    // failed save: skip the local write and reload the unchanged value.
+                    // Carrying on would let the refresh read the stale Infisical value
+                    // over the local one and flip the toggle back with no word.
+                    guard let self else { return }
+                    self.lastError = Self.infisicalSaveFailure("that step setting", error: error)
+                    self.refresh()
+                    return
+                }
+            }
             let outcome: Result<Bool, Error>
             do {
                 outcome = .success(try await launcher(["--set-step", stepId, enabled ? "on" : "off"]))
@@ -226,6 +283,12 @@ final class MaintainStore: ObservableObject {
             }
             self.refresh()
         }
+    }
+
+    /// What the owner reads when Infisical refused a Maintain save.  Uses the
+    /// settings owner's safe message, which never carries a response body.
+    private static func infisicalSaveFailure(_ what: String, error: Error) -> String {
+        "Could not save \(what) to Infisical.\u{00A0} \(InfisicalSettings.safeMessage(for: error))"
     }
 
     /// True inside an XCTest run.  The default launcher refuses to start the
@@ -367,6 +430,13 @@ final class MaintainStore: ObservableObject {
             associatedTool: ToolCatalog.xcode
         ),
         MaintainStepCatalogEntry(
+            id: "shutdown_simulators",
+            title: "Shut Down Xcode Simulators",
+            description: "Shuts down booted iOS Simulators when no build, test, or Simulator.app is running.",
+            tooltip: "Shuts down booted iOS Simulators when no build is running (preserving 1 simulator for Bitrig).",
+            associatedTool: ToolCatalog.xcode
+        ),
+        MaintainStepCatalogEntry(
             id: "simctl_delete_unavailable",
             title: "Remove Unavailable Simulator Runtimes",
             description: "Protects simulator devices and containers; runtime caches are safely cleared by the Simulator cache step.",
@@ -433,8 +503,10 @@ final class MaintainStore: ObservableObject {
         visibleCatalog.filter { isStepEnabled($0.id) }
     }
 
-    /// `coolify_ssh_host` from config.json, trimmed, as of the last
-    /// `refresh()`.  Held in memory because the Settings view and
+    /// The remote server SSH host, trimmed, as of the last `refresh()`:
+    /// Infisical's `hoghunter.maintain.coolifySshHost` when the settings are
+    /// configured and it is set, else `coolify_ssh_host` from config.json.
+    /// Held in memory because the Settings view and
     /// `visibleCatalog` read it on every render, which re-read and parsed the
     /// file each time; `setCoolifyHost` refreshes it once the save lands.
     @Published private(set) var coolifyHost: String = ""
@@ -444,6 +516,7 @@ final class MaintainStore: ObservableObject {
     func setCoolifyHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let launcher = self.launcher
+        let infisical = self.infisical
         // Cancelling a Task does not stop a script it already launched, so a
         // save waits for the previous one to finish before it launches its
         // own: an older run can never land after a newer one and overwrite
@@ -452,6 +525,27 @@ final class MaintainStore: ObservableObject {
         previous?.cancel()
         coolifyHostTask = Task { [weak self] in
             _ = await previous?.value
+            // A newer save superseded this one while it waited: drop it before
+            // it writes its older value to Infisical.
+            if Task.isCancelled { return }
+            if infisical.isConfigured {
+                let gen = infisical.connectionGeneration
+                do {
+                    try await infisical.set(
+                        trimmed,
+                        forKey: InfisicalKey.maintainCoolifySshHost,
+                        expectedGeneration: gen
+                    )
+                } catch {
+                    // Same rule as `setStepEnabled`: a failed Infisical write is a failed
+                    // save.  A newer edit that cancelled this one speaks for itself.
+                    if Task.isCancelled { return }
+                    guard let self else { return }
+                    self.lastError = Self.infisicalSaveFailure("the remote server SSH host", error: error)
+                    self.refresh()
+                    return
+                }
+            }
             let outcome: Result<Bool, Error>
             do {
                 if Task.isCancelled { return }
@@ -486,12 +580,20 @@ final class MaintainStore: ObservableObject {
         for entry in visibleCatalog {
             toggles[entry.id] = !Self.defaultOffSteps.contains(entry.id)
         }
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let steps = json["steps"] as? [String: [String: Bool]] else { return toggles }
-        for (key, val) in steps {
-            if let enabled = val["enabled"] {
-                toggles[key] = enabled
+        if let data = try? Data(contentsOf: configURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let steps = json["steps"] as? [String: [String: Bool]] {
+            for (key, val) in steps {
+                if let enabled = val["enabled"] {
+                    toggles[key] = enabled
+                }
+            }
+        }
+        if infisical.isConfigured {
+            for key in toggles.keys {
+                if let infisVal = infisicalStore.bool(for: "\(InfisicalKey.maintainStepPrefix)\(key)") {
+                    toggles[key] = infisVal
+                }
             }
         }
         return toggles
