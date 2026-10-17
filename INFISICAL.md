@@ -93,6 +93,7 @@ Never put a DSN or auth token in git, `project.yml`, Info.plist, a log, or a PR 
 
 Maintain settings (step toggles, intervals, clean budget, remote host, and thresholds) are wired to Infisical.  The Swift Mac app reads Infisical via `InfisicalStore` and writes through on change; the Python engine (`scripts/vacuum/config.py`) consumes them through `apply_env_overrides()`, supporting both `hoghunter.maintain.*` and `HOGHUNTER_MAINTAIN_*` environment variables.
 
+- A Maintain save (a step toggle or the remote server SSH host) writes to Infisical first.  If that write fails, the save fails: the Mac shows the error, reloads the value Infisical still holds, and does not write the local `config.json`.  The local file is only written after Infisical accepted the value, so a refresh can never put a stale Infisical value over a newer local one.
 - The lane doctor settings in `scripts/vacuum/lanes.py` keep report age (15 minutes), doctor schema (2), doctor timeout (5 minutes), the 7-day retire floor, and the 24-hour dependency floor as code constants.  Config cannot change them in either direction.
 - `lanes.doctor_command` and the `HOGHUNTER_LANE_DOCTOR_COMMAND` override name where the lane doctor is installed on this Mac.  That is a machine-local path, like `hoghunter_clean` and `data_dir`, not a fleet knob.
 

@@ -31,14 +31,26 @@ final class MaintainStore: ObservableObject {
     private let historyURL: URL
     private let configURL: URL
     private let launcher: Launcher
+    /// The Infisical owner and its cache.  The app uses the shared pair; tests
+    /// inject their own so no test reads the app's real settings or the network.
+    private let infisical: InfisicalSettings
+    private let infisicalStore: InfisicalStore
     /// When the files were last read, so a caller that only wants fresh
     /// enough data can skip the read.
     private(set) var lastRefreshAt = Date.distantPast
 
-    /// `supportDirectory`, `repoRoot` and `launcher` exist for tests, which
-    /// point the store at a temporary folder and a stub.  The app uses the
+    /// `supportDirectory`, `repoRoot`, `launcher`, `infisical` and
+    /// `infisicalStore` exist for tests, which point the store at a temporary
+    /// folder, a stub script launcher and a stubbed Infisical.  The app uses the
     /// defaults.
-    init(supportDirectory: URL? = nil, repoRoot: URL? = nil, fileManager: FileManager = .default, launcher: Launcher? = nil) {
+    init(
+        supportDirectory: URL? = nil,
+        repoRoot: URL? = nil,
+        fileManager: FileManager = .default,
+        launcher: Launcher? = nil,
+        infisical: InfisicalSettings? = nil,
+        infisicalStore: InfisicalStore? = nil
+    ) {
         let support = supportDirectory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("HogHunter/Maintain", isDirectory: true)
         statusURL = support.appendingPathComponent("status.json")
@@ -47,6 +59,8 @@ final class MaintainStore: ObservableObject {
         MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
         self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
+        self.infisical = infisical ?? InfisicalSettings.shared
+        self.infisicalStore = infisicalStore ?? InfisicalStore.shared
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(infisicalDidRefresh),
@@ -150,14 +164,26 @@ final class MaintainStore: ObservableObject {
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
         let launcher = self.launcher
+        let infisical = self.infisical
         Task { [weak self] in
-            if InfisicalSettings.shared.isConfigured {
-                let gen = InfisicalSettings.shared.connectionGeneration
-                try? await InfisicalSettings.shared.set(
-                    enabled ? "true" : "false",
-                    forKey: "\(InfisicalKey.maintainStepPrefix)\(stepId)",
-                    expectedGeneration: gen
-                )
+            if infisical.isConfigured {
+                let gen = infisical.connectionGeneration
+                do {
+                    try await infisical.set(
+                        enabled ? "true" : "false",
+                        forKey: "\(InfisicalKey.maintainStepPrefix)\(stepId)",
+                        expectedGeneration: gen
+                    )
+                } catch {
+                    // Infisical is the source of truth, so a failed write-through is a
+                    // failed save: skip the local write and reload the unchanged value.
+                    // Carrying on would let the refresh read the stale Infisical value
+                    // over the local one and flip the toggle back with no word.
+                    guard let self else { return }
+                    self.lastError = Self.infisicalSaveFailure("that step setting", error: error)
+                    self.refresh()
+                    return
+                }
             }
             let outcome: Result<Bool, Error>
             do {
@@ -176,6 +202,12 @@ final class MaintainStore: ObservableObject {
             }
             self.refresh()
         }
+    }
+
+    /// What the owner reads when Infisical refused a Maintain save.  Uses the
+    /// settings owner's safe message, which never carries a response body.
+    private static func infisicalSaveFailure(_ what: String, error: Error) -> String {
+        "Could not save \(what) to Infisical.\u{00A0} \(InfisicalSettings.safeMessage(for: error))"
     }
 
     /// True inside an XCTest run.  The default launcher refuses to start the
@@ -266,10 +298,10 @@ final class MaintainStore: ObservableObject {
     }
 
     var coolifyHost: String {
-        if InfisicalSettings.shared.isConfigured,
-           let infisical = InfisicalStore.shared.string(for: InfisicalKey.maintainCoolifySshHost),
-           !infisical.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return infisical.trimmingCharacters(in: .whitespacesAndNewlines)
+        if infisical.isConfigured,
+           let configured = infisicalStore.string(for: InfisicalKey.maintainCoolifySshHost),
+           !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return configured.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
@@ -282,15 +314,26 @@ final class MaintainStore: ObservableObject {
     func setCoolifyHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let launcher = self.launcher
+        let infisical = self.infisical
         coolifyHostTask?.cancel()
         coolifyHostTask = Task { [weak self] in
-            if InfisicalSettings.shared.isConfigured {
-                let gen = InfisicalSettings.shared.connectionGeneration
-                try? await InfisicalSettings.shared.set(
-                    trimmed,
-                    forKey: InfisicalKey.maintainCoolifySshHost,
-                    expectedGeneration: gen
-                )
+            if infisical.isConfigured {
+                let gen = infisical.connectionGeneration
+                do {
+                    try await infisical.set(
+                        trimmed,
+                        forKey: InfisicalKey.maintainCoolifySshHost,
+                        expectedGeneration: gen
+                    )
+                } catch {
+                    // Same rule as `setStepEnabled`: a failed Infisical write is a failed
+                    // save.  A newer edit that cancelled this one speaks for itself.
+                    if Task.isCancelled { return }
+                    guard let self else { return }
+                    self.lastError = Self.infisicalSaveFailure("the remote server SSH host", error: error)
+                    self.refresh()
+                    return
+                }
             }
             let outcome: Result<Bool, Error>
             do {
@@ -335,9 +378,9 @@ final class MaintainStore: ObservableObject {
                 }
             }
         }
-        if InfisicalSettings.shared.isConfigured {
+        if infisical.isConfigured {
             for key in toggles.keys {
-                if let infisVal = InfisicalStore.shared.bool(for: "\(InfisicalKey.maintainStepPrefix)\(key)") {
+                if let infisVal = infisicalStore.bool(for: "\(InfisicalKey.maintainStepPrefix)\(key)") {
                     toggles[key] = infisVal
                 }
             }

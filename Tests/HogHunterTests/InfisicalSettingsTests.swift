@@ -550,20 +550,8 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainCoolifySshHost))
     }
 
-    @MainActor
-    func testMaintainStoreRespectsInfisicalOverrides() throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("maintain-infisical-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let store = MaintainStore(supportDirectory: tempDir, repoRoot: tempDir, launcher: { _ in true })
-        // Defaults: shutdown_simulators is on.
-        XCTAssertEqual(store.stepToggles["shutdown_simulators"], true)
-
-        // When not configured, InfisicalStore is not consulted.
-        XCTAssertFalse(InfisicalSettings.shared.isConfigured)
-        store.refresh()
-        XCTAssertEqual(store.stepToggles["shutdown_simulators"], true)
-    }
+    // The Maintain store's Infisical override and write-through tests live in
+    // MaintainInfisicalTests.swift, where the settings owner is configured
+    // with a stub instead of the app's shared instance.
 }
 
