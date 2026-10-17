@@ -46,6 +46,13 @@ final class DiskCleanerStore: ObservableObject {
         return false
     }
 
+    var isBusy: Bool {
+        switch state {
+        case .scanning, .cleaning: return true
+        default: return false
+        }
+    }
+
     /// Re-reads the stored exclusions.  The phone and the Settings window edit
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {

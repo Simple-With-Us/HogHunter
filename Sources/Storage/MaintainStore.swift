@@ -218,17 +218,17 @@ final class MaintainStore: ObservableObject {
     }
 
     nonisolated static let catalog: [MaintainStepCatalogEntry] = [
-        MaintainStepCatalogEntry(id: "resource_sample", title: "Check disk and memory"),
-        MaintainStepCatalogEntry(id: "hoghunter_reclaim", title: "Hog Hunter disk reclaim"),
-        MaintainStepCatalogEntry(id: "janitor_worktree_retire", title: "Retire old merged git worktrees"),
-        MaintainStepCatalogEntry(id: "janitor_cache_reclaim", title: "Reclaim caches when disk is low"),
-        MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs"),
-        MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache"),
-        MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache"),
-        MaintainStepCatalogEntry(id: "shutdown_simulators", title: "Shut down Xcode Simulators"),
-        MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes"),
-        MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance"),
-        MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)"),
+        MaintainStepCatalogEntry(id: "resource_sample", title: "Check disk and memory", tooltip: "Samples host disk, memory, and CPU metrics against alert thresholds."),
+        MaintainStepCatalogEntry(id: "hoghunter_reclaim", title: "Hog Hunter disk reclaim", tooltip: "Runs Hog Hunter's built-in disk cleanup rules."),
+        MaintainStepCatalogEntry(id: "janitor_worktree_retire", title: "Retire old merged git worktrees", tooltip: "Cleans up merged and idle git worktrees older than policy."),
+        MaintainStepCatalogEntry(id: "janitor_cache_reclaim", title: "Reclaim caches when disk is low", tooltip: "Frees build and temporary caches when disk space is tight."),
+        MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs", tooltip: "Truncates oversized PM2 background process logs in place."),
+        MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache", tooltip: "Trims global package manager caches when no builds are active."),
+        MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache", tooltip: "Prunes stale Xcode DerivedData and module caches."),
+        MaintainStepCatalogEntry(id: "shutdown_simulators", title: "Shut down Xcode Simulators", tooltip: "Shuts down booted iOS Simulators when no build is running (preserving 1 simulator for Bitrig)."),
+        MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", tooltip: "Removes unavailable iOS simulator runtime remnants."),
+        MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance", tooltip: "Runs /etc/cron.daily/coolify-auto-maintenance over SSH to clean Docker containers, images, and container logs on your remote Coolify server (e.g. using SSH alias 'coolify', IP, or domain)."),
+        MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)", tooltip: "Invokes the CleanMyMac CLI tool if installed locally."),
     ]
 
     private func loadStatus() -> MaintainStatus? {
@@ -269,42 +269,56 @@ final class MaintainStore: ObservableObject {
         if InfisicalSettings.shared.isConfigured,
            let infisical = InfisicalStore.shared.string(for: InfisicalKey.maintainCoolifySshHost),
            !infisical.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return infisical
+            return infisical.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let host = json["coolify_ssh_host"] as? String else { return "" }
-        return host
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        let host = json["coolify_ssh_host"] as? String ?? ""
+        return host.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var coolifyHostTask: Task<Void, Never>?
+
     func setCoolifyHost(_ host: String) {
-        if let data = try? Data(contentsOf: configURL),
-           var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            json["coolify_ssh_host"] = host
-            if let updated = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updated.write(to: configURL)
-            }
-        } else {
-            let json: [String: Any] = ["coolify_ssh_host": host]
-            if let updated = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updated.write(to: configURL)
-            }
-        }
-        if InfisicalSettings.shared.isConfigured {
-            let gen = InfisicalSettings.shared.connectionGeneration
-            Task {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let launcher = self.launcher
+        coolifyHostTask?.cancel()
+        coolifyHostTask = Task { [weak self] in
+            if InfisicalSettings.shared.isConfigured {
+                let gen = InfisicalSettings.shared.connectionGeneration
                 try? await InfisicalSettings.shared.set(
-                    host,
+                    trimmed,
                     forKey: InfisicalKey.maintainCoolifySshHost,
                     expectedGeneration: gen
                 )
             }
+            let outcome: Result<Bool, Error>
+            do {
+                if Task.isCancelled { return }
+                outcome = .success(try await launcher(["--set-coolify-host", trimmed]))
+            } catch is CancellationError {
+                return
+            } catch {
+                outcome = .failure(error)
+            }
+            if Task.isCancelled { return }
+            await MainActor.run {
+                guard let self else { return }
+                switch outcome {
+                case .success(true):
+                    self.lastError = nil
+                case .success(false):
+                    self.lastError = "Could not save remote server SSH host."
+                case .failure(let error):
+                    self.lastError = error.localizedDescription
+                }
+                self.refresh()
+            }
         }
-        refresh()
     }
 
     private var coolifyRemoteConfigured: Bool {
-        !coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !coolifyHost.isEmpty
     }
 
     private func loadStepToggles() -> [String: Bool] {
