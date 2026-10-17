@@ -109,8 +109,13 @@ final class MaintainStore: ObservableObject {
     }
 
     private func loadMaintainConfig() {
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let json = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        // Set even when the file or key is missing, so a host removed on disk
+        // reads empty here too, as the old read-on-every-access getter did.
+        let host = (json?["coolify_ssh_host"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if coolifyHost != host { coolifyHost = host }
+        guard let json else { return }
         if let jan = json["janitor"] as? [String: Any], let low = jan["low_free_gib"] as? Double {
             lowFreeGiB = low
         }
@@ -428,20 +433,25 @@ final class MaintainStore: ObservableObject {
         visibleCatalog.filter { isStepEnabled($0.id) }
     }
 
-    var coolifyHost: String {
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        let host = json["coolify_ssh_host"] as? String ?? ""
-        return host.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    /// `coolify_ssh_host` from config.json, trimmed, as of the last
+    /// `refresh()`.  Held in memory because the Settings view and
+    /// `visibleCatalog` read it on every render, which re-read and parsed the
+    /// file each time; `setCoolifyHost` refreshes it once the save lands.
+    @Published private(set) var coolifyHost: String = ""
 
     private var coolifyHostTask: Task<Void, Never>?
 
     func setCoolifyHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let launcher = self.launcher
-        coolifyHostTask?.cancel()
+        // Cancelling a Task does not stop a script it already launched, so a
+        // save waits for the previous one to finish before it launches its
+        // own: an older run can never land after a newer one and overwrite
+        // it.  The cancel still drops a save that has not launched yet.
+        let previous = coolifyHostTask
+        previous?.cancel()
         coolifyHostTask = Task { [weak self] in
+            _ = await previous?.value
             let outcome: Result<Bool, Error>
             do {
                 if Task.isCancelled { return }
