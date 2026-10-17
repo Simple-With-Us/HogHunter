@@ -245,34 +245,44 @@ final class MaintainStore: ObservableObject {
     var coolifyHost: String {
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        return json["coolify_ssh_host"] as? String ?? ""
+        let host = json["coolify_ssh_host"] as? String ?? ""
+        return host.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private var coolifyHostTask: Task<Void, Never>?
 
     func setCoolifyHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let launcher = self.launcher
-        Task { [weak self] in
+        coolifyHostTask?.cancel()
+        coolifyHostTask = Task { [weak self] in
             let outcome: Result<Bool, Error>
             do {
+                if Task.isCancelled { return }
                 outcome = .success(try await launcher(["--set-coolify-host", trimmed]))
+            } catch is CancellationError {
+                return
             } catch {
                 outcome = .failure(error)
             }
-            guard let self else { return }
-            switch outcome {
-            case .success(true):
-                self.lastError = nil
-            case .success(false):
-                self.lastError = "Could not save remote server SSH host."
-            case .failure(let error):
-                self.lastError = error.localizedDescription
+            if Task.isCancelled { return }
+            await MainActor.run {
+                guard let self else { return }
+                switch outcome {
+                case .success(true):
+                    self.lastError = nil
+                case .success(false):
+                    self.lastError = "Could not save remote server SSH host."
+                case .failure(let error):
+                    self.lastError = error.localizedDescription
+                }
+                self.refresh()
             }
-            self.refresh()
         }
     }
 
     private var coolifyRemoteConfigured: Bool {
-        return !coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !coolifyHost.isEmpty
     }
 
     private func loadStepToggles() -> [String: Bool] {

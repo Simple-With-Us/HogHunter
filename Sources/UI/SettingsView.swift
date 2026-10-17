@@ -373,7 +373,7 @@ private struct CleanerSettingsTab: View {
                         Button("Save Host") {
                             store.maintain.setCoolifyHost(coolifyHost)
                         }
-                        .disabled(coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines) == store.maintain.coolifyHost)
+                        .disabled(coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines) == store.maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines))
 
                         if !store.maintain.coolifyHost.isEmpty {
                             Button("Clear") {
