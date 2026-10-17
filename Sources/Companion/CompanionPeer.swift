@@ -11,7 +11,10 @@ import Network
 /// This judges the address the connection arrived from.  A router that rewrites
 /// forwarded traffic to its own LAN address (SNAT, hairpin NAT) makes that
 /// traffic look local, so port forwarding is still not safe.  Encrypting the
-/// link is the real fix and is tracked as a follow-up.
+/// link is the real fix and is tracked as a follow-up.  A Cloudflare Tunnel
+/// daemon on this Mac arrives over loopback; `resolvingForwardedClient(in:)`
+/// judges those requests by the client the tunnel names, so a phone on a
+/// tunnel reads the snapshot like any outside client and controls nothing.
 struct CompanionPeer: Equatable, Sendable {
     /// The client's address with zone ids and IPv4-in-IPv6 wrapping removed,
     /// so one client is one key.  The auth throttle counts by this.
@@ -38,13 +41,82 @@ struct CompanionPeer: Equatable, Sendable {
         }
     }
 
+    /// Key for a forwarded request whose client address cannot be read.
+    static let unreadableForwardedKey = "forwarded"
+
+    /// The IPv6 loopback address (`::1`) as `make(ipv6:)` keys it.
+    private static let ipv6LoopbackKey = String(repeating: "0", count: 31) + "1"
+
+    /// Whether the connection came from this Mac itself, which is where a
+    /// tunnel daemon such as `cloudflared` connects from.
+    var isLoopback: Bool {
+        key.hasPrefix("127.") || key == Self.ipv6LoopbackKey
+    }
+
+    /// The peer a request should be judged as.  A Cloudflare Tunnel daemon on
+    /// this Mac connects over loopback, which would make every tunnel request
+    /// look local, so a loopback request that names its client in a forwarded
+    /// header is judged by that client instead: a public address is not
+    /// trusted and is throttled under its own key.  A loopback request with
+    /// tunnel marks but no client address it can read is not trusted either.
+    ///
+    /// Forwarded headers from any other peer are ignored.  A LAN or Tailscale
+    /// phone talks to the Mac directly, and honouring its headers would let it
+    /// borrow another address's throttle key (locking that client out) or
+    /// rotate keys to dodge the per-address limit on wrong codes.
+    func resolvingForwardedClient(in request: Data) -> CompanionPeer {
+        guard isLoopback else { return self }
+        if let clientIP = CompanionHTTP.forwardedClientIP(in: request) {
+            return Self.forwarded(clientIP)
+        }
+        if CompanionHTTP.isForwardedTunnel(in: request) {
+            return CompanionPeer(key: Self.unreadableForwardedKey, isTrusted: false)
+        }
+        return self
+    }
+
+    /// A forwarded client address judged like a direct peer's.  Anything that
+    /// is not a bare IPv4 or IPv6 address is not trusted.
+    static func forwarded(_ clientIP: String) -> CompanionPeer {
+        if let v4 = IPv4Address(clientIP) {
+            return make(ipv4: [UInt8](v4.rawValue))
+        }
+        if let v6 = IPv6Address(clientIP) {
+            return make(ipv6: [UInt8](v6.rawValue))
+        }
+        return CompanionPeer(key: unreadableForwardedKey, isTrusted: false)
+    }
+
+    /// Splits an address typed on the phone into a host and an optional port.
+    /// `name:port` and `a.b.c.d:port` split on their one colon.  An IPv6
+    /// literal takes a port only in brackets (`[fd7a:115c:a1e0::1]:24240`),
+    /// because a bare one's last group can be all digits (`fd7a:115c:a1e0::1`)
+    /// and would otherwise be read as a port.  The brackets are dropped.
+    static func splitHostAndPort(_ raw: String) -> (host: String, port: Int?) {
+        if raw.hasPrefix("["), let close = raw.firstIndex(of: "]") {
+            let host = String(raw[raw.index(after: raw.startIndex)..<close])
+            let rest = raw[raw.index(after: close)...]
+            if rest.hasPrefix(":"), let port = Int(rest.dropFirst()) {
+                return (host, port)
+            }
+            return (host, nil)
+        }
+        let colons = raw.filter { $0 == ":" }.count
+        if colons == 1, let colon = raw.firstIndex(of: ":"), let port = Int(raw[raw.index(after: colon)...]) {
+            return (String(raw[..<colon]), port)
+        }
+        return (raw, nil)
+    }
+
     /// Whether the phone should treat the Mac it is about to send a secret to
     /// as being on the local network or Tailscale.  A Bonjour service was found
     /// on the local link; an address is judged like a peer's; a name is trusted
-    /// only if it is a MagicDNS or `.local` name, because any other name can
-    /// point anywhere.  The Mac refuses controls from outside regardless, but
-    /// it reads a request before it can refuse it, so a secret must not be sent
-    /// to a Mac that is only reachable over the public internet.
+    /// only if it is a MagicDNS, `.local` or `localhost` name, because any other
+    /// name can point anywhere.  The port says nothing: 443 proves neither that
+    /// the link is encrypted nor who answers, and a tunnel's edge reads what it
+    /// carries.  The Mac refuses controls from outside regardless, but it reads
+    /// a request before it can refuse it, so a secret must not be sent to a Mac
+    /// that is only reachable over the public internet or a tunnel.
     static func isTrustedEndpoint(_ endpoint: NWEndpoint) -> Bool {
         switch endpoint {
         case .service:
