@@ -224,7 +224,7 @@ def migrate_legacy_support_if_needed(home: Path) -> Path:
     return new_root
 
 
-def load_config(path: Path | None = None, home: Path | None = None) -> dict[str, Any]:
+def load_config(path: Path | None = None, home: Path | None = None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     home = home or Path.home()
     migrate_legacy_support_if_needed(home)
     if path is None:
@@ -256,7 +256,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
     lanes = base.get("lanes")
     base["lanes"] = _deep_merge(DEFAULT_LANES, lanes if isinstance(lanes, dict) else {})
     janitor = base.setdefault("janitor", {})
-    env_max_load = os.environ.get("JANITOR_MAX_LOAD")
+    env_max_load = (os.environ if env is None else env).get("JANITOR_MAX_LOAD")
     if env_max_load:
         try:
             janitor["max_load_hard"] = float(env_max_load)
@@ -267,6 +267,127 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
         steps.setdefault(step_id, {"enabled": step_id not in DEFAULT_OFF_STEPS})
     if not str(base.get("coolify_ssh_host") or "").strip():
         steps.setdefault("coolify_remote", {})["enabled"] = False
+    apply_env_overrides(base, env)
+    return base
+
+
+def _parse_bool(val: str) -> bool | None:
+    cleaned = val.strip().lower()
+    if cleaned in ("true", "1", "on"):
+        return True
+    if cleaned in ("false", "0", "off"):
+        return False
+    return None
+
+
+def _parse_int(val: str) -> int | None:
+    try:
+        return int(float(val.strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_float(val: str) -> float | None:
+    try:
+        return float(val.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Apply environment and Infisical knob overrides over loaded config.
+
+    Supports both hoghunter.maintain.* and HOGHUNTER_MAINTAIN_* environment keys.  Step toggles,
+    cadence intervals, and threshold limits take precedence when present in the environment."""
+    env = os.environ if env is None else env
+
+    # Step toggles
+    steps = base.setdefault("steps", {})
+    for step_id in STEP_CATALOG:
+        candidates = (
+            f"hoghunter.maintain.step.{step_id}",
+            f"HOGHUNTER_MAINTAIN_STEP_{step_id.upper()}",
+        )
+        for key in candidates:
+            if key in env:
+                val = _parse_bool(env[key])
+                if val is not None:
+                    steps.setdefault(step_id, {})["enabled"] = val
+
+    for k, v in env.items():
+        step_id = None
+        if k.startswith("hoghunter.maintain.step."):
+            step_id = k[len("hoghunter.maintain.step."):]
+        elif k.startswith("HOGHUNTER_MAINTAIN_STEP_"):
+            step_id = k[len("HOGHUNTER_MAINTAIN_STEP_"):].lower()
+        if step_id and step_id not in STEP_CATALOG:
+            val = _parse_bool(v)
+            if val is not None:
+                steps.setdefault(step_id, {})["enabled"] = val
+
+    # Intervals (cadence)
+    intervals = base.setdefault("intervals_seconds", {})
+    for key in ("hoghunter.maintain.interval.watchSec", "HOGHUNTER_MAINTAIN_INTERVAL_WATCH_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                intervals["watch"] = val
+    for key in ("hoghunter.maintain.interval.janitorSec", "HOGHUNTER_MAINTAIN_INTERVAL_JANITOR_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                intervals["janitor"] = val
+    for key in ("hoghunter.maintain.interval.fullSec", "HOGHUNTER_MAINTAIN_INTERVAL_FULL_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                intervals["full"] = val
+
+    # History max runs
+    for key in ("hoghunter.maintain.historyMaxRuns", "HOGHUNTER_MAINTAIN_HISTORY_MAX_RUNS"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                base["history_max_runs"] = val
+
+    # Clean budget
+    for key in ("hoghunter.maintain.cleanBudgetSec", "HOGHUNTER_MAINTAIN_CLEAN_BUDGET_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                base["hoghunter_clean_budget_sec"] = val
+
+    # Coolify SSH host
+    for key in ("hoghunter.maintain.coolifySshHost", "HOGHUNTER_MAINTAIN_COOLIFY_SSH_HOST"):
+        if key in env:
+            base["coolify_ssh_host"] = env[key].strip()
+
+    # Janitor thresholds
+    janitor = base.setdefault("janitor", {})
+    for key in ("hoghunter.maintain.janitor.maxLoadHard", "HOGHUNTER_MAINTAIN_JANITOR_MAX_LOAD_HARD"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                janitor["max_load_hard"] = val
+    for key in ("hoghunter.maintain.janitor.lowFreeGib", "HOGHUNTER_MAINTAIN_JANITOR_LOW_FREE_GIB"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                janitor["low_free_gib"] = val
+
+    # Resource watch thresholds
+    resource_watch = base.setdefault("resource_watch", {})
+    for key in ("hoghunter.maintain.watch.diskFreeWarnGb", "HOGHUNTER_MAINTAIN_WATCH_DISK_FREE_WARN_GB"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                resource_watch["disk_free_warn_gb"] = val
+    for key in ("hoghunter.maintain.watch.swapUsedPct", "HOGHUNTER_MAINTAIN_WATCH_SWAP_USED_PCT"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                resource_watch["swap_used_pct"] = val
+
     return base
 
 

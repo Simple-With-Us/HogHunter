@@ -47,6 +47,20 @@ final class MaintainStore: ObservableObject {
         MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
         self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(infisicalDidRefresh),
+            name: .infisicalSettingsDidRefresh,
+            object: nil
+        )
+        refresh()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func infisicalDidRefresh() {
         refresh()
     }
 
@@ -137,6 +151,14 @@ final class MaintainStore: ObservableObject {
         stepToggles[stepId] = enabled
         let launcher = self.launcher
         Task { [weak self] in
+            if InfisicalSettings.shared.isConfigured {
+                let gen = InfisicalSettings.shared.connectionGeneration
+                try? await InfisicalSettings.shared.set(
+                    enabled ? "true" : "false",
+                    forKey: "\(InfisicalKey.maintainStepPrefix)\(stepId)",
+                    expectedGeneration: gen
+                )
+            }
             let outcome: Result<Bool, Error>
             do {
                 outcome = .success(try await launcher(["--set-step", stepId, enabled ? "on" : "off"]))
@@ -243,11 +265,46 @@ final class MaintainStore: ObservableObject {
         return Self.catalog
     }
 
-    private var coolifyRemoteConfigured: Bool {
+    var coolifyHost: String {
+        if InfisicalSettings.shared.isConfigured,
+           let infisical = InfisicalStore.shared.string(for: InfisicalKey.maintainCoolifySshHost),
+           !infisical.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return infisical
+        }
         guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        let host = json["coolify_ssh_host"] as? String ?? ""
-        return !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let host = json["coolify_ssh_host"] as? String else { return "" }
+        return host
+    }
+
+    func setCoolifyHost(_ host: String) {
+        if let data = try? Data(contentsOf: configURL),
+           var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            json["coolify_ssh_host"] = host
+            if let updated = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? updated.write(to: configURL)
+            }
+        } else {
+            let json: [String: Any] = ["coolify_ssh_host": host]
+            if let updated = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? updated.write(to: configURL)
+            }
+        }
+        if InfisicalSettings.shared.isConfigured {
+            let gen = InfisicalSettings.shared.connectionGeneration
+            Task {
+                try? await InfisicalSettings.shared.set(
+                    host,
+                    forKey: InfisicalKey.maintainCoolifySshHost,
+                    expectedGeneration: gen
+                )
+            }
+        }
+        refresh()
+    }
+
+    private var coolifyRemoteConfigured: Bool {
+        !coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func loadStepToggles() -> [String: Bool] {
@@ -255,12 +312,20 @@ final class MaintainStore: ObservableObject {
         for entry in visibleCatalog {
             toggles[entry.id] = !Self.defaultOffSteps.contains(entry.id)
         }
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let steps = json["steps"] as? [String: [String: Bool]] else { return toggles }
-        for (key, val) in steps {
-            if let enabled = val["enabled"] {
-                toggles[key] = enabled
+        if let data = try? Data(contentsOf: configURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let steps = json["steps"] as? [String: [String: Bool]] {
+            for (key, val) in steps {
+                if let enabled = val["enabled"] {
+                    toggles[key] = enabled
+                }
+            }
+        }
+        if InfisicalSettings.shared.isConfigured {
+            for key in toggles.keys {
+                if let infisVal = InfisicalStore.shared.bool(for: "\(InfisicalKey.maintainStepPrefix)\(key)") {
+                    toggles[key] = infisVal
+                }
             }
         }
         return toggles

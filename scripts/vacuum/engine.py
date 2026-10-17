@@ -397,7 +397,7 @@ class VacuumEngine:
         for proc_name, label in (
             ("xcodebuild", "xcodebuild is running"),
             ("xctest", "xctest is running"),
-            ("Simulator", "Simulator.app is open"),
+            ("Simulator\\.app", "Simulator.app is open"),
         ):
             busy, reason = lanes.process_state(self._runner, proc_name, label)
             if busy:
