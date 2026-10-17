@@ -273,6 +273,9 @@ final class MaintainStore: ObservableObject {
                     }
                     errHandle = try FileHandle(forWritingTo: errURL)
                 } catch {
+                    // createFile may already have made the empty file before
+                    // the open threw; removing a missing file is a no-op.
+                    try? FileManager.default.removeItem(at: errURL)
                     continuation.resume(throwing: error)
                     return
                 }
