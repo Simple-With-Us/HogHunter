@@ -64,7 +64,7 @@ extension CompanionModel {
             return
         }
         do {
-            let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: saved.token)
+            let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             applyCleanReport(report)
             if report.state == "scanning" {
                 await followScan(endpoint: endpoint, token: saved.token)
@@ -154,7 +154,8 @@ extension CompanionModel {
                 endpoint: endpoint,
                 token: saved.token,
                 tier: cleanTier,
-                acknowledgedExtreme: extremeAcknowledged
+                acknowledgedExtreme: extremeAcknowledged,
+                useTLS: isUsingTLS(for: saved)
             )
             isStartingScan = false
             if response.status == "scanning" {
@@ -182,7 +183,7 @@ extension CompanionModel {
         let started = Date()
         while !Task.isCancelled, Date().timeIntervalSince(started) < 10 * 60 {
             do {
-                let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: token)
+                let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: token, useTLS: isUsingTLS(for: saved))
                 applyCleanReport(report)
                 if report.state != "scanning" { return }
             } catch {
@@ -230,7 +231,7 @@ extension CompanionModel {
         }
         defer { progress.cancel() }
         do {
-            lastCleanResult = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, request: request)
+            lastCleanResult = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, request: request, useTLS: isUsingTLS(for: saved))
             await refresh()
         } catch CompanionClientError.forbidden(let reason) {
             // Refused before anything ran: the scan and the person's ticks stand.
