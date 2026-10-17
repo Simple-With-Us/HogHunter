@@ -10,10 +10,13 @@ import SwiftUI
 /// card is pinned to the full width so none of them shrinks to its text.
 struct MaintainView: View {
     @ObservedObject var store: MaintainStore
+    var showHeader: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
+            if showHeader {
+                header
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     statusCard
@@ -83,8 +86,16 @@ struct MaintainView: View {
                             set: { store.setStepEnabled(entry.id, enabled: $0) }
                         )) {
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(entry.title)
-                                    .font(.system(size: 12))
+                                HStack(spacing: 4) {
+                                    Text(entry.title)
+                                        .font(.system(size: 12))
+                                    if !entry.tooltip.isEmpty {
+                                        Image(systemName: "info.circle")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .help(entry.tooltip)
+                                    }
+                                }
                                 if let step = store.status?.stepLastResults[entry.id] {
                                     // Two lines, not one: the longest reasons name what
                                     // was skipped and why, and cutting them off hid that.
@@ -96,6 +107,7 @@ struct MaintainView: View {
                                 }
                             }
                         }
+                        .help(entry.tooltip.isEmpty ? entry.title : entry.tooltip)
                         Spacer(minLength: 0)
                     }
                 }

@@ -7,11 +7,14 @@ import SwiftUI
 struct DiskCleanerView: View {
     @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
+    var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
 
     var body: some View {
         VStack(spacing: 10) {
-            tierSelector
+            if showInlineTierSelector {
+                tierSelector
+            }
             if store.selectedTier == .extreme {
                 extremeDisclaimerBanner
             }
