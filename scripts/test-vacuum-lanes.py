@@ -663,6 +663,69 @@ class TestSettings(unittest.TestCase):
         rep = lanes.load_report(lanes.lane_settings({"lanes": {"doctor_command": []}}, Path("/h"), env={}), Path("/h"))
         self.assertFalse(rep.ok)
 
+    def test_load_config_applies_infisical_env_knobs(self) -> None:
+        # Test 1: hoghunter.maintain.* namespace overrides.
+        env_dotted = {
+            "hoghunter.maintain.step.shutdown_simulators": "false",
+            "hoghunter.maintain.step.coolify_remote": "true",
+            "hoghunter.maintain.step.cleanmymac_cli": "1",
+            "hoghunter.maintain.interval.watchSec": "120",
+            "hoghunter.maintain.interval.janitorSec": "900",
+            "hoghunter.maintain.interval.fullSec": "7200",
+            "hoghunter.maintain.historyMaxRuns": "350",
+            "hoghunter.maintain.cleanBudgetSec": "450",
+            "hoghunter.maintain.coolifySshHost": "deploy.fleet.internal",
+            "hoghunter.maintain.janitor.maxLoadHard": "180.5",
+            "hoghunter.maintain.janitor.lowFreeGib": "95.0",
+            "hoghunter.maintain.watch.diskFreeWarnGb": "30.0",
+            "hoghunter.maintain.watch.swapUsedPct": "85.0",
+        }
+        cfg_dotted = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env=env_dotted)
+        self.assertFalse(cfg_dotted["steps"]["shutdown_simulators"]["enabled"])
+        self.assertTrue(cfg_dotted["steps"]["coolify_remote"]["enabled"])
+        self.assertTrue(cfg_dotted["steps"]["cleanmymac_cli"]["enabled"])
+        self.assertEqual(cfg_dotted["intervals_seconds"]["watch"], 120)
+        self.assertEqual(cfg_dotted["intervals_seconds"]["janitor"], 900)
+        self.assertEqual(cfg_dotted["intervals_seconds"]["full"], 7200)
+        self.assertEqual(cfg_dotted["history_max_runs"], 350)
+        self.assertEqual(cfg_dotted["hoghunter_clean_budget_sec"], 450)
+        self.assertEqual(cfg_dotted["coolify_ssh_host"], "deploy.fleet.internal")
+        self.assertEqual(cfg_dotted["janitor"]["max_load_hard"], 180.5)
+        self.assertEqual(cfg_dotted["janitor"]["low_free_gib"], 95.0)
+        self.assertEqual(cfg_dotted["resource_watch"]["disk_free_warn_gb"], 30.0)
+        self.assertEqual(cfg_dotted["resource_watch"]["swap_used_pct"], 85.0)
+
+        # Test 2: HOGHUNTER_MAINTAIN_* uppercase namespace overrides.
+        env_upper = {
+            "HOGHUNTER_MAINTAIN_STEP_SHUTDOWN_SIMULATORS": "0",
+            "HOGHUNTER_MAINTAIN_STEP_COOLIFY_REMOTE": "on",
+            "HOGHUNTER_MAINTAIN_STEP_XCODE_DERIVED_DATA": "off",
+            "HOGHUNTER_MAINTAIN_INTERVAL_WATCH_SEC": "150",
+            "HOGHUNTER_MAINTAIN_INTERVAL_JANITOR_SEC": "1200",
+            "HOGHUNTER_MAINTAIN_INTERVAL_FULL_SEC": "10000",
+            "HOGHUNTER_MAINTAIN_HISTORY_MAX_RUNS": "400",
+            "HOGHUNTER_MAINTAIN_CLEAN_BUDGET_SEC": "500",
+            "HOGHUNTER_MAINTAIN_COOLIFY_SSH_HOST": "coolify.custom.internal",
+            "HOGHUNTER_MAINTAIN_JANITOR_MAX_LOAD_HARD": "220.0",
+            "HOGHUNTER_MAINTAIN_JANITOR_LOW_FREE_GIB": "70.0",
+            "HOGHUNTER_MAINTAIN_WATCH_DISK_FREE_WARN_GB": "20.0",
+            "HOGHUNTER_MAINTAIN_WATCH_SWAP_USED_PCT": "75.0",
+        }
+        cfg_upper = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env=env_upper)
+        self.assertFalse(cfg_upper["steps"]["shutdown_simulators"]["enabled"])
+        self.assertTrue(cfg_upper["steps"]["coolify_remote"]["enabled"])
+        self.assertFalse(cfg_upper["steps"]["xcode_derived_data"]["enabled"])
+        self.assertEqual(cfg_upper["intervals_seconds"]["watch"], 150)
+        self.assertEqual(cfg_upper["intervals_seconds"]["janitor"], 1200)
+        self.assertEqual(cfg_upper["intervals_seconds"]["full"], 10000)
+        self.assertEqual(cfg_upper["history_max_runs"], 400)
+        self.assertEqual(cfg_upper["hoghunter_clean_budget_sec"], 500)
+        self.assertEqual(cfg_upper["coolify_ssh_host"], "coolify.custom.internal")
+        self.assertEqual(cfg_upper["janitor"]["max_load_hard"], 220.0)
+        self.assertEqual(cfg_upper["janitor"]["low_free_gib"], 70.0)
+        self.assertEqual(cfg_upper["resource_watch"]["disk_free_warn_gb"], 20.0)
+        self.assertEqual(cfg_upper["resource_watch"]["swap_used_pct"], 75.0)
+
 
 # --------------------------------------------------------------------------- the Vacuum's own re-check
 
@@ -1600,6 +1663,57 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertIn("CoreSimulator/Devices", reason)
         ran.assert_not_called()
 
+    def test_shutdown_simulators_respects_build_and_bitrig_gates(self) -> None:
+        booted_payload = json.dumps({
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                    {"udid": "U-1", "name": "iPhone 16", "state": "Booted"},
+                    {"udid": "U-2", "name": "iPhone 16 Pro", "state": "Booted"},
+                ]
+            }
+        })
+        shut: list[str] = []
+
+        def fake_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            if cmd[:4] == ["xcrun", "simctl", "list", "devices"]:
+                return subprocess.CompletedProcess(cmd, 0, booted_payload, "")
+            if cmd[:3] == ["xcrun", "simctl", "shutdown"]:
+                shut.append(cmd[3])
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(fake_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 2 booted simulators"))
+        self.assertEqual(shut, ["U-1", "U-2"])
+
+        # Bitrig running -> exempts 1 simulator and shuts down the extra one
+        shut.clear()
+
+        def bitrig_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                rc = 0 if cmd[-1] == "Bitrig" else 1
+                return subprocess.CompletedProcess(cmd, rc, "123\n" if rc == 0 else "", "")
+            return fake_runner(cmd, **kwargs)
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(bitrig_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 1 booted simulator, kept 1 for Bitrig"))
+        self.assertEqual(shut, ["U-2"])
+
+        # Simulator.app running -> skipped
+        def sim_app_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                rc = 0 if "Simulator\\.app" in cmd or "Simulator" in cmd[-1] else 1
+                return subprocess.CompletedProcess(cmd, rc, "123\n" if rc == 0 else "", "")
+            return fake_runner(cmd, **kwargs)
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(sim_app_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: Simulator.app is open"))
+
     def test_brew_cleanup_uses_prune_all_and_waits_for_node_gyp(self) -> None:
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
             _freed, _reason, status = self.engine(Runner(pgrep_rc=1))._brew_cleanup()
@@ -1626,6 +1740,11 @@ class TestLegacyFullSteps(unittest.TestCase):
             _freed, reason, status = self.engine(OnlyMatching("_npx"))._npm_cache()
         self.assertEqual((status, reason), (StepStatus.RAN, "npm cache cleaned; npx folder kept"))
         self.assertTrue((npx / "server.js").exists())
+
+
+class TestShutdownSimulatorsStep(TestLegacyFullSteps):
+    """Targeted runner for simulator shutdown tests."""
+    pass
 
 
 class TestEngineDependencies(unittest.TestCase):

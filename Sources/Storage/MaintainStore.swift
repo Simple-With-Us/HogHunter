@@ -31,14 +31,26 @@ final class MaintainStore: ObservableObject {
     private let historyURL: URL
     private let configURL: URL
     private let launcher: Launcher
+    /// The Infisical owner and its cache.  The app uses the shared pair; tests
+    /// inject their own so no test reads the app's real settings or the network.
+    private let infisical: InfisicalSettings
+    private let infisicalStore: InfisicalStore
     /// When the files were last read, so a caller that only wants fresh
     /// enough data can skip the read.
     private(set) var lastRefreshAt = Date.distantPast
 
-    /// `supportDirectory`, `repoRoot` and `launcher` exist for tests, which
-    /// point the store at a temporary folder and a stub.  The app uses the
+    /// `supportDirectory`, `repoRoot`, `launcher`, `infisical` and
+    /// `infisicalStore` exist for tests, which point the store at a temporary
+    /// folder, a stub script launcher and a stubbed Infisical.  The app uses the
     /// defaults.
-    init(supportDirectory: URL? = nil, repoRoot: URL? = nil, fileManager: FileManager = .default, launcher: Launcher? = nil) {
+    init(
+        supportDirectory: URL? = nil,
+        repoRoot: URL? = nil,
+        fileManager: FileManager = .default,
+        launcher: Launcher? = nil,
+        infisical: InfisicalSettings? = nil,
+        infisicalStore: InfisicalStore? = nil
+    ) {
         let support = supportDirectory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("HogHunter/Maintain", isDirectory: true)
         statusURL = support.appendingPathComponent("status.json")
@@ -47,6 +59,22 @@ final class MaintainStore: ObservableObject {
         MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
         self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
+        self.infisical = infisical ?? InfisicalSettings.shared
+        self.infisicalStore = infisicalStore ?? InfisicalStore.shared
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(infisicalDidRefresh),
+            name: .infisicalSettingsDidRefresh,
+            object: nil
+        )
+        refresh()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func infisicalDidRefresh() {
         refresh()
     }
 
@@ -136,7 +164,27 @@ final class MaintainStore: ObservableObject {
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
         let launcher = self.launcher
+        let infisical = self.infisical
         Task { [weak self] in
+            if infisical.isConfigured {
+                let gen = infisical.connectionGeneration
+                do {
+                    try await infisical.set(
+                        enabled ? "true" : "false",
+                        forKey: "\(InfisicalKey.maintainStepPrefix)\(stepId)",
+                        expectedGeneration: gen
+                    )
+                } catch {
+                    // Infisical is the source of truth, so a failed write-through is a
+                    // failed save: skip the local write and reload the unchanged value.
+                    // Carrying on would let the refresh read the stale Infisical value
+                    // over the local one and flip the toggle back with no word.
+                    guard let self else { return }
+                    self.lastError = Self.infisicalSaveFailure("that step setting", error: error)
+                    self.refresh()
+                    return
+                }
+            }
             let outcome: Result<Bool, Error>
             do {
                 outcome = .success(try await launcher(["--set-step", stepId, enabled ? "on" : "off"]))
@@ -154,6 +202,12 @@ final class MaintainStore: ObservableObject {
             }
             self.refresh()
         }
+    }
+
+    /// What the owner reads when Infisical refused a Maintain save.  Uses the
+    /// settings owner's safe message, which never carries a response body.
+    private static func infisicalSaveFailure(_ what: String, error: Error) -> String {
+        "Could not save \(what) to Infisical.\u{00A0} \(InfisicalSettings.safeMessage(for: error))"
     }
 
     /// True inside an XCTest run.  The default launcher refuses to start the
@@ -203,6 +257,7 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs", tooltip: "Truncates oversized PM2 background process logs in place."),
         MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache", tooltip: "Trims global package manager caches when no builds are active."),
         MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache", tooltip: "Prunes stale Xcode DerivedData and module caches."),
+        MaintainStepCatalogEntry(id: "shutdown_simulators", title: "Shut down Xcode Simulators", tooltip: "Shuts down booted iOS Simulators when no build is running (preserving 1 simulator for Bitrig)."),
         MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes", tooltip: "Removes unavailable iOS simulator runtime remnants."),
         MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance", tooltip: "Runs /etc/cron.daily/coolify-auto-maintenance over SSH to clean Docker containers, images, and container logs on your remote Coolify server (e.g. using SSH alias 'coolify', IP, or domain)."),
         MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)", tooltip: "Invokes the CleanMyMac CLI tool if installed locally."),
@@ -243,6 +298,11 @@ final class MaintainStore: ObservableObject {
     }
 
     var coolifyHost: String {
+        if infisical.isConfigured,
+           let configured = infisicalStore.string(for: InfisicalKey.maintainCoolifySshHost),
+           !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return configured.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
         let host = json["coolify_ssh_host"] as? String ?? ""
@@ -254,8 +314,27 @@ final class MaintainStore: ObservableObject {
     func setCoolifyHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let launcher = self.launcher
+        let infisical = self.infisical
         coolifyHostTask?.cancel()
         coolifyHostTask = Task { [weak self] in
+            if infisical.isConfigured {
+                let gen = infisical.connectionGeneration
+                do {
+                    try await infisical.set(
+                        trimmed,
+                        forKey: InfisicalKey.maintainCoolifySshHost,
+                        expectedGeneration: gen
+                    )
+                } catch {
+                    // Same rule as `setStepEnabled`: a failed Infisical write is a failed
+                    // save.  A newer edit that cancelled this one speaks for itself.
+                    if Task.isCancelled { return }
+                    guard let self else { return }
+                    self.lastError = Self.infisicalSaveFailure("the remote server SSH host", error: error)
+                    self.refresh()
+                    return
+                }
+            }
             let outcome: Result<Bool, Error>
             do {
                 if Task.isCancelled { return }
@@ -290,12 +369,20 @@ final class MaintainStore: ObservableObject {
         for entry in visibleCatalog {
             toggles[entry.id] = !Self.defaultOffSteps.contains(entry.id)
         }
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let steps = json["steps"] as? [String: [String: Bool]] else { return toggles }
-        for (key, val) in steps {
-            if let enabled = val["enabled"] {
-                toggles[key] = enabled
+        if let data = try? Data(contentsOf: configURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let steps = json["steps"] as? [String: [String: Bool]] {
+            for (key, val) in steps {
+                if let enabled = val["enabled"] {
+                    toggles[key] = enabled
+                }
+            }
+        }
+        if infisical.isConfigured {
+            for key in toggles.keys {
+                if let infisVal = infisicalStore.bool(for: "\(InfisicalKey.maintainStepPrefix)\(key)") {
+                    toggles[key] = infisVal
+                }
             }
         }
         return toggles

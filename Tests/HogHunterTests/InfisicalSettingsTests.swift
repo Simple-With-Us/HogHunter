@@ -522,4 +522,36 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(decoded.clientId, "test-id")
         XCTAssertEqual(decoded.effectiveProjectId, "11111111-2222-3333-4444-555555555555")
     }
+
+    @MainActor
+    func testMaintainKeysAndDefaults() {
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepShutdownSimulators], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepXcodeDerivedData], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepXcodeDeviceSupport], "false")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepCoreSimulatorCaches], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepCleanmymacCli], "false")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepCoolifyRemote], "false")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepJanitorWorktreeRetire], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepJanitorCacheReclaim], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainIntervalWatchSec], "300")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainIntervalJanitorSec], "1800")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainIntervalFullSec], "14400")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainHistoryMaxRuns], "500")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainCleanBudgetSec], "600")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainCoolifySshHost], "")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorMaxLoadHard], "250")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorLowFreeGib], "80")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainWatchDiskFreeWarnGb], "25")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainWatchSwapUsedPct], "90")
+
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainStepShutdownSimulators))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainStepXcodeDerivedData))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainIntervalWatchSec))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainCoolifySshHost))
+    }
+
+    // The Maintain store's Infisical override and write-through tests live in
+    // MaintainInfisicalTests.swift, where the settings owner is configured
+    // with a stub instead of the app's shared instance.
 }
+

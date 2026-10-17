@@ -426,6 +426,13 @@ final class AsyncGate: @unchecked Sendable {
 
 @MainActor
 final class MaintainStoreInjectionTests: XCTestCase {
+    /// An Infisical that is never configured.  The test host is the real app,
+    /// which can hold the owner's Keychain credential, so a test that changes a
+    /// step must not fall back to the shared instance and reach the real service.
+    private func unconfiguredInfisical() -> InfisicalSettings {
+        InfisicalSettings(store: InfisicalStore(), credentialProvider: { nil })
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-maintain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -445,7 +452,12 @@ final class MaintainStoreInjectionTests: XCTestCase {
     }
 
     func testTheDefaultLauncherAlsoRefusesToChangeAStep() async throws {
-        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory())
+        let store = MaintainStore(
+            supportDirectory: try temporaryDirectory(),
+            repoRoot: try temporaryDirectory(),
+            infisical: unconfiguredInfisical(),
+            infisicalStore: InfisicalStore()
+        )
         store.setStepEnabled("npm_cache", enabled: false)
         for _ in 0..<200 where store.lastError == nil { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
@@ -492,10 +504,16 @@ final class MaintainStoreInjectionTests: XCTestCase {
 
     func testStepTogglesGoThroughTheLauncher() async throws {
         let launches = CompanionLocked<[[String]]>([])
-        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { arguments in
-            launches.value.append(arguments)
-            return true
-        }
+        let store = MaintainStore(
+            supportDirectory: try temporaryDirectory(),
+            repoRoot: try temporaryDirectory(),
+            launcher: { arguments in
+                launches.value.append(arguments)
+                return true
+            },
+            infisical: unconfiguredInfisical(),
+            infisicalStore: InfisicalStore()
+        )
         store.setStepEnabled("coolify_remote", enabled: false)
         for _ in 0..<200 where launches.value.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertEqual(launches.value, [["--set-step", "coolify_remote", "off"]])
