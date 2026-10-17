@@ -89,6 +89,20 @@ These names are never fetched into `InfisicalStore`.  The DSN is baked into Info
 
 Never put a DSN or auth token in git, `project.yml`, Info.plist, a log, or a PR body.
 
+### Build-time signing (not a runtime Infisical read)
+
+The Mac app and the iPhone companion never read these.  They exist so `.github/workflows/ios-testflight.yml` can sign, archive, and upload the iPhone companion to TestFlight.  Owner ruling 2026-10-17: signing and App Store Connect credentials for all apps are in Infisical, project Fleet-OPS, path `/asc`, and the active `ios-testflight.yml` workflow is intended.  Names only here, never values.
+
+| Name | What it is |
+|---|---|
+| `ASC_KEY_ID`, `ASC_ISSUER_ID` | App Store Connect API key identifiers |
+| `ASC_KEY_P8` | App Store Connect API private key, a multiline PEM that `scripts/ios-stage-asc-key.sh` stages to a mode 600 file |
+| `IOS_DIST_P12_BASE64`, `IOS_DIST_P12_PASSWORD` | Apple Distribution certificate for team `CC8UTF7ATG`, and its password |
+
+The canonical copies are in Fleet-OPS `/asc`.  The workflow itself does not read that path.  It takes same-named GitHub Actions repository secrets, and all five exist.  Only when one of the five is empty does it fall back to Infisical `prod` `/` of the project named by its `INFISICAL_PROJECT_ID` secret.  The workflow runs only while the repository variable `HH_IOS_TESTFLIGHT_ENABLED` is `true`, which it is.  A merge to `main` that touches the iOS app uploads a build, and a manual dispatch uploads only when asked.  A green run is not evidence of a processed or approved beta: check App Store Connect separately (issue #22 stays open until the external release is verified).  The Mac Developer ID certificate is a separate path, described in `docs/AUTO-UPDATE.md`.
+
+Never put a signing value in git, a log, a workflow artifact, a PR body, or chat.
+
 ### Maintain & Robotic Vacuum (Wired via Infisical & Environment)
 
 Maintain settings (step toggles, intervals, clean budget, remote host, and thresholds) are wired to Infisical.  The Swift Mac app reads Infisical via `InfisicalStore` and writes through on change; the Python engine (`scripts/vacuum/config.py`) consumes them through `apply_env_overrides()`, supporting both `hoghunter.maintain.*` and `HOGHUNTER_MAINTAIN_*` environment variables.
