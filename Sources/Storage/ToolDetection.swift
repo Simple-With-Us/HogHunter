@@ -95,6 +95,17 @@ enum ToolCatalog {
         description: "Apple developer toolchain, simulators, and build caches."
     )
 
+    /// Tools whose binary a maintenance step actually runs, so the path picked
+    /// under Connected CLI (`tool_paths` in the maintain config) changes what
+    /// runs.  `_tool_command` in `scripts/vacuum/engine.py` reads it for these.
+    /// The PM2 step truncates log files and the Xcode steps delete folders, so
+    /// neither runs a binary and a picker for them would change nothing.
+    static let pathConfigurableToolIds: Set<String> = ["cleanmymac", "npm", "brew"]
+
+    static func engineRunsPickedPath(_ tool: ToolInfo) -> Bool {
+        pathConfigurableToolIds.contains(tool.id)
+    }
+
     static func tool(for stepId: String) -> ToolInfo? {
         switch stepId {
         case "cleanmymac_cli": return cleanMyMac

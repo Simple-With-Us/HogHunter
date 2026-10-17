@@ -10,6 +10,9 @@ import SwiftUI
 /// card is pinned to the full width so none of them shrinks to its text.
 struct MaintainView: View {
     @ObservedObject var store: MaintainStore
+    /// SwiftUI's own "open the Settings scene" action, the only supported way
+    /// into it; `showSettingsWindow:` sent to `NSApp` by hand is dropped here.
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -39,7 +42,7 @@ struct MaintainView: View {
     private var header: some View {
         HStack {
             Button(action: {
-                HogActions.openSettings(tab: .maintenance)
+                HogActions.openSettings(tab: .maintenance, using: openSettings)
             }) {
                 Label("Modify Maintenance Settings…", systemImage: "slider.horizontal.3")
             }
@@ -91,7 +94,7 @@ struct MaintainView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                         Button("Configure in Settings…") {
-                            HogActions.openSettings(tab: .maintenance)
+                            HogActions.openSettings(tab: .maintenance, using: openSettings)
                         }
                         .buttonStyle(.link)
                         .font(.system(size: 11))

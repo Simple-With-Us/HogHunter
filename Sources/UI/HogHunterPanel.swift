@@ -728,18 +728,20 @@ final class MenuBarAnchorView: NSView {
         let pid = ProcessInfo.processInfo.processIdentifier
         let appAX = AXUIElementCreateApplication(pid)
 
-        var extrasMenuBarRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appAX, "AXExtrasMenuBar" as CFString, &extrasMenuBarRef) == .success,
-              let extras = extrasMenuBarRef else {
+        guard let extrasElement = axElement(appAX, attribute: "AXExtrasMenuBar") else {
             return nil
         }
-
-        let extrasElement = extras as! AXUIElement
         var childrenRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(extrasElement, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement], !children.isEmpty else {
+              let rawChildren = childrenRef as? [AnyObject] else {
             return nil
         }
+        // The array bridge checks only that this is an array; each element's
+        // type is checked here.
+        let children = rawChildren
+            .filter { CFGetTypeID($0) == AXUIElementGetTypeID() }
+            .map { $0 as! AXUIElement }
+        guard !children.isEmpty else { return nil }
 
         for item in children {
             var titleRef: CFTypeRef?
@@ -749,48 +751,56 @@ final class MenuBarAnchorView: NSView {
                 title = str
             }
 
-            if children.count == 1 || title == "Hog Hunter" || (title?.contains("Hog") ?? false) {
-                var posValue: CFTypeRef?
-                var sizeValue: CFTypeRef?
-                var point = CGPoint.zero
-                var size = CGSize.zero
-
-                if AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &posValue) == .success,
-                   let val = posValue {
-                    AXValueGetValue(val as! AXValue, .cgPoint, &point)
-                }
-                if AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &sizeValue) == .success,
-                   let val = sizeValue {
-                    AXValueGetValue(val as! AXValue, .cgSize, &size)
-                }
-
-                if size.width > 0 {
-                    return point.x + size.width / 2.0
-                }
+            if children.count == 1 || title == "Hog Hunter" || (title?.contains("Hog") ?? false),
+               let midX = axMidX(of: item) {
+                return midX
             }
         }
 
         if let first = children.first {
-            var posValue: CFTypeRef?
-            var sizeValue: CFTypeRef?
-            var point = CGPoint.zero
-            var size = CGSize.zero
-
-            if AXUIElementCopyAttributeValue(first, kAXPositionAttribute as CFString, &posValue) == .success,
-               let val = posValue {
-                AXValueGetValue(val as! AXValue, .cgPoint, &point)
-            }
-            if AXUIElementCopyAttributeValue(first, kAXSizeAttribute as CFString, &sizeValue) == .success,
-               let val = sizeValue {
-                AXValueGetValue(val as! AXValue, .cgSize, &size)
-            }
-
-            if size.width > 0 {
-                return point.x + size.width / 2.0
-            }
+            return axMidX(of: first)
         }
 
         return nil
+    }
+
+    /// `attribute` of `element` when it really is an `AXUIElement`.  A cast
+    /// from `CFTypeRef` to a CoreFoundation type, `as!` or `as?`, is not
+    /// checked at runtime, so the type ID is checked first and anything else
+    /// is nil instead of undefined behaviour.
+    private static func axElement(_ element: AXUIElement, attribute: String) -> AXUIElement? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success,
+              let value = ref, CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return (value as! AXUIElement)
+    }
+
+    /// The horizontal middle of `item`, or nil unless both its position and
+    /// size come back as `AXValue`s of the right kind that unpack.
+    private static func axMidX(of item: AXUIElement) -> CGFloat? {
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard let pos = axValue(item, attribute: kAXPositionAttribute, type: .cgPoint),
+              AXValueGetValue(pos, .cgPoint, &point),
+              let sz = axValue(item, attribute: kAXSizeAttribute, type: .cgSize),
+              AXValueGetValue(sz, .cgSize, &size),
+              size.width > 0 else {
+            return nil
+        }
+        return point.x + size.width / 2.0
+    }
+
+    /// `attribute` of `item` when it really is an `AXValue` holding `type`.
+    private static func axValue(_ item: AXUIElement, attribute: String, type: AXValueType) -> AXValue? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(item, attribute as CFString, &ref) == .success,
+              let value = ref, CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+        let axValue = value as! AXValue
+        return AXValueGetType(axValue) == type ? axValue : nil
     }
 }
 

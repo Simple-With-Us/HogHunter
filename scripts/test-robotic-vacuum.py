@@ -849,6 +849,35 @@ class TestCleanMyMacStep(_EngineHome):
         ])
         self.assertIn("clean junk --force", reason)
 
+    def test_connected_cli_picked_in_settings_is_the_one_run(self):
+        """Settings > Maintenance writes the picked installation to tool_paths; the step runs that file.  A
+        relative or non-executable pick is ignored and PATH decides, as before."""
+        seen = []
+
+        def fake(argv, **kwargs):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="done\n", stderr="")
+
+        picked = self.home / "bin" / "CleanMyMac_5_CLI"
+        picked.parent.mkdir(parents=True)
+        picked.write_text("#!/bin/sh\n", encoding="utf-8")
+        picked.chmod(0o755)
+        self.cfg["tool_paths"] = {"cleanmymac": str(picked)}
+        with patch("vacuum.engine.shutil.which", return_value=None):
+            with patch.object(sys, "platform", "darwin"):
+                _freed, _reason, status = self.engine_with(fake)._cleanmymac_cli()
+        self.assertEqual(status, StepStatus.RAN)
+        self.assertEqual([argv[0] for argv in seen], [str(picked), str(picked)])
+
+        picked.chmod(0o644)
+        for bad in (str(picked), "bin/CleanMyMac_5_CLI"):
+            self.cfg["tool_paths"] = {"cleanmymac": bad}
+            with patch("vacuum.engine.shutil.which", return_value=None):
+                with patch.object(sys, "platform", "darwin"):
+                    _freed, reason, status = self.engine_with(fake)._cleanmymac_cli()
+            self.assertEqual(status, StepStatus.SKIPPED, bad)
+            self.assertIn("not installed", reason)
+
     def test_nonzero_exit_fails_with_the_tail(self):
         def fake(argv, **kwargs):
             return subprocess.CompletedProcess(argv, 2, stdout="", stderr="line one\nboom\n")

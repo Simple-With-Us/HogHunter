@@ -32,7 +32,6 @@ final class MaintainStore: ObservableObject {
     // Maintenance tuning knobs
     @Published var lowFreeGiB: Double = 80.0
     @Published var pm2LogsCapMB: Int = 50
-    @Published var retireMinDays: Int = 7
     @Published var coolifySSHHost: String = ""
     @Published var customDerivedDataPath: String = ""
     @Published var toolPaths: [String: String] = [:]
@@ -118,9 +117,6 @@ final class MaintainStore: ObservableObject {
         if let cap = json["pm2_logs_cap_mb"] as? Int {
             pm2LogsCapMB = cap
         }
-        if let lanes = json["lanes"] as? [String: Any], let days = lanes["retire_min_days"] as? Int {
-            retireMinDays = days
-        }
         if let host = json["coolify_ssh_host"] as? String {
             coolifySSHHost = host
         }
@@ -141,10 +137,6 @@ final class MaintainStore: ObservableObject {
         var jan = json["janitor"] as? [String: Any] ?? [:]
         jan["low_free_gib"] = lowFreeGiB
         json["janitor"] = jan
-
-        var lanes = json["lanes"] as? [String: Any] ?? [:]
-        lanes["retire_min_days"] = retireMinDays
-        json["lanes"] = lanes
 
         json["pm2_logs_cap_mb"] = pm2LogsCapMB
         json["coolify_ssh_host"] = coolifySSHHost
@@ -267,15 +259,37 @@ final class MaintainStore: ObservableObject {
                 env["PATH"] = (extraPaths + [existing]).joined(separator: ":")
                 proc.environment = env
 
-                let errPipe = Pipe()
+                // stderr goes to a temporary file, not a pipe: a pipe nobody
+                // drains fills at 64 KB and blocks the script on its next
+                // write, so it never exits and this continuation never
+                // resumes.  A file never blocks the writer, and a background
+                // child that inherits the descriptor cannot hold the read open.
+                let errURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("hoghunter-maintain-\(UUID().uuidString).stderr")
+                let errHandle: FileHandle
+                do {
+                    guard FileManager.default.createFile(atPath: errURL.path, contents: nil) else {
+                        throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: errURL.path])
+                    }
+                    errHandle = try FileHandle(forWritingTo: errURL)
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
                 proc.standardOutput = FileHandle.nullDevice
-                proc.standardError = errPipe
+                proc.standardError = errHandle
                 proc.terminationHandler = { finished in
+                    try? errHandle.close()
+                    let errData = (try? Data(contentsOf: errURL)) ?? Data()
+                    try? FileManager.default.removeItem(at: errURL)
                     if finished.terminationStatus == 0 {
                         continuation.resume(returning: true)
                     } else {
-                        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                        let raw = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        // The tail carries the traceback's last line; a whole
+                        // 64 KB log is not an error message.
+                        let raw = String(String(decoding: errData.suffix(4096), as: UTF8.self)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .suffix(2000))
                         if !raw.isEmpty {
                             continuation.resume(throwing: NSError(
                                 domain: "MaintainStore",
@@ -290,6 +304,8 @@ final class MaintainStore: ObservableObject {
                 do {
                     try proc.run()
                 } catch {
+                    try? errHandle.close()
+                    try? FileManager.default.removeItem(at: errURL)
                     continuation.resume(throwing: error)
                 }
             }

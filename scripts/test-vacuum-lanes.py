@@ -1583,6 +1583,42 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertTrue((outside / "sub" / "x.bin").exists())
         self.assertTrue((self.dd / "Link").is_symlink())
 
+    def test_configured_derived_data_path_must_be_a_derived_data_folder(self) -> None:
+        """Settings > Maintenance takes a typed path, and the step deletes every idle child of it, so a path
+        that is the home folder, a parent of it, or any folder not named DerivedData is refused with the
+        reason, and the default folder is not cleaned in its place."""
+        idle_in_home = self.folder(self.home, "Projects-idle", 3 * 3600)
+        idle_default = self.folder(self.dd, "Idle-def", 3 * 3600)
+        documents = self.home / "Documents"
+        idle_doc = self.folder(documents, "Old", 3 * 3600)
+        for typed in (str(self.home), "~", str(self.home.parent), str(documents), "relative/DerivedData"):
+            self.cfg["xcode_derived_data_path"] = typed
+            freed, reason, status = self.engine()._xcode_derived_data()
+            self.assertEqual((freed, status), (0, StepStatus.SKIPPED), typed)
+            self.assertIn("configured DerivedData path refused", reason, typed)
+        self.assertTrue(idle_in_home.exists())
+        self.assertTrue(idle_default.exists())
+        self.assertTrue(idle_doc.exists())
+
+    def test_configured_derived_data_folder_is_cleaned(self) -> None:
+        custom = self.home / "Volumes" / "Fast" / "DerivedData"
+        idle = self.folder(custom, "Idle-ghi", 3 * 3600)
+        default_idle = self.folder(self.dd, "Idle-def", 3 * 3600)
+        self.cfg["xcode_derived_data_path"] = str(custom)
+        _freed, reason, status = self.engine()._xcode_derived_data()
+        self.assertEqual(status, StepStatus.RAN, reason)
+        self.assertFalse(idle.exists())
+        self.assertTrue(default_idle.exists())
+
+    def test_xcode_reported_location_must_be_a_derived_data_folder(self) -> None:
+        idle_in_home = self.folder(self.home, "Projects-idle", 3 * 3600)
+        reported = subprocess.CompletedProcess([], 0, stdout=str(self.home) + "\n", stderr="")
+        with patch("vacuum.engine.subprocess.run", return_value=reported):
+            freed, reason, status = self.engine()._xcode_derived_data()
+        self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
+        self.assertIn("DerivedData path missing", reason)
+        self.assertTrue(idle_in_home.exists())
+
     def test_device_support_is_off_by_default_and_keeps_versions_used_within_seven_days(self) -> None:
         self.assertFalse(step_enabled(self.cfg, "xcode_device_support"))
         self.assertNotIn("xcode_device_support", steps_for_trigger(self.cfg, "full"))

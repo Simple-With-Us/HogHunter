@@ -246,14 +246,31 @@ enum HogActions {
         }
     }
 
+    /// A tab asked for by `openSettings(tab:using:)`, held until the Settings
+    /// window takes it.  The first open builds the window asynchronously, so
+    /// the notification below has no subscriber yet; `SettingsView` reads
+    /// this in `onAppear` instead.
+    @MainActor private static var pendingSettingsTab: SettingsTab?
+
     @MainActor
-    static func openSettings(tab: SettingsTab? = nil) {
+    static func takePendingSettingsTab() -> SettingsTab? {
+        defer { pendingSettingsTab = nil }
+        return pendingSettingsTab
+    }
+
+    /// Opens Settings, optionally on `tab`.  `openSettings` is the caller's
+    /// `@Environment(\.openSettings)` action: sending `showSettingsWindow:`
+    /// to `NSApp` by hand is silently dropped on this app (see
+    /// `frontSettingsWindow` above), so it is not used here.
+    @MainActor
+    static func openSettings(tab: SettingsTab? = nil, using openSettings: OpenSettingsAction) {
         if let tab {
+            pendingSettingsTab = tab
             NotificationCenter.default.post(name: .selectSettingsTab, object: tab)
         }
         if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector("showSettingsWindow:"), to: nil, from: nil)
+        openSettings()
         scheduleFrontSettingsWindow()
     }
 

@@ -102,10 +102,16 @@ struct SettingsView: View {
         // A stored value nobody recognises falls back to nil -- i.e. follow the Mac.
         .preferredColorScheme(AppearanceChoice(rawValue: appearance)?.colorScheme)
         .background(WindowActivator(role: .settings))
-        .onAppear { WindowActivator.front() }
+        .onAppear {
+            WindowActivator.front()
+            // A tab asked for before this window existed (the notification
+            // had no subscriber yet) is picked up here.
+            if let tab = HogActions.takePendingSettingsTab() { selection = tab }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .selectSettingsTab)) { note in
             if let tab = note.object as? SettingsTab {
                 selection = tab
+                _ = HogActions.takePendingSettingsTab()
             }
         }
     }
@@ -396,6 +402,10 @@ private struct MaintenanceSettingsTab: View {
 private struct MaintenanceSettingsContent: View {
     @ObservedObject var maintain: MaintainStore
 
+    /// Mirrors `RETIRE_MIN_DAYS` in `scripts/vacuum/lanes.py`, a code
+    /// constant the engine never reads from the config.
+    static let worktreeRetireMinDays = 7
+
     var body: some View {
         Form {
             Section("Scheduled Maintenance Steps") {
@@ -452,7 +462,8 @@ private struct MaintenanceSettingsContent: View {
                         }
 
                         // If multiple installations of this tool exist, let the user select which one to connect
-                        if let tool = entry.associatedTool, tool.hasMultipleInstallations {
+                        if let tool = entry.associatedTool, tool.hasMultipleInstallations,
+                           ToolCatalog.engineRunsPickedPath(tool) {
                             HStack(spacing: 6) {
                                 Text("Connected CLI:")
                                     .font(.system(size: 11, weight: .medium))
@@ -527,12 +538,13 @@ private struct MaintenanceSettingsContent: View {
                         Text("Merged Git Worktree Retention:")
                             .font(.system(size: 12, weight: .medium))
                         Spacer()
-                        Text("\(maintain.retireMinDays) days")
+                        Text("\(Self.worktreeRetireMinDays) days")
                             .font(.system(size: 12, weight: .bold))
                     }
-                    Stepper("Retire merged worktrees after \(maintain.retireMinDays) idle days", value: $maintain.retireMinDays, in: 1...60)
-                        .onChange(of: maintain.retireMinDays) { _ in maintain.saveMaintainConfig() }
-                    Text("Minimum idle days after PR merge before an isolated lane worktree is eligible for automated retirement.")
+                    // Read-only on purpose: the engine's lane_settings ignores
+                    // numeric `lanes` keys in the config, so a stray value can
+                    // neither loosen nor tighten this safety floor.
+                    Text("A merged lane worktree must sit idle at least this long before automated retirement.\u{00A0} This is a fixed safety limit, not a setting.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -560,6 +572,10 @@ private struct MaintenanceSettingsContent: View {
                     HStack {
                         TextField("Auto-detected or custom path", text: $maintain.customDerivedDataPath)
                             .textFieldStyle(.roundedBorder)
+                            .onSubmit { maintain.saveMaintainConfig() }
+                        Button("Save") {
+                            maintain.saveMaintainConfig()
+                        }
                         Button("Auto") {
                             maintain.customDerivedDataPath = ""
                             maintain.saveMaintainConfig()

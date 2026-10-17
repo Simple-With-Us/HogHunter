@@ -777,9 +777,15 @@ final class InfisicalSettings: ObservableObject {
         // 3. Fallback to Keychain read strictly without UI (interactionNotAllowed = true)
         let legacyRead = readCredentialFromKeychainSilently()
         if let cred = legacyRead.credential, cred.isComplete {
-            // Migrate to secure file storage and purge the legacy Keychain item so it never prompts again
-            try? writeCredentialToFile(cred)
-            try? removeCredentialFromKeychain()
+            // Migrate to secure file storage and purge the legacy Keychain item so it never prompts again.
+            // Purge only after the file write succeeded: if it throws, the Keychain item is the only copy,
+            // so it stays and the next launch retries the migration.
+            do {
+                try writeCredentialToFile(cred)
+                try? removeCredentialFromKeychain()
+            } catch {
+                // Keep the Keychain copy; the credential is still returned for this launch.
+            }
             return KeychainCredentialRead(credential: cred, terminal: true)
         }
 
