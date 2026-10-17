@@ -30,13 +30,10 @@ enum CompanionConnection {
             case .name(let n, _): name = n
             case .ipv4(let addr): name = "\(addr)"
             case .ipv6(let addr): name = "\(addr)"
-            @unknown default: name = "hoghunter"
+            @unknown default: return "hoghunter"
             }
-            if port.rawValue == 80 || port.rawValue == 443 {
-                return name
-            } else {
-                return "\(name):\(port.rawValue)"
-            }
+            // Brackets an IPv6 literal, so the port cannot run into it.
+            return CompanionHTTP.hostHeaderValue(host: name, port: port.rawValue)
         default:
             return "hoghunter"
         }

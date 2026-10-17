@@ -327,6 +327,16 @@ final class CompanionServerHardeningTests: XCTestCase {
         XCTAssertTrue(text.contains("Host: tunnel.simplewithus.com\r\n"))
     }
 
+    func testHostHeaderValueBracketsIPv6() {
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "fd7a:115c:a1e0::1", port: 24240), "[fd7a:115c:a1e0::1]:24240")
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "fd7a:115c:a1e0::1", port: 443), "[fd7a:115c:a1e0::1]")
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "[fd7a:115c:a1e0::1]", port: 24240), "[fd7a:115c:a1e0::1]:24240")
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "fe80::1%en0", port: 24240), "[fe80::1]:24240")
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "100.101.102.103", port: 24240), "100.101.102.103:24240")
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "tunnel.simplewithus.com", port: 443), "tunnel.simplewithus.com")
+        XCTAssertEqual(CompanionHTTP.hostHeaderValue(host: "my-mac.tailnet.ts.net", port: 80), "my-mac.tailnet.ts.net")
+    }
+
     func testForwardedClientIPExtraction() {
         let cfReq = Data("GET /v1/snapshot HTTP/1.1\r\nHost: tunnel.simplewithus.com\r\nCF-Connecting-IP: 203.0.113.195\r\n\r\n".utf8)
         XCTAssertEqual(CompanionHTTP.forwardedClientIP(in: cfReq), "203.0.113.195")

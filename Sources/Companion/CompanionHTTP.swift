@@ -387,6 +387,22 @@ enum CompanionHTTP {
         return jsonReply(status: 403, body: body)
     }
 
+    /// The `Host` value for a host and port (RFC 7230 §5.4, RFC 3986 §3.2.2).
+    /// An IPv6 literal is bracketed and loses its zone id, so
+    /// `fd7a:115c:a1e0::1` on 24240 is `[fd7a:115c:a1e0::1]:24240`, never
+    /// `fd7a:115c:a1e0::1:24240`.  Ports 80 and 443 are left off.
+    static func hostHeaderValue(host: String, port: UInt16) -> String {
+        var name = host
+        if name.contains(":") {
+            if name.hasPrefix("[") && name.hasSuffix("]") {
+                name = String(name.dropFirst().dropLast())
+            }
+            if let zone = name.firstIndex(of: "%") { name = String(name[..<zone]) }
+            name = "[\(name)]"
+        }
+        return port == 80 || port == 443 ? name : "\(name):\(port)"
+    }
+
     static func hostHeaderLine(_ host: String?) -> String {
         let trimmed = host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return "Host: \(trimmed.isEmpty ? "hoghunter" : trimmed)"
