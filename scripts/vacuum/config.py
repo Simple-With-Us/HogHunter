@@ -32,6 +32,10 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Remove unavailable Simulator runtimes",
         "triggers": ["full"],
     },
+    "shutdown_simulators": {
+        "title": "Shut down Xcode Simulators",
+        "triggers": ["full", "janitor"],
+    },
     "npm_cache": {
         "title": "Trim npm download cache",
         "triggers": ["full"],

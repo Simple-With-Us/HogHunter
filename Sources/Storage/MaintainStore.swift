@@ -203,6 +203,7 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(id: "pm2_logs", title: "Cap oversized PM2 logs"),
         MaintainStepCatalogEntry(id: "npm_cache", title: "Trim npm download cache"),
         MaintainStepCatalogEntry(id: "xcode_derived_data", title: "Clear Xcode build cache"),
+        MaintainStepCatalogEntry(id: "shutdown_simulators", title: "Shut down Xcode Simulators"),
         MaintainStepCatalogEntry(id: "simctl_delete_unavailable", title: "Remove unavailable Simulator runtimes"),
         MaintainStepCatalogEntry(id: "coolify_remote", title: "Remote server maintenance"),
         MaintainStepCatalogEntry(id: "cleanmymac_cli", title: "CleanMyMac CLI sweep (when installed)"),

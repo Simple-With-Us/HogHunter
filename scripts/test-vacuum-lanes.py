@@ -1600,6 +1600,46 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertIn("CoreSimulator/Devices", reason)
         ran.assert_not_called()
 
+    def test_shutdown_simulators_respects_build_and_bitrig_gates(self) -> None:
+        booted_payload = json.dumps({
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                    {"udid": "U-1", "name": "iPhone 16", "state": "Booted"},
+                    {"udid": "U-2", "name": "iPhone 16 Pro", "state": "Booted"},
+                ]
+            }
+        })
+        shut: list[str] = []
+
+        def fake_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            if cmd[:4] == ["xcrun", "simctl", "list", "devices"]:
+                return subprocess.CompletedProcess(cmd, 0, booted_payload, "")
+            if cmd[:3] == ["xcrun", "simctl", "shutdown"]:
+                shut.append(cmd[3])
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(fake_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 2 booted simulators"))
+        self.assertEqual(shut, ["U-1", "U-2"])
+
+        # Bitrig running -> exempts 1 simulator and shuts down the extra one
+        shut.clear()
+
+        def bitrig_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                rc = 0 if cmd[-1] == "Bitrig" else 1
+                return subprocess.CompletedProcess(cmd, rc, "123\n" if rc == 0 else "", "")
+            return fake_runner(cmd, **kwargs)
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(bitrig_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 1 booted simulator, kept 1 for Bitrig"))
+        self.assertEqual(shut, ["U-2"])
+
     def test_brew_cleanup_uses_prune_all_and_waits_for_node_gyp(self) -> None:
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
             _freed, _reason, status = self.engine(Runner(pgrep_rc=1))._brew_cleanup()
