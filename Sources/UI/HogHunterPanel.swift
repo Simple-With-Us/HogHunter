@@ -161,9 +161,7 @@ struct HogHunterPanel: View {
                     .renderingMode(.original)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 15)
-                Text("Hog Hunter")
-                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 36, height: 30)
                 if store.isStale {
                     Text("Sampling Behind")
                         .font(.system(size: 10, weight: .medium))
@@ -177,7 +175,7 @@ struct HogHunterPanel: View {
             }
             .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter, sampling is up to date")
+            .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter")
 
             Spacer()
 

@@ -49,7 +49,6 @@ struct StorageView: View {
 
             switch selectedTab {
             case .appStorage:
-                appStorageControls
                 statusRow
                 list
                 footer
@@ -100,22 +99,7 @@ struct StorageView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(headerTitle)
-                    .font(.system(size: 17, weight: .semibold))
-                Text(headerSubtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            .fixedSize(horizontal: true, vertical: false)
-
-            Spacer()
-
-            // The label is hidden because the 260 pt frame covers label and
-            // control together: "Mode" took its share, wrapped to "Mod" over
-            // "e", and the Apps segment was pushed off the right edge.  The
-            // segments say what they are, and VoiceOver still reads "Mode".
+        HStack(alignment: .center, spacing: 10) {
             Picker("Mode", selection: $selectedTab) {
                 Text("Clean").tag(StorageTab.diskCleaner)
                 Text("Maintain").tag(StorageTab.maintain)
@@ -123,19 +107,62 @@ struct StorageView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 260)
+            .frame(width: 230)
             .disabled(cleanerStore.isCleaning)
+
+            Spacer(minLength: 6)
+
+            switch selectedTab {
+            case .diskCleaner:
+                cleanerHeaderControls
+            case .maintain:
+                maintainHeaderControls
+            case .appStorage:
+                appStorageHeaderControls
+            }
         }
     }
 
-    // MARK: - App Storage Controls
+    private var cleanerHeaderControls: some View {
+        HStack(spacing: 8) {
+            Picker("Tier", selection: Binding(
+                get: { cleanerStore.selectedTier },
+                set: { cleanerStore.setTier($0) }
+            )) {
+                ForEach(CleanTier.allCases) { tier in
+                    Text(tier.title).tag(tier)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 170)
+            .disabled(cleanerStore.isBusy)
 
-    private var appStorageControls: some View {
-        HStack(spacing: 10) {
-            // `labelsHidden` is what was missing: the picker's "Filter" label
-            // was rendering inside a 140 pt control and wrapping mid-word as
-            // "Filt / er".  The segmented control only needs room for the two
-            // segments, so it now sizes to them.
+            Text(cleanerStore.selectedTier.badge)
+                .font(.system(size: 10, weight: .semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(cleanerStore.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
+                )
+                .foregroundStyle(cleanerStore.selectedTier == .extreme ? Color.orange : Color.blue)
+        }
+    }
+
+    private var maintainHeaderControls: some View {
+        HStack(spacing: 8) {
+            Button("Run Now") {
+                maintainStore.runNow("full")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(maintainStore.isRunningNow)
+        }
+    }
+
+    private var appStorageHeaderControls: some View {
+        HStack(spacing: 8) {
             Picker("Filter", selection: $filter) {
                 Text("All").tag(StorageFilter.all)
                 Text("Running").tag(StorageFilter.running)
@@ -143,8 +170,6 @@ struct StorageView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-
-            Spacer()
 
             HStack(spacing: 4) {
                 Text("Sort:")
@@ -156,7 +181,7 @@ struct StorageView: View {
                     Text("Bundle").tag(StorageSort.bundle)
                 }
                 .pickerStyle(.menu)
-                .frame(width: 115)
+                .frame(width: 100)
 
                 Button {
                     sortAscending.toggle()
@@ -176,29 +201,6 @@ struct StorageView: View {
                 .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
         }
-    }
-
-    private var headerTitle: String {
-        switch selectedTab {
-        case .diskCleaner: return "Clean"
-        case .maintain: return "Maintain"
-        case .appStorage: return "Storage"
-        }
-    }
-
-    /// Keep each line short: the header is pinned to the panel's inner width, and
-    /// a longer one pushes the mode control past the right edge.
-    private var headerSubtitle: String {
-        switch selectedTab {
-        case .diskCleaner: return "Find clutter and remove what you choose"
-        case .maintain: return "Scheduled upkeep, with a record of every run"
-        case .appStorage: return subtitle
-        }
-    }
-
-    private var subtitle: String {
-        guard let when = store.state.completedAt else { return "Loading…" }
-        return "Scanned \(Self.relativeTimeFormatter.localizedString(for: when, relativeTo: Date()))."
     }
 
     private static let relativeTimeFormatter: RelativeDateTimeFormatter = {

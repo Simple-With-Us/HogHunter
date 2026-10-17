@@ -138,6 +138,16 @@ class VacuumStore:
         self._locked_json_update(cfg_path, {}, updater)
         self.cfg = load_config(cfg_path, self.home)
 
+    def save_coolify_host(self, host: str) -> None:
+        cfg_path = self.data_dir / "config.json"
+
+        def updater(user_cfg: dict[str, Any]) -> dict[str, Any]:
+            user_cfg["coolify_ssh_host"] = host
+            return user_cfg
+
+        self._locked_json_update(cfg_path, {}, updater)
+        self.cfg = load_config(cfg_path, self.home)
+
     def _locked_json_update(
         self,
         path: Path,

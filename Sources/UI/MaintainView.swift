@@ -13,10 +13,13 @@ struct MaintainView: View {
     /// SwiftUI's own "open the Settings scene" action, the only supported way
     /// into it; `showSettingsWindow:` sent to `NSApp` by hand is dropped here.
     @Environment(\.openSettings) private var openSettings
+    var showHeader: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
+            if showHeader {
+                header
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     statusCard
@@ -133,6 +136,12 @@ struct MaintainView: View {
                     Text(entry.title)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.primary)
+                    if !entry.tooltip.isEmpty {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .help(entry.tooltip)
+                    }
                     Spacer()
                     Text(status.label)
                         .font(.system(size: 10, weight: .medium))
@@ -144,6 +153,7 @@ struct MaintainView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .help(entry.tooltip.isEmpty ? entry.title : entry.tooltip)
 
             HStack(spacing: 8) {
                 Text(history.lastRunDate != nil ? "Last run \(formatDate(history.lastRunDate))" : "Not run yet")

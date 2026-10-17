@@ -146,12 +146,14 @@ struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
     var description: String = ""
+    var tooltip: String = ""
     let associatedTool: ToolInfo?
 
-    init(id: String, title: String, description: String = "", associatedTool: ToolInfo? = nil) {
+    init(id: String, title: String, description: String = "", tooltip: String = "", associatedTool: ToolInfo? = nil) {
         self.id = id
         self.title = title
         self.description = description
+        self.tooltip = tooltip
         self.associatedTool = associatedTool ?? ToolCatalog.tool(for: id)
     }
 

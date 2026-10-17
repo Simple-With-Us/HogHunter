@@ -87,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-alerts", action="store_true", help="Evaluate alerts and notify")
     parser.add_argument("--set-step", nargs=2, metavar=("STEP_ID", "on|off"), help="Toggle a cleaning step")
     parser.add_argument("--set-config", nargs=2, metavar=("KEY", "VALUE"), help="Set a maintain config value")
+    parser.add_argument("--set-coolify-host", metavar="HOST", help="Set the SSH host or alias for remote server maintenance")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -96,11 +97,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.dry_run and (args.set_step or args.set_config or args.status or args.check_alerts):
+    if args.dry_run and (args.set_step or args.set_config or args.set_coolify_host or args.status or args.check_alerts):
         parser.error("--dry-run only combines with --tick or --run-now")
 
     store = VacuumStore.open()
     bootstrap_registry(store.home, REPO_ROOT, store.cfg)
+
+    if args.set_coolify_host is not None:
+        host = args.set_coolify_host.strip()
+        store.save_coolify_host(host)
+        print(f"coolify_ssh_host -> {host or '(empty)'}")
+        return 0
 
     if args.set_step:
         step_id, flag = args.set_step

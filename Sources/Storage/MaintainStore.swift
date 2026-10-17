@@ -316,56 +316,66 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(
             id: "resource_sample",
             title: "Check Disk and Memory",
-            description: "Samples CPU load, memory pressure, and free disk space against safety thresholds."
+            description: "Samples CPU load, memory pressure, and free disk space against safety thresholds.",
+            tooltip: "Samples host disk, memory, and CPU metrics against alert thresholds."
         ),
         MaintainStepCatalogEntry(
             id: "hoghunter_reclaim",
             title: "Hog Hunter Disk Reclaim",
-            description: "Reclaims disk bloat according to Hog Hunter's automated rules."
+            description: "Reclaims disk bloat according to Hog Hunter's automated rules.",
+            tooltip: "Runs Hog Hunter's built-in disk cleanup rules."
         ),
         MaintainStepCatalogEntry(
             id: "janitor_worktree_retire",
             title: "Retire Old Merged Git Worktrees",
-            description: "Safely cleans up stale git worktrees whose branches are merged into main."
+            description: "Safely cleans up stale git worktrees whose branches are merged into main.",
+            tooltip: "Cleans up merged and idle git worktrees older than policy."
         ),
         MaintainStepCatalogEntry(
             id: "janitor_cache_reclaim",
             title: "Reclaim Caches Under Low Disk",
-            description: "Prunes developer and build caches when free disk drops below threshold."
+            description: "Prunes developer and build caches when free disk drops below threshold.",
+            tooltip: "Frees build and temporary caches when disk space is tight."
         ),
         MaintainStepCatalogEntry(
             id: "pm2_logs",
             title: "Cap Oversized PM2 Logs",
             description: "Truncates PM2 daemon logs exceeding the configured cap to prevent unbounded disk usage.",
+            tooltip: "Truncates oversized PM2 background process logs in place.",
             associatedTool: ToolCatalog.pm2
         ),
         MaintainStepCatalogEntry(
             id: "npm_cache",
             title: "Trim npm Download Cache",
             description: "Cleans npm download cache and unreferenced npx temporary binaries.",
+            tooltip: "Trims global package manager caches when no builds are active.",
             associatedTool: ToolCatalog.npm
         ),
         MaintainStepCatalogEntry(
             id: "xcode_derived_data",
             title: "Clear Xcode Build Cache",
             description: "Cleans Xcode DerivedData caches that have not been modified recently.",
+            tooltip: "Prunes stale Xcode DerivedData and module caches.",
             associatedTool: ToolCatalog.xcode
         ),
         MaintainStepCatalogEntry(
             id: "simctl_delete_unavailable",
             title: "Remove Unavailable Simulator Runtimes",
             description: "Protects simulator devices and containers; runtime caches are safely cleared by the Simulator cache step.",
+            tooltip: "Removes unavailable iOS simulator runtime remnants.",
             associatedTool: ToolCatalog.xcode
         ),
         MaintainStepCatalogEntry(
             id: "coolify_remote",
             title: "Remote Server Maintenance",
-            description: "Performs remote Docker and system maintenance on configured Coolify host."
+            description: "Performs remote Docker and system maintenance on configured Coolify host.",
+            tooltip: "Runs /etc/cron.daily/coolify-auto-maintenance over SSH to clean Docker containers, images, and container logs on your remote Coolify server (e.g. using SSH alias 'coolify', IP, or domain)."
         ),
         MaintainStepCatalogEntry(
             id: "cleanmymac_cli",
             title: "CleanMyMac CLI Sweep",
             description: "Runs non-interactive junk and purgeable sweeps using CleanMyMac CLI when installed.",
+            tooltip: "Invokes the CleanMyMac CLI tool if installed locally.",
             associatedTool: ToolCatalog.cleanMyMac
         ),
     ]
@@ -415,11 +425,47 @@ final class MaintainStore: ObservableObject {
         visibleCatalog.filter { isStepEnabled($0.id) }
     }
 
-    private var coolifyRemoteConfigured: Bool {
+    var coolifyHost: String {
         guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
         let host = json["coolify_ssh_host"] as? String ?? ""
-        return !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return host.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var coolifyHostTask: Task<Void, Never>?
+
+    func setCoolifyHost(_ host: String) {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let launcher = self.launcher
+        coolifyHostTask?.cancel()
+        coolifyHostTask = Task { [weak self] in
+            let outcome: Result<Bool, Error>
+            do {
+                if Task.isCancelled { return }
+                outcome = .success(try await launcher(["--set-coolify-host", trimmed]))
+            } catch is CancellationError {
+                return
+            } catch {
+                outcome = .failure(error)
+            }
+            if Task.isCancelled { return }
+            await MainActor.run {
+                guard let self else { return }
+                switch outcome {
+                case .success(true):
+                    self.lastError = nil
+                case .success(false):
+                    self.lastError = "Could not save remote server SSH host."
+                case .failure(let error):
+                    self.lastError = error.localizedDescription
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    private var coolifyRemoteConfigured: Bool {
+        return !coolifyHost.isEmpty
     }
 
     private func loadStepToggles() -> [String: Bool] {
