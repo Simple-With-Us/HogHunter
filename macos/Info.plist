@@ -12,5 +12,20 @@
 	     Empty in local and CI builds, which keeps SentryTelemetry a no-op. -->
 	<key>SentryDSN</key>
 	<string>$(SENTRY_DSN)</string>
+	<!-- Sparkle 2 automatic updater feed and verification key -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>3600</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>
