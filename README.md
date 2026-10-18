@@ -2,7 +2,7 @@
 
 A Mac menu bar utility that names the processes and apps eating CPU and memory right now, over the past hour, and over the past 24 hours.  Quit a hog from the list after a confirm.  It also shows what is using your disk and your network, and it can clean reclaimable disk clutter.
 
-The Mac app is a direct download.  The iPhone companion has TestFlight builds.  Neither is on the App Store.
+The Mac app is a direct download: grab the latest signed, notarized build (DMG or ZIP) from [GitHub Releases](https://github.com/Simple-With-Us/HogHunter/releases).  Installed copies keep themselves current - a release is published on every merge to `main`, and the app checks hourly and installs the update while it is idle (Sparkle 2; see `docs/AUTO-UPDATE.md`).  The iPhone companion has TestFlight builds.  Neither is on the App Store.
 
 ## What it shows
 
@@ -12,6 +12,8 @@ The Mac app is a direct download.  The iPhone companion has TestFlight builds.  
 - **Past Hour** / **Past 24 Hours** — averages from samples Hog Hunter took while it was open.
 - **Apps** groups helpers (Chrome, Electron, …) under one row.  **Processes** lists pids.
 - **Quit** / **Force Quit** on live rows.  History rows are look-only.
+- **Alerts** - get notified when an app holds CPU above your threshold for a sustained number of minutes, with a cooldown so it does not keep repeating.  Alerts can also go to a webhook; Settings has a Send Test Webhook button.
+- **Network** - live bandwidth and the 24-hour peak, plus what is using the network.
 
 History only covers time the menu bar app has been running.  Turn on **Launch at Login** if you want a real day of data.
 
@@ -22,11 +24,14 @@ History only covers time the menu bar app has been running.  Turn on **Launch at
 - **All installed** / **Running now** filters, and **Total** / **Hidden** / **Bundle** sort orders.
 - A disk cleaner for caches, logs, Trash, developer junk, orphaned app leftovers, stale AI agent transcripts and models, and large or old files.  A standard clean preserves recoverability through an APFS snapshot; a deep clean goes further.
 - **Robotic Vacuum** — scheduled background cleaning (pressure check every 5 minutes, worktree janitor every 30 minutes, full vacuum every 4 hours) with run history, step toggles, and alerts when a schedule is missed or the background job is unloaded.
+- **Maintain** - the Robotic Vacuum's control surface (Storage > Maintain): a registry of maintenance scripts it owns or only observes, local or remote, with a lane doctor and run history.  Optional maintenance of remote servers over SSH (Coolify) stays off until a host is configured.
 - Per-directory walks are capped, and a capped row is flagged as approximate in the UI rather than reported as exact.
 
 ## iPhone
 
 Hog Hunter on iPhone shows the same list the Mac is showing, over the Wi-Fi you are both on or over Tailscale, and it can act on that Mac: quit or force quit an app, tame a runaway one, scan the disk, choose what to clean and run the Standard or Extreme clean, change cleaner exclusions and the panel view (including the CPU scale), change the refresh interval, alerts and webhook, run Sample for 3 Seconds on a row, and show the Robotic Vacuum's status and recent runs and start a full run.  It also shows the Mac's network speed and 24-hour peak and a CPU sparkline.  Each of those is off until you turn it on in Settings > iPhone on the Mac, the phone asks you to confirm every action, and the Mac accepts them only from your local network or Tailscale.  Running the Robotic Vacuum has a switch of its own that the pairing alert never offers, because a full run can retire old merged git worktrees and run maintenance on remote servers.
+
+Home-screen widgets on the iPhone show the Mac's state at a glance, and the small widget's Clean pill always asks for confirmation on the phone before anything runs.
 
 On the Mac, open Settings and turn on **Share With iPhone**.  Type the pairing code into the phone, or let the phone ask and approve it on the Mac.  Each phone gets a token of its own and is listed under **Paired iPhones**, where **Revoke** cuts it off.  Leave the switch off on a network you do not trust.  Do not forward the port from your router: the link is not encrypted yet.  See `docs/rollouts/2026-10-09-phone-parity-batch-1.md`.
 
