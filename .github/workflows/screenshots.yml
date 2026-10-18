@@ -194,7 +194,11 @@ jobs:
               TRY_SHOT=$(mktemp /tmp/hoghunter-try-XXXXXX.png)
               xcrun simctl io "$UDID" screenshot "$TRY_SHOT" || true
               if python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_unchanged_problem; problem = screenshot_unchanged_problem(sys.argv[1], sys.argv[2]); print("CHECK: %s" % (problem or "foreground confirmed")); sys.exit(0 if problem is None else 1)' "$BASELINE_SHOT" "$TRY_SHOT"; then
-                mv "$TRY_SHOT" "screenshots/${SAFE_NAME}.png"
+                if ! mv "$TRY_SHOT" "screenshots/${SAFE_NAME}.png"; then
+                  echo "ERROR: failed to save device screenshot on $DEVICE_PATTERN"
+                  rm -f "$TRY_SHOT" "$BASELINE_SHOT"
+                  return 1
+                fi
                 FOREGROUNDED=1
                 break
               fi
@@ -217,19 +221,19 @@ jobs:
                 return 1
               fi
               xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterWidgetPreview
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterWidgetPreview || return 1
               sleep 5
-              xcrun simctl io "$UDID" screenshot "screenshots/widget-small.png"
+              xcrun simctl io "$UDID" screenshot "screenshots/widget-small.png" || return 1
               xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterCleanConfirm
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterCleanConfirm || return 1
               sleep 5
-              xcrun simctl io "$UDID" screenshot "screenshots/clean-cold-start.png"
+              xcrun simctl io "$UDID" screenshot "screenshots/clean-cold-start.png" || return 1
               xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample || return 1
               sleep 4
-              xcrun simctl openurl "$UDID" "hoghunter://clean"
+              xcrun simctl openurl "$UDID" "hoghunter://clean" || return 1
               sleep 3
-              xcrun simctl io "$UDID" screenshot "screenshots/clean-deep-link.png"
+              xcrun simctl io "$UDID" screenshot "screenshots/clean-deep-link.png" || return 1
               if ! python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_problem; paths = ["screenshots/widget-small.png", "screenshots/clean-cold-start.png", "screenshots/clean-deep-link.png"]; bad = [(p, screenshot_problem(p)) for p in paths]; bad = [(p, problem) for p, problem in bad if problem]; [print("ERROR: %s: %s" % item) for item in bad]; [print("OK %s" % p) for p in paths if p not in [item[0] for item in bad]]; sys.exit(1 if bad else 0)'; then
                 echo "ERROR: extra screenshot validation failed on $DEVICE_PATTERN"
                 return 1
@@ -240,6 +244,7 @@ jobs:
             SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
             if ! capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
               echo "First capture attempt failed on $DEVICE_PATTERN; erasing simulator and retrying once"
+              rm -f screenshots/widget-small.png screenshots/clean-cold-start.png screenshots/clean-deep-link.png
               xcrun simctl shutdown "$UDID" || true
               xcrun simctl erase "$UDID"
               if ! capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
