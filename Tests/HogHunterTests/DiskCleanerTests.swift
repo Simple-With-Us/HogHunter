@@ -593,7 +593,7 @@ final class DiskCleanerTests: XCTestCase {
         // would force a full re-download of every simulator runtime next launch.
         XCTAssertTrue(CleanCategory.developer.defaultSelected, "Developer category stays default-selected; only Simulator/CoreDevice rows are opt-in")
         let developer = cleaner.scanDeveloper()
-        for item in developer where item.title == "iOS Simulator Devices" || item.title == "Xcode Connected-Device Support" {
+        for item in developer where item.title.hasPrefix("iOS Simulator Devices") || item.title.hasPrefix("iOS 27 Simulator Device") || item.title == "Xcode Connected-Device Support" {
             XCTAssertFalse(item.isSelected, "Simulator/CoreDevice items must require explicit opt-in")
             XCTAssertEqual(item.category, .developer)
             XCTAssertGreaterThan(item.bytes, 0)
@@ -602,6 +602,61 @@ final class DiskCleanerTests: XCTestCase {
         for item in developer where item.title == "Xcode DerivedData" {
             XCTAssertTrue(item.isSelected)
         }
+    }
+
+    func testPrimaryIOS27SimulatorPreservationAndSeparateOption() async throws {
+        let fm = FileManager.default
+        let simBase = tempDirectory.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
+        let primaryDir = simBase.appendingPathComponent("Device-iOS27-Primary", isDirectory: true)
+        let secondaryDir = simBase.appendingPathComponent("Device-iOS27-Secondary", isDirectory: true)
+        let oldDir = simBase.appendingPathComponent("Device-iOS26", isDirectory: true)
+
+        try fm.createDirectory(at: primaryDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: secondaryDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: oldDir, withIntermediateDirectories: true)
+
+        let now = Date()
+        func writeDevicePlist(dir: URL, name: String, runtime: String, lastUsed: Date) throws {
+            let dict: [String: Any] = [
+                "UDID": dir.lastPathComponent,
+                "name": name,
+                "runtime": runtime,
+                "lastUsedAt": lastUsed,
+                "state": 1
+            ]
+            let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+            try data.write(to: dir.appendingPathComponent("device.plist"))
+            try "dummy payload data".write(to: dir.appendingPathComponent("data.bin"), atomically: true, encoding: .utf8)
+        }
+
+        try writeDevicePlist(dir: primaryDir, name: "Primary iPhone 18", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", lastUsed: now)
+        try writeDevicePlist(dir: secondaryDir, name: "Secondary iPhone 17", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", lastUsed: now.addingTimeInterval(-3600))
+        try writeDevicePlist(dir: oldDir, name: "Legacy iPhone 16", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-0", lastUsed: now.addingTimeInterval(-7200))
+
+        let testCleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let items = testCleaner.scanDeveloper()
+
+        let aggregateItem = items.first { $0.title == "iOS Simulator Devices (Except Default iOS 27)" }
+        let primaryItem = items.first { $0.title.hasPrefix("iOS 27 Simulator Device (Primary:") }
+
+        XCTAssertNotNil(aggregateItem, "Aggregate item without default iOS 27 must be present")
+        XCTAssertNotNil(primaryItem, "Primary iOS 27 simulator item must be present as separate option")
+
+        guard let aggregateItem, let primaryItem else { return }
+        XCTAssertFalse(aggregateItem.isSelected, "Aggregate simulator item must be unselected by default")
+        XCTAssertFalse(primaryItem.isSelected, "Primary iOS 27 simulator item must be unselected by default")
+
+        // Clean only the aggregate item: the primary iOS 27 device must survive intact
+        let result = await testCleaner.clean(items: [aggregateItem], createSnapshot: false)
+        XCTAssertEqual(result.errors, [])
+        XCTAssertTrue(fm.fileExists(atPath: primaryDir.path), "Primary iOS 27 device must be preserved when cleaning other simulators")
+        XCTAssertFalse(fm.fileExists(atPath: secondaryDir.path), "Secondary device must be removed by aggregate clean")
+        XCTAssertFalse(fm.fileExists(atPath: oldDir.path), "Legacy device must be removed by aggregate clean")
+
+        // Clean the primary item specifically: now primary is cleaned as well
+        let primaryResult = await testCleaner.clean(items: [primaryItem], createSnapshot: false)
+        XCTAssertEqual(primaryResult.errors, [])
+        XCTAssertFalse(fm.fileExists(atPath: primaryDir.path), "Primary iOS 27 device must be removed when explicitly chosen")
     }
 
     // MARK: - Temp Files Category (/tmp)

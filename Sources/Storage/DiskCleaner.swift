@@ -1175,26 +1175,68 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         if !Task.isCancelled {
-            // iOS Simulator Devices — every installed simulator + runtime.  Opt-in
-            // only: other users may actively develop for iOS, and an auto-clean
-            // would force a full re-download of every runtime on next boot.
+            // iOS Simulator Devices — installed simulators + runtimes.  Opt-in only:
+            // other users may actively develop for iOS, and an auto-clean would force
+            // a full re-download of every runtime on next boot.
+            // By default, one primary iOS 27 simulator is preserved so BitRig and test
+            // suites can run simulators without a forced re-download, with a separate option
+            // to clean that primary iOS 27 simulator as well.
             let simDevicesURL = userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
             var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: simDevicesURL.path, isDirectory: &isDir) {
-                let stats = directoryStats(at: simDevicesURL)
-                if stats.bytes > 0 {
-                    items.append(CleanItem(
-                        category: .developer,
-                        title: "iOS Simulator Devices",
-                        subtitle: "~/Library/Developer/CoreSimulator/Devices",
-                        url: simDevicesURL,
-                        bytes: stats.bytes,
-                        fileCount: stats.fileCount,
-                        isApproximate: stats.isApproximate,
-                        lastModified: stats.lastModified,
-                        isSelected: false,
-                        detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
-                    ))
+            if fileManager.fileExists(atPath: simDevicesURL.path, isDirectory: &isDir), isDir.boolValue {
+                let deviceMetas = scanSimulatorDevices(at: simDevicesURL)
+                let primary = primaryIOS27Simulator(in: deviceMetas)
+
+                if let primary = primary {
+                    let otherDevices = deviceMetas.filter { $0.url.path != primary.url.path }
+                    let otherBytes = otherDevices.reduce(0) { $0 + $1.bytes }
+                    let otherCount = otherDevices.reduce(0) { $0 + $1.fileCount }
+
+                    if otherBytes > 0 || !otherDevices.isEmpty {
+                        items.append(CleanItem(
+                            category: .developer,
+                            title: "iOS Simulator Devices (Except Default iOS 27)",
+                            subtitle: "~/Library/Developer/CoreSimulator/Devices",
+                            url: simDevicesURL,
+                            bytes: otherBytes,
+                            fileCount: otherCount,
+                            isApproximate: false,
+                            lastModified: otherDevices.compactMap(\.lastUsedAt).max(),
+                            isSelected: false,
+                            detail: "Installed iOS simulator devices except the primary iOS 27 simulator (\(primary.name)), which is preserved by default for BitRig and testing.\u{00a0} Xcode re-downloads runtimes on demand."
+                        ))
+                    }
+
+                    if primary.bytes > 0 {
+                        items.append(CleanItem(
+                            category: .developer,
+                            title: "iOS 27 Simulator Device (Primary: \(primary.name))",
+                            subtitle: "~/Library/Developer/CoreSimulator/Devices/\(primary.udid)",
+                            url: primary.url,
+                            bytes: primary.bytes,
+                            fileCount: primary.fileCount,
+                            isApproximate: false,
+                            lastModified: primary.lastUsedAt,
+                            isSelected: false,
+                            detail: "The primary iOS 27 simulator (\(primary.name)), preserved by default so BitRig and local test lanes can run without re-downloading.\u{00a0} Select this option to clean it also."
+                        ))
+                    }
+                } else {
+                    let stats = directoryStats(at: simDevicesURL)
+                    if stats.bytes > 0 {
+                        items.append(CleanItem(
+                            category: .developer,
+                            title: "iOS Simulator Devices",
+                            subtitle: "~/Library/Developer/CoreSimulator/Devices",
+                            url: simDevicesURL,
+                            bytes: stats.bytes,
+                            fileCount: stats.fileCount,
+                            isApproximate: stats.isApproximate,
+                            lastModified: stats.lastModified,
+                            isSelected: false,
+                            detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
+                        ))
+                    }
                 }
             }
         }
@@ -1945,6 +1987,33 @@ final class DiskCleaner: @unchecked Sendable {
                     reclaimed &+= item.bytes
                     removedCount += 1
                     noteSuccess(item)
+                } else if item.url.standardizedFileURL.path == userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true).standardizedFileURL.path {
+                    // Aggregate simulator devices item: trash child devices individually so the primary iOS 27
+                    // simulator is preserved unless explicitly selected as its own item in activeItems.
+                    let simDevicesURL = item.url
+                    let deviceMetas = scanSimulatorDevices(at: simDevicesURL)
+                    let primary = primaryIOS27Simulator(in: deviceMetas)
+                    let primaryPath = primary?.url.standardizedFileURL.path
+                    let primaryAlsoSelected = primaryPath != nil && activeItems.contains { $0.url.standardizedFileURL.path == primaryPath }
+
+                    if let children = try? fileManager.contentsOfDirectory(at: simDevicesURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                        for child in children {
+                            let childPath = child.standardizedFileURL.path
+                            if child.lastPathComponent == "device_set.plist" && !primaryAlsoSelected {
+                                continue
+                            }
+                            if childPath == primaryPath {
+                                continue
+                            }
+                            if isSafeToDelete(url: child, category: item.category) {
+                                var trashedURL: NSURL?
+                                try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)
+                            }
+                        }
+                    }
+                    reclaimed &+= item.bytes
+                    removedCount += 1
+                    noteSuccess(item)
                 } else {
                     // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
@@ -2178,6 +2247,94 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         return DirectoryStats(bytes: totalBytes, fileCount: totalCount, lastModified: latestDate, isApproximate: hitCap)
+    }
+
+    // MARK: - Simulator Device Inspection
+
+    struct SimulatorDeviceInfo: Sendable {
+        let url: URL
+        let udid: String
+        let name: String
+        let runtime: String
+        let lastUsedAt: Date?
+        let isIOS27: Bool
+        let bytes: UInt64
+        let fileCount: Int
+    }
+
+    /// Scans individual simulator devices inside `CoreSimulator/Devices`.
+    func scanSimulatorDevices(at devicesURL: URL) -> [SimulatorDeviceInfo] {
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: devicesURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        var devices: [SimulatorDeviceInfo] = []
+        for item in contents {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let plistURL = item.appendingPathComponent("device.plist")
+            guard fileManager.fileExists(atPath: plistURL.path) else { continue }
+
+            var name = item.lastPathComponent
+            var runtime = ""
+            var lastUsedAt: Date?
+            var udid = item.lastPathComponent
+
+            if let data = try? Data(contentsOf: plistURL),
+               let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any] {
+                if let parsedName = plist["name"] as? String, !parsedName.isEmpty {
+                    name = parsedName
+                }
+                if let parsedRuntime = plist["runtime"] as? String {
+                    runtime = parsedRuntime
+                }
+                if let parsedUDID = plist["UDID"] as? String, !parsedUDID.isEmpty {
+                    udid = parsedUDID
+                }
+                if let parsedLastUsed = plist["lastUsedAt"] as? Date {
+                    lastUsedAt = parsedLastUsed
+                }
+            }
+
+            if lastUsedAt == nil {
+                if let values = try? item.resourceValues(forKeys: [.contentModificationDateKey]),
+                   let mod = values.contentModificationDate {
+                    lastUsedAt = mod
+                }
+            }
+
+            let isIOS27 = runtime.localizedCaseInsensitiveContains("iOS-27") ||
+                          runtime.localizedCaseInsensitiveContains("iOS 27") ||
+                          runtime.localizedCaseInsensitiveContains("iOS.27")
+            let stats = directoryStats(at: item)
+            devices.append(SimulatorDeviceInfo(
+                url: item,
+                udid: udid,
+                name: name,
+                runtime: runtime,
+                lastUsedAt: lastUsedAt,
+                isIOS27: isIOS27,
+                bytes: stats.bytes,
+                fileCount: stats.fileCount
+            ))
+        }
+        return devices
+    }
+
+    /// Finds the primary iOS 27 simulator device to preserve (most recently active).
+    func primaryIOS27Simulator(in devices: [SimulatorDeviceInfo]) -> SimulatorDeviceInfo? {
+        let ios27Devices = devices.filter(\.isIOS27).sorted { lhs, rhs in
+            if let lDate = lhs.lastUsedAt, let rDate = rhs.lastUsedAt {
+                return lDate > rDate
+            }
+            if lhs.lastUsedAt != nil { return true }
+            if rhs.lastUsedAt != nil { return false }
+            return lhs.name < rhs.name
+        }
+        return ios27Devices.first
     }
 
     // MARK: - Internal Helpers

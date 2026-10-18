@@ -46,7 +46,7 @@
     "stagingMinutes": 60,
     "cacheMinutes": 90,
     "deviceSupportDays": 7,
-    "simulatorRuntimeDays": 1
+    "simulatorRuntimeDays": 2
   },
 
   "rules": [
