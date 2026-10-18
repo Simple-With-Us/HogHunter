@@ -1730,7 +1730,7 @@ class TestLegacyFullSteps(unittest.TestCase):
 
         def bitrig_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             if cmd[0] == "pgrep":
-                rc = 0 if cmd[-1] == "Bitrig" else 1
+                rc = 0 if cmd[-1] in ("Bitrig", "[Bb]itrig") else 1
                 return subprocess.CompletedProcess(cmd, rc, "123\n" if rc == 0 else "", "")
             return fake_runner(cmd, **kwargs)
 
@@ -1738,6 +1738,17 @@ class TestLegacyFullSteps(unittest.TestCase):
             _freed, reason, status = self.engine(bitrig_runner)._shutdown_simulators()
         self.assertEqual((status, reason), (StepStatus.RAN, "shut down 1 booted simulator, kept 1 for Bitrig"))
         self.assertEqual(shut, ["U-2"])
+
+        # When U-2 is more recently used, keep U-2 and shut down U-1
+        shut.clear()
+        reaper_dir = self.home / "Library" / "Application Support" / "sim-idle-reaper"
+        reaper_dir.mkdir(parents=True, exist_ok=True)
+        (reaper_dir / "state.json").write_text(json.dumps({"U-1": 100.0, "U-2": 500.0}))
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(bitrig_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 1 booted simulator, kept 1 for Bitrig"))
+        self.assertEqual(shut, ["U-1"])
 
         # Simulator.app running -> skipped
         def sim_app_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:

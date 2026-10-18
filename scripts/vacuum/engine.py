@@ -507,11 +507,32 @@ class VacuumEngine:
                     booted.append({"udid": str(dev["udid"]), "name": str(dev.get("name", ""))})
         if not booted:
             return 0, "0 booted simulators", StepStatus.SKIPPED
-        bitrig_busy, _ = lanes.process_state(self._runner, "Bitrig", "Bitrig is running")
+        def _score_booted(idx_dev: tuple[int, dict[str, str]]) -> tuple[float, int]:
+            idx, dev = idx_dev
+            u = dev["udid"]
+            t = 0.0
+            reaper_state = self.home / "Library" / "Application Support" / "sim-idle-reaper" / "state.json"
+            if reaper_state.is_file():
+                try:
+                    with open(reaper_state, encoding="utf-8") as f:
+                        doc_reaper = json.load(f)
+                    t = float(doc_reaper.get(u, 0.0))
+                except Exception:
+                    pass
+            dev_dir = self.home / "Library" / "Developer" / "CoreSimulator" / "Devices" / u
+            for sub in (dev_dir / "data", dev_dir):
+                try:
+                    t = max(t, sub.stat().st_mtime)
+                except OSError:
+                    pass
+            return (t, -idx)
+
+        bitrig_busy, _ = lanes.process_state(self._runner, "[Bb]itrig", "Bitrig is running")
         if bitrig_busy:
             if len(booted) == 1:
                 return 0, "skipped: Bitrig is running (1 simulator exempt)", StepStatus.SKIPPED
-            targets = booted[1:]
+            _exempt_idx, exempt_dev = max(enumerate(booted), key=_score_booted)
+            targets = [dev for dev in booted if dev["udid"] != exempt_dev["udid"]]
         else:
             targets = booted
         suffix = ", kept 1 for Bitrig" if bitrig_busy else ""
