@@ -1203,7 +1203,7 @@ final class DiskCleaner: @unchecked Sendable {
                             isApproximate: false,
                             lastModified: otherDevices.compactMap(\.lastUsedAt).max(),
                             isSelected: false,
-                            detail: "Installed iOS simulator devices except the primary iOS 27 simulator (\(primary.name)), which is preserved by default for BitRig and testing.  Xcode re-downloads runtimes on demand."
+                            detail: "Installed iOS simulator devices except the primary iOS 27 simulator (\(primary.name)), which is preserved by default for BitRig and testing.\u{00a0} Xcode re-downloads runtimes on demand."
                         ))
                     }
 
@@ -1218,7 +1218,7 @@ final class DiskCleaner: @unchecked Sendable {
                             isApproximate: false,
                             lastModified: primary.lastUsedAt,
                             isSelected: false,
-                            detail: "The primary iOS 27 simulator (\(primary.name)), preserved by default so BitRig and local test lanes can run without re-downloading.  Select this option to clean it also."
+                            detail: "The primary iOS 27 simulator (\(primary.name)), preserved by default so BitRig and local test lanes can run without re-downloading.\u{00a0} Select this option to clean it also."
                         ))
                     }
                 } else {
@@ -2002,10 +2002,7 @@ final class DiskCleaner: @unchecked Sendable {
                             if child.lastPathComponent == "device_set.plist" && !primaryAlsoSelected {
                                 continue
                             }
-                            if childPath == primaryPath && !primaryAlsoSelected {
-                                continue
-                            }
-                            if childPath == primaryPath && primaryAlsoSelected {
+                            if childPath == primaryPath {
                                 continue
                             }
                             if isSafeToDelete(url: child, category: item.category) {
