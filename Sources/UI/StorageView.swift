@@ -226,9 +226,15 @@ struct StorageView: View {
             }
         case .completed:
             HStack(spacing: 6) {
-                Text("Showing \(store.apps.count) of \(store.installedAppCount) installed apps.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                if let when = store.state.completedAt {
+                    Text("Scanned \(Self.relativeTimeFormatter.localizedString(for: when, relativeTo: Date())) • Showing \(store.apps.count) of \(store.installedAppCount) installed apps.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Showing \(store.apps.count) of \(store.installedAppCount) installed apps.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Refresh") { store.refresh() }
             }
