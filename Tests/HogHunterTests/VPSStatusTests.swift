@@ -98,6 +98,20 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertEqual(root?.estimatedTotalBytes, 301 * 1024 * 1024 * 1024)
         XCTAssertNotNil(root?.usedFraction)
 
+        let tmp = snapshot.tmpDevice
+        XCTAssertNotNil(tmp)
+        XCTAssertEqual(tmp?.mount, "/tmp")
+        XCTAssertEqual(tmp?.freeBytes, 16201887744)
+        XCTAssertEqual(tmp?.estimatedTotalBytes, 16 * 1024 * 1024 * 1024)
+        XCTAssertNotNil(tmp?.usedFraction)
+
+        let shm = snapshot.shmDevice
+        XCTAssertNotNil(shm)
+        XCTAssertEqual(shm?.mount, "/dev/shm")
+        XCTAssertEqual(shm?.freeBytes, 16424865792)
+        XCTAssertEqual(shm?.estimatedTotalBytes, 16 * 1024 * 1024 * 1024)
+        XCTAssertNotNil(shm?.usedFraction)
+
         // Databases
         XCTAssertEqual(snapshot.appDbs?["st_app_db"], 19904122112)
         XCTAssertEqual(snapshot.appDbs?["ct_db"], 4736902136)

@@ -117,10 +117,21 @@ struct VPSResourceCardView: View {
 
             HStack(spacing: 8) {
                 if let root = snapshot.rootDevice {
-                    diskBox(root)
+                    deviceBox(root, title: "Disk (/)")
                 }
                 if let swap = snapshot.swap {
                     swapBox(swap)
+                }
+            }
+
+            if snapshot.tmpDevice != nil || snapshot.shmDevice != nil {
+                HStack(spacing: 8) {
+                    if let tmp = snapshot.tmpDevice {
+                        deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
+                    }
+                    if let shm = snapshot.shmDevice {
+                        deviceBox(shm, title: "Shared Mem (/dev/shm)", tooltip: shm.note)
+                    }
                 }
             }
 
@@ -176,29 +187,30 @@ struct VPSResourceCardView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
     }
 
-    private func diskBox(_ root: VPSDevice) -> some View {
+    private func deviceBox(_ device: VPSDevice, title: String, tooltip: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Disk (/)")
+                Text(title)
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
-                if let frac = root.usedFraction {
+                if let frac = device.usedFraction {
                     Text(String(format: "%.0f%% used", frac * 100))
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(Severity.forDisk(frac).color)
                 }
             }
-            if let frac = root.usedFraction {
+            if let frac = device.usedFraction {
                 ProgressView(value: frac)
                     .tint(Severity.forDisk(frac).color)
             }
-            Text("\(HogFormat.memory(UInt64(root.freeBytes))) free\(root.estimatedTotalBytes != nil ? " of \(HogFormat.memory(UInt64(root.estimatedTotalBytes!)))" : "")")
+            Text("\(HogFormat.memory(UInt64(device.freeBytes))) free\(device.estimatedTotalBytes != nil ? " of \(HogFormat.memory(UInt64(device.estimatedTotalBytes!)))" : "")")
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .help(tooltip ?? device.note ?? title)
     }
 
     private func swapBox(_ swap: VPSSwap) -> some View {

@@ -69,6 +69,14 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     var rootDevice: VPSDevice? {
         devices["root"]
     }
+
+    var tmpDevice: VPSDevice? {
+        devices["tmp"]
+    }
+
+    var shmDevice: VPSDevice? {
+        devices["shm"]
+    }
 }
 
 struct VPSDevice: Codable, Equatable, Sendable {
