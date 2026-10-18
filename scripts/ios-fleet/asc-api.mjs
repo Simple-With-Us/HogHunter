@@ -624,15 +624,21 @@ async function main() {
     console.error(`ensure-tf-ready: build=${version} id=${buildId} enc=${enc} internal=${beta.internalBuildState || "unknown"}`);
 
     // ---- Phase B: export compliance, on the DISCOVERED build.
+    // HogHunter vendor patch (HH-157): a failed PATCH no longer exits before
+    // Phase B2.  ship-testflight.sh treats exit 2 as a warning and records the
+    // ship, so exiting here skipped the mandatory What to Test for good.  The
+    // notes are published first;  the exit code (2) is unchanged.
+    let compliancePatchFailed = false;
     if (enc !== false) {
       const patch = await api("PATCH", `/v1/builds/${buildId}`, JSON.stringify({
         data: { type: "builds", id: buildId, attributes: { usesNonExemptEncryption: false } }
       }));
       if (!patch.ok) {
         console.error(`ensure-tf-ready: compliance patch failed HTTP ${patch.status}`);
-        process.exit(2);
+        compliancePatchFailed = true;
+      } else {
+        console.error("ensure-tf-ready: declared usesNonExemptEncryption=false");
       }
-      console.error("ensure-tf-ready: declared usesNonExemptEncryption=false");
     }
 
     // ---- Phase B2: TestFlight "What to Test". Before the readiness wait, so a
@@ -641,6 +647,9 @@ async function main() {
       await setWhatToTest({ api, buildId, appId, marketing: wantMarketing });
     } catch (err) {
       console.error(`ensure-tf-ready: release-notes step failed (non-fatal): ${err && err.message ? err.message : err}`);
+    }
+    if (compliancePatchFailed) {
+      process.exit(2);
     }
 
     // ---- Phase C: readiness, drawing from the same overall deadline. Always

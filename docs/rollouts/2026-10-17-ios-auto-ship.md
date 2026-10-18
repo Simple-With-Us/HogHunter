@@ -35,12 +35,12 @@ The repository variable `HH_IOS_TESTFLIGHT_ENABLED` still gates every trigger.
 
 ## The vendored fleet files
 
-`scripts/ios-fleet/` is a copy of the Mac fleet tooling (`/Users/jay/apps/ios-fleet`) so a hosted runner can use it, as in the other fleet repos:
+`scripts/ios-fleet/` is a copy of the Mac fleet tooling (the `ios-fleet` directory on the fleet Mac) so a hosted runner can use it, as in the other fleet repos:
 
 | File | Source | Change |
 |---|---|---|
 | `ship-testflight.sh`, `ExportOptions-*.plist` | Mac canonical | none |
-| `asc-api.mjs` | Mac canonical | `centralTimestamp` drops the ` CT` suffix and writes `am` or `pm` in lower case (the canonical copy still breaks the no-timezone-abbreviation rule);  the agent filter also covers `minimax`, `clutch`, `opencode` and the bracketed tags `[MM]`, `[MC]`, `[MA]`, `[FX]`, `[DSH]`, `[JET]`, `[GROK-WEB]` |
+| `asc-api.mjs` | Mac canonical | `centralTimestamp` drops the ` CT` suffix and writes `am` or `pm` in lower case (the canonical copy still breaks the no-timezone-abbreviation rule);  the agent filter also covers `minimax`, `clutch`, `opencode` and the bracketed tags `[MM]`, `[MC]`, `[MA]`, `[FX]`, `[DSH]`, `[JET]`, `[GROK-WEB]`;  a failed export-compliance PATCH in `ensure-tf-ready` still publishes What to Test before it exits 2 (the canonical copy exits first, and the ship script records the ship, so the notes were lost) |
 | `scheduled-ship-gate.sh`, `test-scheduled-ship-gate.sh` | CodeCaps | none |
 | `apps.json` | new | the `hoghunter` row only, with `xcodegenDir` set to `.` because the Xcode project is generated and not committed |
 
@@ -55,7 +55,18 @@ Left out on purpose:  `publish-ios-versions.sh` (it writes the public version ma
 - `bash scripts/test-ios-stage-asc-key.sh`, `bash scripts/ios-fleet/test-scheduled-ship-gate.sh` and `python3 scripts/test-ios-release.py` run in the Linux `release-safety` job.
 - `bash scripts/ios-ship-testflight.sh --dry-run` (locally, with the state directory pointed at a scratch folder) prints the plan:  `seq sources: local=0 asc=10`, shipping `1.0.11`.
 - An `upload=false` dispatch from the PR branch archives and exports on a hosted runner, which proves signing with the Fleet-OPS key and the xcodegen path before `main` switches over.
-- After the merge, `node ~/apps/ios-fleet/ios_testflight_freshness.mjs --app hoghunter` reports `current`.
+- After the merge, the fleet TestFlight freshness check (`ios_testflight_freshness.mjs --app hoghunter`, in the Mac fleet tooling) reports `current`.
+
+## Follow-ups
+
+Next steps after the merge:
+
+- Watch the first push run and the first hourly scheduled ticks:  a tick with no native change must exit at the gate, and a second upload inside the hour must be skipped by the rate gate.
+- Confirm in App Store Connect that the first build lands as `1.0.11` with What to Test published and export compliance declared, then run the freshness check above.  Issue #22 stays open until the external release is verified.
+- Upstream the third `asc-api.mjs` patch (What to Test survives a failed compliance PATCH) and the timezone-free stamp to the canonical fleet copy, so the other fleet apps get them and this copy can return to two patches or none.
+- The release-notes tie-break prefix is derived from `projectRel`, which is `.` here because the project is generated at the repository root, so past ten bullets every commit counts as iPhone work and the newest ten are kept.  A per-app prefix list belongs in the canonical `ship-testflight.sh`;  the vendored copy stays identical to it.
+
+Blockers:  none known.  The org machine identity and the org secret `INFISICAL_FLEET_OPS_PROJECT_ID` are already shared with this repository, and they are the pair ContactLogo reads `/asc` with.
 
 ## Rollback
 

@@ -202,7 +202,9 @@ jobs:
       - name: Load ASC credentials (Fleet-OPS prod /asc)
         if: steps.gate.outputs.should_ship == '1'
         env:
-          ASC_INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
+          # The org secret shared with this repository (ContactLogo reads /asc
+          # the same way), so this public file never names the project.
+          ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -211,6 +213,11 @@ jobs:
           set +o xtrace
           set -euo pipefail
           export INFISICAL_DISABLE_UPDATE_CHECK=true
+
+          if [ -z "${ASC_INFISICAL_PROJECT_ID:-}" ]; then
+            echo "::error::The org secret INFISICAL_FLEET_OPS_PROJECT_ID is empty or not shared with this repository." >&2
+            exit 1
+          fi
 
           if ! command -v infisical >/dev/null 2>&1; then
             NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install infisical/get-cli/infisical
@@ -255,7 +262,7 @@ jobs:
                 2>/dev/null || true
             )"
             if [ -z "$val" ]; then
-              echo "::error::Missing $name in Fleet-OPS prod /asc;  verify the CI identity has read access to project ${ASC_INFISICAL_PROJECT_ID} path /asc." >&2
+              echo "::error::Missing $name in Fleet-OPS prod /asc;  verify the CI identity has read access to the Fleet-OPS project, path /asc." >&2
               exit 1
             fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
@@ -275,7 +282,7 @@ jobs:
               2>/dev/null || true
           )"
           if [ -z "$key_material" ]; then
-            echo "::error::Missing ASC key material in Fleet-OPS prod /asc;  verify the CI identity has read access to project ${ASC_INFISICAL_PROJECT_ID} path /asc." >&2
+            echo "::error::Missing ASC key material in Fleet-OPS prod /asc;  verify the CI identity has read access to the Fleet-OPS project, path /asc." >&2
             exit 1
           fi
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"

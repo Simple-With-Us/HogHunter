@@ -171,6 +171,16 @@ if env -u ASC_KEY_P8 -u INFISICAL_UNIVERSAL_AUTH_CLIENT_ID -u INFISICAL_UNIVERSA
 fi
 grep -q 'Missing Infisical machine identity' "$tmp_dir/noid-stdout" "$tmp_dir/noid-stderr"
 
+# An empty Fleet-OPS project id (the org secret not shared) must fail before
+# any Infisical call, rather than querying an unnamed project.
+if run_load "$tmp_dir/noproj-env" "$tmp_dir/noproj-calls" ASC_INFISICAL_PROJECT_ID= \
+  > "$tmp_dir/noproj-stdout" 2> "$tmp_dir/noproj-stderr"; then
+  echo 'an empty Fleet-OPS project id was accepted' >&2
+  exit 1
+fi
+grep -q 'INFISICAL_FLEET_OPS_PROJECT_ID is empty' "$tmp_dir/noproj-stderr"
+[[ ! -s "$tmp_dir/noproj-calls" && ! -s "$tmp_dir/noproj-env" ]]
+
 # The ASC key is never read from a repository secret, and the certificate is
 # scoped to the import step alone.
 if grep -Eq 'secrets\.ASC_(KEY_ID|ISSUER_ID|KEY_P8)' "$workflow"; then

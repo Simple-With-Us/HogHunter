@@ -267,7 +267,10 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertRegex(self.code, r"(?s)Save iOS ship state.*export_only != '1'")
 
     def test_asc_key_comes_from_fleet_ops_asc_only(self):
-        self.assertIn("8dae6d03-8f12-48b2-adf3-e5c1b881c8c5", self.code)
+        # The Fleet-OPS project id comes from the shared org secret;  this public
+        # file never carries it as a literal.
+        self.assertIn("ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}", self.code)
+        self.assertNotRegex(self.code, r"ASC_INFISICAL_PROJECT_ID:\s*[0-9a-f]{8}-")
         self.assertIn("--path=/asc", self.code)
         for name in ("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"):
             self.assertNotRegex(self.code, rf"secrets\.{name}\b")
