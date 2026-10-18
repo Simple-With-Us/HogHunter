@@ -179,7 +179,9 @@ jobs:
               return 1
             fi
             local LAUNCH_PID
-            if ! LAUNCH_PID=$(xcrun simctl launch "$UDID" "$BUNDLE_ID"); then
+            # -HogHunterSample: sample-state flag so the app shows the live
+            # dashboard, not the "Looking for Your Mac" onboarding screen.
+            if ! LAUNCH_PID=$(xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample); then
               echo "ERROR: failed to launch $BUNDLE_ID on $DEVICE_PATTERN"
               rm -f "$BASELINE_SHOT"
               return 1
@@ -204,7 +206,7 @@ jobs:
               fi
               echo "Attempt $ATTEMPT/10: app not foregrounded on $DEVICE_PATTERN, retrying"
               rm -f "$TRY_SHOT"
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null || true
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample >/dev/null || true
             done
             rm -f "$BASELINE_SHOT"
             if [ "$FOREGROUNDED" -ne 1 ]; then
