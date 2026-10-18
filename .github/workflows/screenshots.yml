@@ -34,7 +34,16 @@ jobs:
       - name: Find built app
         id: find-app
         run: |
-          APP_PATH=$(find build-ios -name "*.app" -type d | head -1)
+          # Match the built product only: a bare "*.app" search also matches
+          # dependency artifacts (e.g. Sparkle's Updater.app under
+          # SourcePackages), which once made the lane install and launch the
+          # wrong bundle.
+          APP_PATH=$(find build-ios -path "*/Build/Products/*" -name "HogHunter.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: HogHunter.app not found under build-ios/Build/Products"
+            find build-ios -name "*.app" -type d | head -20 || true
+            exit 1
+          fi
           echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
           echo "Found app: $APP_PATH"
 
