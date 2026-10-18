@@ -120,6 +120,7 @@ POLICY_PATH = Path(__file__).resolve().parent.parent / "config" / "reclaim-polic
 # walk that can run for minutes under load, and their gate is a human
 # decision rather than a byte count -- so skip sizing unless asked.
 SIZE_ASK_FIRST = False
+CLEAN_IOS27 = False
 
 # Never touch these, no matter what a scan finds.  Data, not waste.
 FORBIDDEN_PREFIXES = (
@@ -955,11 +956,14 @@ def rule_simulator_runtimes() -> list[Candidate]:
         for rt in root.iterdir():
             if not rt.is_dir() or is_forbidden(str(rt)):
                 continue
-            if newest_file_age_min(str(rt)) < 60 * 24 or open_handles(str(rt)):
+            is_ios27 = bool(re.search(r"iOS[-_ ]?27", rt.name, re.I))
+            if is_ios27 and not CLEAN_IOS27:
+                continue
+            if newest_file_age_min(str(rt)) < 60 * 48 or open_handles(str(rt)):
                 continue
             cands.append(Candidate(
                 category="simulator-runtimes", path=str(rt), bytes=dir_bytes(str(rt)),
-                reason="iOS simulator runtime untouched for 24h+, re-downloadable",
+                reason="iOS simulator runtime untouched for 48h+, re-downloadable",
                 tier="expensive",
             ))
     return cands
@@ -1441,11 +1445,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="after this engine's own work, also run the CleanMyMac CLI "
                         "sweeps (clean junk --force, optimize purgeable) when installed; "
                         "never invoked without this flag")
+    p.add_argument("--clean-ios27", action="store_true",
+                   help="also clean iOS 27 simulator runtimes (preserved by default)")
     p.add_argument("--version", action="store_true")
     args = p.parse_args(argv)
 
-    global SIZE_ASK_FIRST
+    global SIZE_ASK_FIRST, CLEAN_IOS27
     SIZE_ASK_FIRST = args.size_ask_first
+    CLEAN_IOS27 = args.clean_ios27 or os.environ.get("HOGHUNTER_CLEAN_IOS27") == "1"
     started = time.monotonic()
     set_budget(args.budget_sec)
 
