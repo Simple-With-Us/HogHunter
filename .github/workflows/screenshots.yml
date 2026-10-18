@@ -63,6 +63,34 @@ jobs:
           
           # Use existing simulators instead of creating new ones
           # Map to actual available devices
+          # Pick the newest iOS runtime that has available devices, so a
+          # missing device model can be created instead of skipped.
+          RUNTIME_ID=$(xcrun simctl list devices -j | python3 -c "
+          import json, re, sys
+          devices = json.load(sys.stdin)['devices']
+          def version_key(rt):
+              m = re.search(r'iOS-(\d+)-(\d+)', rt)
+              return tuple(int(x) for x in m.groups()) if m else (0,)
+          candidates = [rt for rt, devs in devices.items()
+                        if 'iOS' in rt and any(d.get('isAvailable', False) for d in devs)]
+          candidates.sort(key=version_key)
+          sys.exit(1 if not candidates else print(candidates[-1]))
+          ")
+          if [ -z "$RUNTIME_ID" ]; then
+            echo "ERROR: no iOS runtime with available devices found on this runner"
+            exit 1
+          fi
+          echo "Using runtime: $RUNTIME_ID"
+          # Track simulators created by this run so they are deleted even if
+          # a later per-device step exits early.
+          CREATED_UDIDS=""
+          cleanup_created() {
+            for id in $CREATED_UDIDS; do
+              xcrun simctl shutdown "$id" >/dev/null 2>&1 || true
+              xcrun simctl delete "$id" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup_created EXIT
           for DEVICE_PATTERN in "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 11 Pro Max"; do
             echo "=== Looking for: $DEVICE_PATTERN ==="
             UDID=$(xcrun simctl list devices available -j | python3 -c "
@@ -76,8 +104,18 @@ jobs:
                       sys.exit(0)
           ")
             if [ -z "$UDID" ]; then
-              echo "WARNING: No available simulator found for $DEVICE_PATTERN, skipping"
-              continue
+              # Resolve the human-readable device name to its CoreSimulator
+              # identifier; fall back to the name itself (simctl accepts both).
+              DEVICE_TYPE_ID=$(xcrun simctl list devicetypes | sed -n "s/^${DEVICE_PATTERN} (\(.*\))$/\1/p" | head -1)
+              if [ -z "$DEVICE_TYPE_ID" ]; then
+                DEVICE_TYPE_ID="$DEVICE_PATTERN"
+              fi
+              echo "No existing simulator for $DEVICE_PATTERN; creating one on $RUNTIME_ID"
+              if ! UDID=$(xcrun simctl create "HH-screenshots-$(echo "$DEVICE_PATTERN" | tr ' ' '-')" "$DEVICE_TYPE_ID" "$RUNTIME_ID"); then
+                echo "ERROR: could not create a $DEVICE_PATTERN simulator (device type or runtime missing)"
+                exit 1
+              fi
+              CREATED_UDIDS="$CREATED_UDIDS $UDID"
             fi
             echo "Using simulator $UDID for $DEVICE_PATTERN"
             # Boot (tolerate already-booted) and wait until the device
