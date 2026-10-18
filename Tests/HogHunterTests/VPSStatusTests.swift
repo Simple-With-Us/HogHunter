@@ -152,13 +152,17 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertEqual(hotSwap.severity, .hot)
     }
 
+    final class Counter: @unchecked Sendable {
+        var value = 0
+    }
+
     @MainActor
     func testVPSStatusStoreWithStub() async throws {
         let expected = try JSONDecoder().decode(VPSStatusSnapshot.self, from: sampleJSON)
-        var callCount = 0
+        let counter = Counter()
 
         let store = VPSStatusStore(initialHost: "coolify", fetcher: { host in
-            callCount += 1
+            counter.value += 1
             if host == "fail.host" {
                 throw NSError(domain: "test", code: 42, userInfo: [NSLocalizedDescriptionKey: "Connection refused"])
             }
@@ -172,7 +176,7 @@ final class VPSStatusTests: XCTestCase {
         // Give async Task a chance to complete
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(counter.value, 1)
         XCTAssertEqual(store.snapshot?.host, "fleet-hetzner-nbg1")
         XCTAssertNil(store.errorMessage)
         XCTAssertNotNil(store.lastFetchDate)
@@ -181,9 +185,23 @@ final class VPSStatusTests: XCTestCase {
         store.setHost("fail.host")
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        XCTAssertEqual(callCount, 2)
+        XCTAssertEqual(counter.value, 2)
         XCTAssertNil(store.snapshot)
         XCTAssertEqual(store.errorMessage, "Connection refused")
+    }
+
+    @MainActor
+    func testStopPollingResetsIsLoading() async throws {
+        let store = VPSStatusStore(initialHost: "coolify", fetcher: { _ in
+            try await Task.sleep(nanoseconds: 500_000_000)
+            throw NSError(domain: "test", code: 1, userInfo: nil)
+        })
+
+        store.fetch(force: true)
+        XCTAssertTrue(store.isLoading)
+
+        store.stopPolling()
+        XCTAssertFalse(store.isLoading)
     }
 
     @MainActor

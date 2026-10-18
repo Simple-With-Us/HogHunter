@@ -53,6 +53,7 @@ final class VPSStatusStore: ObservableObject {
         timer = nil
         activeFetchTask?.cancel()
         activeFetchTask = nil
+        isLoading = false
     }
 
     func fetch(force: Bool = false) {
@@ -84,8 +85,9 @@ final class VPSStatusStore: ObservableObject {
                 result = .failure(error)
             }
 
-            guard let self, !Task.isCancelled else { return }
+            guard let self else { return }
             self.isLoading = false
+            guard !Task.isCancelled else { return }
             switch result {
             case .success(let snap):
                 self.snapshot = snap
@@ -125,19 +127,42 @@ final class VPSStatusStore: ObservableObject {
                 proc.arguments = [
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
+                    "-o", "ServerAliveInterval=3",
+                    "-o", "ServerAliveCountMax=2",
                     trimmedHost,
                     "cat /root/vps-storage-status.json"
                 ]
                 proc.standardOutput = outHandle
                 proc.standardError = errHandle
 
+                let resumeLock = NSLock()
+                var hasResumed = false
+
+                let timeoutTimer = DispatchSource.makeTimerSource()
+                timeoutTimer.schedule(deadline: .now() + 15.0)
+                timeoutTimer.setEventHandler {
+                    if proc.isRunning {
+                        proc.terminate()
+                    }
+                }
+                timeoutTimer.resume()
+
                 proc.terminationHandler = { finished in
+                    timeoutTimer.cancel()
                     try? outHandle.close()
                     try? errHandle.close()
                     let outData = (try? Data(contentsOf: outURL)) ?? Data()
                     let errData = (try? Data(contentsOf: errURL)) ?? Data()
                     try? FileManager.default.removeItem(at: outURL)
                     try? FileManager.default.removeItem(at: errURL)
+
+                    resumeLock.lock()
+                    if hasResumed {
+                        resumeLock.unlock()
+                        return
+                    }
+                    hasResumed = true
+                    resumeLock.unlock()
 
                     if finished.terminationStatus == 0 {
                         do {
@@ -165,11 +190,20 @@ final class VPSStatusStore: ObservableObject {
                 do {
                     try proc.run()
                 } catch {
+                    timeoutTimer.cancel()
                     try? outHandle.close()
                     try? errHandle.close()
                     try? FileManager.default.removeItem(at: outURL)
                     try? FileManager.default.removeItem(at: errURL)
-                    continuation.resume(throwing: error)
+
+                    resumeLock.lock()
+                    let already = hasResumed
+                    hasResumed = true
+                    resumeLock.unlock()
+
+                    if !already {
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }
