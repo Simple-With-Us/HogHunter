@@ -446,8 +446,8 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(
             id: "coolify_remote",
             title: "Remote Server Maintenance",
-            description: "Performs remote Docker and system maintenance on configured Coolify host.",
-            tooltip: "Runs /etc/cron.daily/coolify-auto-maintenance over SSH to clean Docker containers, images, and container logs on your remote Coolify server (e.g. using SSH alias 'coolify', IP, or domain)."
+            description: "Performs remote Docker and system maintenance on configured host via SSH.",
+            tooltip: "Runs remote maintenance over SSH (e.g. using an SSH alias, IP, or user@host) to prune unused Docker containers, images, and container logs."
         ),
         MaintainStepCatalogEntry(
             id: "cleanmymac_cli",
