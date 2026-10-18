@@ -36,6 +36,8 @@ final class MaintainStore: ObservableObject {
     @Published var customDerivedDataPath: String = ""
     @Published var toolPaths: [String: String] = [:]
 
+    let vpsStore: VPSStatusStore
+
     private var timer: Timer?
     private let statusURL: URL
     private let historyURL: URL
@@ -59,7 +61,8 @@ final class MaintainStore: ObservableObject {
         fileManager: FileManager = .default,
         launcher: Launcher? = nil,
         infisical: InfisicalSettings? = nil,
-        infisicalStore: InfisicalStore? = nil
+        infisicalStore: InfisicalStore? = nil,
+        vpsFetcher: VPSStatusStore.Fetcher? = nil
     ) {
         let support = supportDirectory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("HogHunter/Maintain", isDirectory: true)
@@ -71,6 +74,7 @@ final class MaintainStore: ObservableObject {
         self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
         self.infisical = infisical ?? InfisicalSettings.shared
         self.infisicalStore = infisicalStore ?? InfisicalStore.shared
+        self.vpsStore = VPSStatusStore(fetcher: vpsFetcher)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(infisicalDidRefresh),
@@ -78,6 +82,24 @@ final class MaintainStore: ObservableObject {
             object: nil
         )
         refresh()
+    }
+
+    /// Convenience initializer for tests passing a trailing closure launcher.
+    convenience init(
+        supportDirectory: URL? = nil,
+        repoRoot: URL? = nil,
+        fileManager: FileManager = .default,
+        launcher: @escaping Launcher
+    ) {
+        self.init(
+            supportDirectory: supportDirectory,
+            repoRoot: repoRoot,
+            fileManager: fileManager,
+            launcher: launcher,
+            infisical: nil,
+            infisicalStore: nil,
+            vpsFetcher: nil
+        )
     }
 
     deinit {
@@ -114,6 +136,7 @@ final class MaintainStore: ObservableObject {
         // the app), so a view that opens reads the files now instead of
         // showing launch-time status for the first half minute.
         refresh()
+        vpsStore.startPolling()
         let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -125,6 +148,7 @@ final class MaintainStore: ObservableObject {
     func stopPolling() {
         timer?.invalidate()
         timer = nil
+        vpsStore.stopPolling()
     }
 
     func refresh() {
@@ -150,7 +174,12 @@ final class MaintainStore: ObservableObject {
             ? (infisicalStore.string(for: InfisicalKey.maintainCoolifySshHost) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             : ""
         let host = infisicalHost.isEmpty ? fileHost : infisicalHost
-        if coolifyHost != host { coolifyHost = host }
+        if coolifyHost != host {
+            coolifyHost = host
+            vpsStore.setHost(host)
+        } else if vpsStore.configuredHost != host {
+            vpsStore.setHost(host)
+        }
         // The Maintenance tab's host field edits this copy and saves it
         // through setCoolifyHost, so it shows the same resolved host.
         if coolifySSHHost != host { coolifySSHHost = host }

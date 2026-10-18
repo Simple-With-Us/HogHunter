@@ -1,0 +1,279 @@
+import AppKit
+import SwiftUI
+
+/// Remote VPS resource-usage card showing CPU, RAM (including swap),
+/// and storage from `/root/vps-storage-status.json`.
+struct VPSResourceCardView: View {
+    @ObservedObject var store: VPSStatusStore
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                cardHeader
+                if store.configuredHost.isEmpty {
+                    unconfiguredView
+                } else if let err = store.errorMessage, store.snapshot == nil {
+                    errorView(err)
+                } else if store.isLoading && store.snapshot == nil {
+                    loadingView
+                } else if let snapshot = store.snapshot {
+                    snapshotContent(snapshot)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+    }
+
+    private var cardHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "server.rack")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.accentColor)
+            Text(store.snapshot?.host ?? (store.configuredHost.isEmpty ? "Server Resources" : store.configuredHost))
+                .font(.system(size: 13, weight: .semibold))
+            if store.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Spacer()
+            if let snapshot = store.snapshot {
+                Text("Snapshot \(snapshot.relativeTimeString())")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                store.fetch(force: true)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Refresh remote server resource status")
+            .disabled(store.isLoading || store.configuredHost.isEmpty)
+        }
+    }
+
+    private var unconfiguredView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("No remote server configured.\u{00A0} Set an SSH host in Settings to monitor server CPU, RAM, and storage.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Button("Configure in Settings…") {
+                HogActions.openSettings(tab: .maintenance, using: openSettings)
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func errorView(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Unable to read server snapshot")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button("Retry") {
+                store.fetch(force: true)
+            }
+            .controlSize(.small)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var loadingView: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Connecting to remote host…")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private func snapshotContent(_ snapshot: VPSStatusSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if let cpu = snapshot.cpu {
+                    cpuBox(cpu)
+                }
+                if let mem = snapshot.memory {
+                    memoryBox(mem)
+                }
+            }
+
+            HStack(spacing: 8) {
+                if let root = snapshot.rootDevice {
+                    diskBox(root)
+                }
+                if let swap = snapshot.swap {
+                    swapBox(swap)
+                }
+            }
+
+            if let dbs = snapshot.appDbs, !dbs.isEmpty {
+                appDbsRow(dbs)
+            }
+
+            if let dirs = snapshot.largestDirs, !dirs.isEmpty {
+                largestDirsView(dirs)
+            }
+        }
+    }
+
+    private func cpuBox(_ cpu: VPSCPU) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("CPU")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(String(format: "%.1f%%", cpu.pct))
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(cpu.severity.color)
+            }
+            ProgressView(value: min(max(cpu.pct / 100, 0), 1))
+                .tint(cpu.severity.color)
+            Text("\(cpu.cores) cores • 1m load: \(String(format: "%.2f", cpu.load1))")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private func memoryBox(_ mem: VPSMemory) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Memory")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(String(format: "%.0f%%", mem.usedPercentage))
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(mem.severity.color)
+            }
+            ProgressView(value: min(max(mem.usedPercentage / 100, 0), 1))
+                .tint(mem.severity.color)
+            Text("\(HogFormat.memory(UInt64(mem.usedBytes))) / \(HogFormat.memory(UInt64(mem.totalBytes)))")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private func diskBox(_ root: VPSDevice) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Disk (/)")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                if let frac = root.usedFraction {
+                    Text(String(format: "%.0f%% used", frac * 100))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(Severity.forDisk(frac).color)
+                }
+            }
+            if let frac = root.usedFraction {
+                ProgressView(value: frac)
+                    .tint(Severity.forDisk(frac).color)
+            }
+            Text("\(HogFormat.memory(UInt64(root.freeBytes))) free\(root.estimatedTotalBytes != nil ? " of \(HogFormat.memory(UInt64(root.estimatedTotalBytes!)))" : "")")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private func swapBox(_ swap: VPSSwap) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Swap")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(String(format: "%.0f%%", swap.usedPercentage))
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(swap.severity.color)
+            }
+            ProgressView(value: min(max(swap.usedPercentage / 100, 0), 1))
+                .tint(swap.severity.color)
+            Text("\(HogFormat.memory(UInt64(swap.usedBytes))) of \(HogFormat.memory(UInt64(swap.totalBytes))) swapped")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private func appDbsRow(_ dbs: [String: Int64]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("App Databases")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                if let st = dbs["st_app_db"] {
+                    dbPill("Socratic.Trade", bytes: st)
+                }
+                if let ct = dbs["ct_db"] {
+                    dbPill("Congress.Trade", bytes: ct)
+                }
+                if let um = dbs["um_db"] {
+                    dbPill("Usage Monitor", bytes: um)
+                }
+            }
+        }
+    }
+
+    private func dbPill(_ name: String, bytes: Int64) -> some View {
+        HStack(spacing: 4) {
+            Text(name)
+                .font(.system(size: 10))
+                .foregroundStyle(.primary)
+            Text(HogFormat.memory(UInt64(bytes)))
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.accentColor)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.05)))
+    }
+
+    private func largestDirsView(_ dirs: [VPSDirectory]) -> some View {
+        DisclosureGroup("Largest Server Directories") {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(dirs) { dir in
+                    HStack {
+                        Text(dir.path)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(HogFormat.memory(UInt64(dir.bytes)))
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.secondary)
+    }
+}
