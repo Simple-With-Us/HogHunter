@@ -12,7 +12,7 @@ Owner ruling, Tue, Sep 29, 2026: every fleet Mac app updates itself seamlessly, 
 
 Settings ▸ About shows "Automatic updates: On" and a **Check For Updates…** button.  The same command is in the app menu.
 
-The iOS companion ships on the same trigger: `.github/workflows/ios-testflight.yml` archives and uploads to TestFlight on every merge to `main` that touches the iOS app (`ios/**`, `Assets.xcassets`, `project.yml`, `scripts/ios-*`).
+The iOS companion ships on the same trigger: `.github/workflows/ios-testflight.yml` archives and uploads to TestFlight on every merge to `main` that touches the iOS native tree (`ios/**`, `project.yml`, and the shared Mac files the iPhone targets compile), through the fleet ship script.  See `docs/rollouts/2026-10-17-ios-auto-ship.md`.
 
 ## The Pieces
 
