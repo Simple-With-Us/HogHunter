@@ -294,7 +294,6 @@ private struct AlertsSettingsTab: View {
 private struct CleanerSettingsTab: View {
     @EnvironmentObject private var store: HogStore
     @State private var exclusions: CleanerExclusions = CleanerExclusions.load()
-    @State private var coolifyHost: String = ""
 
     var body: some View {
         Form {
@@ -383,40 +382,11 @@ private struct CleanerSettingsTab: View {
                     }
                 }
             }
-
-            Section("Remote Server Maintenance") {
-                VStack(alignment: .leading, spacing: 6) {
-                    TextField("SSH Host or Alias (e.g. coolify, user@ip, user@domain)", text: $coolifyHost)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            store.maintain.setCoolifyHost(coolifyHost)
-                        }
-                    Text("Runs /etc/cron.daily/coolify-auto-maintenance over SSH to prune Docker images, containers, and oversized container logs.  Supports ~/.ssh/config aliases (like 'coolify') or user@host with key-based authentication.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack {
-                        Button("Save Host") {
-                            store.maintain.setCoolifyHost(coolifyHost)
-                        }
-                        .disabled(coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines) == store.maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines))
-
-                        if !store.maintain.coolifyHost.isEmpty {
-                            Button("Clear") {
-                                coolifyHost = ""
-                                store.maintain.setCoolifyHost("")
-                            }
-                        }
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
         .frame(width: SettingsView.windowWidth - 80)
         .onAppear {
             exclusions = CleanerExclusions.load()
-            coolifyHost = store.maintain.coolifyHost
         }
     }
 }
@@ -586,14 +556,22 @@ private struct MaintenanceSettingsContent: View {
                     Text("Remote Server Maintenance Host:")
                         .font(.system(size: 12, weight: .medium))
                     HStack {
-                        TextField("e.g. root@coolify.jays.services", text: $maintain.coolifySSHHost)
+                        TextField("e.g. user@server.example.com or ssh-alias", text: $maintain.coolifySSHHost)
                             .textFieldStyle(.roundedBorder)
                             .onSubmit { maintain.setCoolifyHost(maintain.coolifySSHHost) }
                         Button("Save") {
                             maintain.setCoolifyHost(maintain.coolifySSHHost)
                         }
+                        .disabled(maintain.coolifySSHHost.trimmingCharacters(in: .whitespacesAndNewlines) == maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines))
+
+                        if !maintain.coolifyHost.isEmpty {
+                            Button("Clear") {
+                                maintain.coolifySSHHost = ""
+                                maintain.setCoolifyHost("")
+                            }
+                        }
                     }
-                    Text("SSH destination for remote server maintenance sweeps. Leave blank to disable.")
+                    Text("SSH destination for remote Docker and system maintenance sweeps.  Supports ~/.ssh/config aliases or user@host with key-based authentication.  Leave blank to disable.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
