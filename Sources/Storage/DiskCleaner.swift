@@ -155,7 +155,7 @@ enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var badge: String {
         switch self {
-        case .standard: return "Safe / Reversible"
+        case .standard: return "Reversible"
         case .extreme: return "Deep / AI Artifacts"
         }
     }

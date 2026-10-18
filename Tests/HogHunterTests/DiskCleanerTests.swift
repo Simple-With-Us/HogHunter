@@ -154,7 +154,7 @@ final class DiskCleanerTests: XCTestCase {
             XCTAssertTrue(CleanTier.extreme.isCategoryIncluded(cat))
         }
 
-        XCTAssertEqual(CleanTier.standard.badge, "Safe / Reversible")
+        XCTAssertEqual(CleanTier.standard.badge, "Reversible")
         XCTAssertEqual(CleanTier.extreme.badge, "Deep / AI Artifacts")
     }
 
