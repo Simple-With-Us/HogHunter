@@ -63,6 +63,21 @@ jobs:
           
           # Use existing simulators instead of creating new ones
           # Map to actual available devices
+          # Pick the newest iOS runtime that has available devices, so a
+          # missing device model can be created instead of skipped.
+          RUNTIME_ID=$(xcrun simctl list devices -j | python3 -c "
+          import json, sys
+          devices = json.load(sys.stdin)['devices']
+          candidates = [rt for rt, devs in devices.items()
+                        if 'iOS' in rt and any(d.get('isAvailable', False) for d in devs)]
+          candidates.sort()
+          sys.exit(1 if not candidates else print(candidates[-1]))
+          ")
+          if [ -z "$RUNTIME_ID" ]; then
+            echo "ERROR: no iOS runtime with available devices found on this runner"
+            exit 1
+          fi
+          echo "Using runtime: $RUNTIME_ID"
           for DEVICE_PATTERN in "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 11 Pro Max"; do
             echo "=== Looking for: $DEVICE_PATTERN ==="
             UDID=$(xcrun simctl list devices available -j | python3 -c "
@@ -75,9 +90,14 @@ jobs:
                       print(d['udid'])
                       sys.exit(0)
           ")
+            CREATED=0
             if [ -z "$UDID" ]; then
-              echo "WARNING: No available simulator found for $DEVICE_PATTERN, skipping"
-              continue
+              echo "No existing simulator for $DEVICE_PATTERN; creating one on $RUNTIME_ID"
+              if ! UDID=$(xcrun simctl create "HH-screenshots-$(echo "$DEVICE_PATTERN" | tr ' ' '-')" "$DEVICE_PATTERN" "$RUNTIME_ID"); then
+                echo "ERROR: could not create a $DEVICE_PATTERN simulator (device type or runtime missing)"
+                exit 1
+              fi
+              CREATED=1
             fi
             echo "Using simulator $UDID for $DEVICE_PATTERN"
             # Boot (tolerate already-booted) and wait until the device
@@ -180,6 +200,9 @@ jobs:
               python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_problem; paths = ["screenshots/widget-small.png", "screenshots/clean-cold-start.png", "screenshots/clean-deep-link.png"]; bad = [(p, screenshot_problem(p)) for p in paths]; bad = [(p, problem) for p, problem in bad if problem]; [print("ERROR: %s: %s" % item) for item in bad]; [print("OK %s" % p) for p in paths if p not in [item[0] for item in bad]]; sys.exit(1 if bad else 0)'
             fi
             xcrun simctl shutdown "$UDID" || true
+            if [ "$CREATED" = "1" ]; then
+              xcrun simctl delete "$UDID" || true
+            fi
           done
           
           echo "=== Screenshots captured ==="
