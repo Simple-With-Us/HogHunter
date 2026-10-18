@@ -31,8 +31,9 @@ invite is not yet a usable installation path.
 
 ## Remaining gates
 
-1. Complete replacement signing credentials and repository secret setup, then
-   enable the [manual iOS workflow](2026-09-27-ios-manual-release.md).
+1. Cleared by the owner ruling of 2026-10-17: signing and App Store Connect
+   credentials are in Infisical (see [`INFISICAL.md`](../../INFISICAL.md)), and
+   the [iOS workflow](2026-09-27-ios-manual-release.md) is enabled.
    It uses Xcode automatic provisioning and validates the resulting profile.
    Do not use the previous ASC key or place a multiline private key in workflow
    `env` or `$GITHUB_ENV`.

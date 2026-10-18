@@ -18,8 +18,10 @@ Mac menu bar utility.  Finds CPU and memory hogs now, over the past hour, and ov
 **Installed app:** `/Applications/HogHunter.app`  
 **TestFlight authorization:** The owner requested external testing for the
 iPhone companion on 2026-09-27.  The release lane is tracked in issue #22.
-Do not upload until the matching App Store Connect app record and a signing-safe
-workflow are ready.
+The App Store Connect app record exists and the guarded workflow
+`.github/workflows/ios-testflight.yml` is active; upload through that workflow
+only (see Inter-Agent Coordination below and `INFISICAL.md` for the signing
+credentials).
 
 Hosting and routing (apexes, hostnames, hosts, deploy paths): see [`Fleet-OPS/docs/DOMAINS-AND-ROUTING.md`](https://github.com/jaywedgeworth22/Fleet-OPS/blob/main/docs/DOMAINS-AND-ROUTING.md). Built from live Cloudflare, Vercel, Coolify, Namecheap/RDAP, and GitHub APIs by CLAUDE on 2026-09-25; refresh via `Fleet-OPS/scripts/domain-inventory/run-all.sh`.
 
@@ -133,4 +135,4 @@ Coordinate on Zulip (`https://simplewithus.zulipchat.com`), channel `#agent-sync
 
 Listen for peers with the same CLI: `agent-sync inbox` at session start and `agent-sync listen --mentions` under a monitor.  Search fleet recall before re-deriving lessons and record reusable findings at closeout.  Commit and push finished units, open a PR, and merge after required checks pass.  Verify releases separately.
 
-The manual iOS release workflow is documented in `docs/rollouts/2026-09-27-ios-manual-release.md`.  Keep it disabled until replacement signing credentials are ready; workflow preparation does not establish an uploaded or installable beta.
+The iOS TestFlight workflow, `.github/workflows/ios-testflight.yml`, is active and intended.  It archives, validates, and uploads on every merge to `main` that touches the iOS app, and on manual dispatch, while the repository variable `HH_IOS_TESTFLIGHT_ENABLED` is `true`.  Leave it enabled; do not hold it for signing credentials.  Owner ruling 2026-10-17: signing and App Store Connect credentials for all apps are in Infisical, project Fleet-OPS, path `/asc`.  `INFISICAL.md` (Build-time signing) lists the key names and how this workflow receives them; names only, never values.  A green run or an upload command does not establish a processed or approved beta: check App Store Connect separately, and keep issue #22 open until the external release is verified.  The original manual-release design is in `docs/rollouts/2026-09-27-ios-manual-release.md`.
