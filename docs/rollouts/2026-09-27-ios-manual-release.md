@@ -12,7 +12,10 @@ No signing or upload was performed while preparing it.
 > ruling of 2026-10-17: signing and App Store Connect credentials for all apps
 > are in Infisical (see [`INFISICAL.md`](../../INFISICAL.md)).  Where the text
 > below says the workflow is manual-only, stays disabled, or waits on
-> replacement credentials, read it as superseded.
+> replacement credentials, read it as superseded.  The release script and the
+> validator this page describes (`scripts/ios-testflight-release.sh`,
+> `scripts/validate-ios-release.py`) were replaced on 2026-10-17 by the fleet
+> ship script;  see [`2026-10-17-ios-auto-ship.md`](2026-10-17-ios-auto-ship.md).
 
 ## Current state and remaining blockers
 
@@ -113,8 +116,9 @@ build before advertising installation.  Leave
 ## Checks requiring no signing credentials
 
 ```sh
-bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh
+bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/test-ios-stage-asc-key.sh
 bash scripts/test-ios-stage-asc-key.sh
+bash scripts/ios-fleet/test-scheduled-ship-gate.sh
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
 ```
 
