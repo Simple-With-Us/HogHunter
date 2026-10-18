@@ -941,7 +941,8 @@ def rule_simulator_runtimes() -> list[Candidate]:
     Large (18+ GB measured), fully re-downloadable from Xcode.  Deleting a
     runtime does not touch CoreSimulator/Devices, which stays ask-first.
     """
-    if proc_count("xcodebuild") or proc_count("Simulator") or proc_count("CoreSimulatorService"):
+    if (proc_count("xcodebuild") or proc_count("Simulator") or
+            proc_count("CoreSimulatorService") or proc_count("[Bb]itrig")):
         return []
     cands: list[Candidate] = []
     roots = [
