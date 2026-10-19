@@ -139,10 +139,6 @@ struct ServerStatusView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Remote Server")
                     .font(.system(size: 13, weight: .semibold))
-                Text("The other machine this app watches.\u{00A0} Its CPU, memory, swap and disk as the host reports them, refreshed every minute.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VPSResourceCardView(store: store)
