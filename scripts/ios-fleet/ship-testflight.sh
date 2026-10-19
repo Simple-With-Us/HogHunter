@@ -203,17 +203,23 @@ sentry_project_for_app() {
   esac
 }
 
-# Pull SENTRY_AUTH_TOKEN from the handoff file if the environment does not
-# already have it.  Names-only grep trap: extract into a var, never echo.
+# Pull SENTRY_AUTH_TOKEN from the environment, else from `fleet-secrets get`
+# when that helper is installed.  Extract into a var, never echo.
 load_sentry_auth() {
   if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
     return 0
   fi
-  # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired flat file.
-  local fs_bin="/Users/jay/.local/bin/fleet-secrets"
-  if [[ -x "$fs_bin" ]]; then
-    SENTRY_AUTH_TOKEN="$("$fs_bin" get SENTRY_AUTH_TOKEN 2>/dev/null || true)"
-    export SENTRY_AUTH_TOKEN
+  # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired
+  # flat file.  Resolve through PATH: a hardcoded /Users/jay path silently
+  # leaves the token unset on every other machine and on CI, which is exactly
+  # where a dSYM upload would then fail quietly.
+  if command -v fleet-secrets &>/dev/null; then
+    local token
+    token="$(fleet-secrets get SENTRY_AUTH_TOKEN 2>/dev/null | tr -d '\r')" || token=""
+    if [[ -n "$token" ]]; then
+      SENTRY_AUTH_TOKEN="$token"
+      export SENTRY_AUTH_TOKEN
+    fi
   fi
 }
 
@@ -805,6 +811,16 @@ else
   COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo "$SEQ")"
   MARKETING="${MARKETING_PREFIX}.${COMMIT_COUNT}"
   BUILD_NUM="${COMMIT_COUNT}"
+  # Strictly-increasing guard for a re-ship of the same commit.  App Store
+  # Connect treats CFBundleVersion as a uniqueness key inside a marketing
+  # train, so repeating the pair is rejected as a duplicate.  --force-ship and
+  # a retry after an upload that actually landed both produce exactly that, so
+  # never ship at or below the floor that local cache / ASC / project.pbxproj
+  # already know about.
+  if [[ "$SEQ_FLOOR" -ge "$BUILD_NUM" ]]; then
+    BUILD_NUM="$((SEQ_FLOOR + 1))"
+    log "build: commit count ${COMMIT_COUNT} already shipped; using ${BUILD_NUM} instead"
+  fi
 fi
 
 # The project file and the shipped version must never disagree silently. The

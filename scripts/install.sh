@@ -110,19 +110,48 @@ INFO_PLIST="$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_COUNT" "$INFO_PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_COUNT" "$INFO_PLIST"
 
-# Sparkle auto-update feed and public key for the installed Release bundle
+# Sparkle auto-update feed and public key for the installed Release bundle.
+#
+# Only for a build cut from main and signed with the real Developer ID.  A
+# developer build sits at a commit no release has published, so a working feed
+# points it at a newer production release and Sparkle silently replaces the
+# working copy under the developer — losing the very build they were testing.
+# Gate the feed on the same conditions that make it legitimate.
 SPARKLE_FEED_URL="https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml"
 SPARKLE_PUBLIC_ED_KEY="8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE="
-/usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$INFO_PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $SPARKLE_FEED_URL" "$INFO_PLIST"
-/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST"
-for key in SUEnableAutomaticChecks SUAutomaticallyUpdate SUAllowsAutomaticUpdates SUVerifyUpdateBeforeExtraction; do
-  /usr/libexec/PlistBuddy -c "Set :$key true" "$INFO_PLIST" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :$key bool true" "$INFO_PLIST"
-done
-/usr/libexec/PlistBuddy -c "Set :SUScheduledCheckInterval 3600" "$INFO_PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :SUScheduledCheckInterval integer 3600" "$INFO_PLIST"
+
+# Resolved before the Sparkle gate below, which needs the answer.  Kept in one
+# place so the signing block further down cannot disagree with it.
+DEVELOPER_ID_AVAILABLE=0
+if [[ "$ADHOC" -eq 1 ]]; then
+  : # --adhoc requested; skip the Developer ID check entirely.
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+  DEVELOPER_ID_AVAILABLE=1
+fi
+
+_on_main=0
+[[ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo)" == "main" ]] && _on_main=1
+
+if [[ "$_on_main" -eq 1 && "$DEVELOPER_ID_AVAILABLE" -eq 1 && "$ADHOC" -ne 1 ]]; then
+  /usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $SPARKLE_FEED_URL" "$INFO_PLIST"
+  /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST"
+  for key in SUEnableAutomaticChecks SUAutomaticallyUpdate SUAllowsAutomaticUpdates SUVerifyUpdateBeforeExtraction; do
+    /usr/libexec/PlistBuddy -c "Set :$key true" "$INFO_PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :$key bool true" "$INFO_PLIST"
+  done
+  /usr/libexec/PlistBuddy -c "Set :SUScheduledCheckInterval 3600" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :SUScheduledCheckInterval integer 3600" "$INFO_PLIST"
+else
+  # Explicitly off, not merely absent: a stale key inherited from project.yml
+  # would otherwise still point the developer build at the production feed.
+  for key in SUEnableAutomaticChecks SUAutomaticallyUpdate SUAllowsAutomaticUpdates; do
+    /usr/libexec/PlistBuddy -c "Set :$key false" "$INFO_PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :$key bool false" "$INFO_PLIST"
+  done
+  echo "Sparkle auto-update off (not a signed main build); this copy will not self-update."
+fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "Dry run: built $APP_PATH."
@@ -137,13 +166,7 @@ sign_adhoc() {
   codesign --force --deep --sign - "$APP_PATH"
 }
 
-DEVELOPER_ID_AVAILABLE=0
-if [[ "$ADHOC" -eq 1 ]]; then
-  : # --adhoc requested; skip the Developer ID check entirely.
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
-  DEVELOPER_ID_AVAILABLE=1
-fi
-
+# DEVELOPER_ID_AVAILABLE is resolved above, before the Sparkle gate needs it.
 if [[ "$DEVELOPER_ID_AVAILABLE" -eq 1 ]]; then
   echo "Signing with Developer ID Application.  20 second timeout."
   # macOS has no `timeout` binary, so bound codesign with perl's alarm instead.
