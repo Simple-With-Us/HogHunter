@@ -2,7 +2,8 @@ import Foundation
 
 /// Fetches and caches remote VPS resource snapshots over SSH.
 ///
-/// Owned by `MaintainStore` and consumed by `VPSResourceCardView` in the Maintenance tab.
+/// Owned by `MaintainStore`, and read by the panel's server strip and the
+/// panel's Server tab.
 @MainActor
 final class VPSStatusStore: ObservableObject {
     typealias Fetcher = @Sendable (_ host: String) async throws -> VPSStatusSnapshot
@@ -16,17 +17,20 @@ final class VPSStatusStore: ObservableObject {
     private let fetcher: Fetcher
     private var timer: Timer?
     private var activeFetchTask: Task<Void, Never>?
-    /// How many views currently want server readings.  The panel shows a
-    /// server strip on its Activity tab and the Server tab shows the full
-    /// card, so the store outlives any one of them: polling stops only when
-    /// the last owner lets go, never when one of them closes.
-    private var pollingOwners: Int = 0
 
     init(initialHost: String = "", fetcher: Fetcher? = nil) {
         self.configuredHost = initialHost.trimmingCharacters(in: .whitespacesAndNewlines)
         self.fetcher = fetcher ?? Self.sshFetcher()
     }
 
+    /// Sets the host to watch, and starts or stops the readings with it.
+    ///
+    /// The store owns its polling; the window does not hand out shares.  A
+    /// share was the obvious design, but a view's lifetime is not a reliable
+    /// signal (a panel that is hidden without being torn down never says so),
+    /// and a counter that never comes back down would keep polling forever.
+    /// One small file read a minute on the host is a fair price for watching a
+    /// machine, and it cannot get stuck.
     func setHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != configuredHost else { return }
@@ -34,34 +38,17 @@ final class VPSStatusStore: ObservableObject {
         snapshot = nil
         errorMessage = nil
         if !configuredHost.isEmpty {
-            fetch(force: true)
-        }
-    }
-
-    /// Whether the readings are still being fetched.  True while at least one
-    /// owner holds a share.
-    var isPolling: Bool {
-        pollingOwners > 0
-    }
-
-    /// Takes a share of the polling.  The first owner starts it; the last one
-    /// to let go stops it.  A view that shows server readings acquires on
-    /// appear and releases on disappear, so two views showing them at once
-    /// cannot switch each other's readings off.
-    func acquirePolling() {
-        pollingOwners += 1
-        if pollingOwners == 1 {
             startPolling()
-        }
-    }
-
-    /// Gives up a share of the polling.  Polling stops when the last owner
-    /// lets go.
-    func releasePolling() {
-        pollingOwners = max(0, pollingOwners - 1)
-        if pollingOwners == 0 {
+            // A new host wants fresh readings now, not in a minute.
+            fetch(force: true)
+        } else {
             stopPolling()
         }
+    }
+
+    /// Whether the readings are being fetched.
+    var isPolling: Bool {
+        timer != nil
     }
 
     func startPolling() {

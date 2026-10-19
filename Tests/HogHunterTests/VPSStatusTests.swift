@@ -204,22 +204,22 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertFalse(store.isLoading)
     }
 
-    /// The panel shows the server headline and the Maintain tab shows one line,
-    /// so the store is shared by more than one view.  One view closing must not
-    /// switch the readings off for the others: the polling stops when the last
-    /// owner lets go.
+    /// The store owns its polling: setting a host starts it, clearing the
+    /// host stops it, and nothing a view does can leave it stuck.  A view's
+    /// lifetime is not a reliable signal (a panel that is hidden without
+    /// being torn down never says so), so no view hands out shares.
     @MainActor
-    func testPollingSurvivesUntilTheLastOwnerLetsGo() {
-        let store = VPSStatusStore(initialHost: "coolify", fetcher: { _ in
+    func testTheStoreOwnsItsPolling() {
+        let store = VPSStatusStore(initialHost: "", fetcher: { _ in
             throw NSError(domain: "test", code: 1, userInfo: nil)
         })
-
-        store.acquirePolling()
-        store.acquirePolling()
-        store.releasePolling()
-        XCTAssertTrue(store.isPolling, "one owner is left, so the readings keep coming")
-        store.releasePolling()
-        XCTAssertFalse(store.isPolling, "the last owner let go, so the readings stop")
+        XCTAssertFalse(store.isPolling, "no host, no polling")
+        store.setHost("coolify")
+        XCTAssertTrue(store.isPolling, "a host starts the readings")
+        store.setHost("coolify")
+        XCTAssertTrue(store.isPolling, "setting the same host again changes nothing")
+        store.setHost("")
+        XCTAssertFalse(store.isPolling, "clearing the host stops the readings")
     }
 
     /// The headline is the one-line answer the panel strip and the Maintain

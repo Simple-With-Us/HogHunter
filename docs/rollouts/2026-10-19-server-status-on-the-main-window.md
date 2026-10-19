@@ -53,11 +53,17 @@ went from 290 to 360 points).
 
 **The readings follow the window, not a tab** (`Sources/Storage/VPSStatusStore.swift`).
 Before, the server was only fetched while the Maintain tab was on screen, which
-is part of why the status was invisible.  The store now counts its owners:
-`acquirePolling()` on appear, `releasePolling()` on disappear, and the polling
-stops when the last owner lets go.  The panel takes a share while it is open;
-the Maintain tab takes one while it is showing.  Neither can switch the other
-off, which is what a plain start/stop pair would have done.
+is part of why the status was invisible.  The store now owns its polling: a
+configured host starts it, clearing the host stops it, and one small file read
+a minute on the host is the whole cost.
+
+The first attempt at this handed out shares — the panel took one, the Maintain
+tab took one, and the last one to let go stopped the readings — and the review
+was right to send it back: a view's lifetime is not a reliable signal.  A panel
+that is hidden without being torn down never says so, and a counter that never
+comes back down keeps polling forever.  The store owning it removes the whole
+class of problem, and the strip is never stale because nothing depends on a
+view being open.
 
 **One model, two places** (`Sources/Storage/VPSStatusModels.swift`):
 `VPSStatusSnapshot.headline` is the one-line answer (host plus each reading

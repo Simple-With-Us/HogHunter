@@ -110,11 +110,10 @@ struct HogHunterPanel: View {
         }
         .onAppear {
             store.registerPanelVisible(panelInstanceId)
-            // The panel shows the server's headline, so it keeps the readings
-            // coming while it is open.  The share is given back on close: the
-            // store outlives the panel, and other views (the Maintain tab) can
-            // hold their own share at the same time.
-            store.maintain.vpsStore.acquirePolling()
+            // The server readings are the store's own business: it polls
+            // whenever a host is configured, so the strip is never stale and
+            // nothing depends on this view's lifetime.
+            store.maintain.refresh()
             if selectedTab == .storage {
                 hasVisitedStorage = true
             } else if selectedTab == .network {
@@ -125,7 +124,6 @@ struct HogHunterPanel: View {
         }
         .onDisappear {
             store.unregisterPanelVisible(panelInstanceId)
-            store.maintain.vpsStore.releasePolling()
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(panelAccessibilityLabel)
