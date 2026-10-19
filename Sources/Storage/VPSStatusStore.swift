@@ -14,11 +14,13 @@ final class VPSStatusStore: ObservableObject {
     @Published private(set) var lastFetchDate: Date?
     @Published private(set) var configuredHost: String = ""
 
+    private let history: SizeGrowthHistory
     private let fetcher: Fetcher
     private var timer: Timer?
     private var activeFetchTask: Task<Void, Never>?
 
-    init(initialHost: String = "", fetcher: Fetcher? = nil) {
+    init(initialHost: String = "", fetcher: Fetcher? = nil, history: SizeGrowthHistory = .shared) {
+        self.history = history
         self.configuredHost = initialHost.trimmingCharacters(in: .whitespacesAndNewlines)
         self.fetcher = fetcher ?? Self.sshFetcher()
     }
@@ -36,6 +38,7 @@ final class VPSStatusStore: ObservableObject {
         guard trimmed != configuredHost else { return }
         configuredHost = trimmed
         snapshot = nil
+        lastFetchDate = nil
         errorMessage = nil
         if !configuredHost.isEmpty {
             startPolling()
@@ -108,6 +111,8 @@ final class VPSStatusStore: ObservableObject {
             guard !Task.isCancelled else { return }
             switch result {
             case .success(let snap):
+                guard self.configuredHost == host else { return }
+                self.recordSizes(snap, configuredHost: host)
                 self.snapshot = snap
                 self.errorMessage = nil
                 self.lastFetchDate = Date()
@@ -115,6 +120,43 @@ final class VPSStatusStore: ObservableObject {
                 self.errorMessage = err.localizedDescription
             }
         }
+    }
+
+    private func historyHost(_ source: VPSStatusSnapshot) -> String {
+        configuredHost + "|" + source.host
+    }
+
+    private func recordSizes(_ source: VPSStatusSnapshot, configuredHost: String) {
+        guard let sampledAt = source.generatedAtDate else { return }
+        let host = configuredHost + "|" + source.host
+        func observations(_ samples: [VPSSizeSample]?, path: String, bytes: Int64) -> [SizeGrowthSample] {
+            var values = (samples ?? []).compactMap { sample -> SizeGrowthSample? in
+                let date = Date(timeIntervalSince1970: sample.sampledAt)
+                guard sample.path == path, date <= sampledAt,
+                      sampledAt.timeIntervalSince(date) <= 172_800 else { return nil }
+                return SizeGrowthSample(bytes: sample.bytes, sampledAt: date)
+            }
+            values.append(SizeGrowthSample(bytes: bytes, sampledAt: sampledAt))
+            return values
+        }
+        for (key, bytes) in source.appDbs ?? [:] {
+            history.importSamples(host: host, metric: "database", path: key,
+                                  samples: observations(source.databaseSamples, path: key, bytes: bytes))
+        }
+        for directory in source.largestDirs ?? [] {
+            history.importSamples(host: host, metric: "directory", path: directory.path,
+                                  samples: observations(source.directorySamples, path: directory.path, bytes: directory.bytes))
+        }
+    }
+
+    func databasePercentChange(key: String) -> Double? {
+        guard let snapshot else { return nil }
+        return history.percentChange(host: historyHost(snapshot), metric: "database", path: key)
+    }
+
+    func directoryPercentChange(path: String) -> Double? {
+        guard let snapshot else { return nil }
+        return history.percentChange(host: historyHost(snapshot), metric: "directory", path: path)
     }
 
     nonisolated static func sshFetcher() -> Fetcher {

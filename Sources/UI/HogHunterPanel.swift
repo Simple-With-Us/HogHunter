@@ -24,6 +24,7 @@ struct HogHunterPanel: View {
     @State private var hasVisitedServer: Bool = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
+    @StateObject private var directoryUsage = DirectoryUsageStore()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -70,7 +71,9 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedServer {
-                    ServerStatusView(store: store.maintain.vpsStore)
+                    ScrollView {
+                        ServerStatusView(store: store.maintain.vpsStore)
+                    }
                         .frame(width: Self.contentWidth, alignment: .leading)
                         .clipped()
                         .opacity(selectedTab == .server ? 1 : 0)
@@ -99,6 +102,12 @@ struct HogHunterPanel: View {
         )
         .background(MenuBarAnchorFinder { x in beakX = x })
         .preferredColorScheme(store.appearance.colorScheme)
+        .task {
+            while !Task.isCancelled {
+                await directoryUsage.refreshIfNeeded()
+                try? await Task.sleep(for: .seconds(900))
+            }
+        }
         .onChange(of: selectedTab) { newTab in
             if newTab == .storage {
                 hasVisitedStorage = true
@@ -302,26 +311,43 @@ struct HogHunterPanel: View {
     private var meters: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 6) {
-                Meter(
-                    title: "CPU",
-                    value: store.pulse.cpuPercent,
-                    caption: store.hasBaseline ? store.cpuCaption : "Measuring…",
-                    severity: Severity.forMachineCpu(store.pulse.cpuPercent)
-                )
+                HStack(alignment: .top, spacing: 8) {
+                    cpuHistoryCard
+                    Meter(
+                        title: "Memory",
+                        value: store.pulse.memoryPercent,
+                        caption: store.memorySizeCaption,
+                        severity: Severity.forPressure(store.pulse.pressure),
+                        accessibilityDetail: store.memoryCaption
+                    )
+                }
                 pillRow(thermalPills)
                 diskCard
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Meter(
-                    title: "Memory",
-                    value: store.pulse.memoryPercent,
-                    caption: store.memorySizeCaption,
-                    severity: Severity.forPressure(store.pulse.pressure),
-                    accessibilityDetail: store.memoryCaption
-                )
                 pillRow(memoryPills)
             }
+            .frame(width: Self.contentWidth * 0.48)
+            CodingDirectoriesView(store: directoryUsage)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+    }
+
+    private var cpuHistoryCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("CPU").fontWeight(.semibold)
+                Spacer()
+                Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
+                    .monospacedDigit()
+            }
+            .font(.system(size: 11))
+            CpuHistoryBarsView(history: store.cpuMinuteHistory)
+            Text("30 min")
+                .font(.system(size: 8))
+                .foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
     }
 
     /// The third card, under CPU: how full the boot volume is.  It is a button

@@ -11,6 +11,9 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     let memory: VPSMemory?
     let swap: VPSSwap?
     let largestDirs: [VPSDirectory]?
+    let toolStatuses: [VPSToolStatus]?
+    let databaseSamples: [VPSSizeSample]?
+    let directorySamples: [VPSSizeSample]?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -21,6 +24,9 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         case memory
         case swap
         case largestDirs = "largest_dirs"
+        case toolStatuses = "tool_statuses"
+        case databaseSamples = "database_samples"
+        case directorySamples = "directory_samples"
     }
 
     init(
@@ -31,7 +37,10 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         cpu: VPSCPU? = nil,
         memory: VPSMemory? = nil,
         swap: VPSSwap? = nil,
-        largestDirs: [VPSDirectory]? = nil
+        largestDirs: [VPSDirectory]? = nil,
+        toolStatuses: [VPSToolStatus]? = nil,
+        databaseSamples: [VPSSizeSample]? = nil,
+        directorySamples: [VPSSizeSample]? = nil
     ) {
         self.generatedAt = generatedAt
         self.host = host
@@ -41,6 +50,9 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         self.memory = memory
         self.swap = swap
         self.largestDirs = largestDirs
+        self.toolStatuses = toolStatuses
+        self.databaseSamples = databaseSamples
+        self.directorySamples = directorySamples
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {
@@ -234,5 +246,28 @@ struct VPSDirectory: Codable, Equatable, Sendable, Identifiable {
     init(path: String, bytes: Int64) {
         self.path = path
         self.bytes = bytes
+    }
+}
+
+/// Fixed labels and counts only.  No process arguments or environment values travel here.
+struct VPSToolStatus: Codable, Equatable, Sendable, Identifiable {
+    enum State: String, Codable, Sendable {
+        case running, stopped, absent, unknown
+    }
+    let id: String
+    let name: String
+    let state: State
+    let count: Int
+}
+
+/// Existing server observations retain their original Unix timestamps.
+struct VPSSizeSample: Codable, Equatable, Sendable {
+    let path: String
+    let bytes: Int64
+    let sampledAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case path, bytes
+        case sampledAt = "sampled_at"
     }
 }
