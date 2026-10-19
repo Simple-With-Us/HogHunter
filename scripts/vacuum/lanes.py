@@ -978,8 +978,15 @@ def never_touch_reason(path: str, home_real: str) -> str:
 
 def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     """Filesystem facts that do not need git.  Empty string means pass."""
-    if os.path.realpath(path) != path:
-        return "path resolves somewhere else now"
+    # The path itself must be a plain directory: a symlinked lane could point
+    # anywhere.  A symlinked PARENT is normal and must not refuse the lane:
+    # the fleet keeps ~/apps/lanes/<Repo> on the external disk behind a
+    # symlink, and the doctor reports that ~/apps/lanes spelling without
+    # resolving it.  The old check compared the path with its own realpath,
+    # so every lane on the external drive was refused with "path resolves
+    # somewhere else now" and could never be retired.  The lane's identity is
+    # proved by the repository it belongs to instead (see _linked_facts and
+    # the parent-repo check in recheck_for_removal).
     if os.path.islink(path) or not os.path.isdir(path):
         return "path is not a plain directory"
     if not path.startswith(ctx.home_real + os.sep):
@@ -999,11 +1006,18 @@ def _live_processes(path: str, ctx: LaneContext) -> str:
     cwds, err = ctx.cwd_paths()
     if cwds is None:
         return f"process check failed: {err}"
-    folded = path.casefold()
+    # lsof reports each working directory as the kernel sees it, which is the
+    # physical path.  A lane behind a symlinked parent (the external-disk lanes
+    # root) is spelled with the symlink here, so its resolved path has to be
+    # compared as well or a process sitting in an external lane goes unseen.
+    # The lane itself is never a symlink (_live_basics refuses that), so this
+    # only ever resolves the parent chain.
+    folded = {path.casefold(), os.path.realpath(path).casefold()}
     for cwd in cwds:
         low = cwd.casefold()
-        if low == folded or low.startswith(folded + os.sep):
-            return "a process has it as its working directory"
+        for one in folded:
+            if low == one or low.startswith(one + os.sep):
+                return "a process has it as its working directory"
     busy, reason = path_process_state(ctx.runner, path)
     return reason if busy else ""
 
@@ -1154,6 +1168,15 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     repo_root, why = _linked_facts(path, co, ctx)
     if why:
         return "", why
+    # The lane must still belong to the repository the doctor saw.  This is
+    # what the old "path resolves somewhere else" check really meant, and it
+    # survives the fleet's symlinked lanes root: where the lane lives on disk
+    # (~/apps/lanes/<Repo> on the external drive) says nothing, which
+    # repository it belongs to says everything.
+    expected_repo = co.get("parent_repo")
+    if isinstance(expected_repo, str) and expected_repo:
+        if os.path.realpath(repo_root) != os.path.realpath(expected_repo):
+            return "", "it now belongs to a different repository"
     why = _head_matches_report(path, co, ctx)
     if why:
         return "", why
