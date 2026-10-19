@@ -130,13 +130,16 @@ final class MaintainStore: ObservableObject {
         }
     }
 
+    /// The server readings are the store's own business: it polls whenever a
+    /// host is configured, so the panel and the Maintain tab never have to
+    /// hand out shares, and a view that is hidden without being torn down
+    /// cannot leave a counter stuck.
     func startPolling() {
         stopPolling()
         // The store may have been built hours ago (it is shared and lives with
         // the app), so a view that opens reads the files now instead of
         // showing launch-time status for the first half minute.
         refresh()
-        vpsStore.startPolling()
         let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -148,7 +151,6 @@ final class MaintainStore: ObservableObject {
     func stopPolling() {
         timer?.invalidate()
         timer = nil
-        vpsStore.stopPolling()
     }
 
     func refresh() {
