@@ -1006,11 +1006,18 @@ def _live_processes(path: str, ctx: LaneContext) -> str:
     cwds, err = ctx.cwd_paths()
     if cwds is None:
         return f"process check failed: {err}"
-    folded = path.casefold()
+    # lsof reports each working directory as the kernel sees it, which is the
+    # physical path.  A lane behind a symlinked parent (the external-disk lanes
+    # root) is spelled with the symlink here, so its resolved path has to be
+    # compared as well or a process sitting in an external lane goes unseen.
+    # The lane itself is never a symlink (_live_basics refuses that), so this
+    # only ever resolves the parent chain.
+    folded = {path.casefold(), os.path.realpath(path).casefold()}
     for cwd in cwds:
         low = cwd.casefold()
-        if low == folded or low.startswith(folded + os.sep):
-            return "a process has it as its working directory"
+        for one in folded:
+            if low == one or low.startswith(one + os.sep):
+                return "a process has it as its working directory"
     busy, reason = path_process_state(ctx.runner, path)
     return reason if busy else ""
 
