@@ -28,6 +28,89 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+
+# The launchd job runs this every five minutes.  A tick that wedges -- on a
+# slow disk, mid-import, with the host swapping -- blocks every tick after
+# it, because launchd will not start a second instance of a StartInterval job
+# while one is running.  The maintainer then stops without ever saying so:
+# the panel keeps showing the last status it wrote and the disk fills up
+# anyway.  A tick that cannot finish has to die so the next one can start.
+#
+# Measured 2026-10-19: a launchd tick sat in PyImport_ImportModule for 17
+# minutes and had written nothing.  The same tick, run by hand, took seven
+# seconds.
+#
+# The budget has to sit above the longest tick the engine can legitimately
+# run, or the watchdog kills work that was still inside its own budget.  A
+# watch tick that decides to clean hands off to a pressure run, and the cache
+# reclaim step alone runs hoghunter-clean with a 600s budget plus a 180s
+# grace (engine.py `_RECLAIM_BUDGET_SECONDS` and `_RECLAIM_GRACE_SECONDS`),
+# so 900s leaves room for that step without the watchdog cutting it short.
+TICK_WATCHDOG_SEC = 900.0
+
+_watchdog_armed = False
+
+
+def _watchdog_exit(seconds: float) -> None:
+    """Exit the process once the tick has overrun its budget."""
+    time.sleep(seconds)
+    sys.stderr.write(
+        f"[hoghunter] scheduler tick exceeded {seconds:.0f}s; "
+        "exiting so the next tick can run\n"
+    )
+    sys.stderr.flush()
+    os._exit(3)
+
+
+def _start_tick_watchdog(seconds: float) -> None:
+    """Arm the watchdog.  Nothing is lost when it fires: the store writes
+    through a temporary file and renames it, so a kill leaves the last good
+    state in place.
+
+    Arming happens twice per tick -- once below, before the vacuum imports,
+    and once from main() -- and the second call is a no-op.  Two threads
+    would both be harmless, but one keeps the exit message single.
+    """
+    global _watchdog_armed
+    if seconds <= 0 or _watchdog_armed:
+        return
+    _watchdog_armed = True
+    threading.Thread(target=_watchdog_exit, args=(seconds,), daemon=True).start()
+
+
+def _argv_tick_timeout(argv: list[str]) -> float | None:
+    """The watchdog budget for this invocation, or None when it is not a tick.
+
+    Read straight off argv so the watchdog can be armed before the vacuum
+    imports below, which is where the tick that prompted it wedged for 17
+    minutes.  Parsed here rather than by argparse because argparse has not
+    run yet at that point; an unparseable value falls back to the default,
+    which is the same thing argparse's `type=float` defaulting would do for
+    anyone who did not pass the flag at all.
+    """
+    if "--tick" not in argv:
+        return None
+    for i, arg in enumerate(argv):
+        if arg == "--tick-timeout" and i + 1 < len(argv):
+            try:
+                return float(argv[i + 1])
+            except ValueError:
+                return TICK_WATCHDOG_SEC
+        if arg.startswith("--tick-timeout="):
+            try:
+                return float(arg.split("=", 1)[1])
+            except ValueError:
+                return TICK_WATCHDOG_SEC
+    return TICK_WATCHDOG_SEC
+
+
+# Armed before the imports on purpose.  A wedge in an import happens before
+# main() exists, so a watchdog armed down there cannot see it and launchd
+# still refuses to start the next tick.
+_tick_timeout = _argv_tick_timeout(sys.argv[1:])
+if _tick_timeout is not None:
+    _start_tick_watchdog(_tick_timeout)
+
 from vacuum.alerts import NO_NOTIFY_ENV, evaluate_alerts, notify_macos  # noqa: E402
 from vacuum.config import STEP_CATALOG, load_config  # noqa: E402
 from vacuum.engine import VacuumEngine  # noqa: E402
@@ -53,39 +136,6 @@ def ensure_standard_mac_paths() -> None:
 
 
 ensure_standard_mac_paths()
-
-
-# The launchd job runs this every five minutes.  A tick that wedges -- on a
-# slow disk, mid-import, with the host swapping -- blocks every tick after
-# it, because launchd will not start a second instance of a StartInterval job
-# while one is running.  The maintainer then stops without ever saying so:
-# the panel keeps showing the last status it wrote and the disk fills up
-# anyway.  A tick that cannot finish has to die so the next one can start.
-#
-# Measured 2026-10-19: a launchd tick sat in PyImport_ImportModule for 17
-# minutes and had written nothing.  The same tick, run by hand, took seven
-# seconds.
-TICK_WATCHDOG_SEC = 240.0
-
-
-def _watchdog_exit(seconds: float) -> None:
-    """Exit the process once the tick has overrun its budget."""
-    time.sleep(seconds)
-    sys.stderr.write(
-        f"[hoghunter] scheduler tick exceeded {seconds:.0f}s; "
-        "exiting so the next tick can run\n"
-    )
-    sys.stderr.flush()
-    os._exit(3)
-
-
-def _start_tick_watchdog(seconds: float) -> None:
-    """Arm the watchdog.  Nothing is lost when it fires: the store writes
-    through a temporary file and renames it, so a kill leaves the last good
-    state in place."""
-    if seconds <= 0:
-        return
-    threading.Thread(target=_watchdog_exit, args=(seconds,), daemon=True).start()
 
 
 def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:

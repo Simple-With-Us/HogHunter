@@ -404,7 +404,6 @@ def _load_open_snapshot() -> set[str] | None:
     global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_AT
     if _OPEN_SNAPSHOT is not None and time.monotonic() - _OPEN_SNAPSHOT_AT < _OPEN_SNAPSHOT_MAX_AGE_SEC:
         return _OPEN_SNAPSHOT
-    _OPEN_SNAPSHOT_AT = time.monotonic()
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True, timeout=180)
     except (subprocess.TimeoutExpired, OSError) as exc:
@@ -449,6 +448,12 @@ def _load_open_snapshot() -> set[str] | None:
         # believable.  Treat it as untrustworthy rather than as "nothing open".
         log("system-wide lsof returned no paths; treating the snapshot as untrustworthy")
         return None
+    # Stamp the age only once the listing has actually passed every gate
+    # above.  Stamping it before the lsof pass would start the clock while a
+    # listing that took longer than the max age to produce is still forming,
+    # so that listing arrives already stale and the next candidate pays for
+    # another system-wide lsof.
+    _OPEN_SNAPSHOT_AT = time.monotonic()
     _OPEN_SNAPSHOT = paths
     return _OPEN_SNAPSHOT
 

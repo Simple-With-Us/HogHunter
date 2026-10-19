@@ -881,6 +881,36 @@ def test_the_snapshot_is_retaken_once_it_goes_stale(hh):
         assert hh.open_handles("/Users/jay/work/second.bin") == 1
 
 
+def test_the_snapshot_age_is_stamped_after_the_listing_lands(hh):
+    """The max-age clock used to start before the lsof pass, so a listing that
+    took longer than the max age to produce arrived already stale and the next
+    candidate paid for another system-wide lsof.  Stamped before the pass, a
+    70s listing would be discarded the moment it finished."""
+    _reset_open_snapshot(hh)
+    hh._OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
+    first = "p1\nf3\nn/Users/jay/work/first.bin\n"
+    second = "p1\nf3\nn/Users/jay/work/second.bin\n"
+    clock = hh.time.monotonic()
+
+    def listing_takes_70s(*_a, **_kw):
+        # The lsof pass itself consumes more than the whole max age.
+        nonlocal clock
+        clock += 70.0
+        return completed(0, first)
+
+    with mock.patch.object(hh.subprocess, "run", side_effect=listing_takes_70s):
+        with mock.patch.object(hh.time, "monotonic", side_effect=lambda: clock):
+            assert hh.open_handles("/Users/jay/work/second.bin") == 0
+
+    # The listing is fresh the moment it lands, so the next candidate is
+    # answered from it instead of paying for another system-wide lsof.
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, second)) as run:
+        with mock.patch.object(hh.time, "monotonic", side_effect=lambda: clock):
+            assert hh.open_handles("/Users/jay/work/first.bin") == 1
+            assert hh.open_handles("/Users/jay/work/second.bin") == 0
+    assert run.call_count == 0, "a listing that just landed must not be re-taken"
+
+
 def test_the_snapshot_matches_a_candidate_spelled_through_a_symlink(hh):
     """lsof answers with resolved vnode paths, so a handle under the per-user
     TMPDIR arrives as /private/var/... while `getconf DARWIN_USER_TEMP_DIR`

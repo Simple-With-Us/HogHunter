@@ -1531,6 +1531,62 @@ class TestTickWatchdog(unittest.TestCase):
         arm.assert_called_once()
         self.assertGreater(arm.call_args[0][0], 0, "the watchdog needs a budget to fire")
 
+    def test_the_watchdog_budget_outlasts_a_reclaim_step(self):
+        """A watch tick that decides to clean runs hoghunter-clean with the
+        reclaim budget plus its grace.  A watchdog shorter than that kills
+        the tick mid-reclaim, leaving a half-deleted tree and no run record,
+        which is the outcome the watchdog exists to prevent."""
+        import maintain
+        from vacuum import engine
+
+        longest = engine._RECLAIM_BUDGET_SECONDS + engine._RECLAIM_GRACE_SECONDS
+        self.assertGreater(
+            maintain.TICK_WATCHDOG_SEC, longest,
+            "the watchdog must sit above the longest step a tick can legitimately run",
+        )
+
+    def test_the_watchdog_is_armed_before_the_vacuum_imports(self):
+        """The tick that prompted the watchdog sat in PyImport_ImportModule for
+        17 minutes -- during the module-level vacuum imports, before main()
+        exists.  A watchdog armed down in main() cannot see that wedge, and
+        launchd still refuses to start the next tick."""
+        import maintain
+
+        source = (REPO / "scripts" / "maintain.py").read_text()
+        arm_at = source.index("_start_tick_watchdog(_tick_timeout)")
+        first_vacuum_import = source.index("from vacuum.alerts import")
+        self.assertLess(
+            arm_at, first_vacuum_import,
+            "the watchdog has to be armed before the imports that wedged",
+        )
+
+    def test_the_pre_import_arm_reads_the_budget_off_argv(self):
+        """main() cannot arm the watchdog early -- argparse has not run yet --
+        so the pre-import arm reads --tick-timeout straight off argv."""
+        import maintain
+
+        self.assertIsNone(maintain._argv_tick_timeout(["--status"]))
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler"]), maintain.TICK_WATCHDOG_SEC)
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "42"]), 42.0)
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout=42"]), 42.0)
+        # 0 disables the watchdog, and a bad value falls back to the default.
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "0"]), 0.0)
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "soon"]), maintain.TICK_WATCHDOG_SEC)
+
+    def test_a_second_arm_is_a_no_op(self):
+        """The watchdog is armed once before the imports and once from main().
+        Two threads would both be harmless, but one keeps the exit single."""
+        import maintain
+
+        with patch.object(maintain.threading, "Thread") as thread:
+            maintain._watchdog_armed = False
+            try:
+                maintain._start_tick_watchdog(60)
+                maintain._start_tick_watchdog(60)
+            finally:
+                maintain._watchdog_armed = False
+        self.assertEqual(thread.call_count, 1)
+
 
 def load_tests(loader, tests, pattern):
     """CI runs only this file, so load the lane doctor tests beside the others."""
