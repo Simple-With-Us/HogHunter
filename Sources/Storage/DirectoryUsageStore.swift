@@ -153,14 +153,15 @@ final class DirectoryUsageStore: ObservableObject {
             try? output.close()
             try? FileManager.default.removeItem(at: outputURL)
         }
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/du")
-        process.arguments = ["-sk", "-x"] + roots
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/nice")
+        process.arguments = ["-n", "10", "/usr/bin/du", "-sk", "-x"] + roots
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         let completed = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in completed.signal() }
         do { try process.run() } catch { return nil }
-        guard completed.wait(timeout: .now() + 8) == .success else {
+        let deadline: TimeInterval = roots.count > 1 ? 120 : 8
+        guard completed.wait(timeout: .now() + deadline) == .success else {
             process.terminate()
             if completed.wait(timeout: .now() + 0.2) != .success { kill(process.processIdentifier, SIGKILL) }
             return nil
