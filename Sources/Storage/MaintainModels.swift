@@ -11,6 +11,9 @@ struct MaintainStatus: Codable, Equatable {
     var stepLastResults: [String: MaintainStepResult]
     var historyCount: Int
     var updatedAt: Double?
+    /// The disk reading the engine last sampled.  Nil before the first watch
+    /// tick, and nil for a status written before the engine reported it.
+    var disk: MaintainDisk? = nil
 
     enum CodingKeys: String, CodingKey {
         case health
@@ -22,6 +25,7 @@ struct MaintainStatus: Codable, Equatable {
         case stepLastResults = "step_last_results"
         case historyCount = "history_count"
         case updatedAt = "updated_at"
+        case disk
     }
 
     var displayHealth: String {
@@ -30,8 +34,34 @@ struct MaintainStatus: Codable, Equatable {
         case "overdue": return "Overdue"
         case "failed": return "Needs attention"
         case "unloaded": return "Not running in background"
+        case "critical": return "Disk critically low"
+        case "degraded": return "Disk low"
         default: return health.capitalized
         }
+    }
+}
+
+/// How much room is left, as the engine's watch tick last measured it.
+///
+/// The engine used to report "healthy" while the disk sat at 100% with three
+/// gigabytes free, because health never looked at the disk at all.  It does
+/// now, and this carries the number so the panel can show it.
+struct MaintainDisk: Codable, Equatable {
+    /// Free space on the Data volume, in gigabytes.  Nil when the engine has
+    /// not sampled the disk yet.
+    var freeGb: Double?
+    /// "ok", "acute", "critical", or "unknown" before the first sample.
+    var health: String
+
+    enum CodingKeys: String, CodingKey {
+        case freeGb = "free_gb"
+        case health
+    }
+
+    /// The free space as a short string for the panel, or nil when unknown.
+    var freeText: String? {
+        guard let freeGb else { return nil }
+        return String(format: "%.1f GB free", freeGb)
     }
 }
 

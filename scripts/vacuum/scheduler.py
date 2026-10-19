@@ -139,6 +139,44 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
     if last_record and int(last_record.get("exit_code", 0)) != 0:
         health = "failed"
 
+    # Health has to reflect the disk.  Until now it only ever looked at schedule
+    # lateness and the last run's exit code, so the panel said "healthy" while
+    # the disk sat at 100% with 3 GB free and every run freed zero bytes --
+    # the exact situation this whole feature exists to prevent, reported as
+    # fine.  The watch tick samples the disk every five minutes and keeps the
+    # number in the scheduler state, so read it from there rather than running
+    # another df on a host that is already loaded.
+    #
+    # The thresholds are the same keys and the same defaults evaluate_hits
+    # uses, so the headline and the watch's own threshold hits can never
+    # disagree about whether the disk is low.
+    rw_cfg = cfg.get("resource_watch", {})
+    crit_gb = float(rw_cfg.get("disk_free_crit_gb", 15))
+    warn_gb = float(rw_cfg.get("disk_free_warn_gb", 25))
+    disk: dict[str, Any] = {"free_gb": None, "health": "unknown"}
+    raw_free = store.scheduler_state().get("prev_disk_free_gb")
+    if raw_free is not None:
+        try:
+            free_gb = float(raw_free)
+        except (TypeError, ValueError):
+            free_gb = None
+        if free_gb is not None:
+            disk["free_gb"] = round(free_gb, 2)
+            if free_gb <= crit_gb:
+                disk["health"] = "critical"
+            elif free_gb <= warn_gb:
+                disk["health"] = "acute"
+            else:
+                disk["health"] = "ok"
+            # A critically low disk outranks a failed run at the headline: it is
+            # the emergency the owner has to act on now.  The failed run is
+            # still visible in the step list, and "failed" is kept when the disk
+            # is merely low.
+            if disk["health"] == "critical":
+                health = "critical"
+            elif disk["health"] == "acute" and health in ("healthy", "overdue"):
+                health = "degraded"
+
     from .alerts import launchd_loaded
     from .script_registry import bootstrap_registry, summary_for_status
 
@@ -154,6 +192,7 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
 
     return {
         "health": health,
+        "disk": disk,
         "last_runs": {
             k: float(v["ended_at"])
             for k, v in last_runs.items()

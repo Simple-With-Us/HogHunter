@@ -371,17 +371,85 @@ def has_keep_sentinel(path: str) -> bool:
     return False
 
 
+# One system-wide lsof pass answers "is this path in use" for every candidate
+# at once.  The old shape asked lsof about each path separately, and lsof on
+# a loaded Mac times out at 25s.  With hundreds of candidates that is hours of
+# blocked scanning, and a scan that never reaches a decision deletes nothing:
+# the safe tier found 41.9 MB across 915 items and freed nothing else.  One
+# snapshot turns that per-path cost into a single bounded one.
+_OPEN_SNAPSHOT: set[str] | None = None
+_OPEN_SNAPSHOT_TRIED = False
+
+
+def _load_open_snapshot() -> set[str] | None:
+    """Every path lsof reports open, or None when the answer is untrustworthy.
+
+    The name list is read with the cwd of each process so that a relative
+    name can be resolved: lsof prints "./thing" for a file opened relative to
+    a working directory, and an unresolved relative name would silently hide
+    an open handle.
+    """
+    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_TRIED
+    if _OPEN_SNAPSHOT_TRIED:
+        return _OPEN_SNAPSHOT
+    _OPEN_SNAPSHOT_TRIED = True
+    try:
+        p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True, timeout=180)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"system-wide lsof did not answer ({type(exc).__name__}); using per-path checks")
+        return None
+    cwd_by_pid: dict[str, str] = {}
+    paths: set[str] = set()
+    pid = ""
+    for ln in p.stdout.splitlines():
+        if not ln:
+            continue
+        tag, body = ln[0], ln[1:]
+        if tag == "p":
+            pid = body
+        elif tag == "f":
+            if body in ("cwd", "rtd") and pid:
+                cwd_by_pid.setdefault(pid, "")
+        elif tag == "n":
+            name = body
+            if name.endswith(" (deleted)"):
+                name = name[: -len(" (deleted)")]
+            if name and not name.startswith("/"):
+                base = cwd_by_pid.get(pid)
+                if base:
+                    name = os.path.join(base, name)
+            if name.startswith("/"):
+                paths.add(name)
+    if not paths:
+        # lsof answered but found nothing at all, which on a live Mac is not
+        # believable.  Treat it as untrustworthy rather than as "nothing open".
+        log("system-wide lsof returned no paths; treating the snapshot as untrustworthy")
+        return None
+    _OPEN_SNAPSHOT = paths
+    return _OPEN_SNAPSHOT
+
+
 def open_handles(path: str) -> int:
     """Count processes with this exact path open.
 
     Housekeeper rule: `lsof +D` HANGS on big trees -- never use it.  Ask
     lsof about the exact path instead.
 
-    A look that failed is not an empty room.  lsof that times out (it does,
-    under load 600) or cannot run counts as one open handle, so the caller
-    leaves the path alone.  lsof exits 1 for "nothing found", so the exit code
-    does not decide it: the pids on stdout do.
+    The answer comes from one system-wide lsof snapshot when that snapshot is
+    available, so the cost is one bounded pass rather than one timeout per
+    candidate.  A snapshot that could not be taken falls back to the old
+    per-path lsof.
+
+    A look that failed is not an empty room.  A per-path lsof that times out
+    (it does, under load 600) or cannot run counts as one open handle, so the
+    caller leaves the path alone.  lsof exits 1 for "nothing found", so the
+    exit code does not decide it: the pids on stdout do.
     """
+    snapshot = _load_open_snapshot()
+    if snapshot is not None:
+        target = str(path).rstrip("/")
+        prefix = target + "/"
+        return sum(1 for n in snapshot if n == target or n.startswith(prefix))
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "p", "--", str(path)],
                            capture_output=True, text=True, timeout=25)
@@ -1252,12 +1320,213 @@ def rule_ask_first_inventory() -> list[Candidate]:
     return cands
 
 
+_DEV_CACHE_PATHS = (
+    "Library/Caches/node-gyp",
+    "Library/Caches/electron",
+    "Library/Caches/electron-builder",
+    "Library/Caches/deno",
+    "Library/Caches/copilot",
+    "Library/Caches/org.swift.swiftpm",
+    "Library/Caches/ms-playwright",
+    "Library/Caches/@mmx-agentelectron-updater",
+    ".npm/_cacache",
+    ".cache/uv",
+    ".cache/pip",
+    ".yarn/cache",
+    "Library/pnpm/store",
+)
+
+
+def rule_app_caches() -> list[Candidate]:
+    """Per-application cache directories that no other rule covered.
+
+    The measured hog on this Mac was `~/Library/Caches/org.swift.swiftpm` at
+    3.6 GB, with Codex (624 MB), pnpm (552 MB), antigravity (349 MB) and
+    electron (248 MB) on top of it.  The old rule set named a handful of
+    specific toolchain caches and nothing else, so a host whose space went
+    into app caches got nothing back -- and the dev-caches rule that *did*
+    name swiftpm could not act on it, because the per-path lsof check timed
+    out under load and every cache read as in use.
+
+    These are the same gates the other cache rules use: idle, no open
+    handles, no keep sentinel, not forbidden, and big enough to be worth the
+    delete.  Everything under ~/Library/Caches is rebuildable by its app.
+    """
+    cands: list[Candidate] = []
+    roots: list[tuple[Path, str]] = [
+        (HOME / "Library/Caches", "application cache"),
+        (HOME / "Library/Application Support", "application support cache"),
+        (HOME / "Library/Containers", "sandboxed container cache"),
+        (HOME / "Library/Group Containers", "group container cache"),
+    ]
+    # Only the cache-shaped children of these trees.  Everything else in
+    # Application Support is app state and stays untouched.  The names are
+    # matched case-insensitively: this volume is case-insensitive, so "Cache"
+    # and "cache" are the same directory and must not be counted twice.
+    support_names = {"cache", "cacheddata", "code cache", "gpucache", "logs", "cachestorage"}
+    for root, label in roots:
+        if not root.is_dir():
+            continue
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            try:
+                if root.name == "Caches":
+                    targets = [(child, label)]
+                elif root.name == "Application Support":
+                    targets = [(d, label) for d in child.iterdir()
+                               if d.is_dir() and d.name.lower() in support_names]
+                else:
+                    targets = []
+                    data = child / "Data"
+                    cache_root = data / "Library" / "Caches"
+                    if cache_root.is_dir():
+                        targets.append((cache_root, label))
+                    lib = data / "Library"
+                    if lib.is_dir():
+                        targets += [(d, label) for d in lib.iterdir()
+                                    if d.is_dir() and d.name.lower() in support_names]
+                for target, what in targets:
+                    if not target.is_dir() or target.is_symlink():
+                        continue
+                    s = str(target)
+                    if is_forbidden(s) or has_keep_sentinel(s):
+                        continue
+                    if any(s.endswith("/" + dp) or s == str(HOME / dp) for dp in _DEV_CACHE_PATHS):
+                        continue
+                    if newest_file_age_min(s) < IDLE_MIN_OK or open_handles(s):
+                        continue
+                    size = dir_bytes(s)
+                    if size < 8 * 1024 * 1024:
+                        continue
+                    cands.append(Candidate(
+                        category="app-caches", path=s, bytes=size,
+                        reason=f"{what}, idle, no open handles",
+                    ))
+            except OSError as exc:
+                # One unreadable directory must not cost the whole rule.  The
+                # scan is the thing that has to survive a busy host.
+                log(f"app-caches skipped {child}: {type(exc).__name__}: {exc}")
+    return cands
+
+
+_AGENT_HOMES = (".codex", ".claude", ".grok", ".minimax", ".cursor", ".config", ".gemini", ".opencode")
+_AGENT_TRANSIENT = ("logs", "log", "tmp", "temp", "cache", "caches", "debug", "shell-snapshots")
+_AGENT_HISTORY = ("sessions", "projects", "history", "conversations")
+
+
+def _dirs_named(root: Path, names: tuple[str, ...]) -> list[Path]:
+    """Directories under root whose name matches one of names.
+
+    The match is case-insensitive because this volume is case-insensitive, so
+    "Cache" and "cache" are the same directory.  Globbing both spellings
+    found it twice and counted its size twice.
+    """
+    wanted = {n.lower() for n in names}
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return []
+    return [c for c in children
+            if not c.is_symlink() and c.is_dir() and c.name.lower() in wanted]
+
+
+def _agent_transient_dirs(root: Path) -> list[Path]:
+    """Transient directories under an agent home, one and two levels down."""
+    wanted = {n.lower() for n in _AGENT_TRANSIENT}
+    out: list[Path] = []
+    try:
+        children = [c for c in root.iterdir() if not c.is_symlink() and c.is_dir()]
+    except OSError:
+        return out
+    for child in children:
+        if child.name.lower() in wanted:
+            out.append(child)
+            continue
+        try:
+            grand = [g for g in child.iterdir() if not g.is_symlink() and g.is_dir()]
+        except OSError:
+            continue
+        out += [g for g in grand if g.name.lower() in wanted]
+    return out
+
+
+def rule_agent_state() -> list[Candidate]:
+    """Transient state left behind by the coding agents that run on this Mac.
+
+    The agents are the fleet's own workers, and they write logs, scratch
+    files and caches next to their state.  Those rebuild; the sessions and
+    transcripts beside them do not, so the sessions are reported rather than
+    deleted and only the transient parts are removed.
+    """
+    cands: list[Candidate] = []
+    seen: set[tuple[int, int]] = set()
+
+    def claim(path: Path) -> bool:
+        """True when this path is not already claimed under another spelling."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return True
+        key = (st.st_dev, st.st_ino)
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
+    for name in _AGENT_HOMES:
+        root = HOME / name
+        if not root.is_dir():
+            continue
+        for target in _agent_transient_dirs(root):
+            s = str(target)
+            if is_forbidden(s) or has_keep_sentinel(s):
+                continue
+            if not claim(target):
+                continue
+            if newest_file_age_min(s) < IDLE_MIN_OK or open_handles(s):
+                continue
+            size = dir_bytes(s)
+            if size < 8 * 1024 * 1024:
+                continue
+            cands.append(Candidate(
+                category="agent-state", path=s, bytes=size,
+                reason="agent transient state, idle, no open handles",
+            ))
+    # The agent session transcripts are Jay's history, not cache.  Report them.
+    for name in _AGENT_HOMES:
+        root = HOME / name
+        if not root.is_dir():
+            continue
+        for target in _dirs_named(root, _AGENT_HISTORY):
+            s = str(target)
+            if is_forbidden(s) or has_keep_sentinel(s):
+                continue
+            if not claim(target):
+                continue
+            size = dir_bytes(s)
+            if size < 64 * 1024 * 1024:
+                continue
+            cands.append(Candidate(
+                category="agent-state", path=s, bytes=size,
+                reason="agent session history (report only; it is not cache)",
+                tier="ask-first", op="report",
+            ))
+    return cands
+
+
 RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "snapshots": (rule_snapshots, "APFS / Time Machine local snapshots"),
     "temp-scratch": (rule_temp_scratch, "Orphaned per-user temp scratch"),
     "app-staging": (rule_app_staging, "Extracted but unused app updaters"),
     "botfleet-rollback": (rule_botfleet_rollback, "Abandoned BotFleet update/rollback copies"),
     "dev-caches": (rule_dev_caches, "Package manager and toolchain caches"),
+    "app-caches": (rule_app_caches, "Per-application cache directories"),
+    "agent-state": (rule_agent_state, "Transient state left by coding agents"),
     "xcode-artifacts": (rule_xcode_artifacts, "DerivedData and device support"),
     "simulator-runtimes": (rule_simulator_runtimes, "iOS simulator runtimes"),
     "logs": (rule_unbounded_logs, "Unbounded logs (tail-truncated)"),
@@ -1384,6 +1653,8 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
     global _SCAN_BUDGET_EXHAUSTED
     _SCAN_BUDGET_EXHAUSTED = False
     out: list[Candidate] = []
+    seen: set[tuple[str, str]] = set()
+    seen_inodes: set[tuple[int, int, str]] = set()
     for name, (fn, _desc) in RULES.items():
         if cats and name not in cats:
             continue
@@ -1392,9 +1663,28 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
                 _SCAN_BUDGET_EXHAUSTED = True
             break
         try:
-            out.extend(fn())
+            found = fn()
         except Exception as exc:  # a broken rule must not kill the scan
             log(f"rule {name} failed: {type(exc).__name__}: {exc}")
+            found = []
+        for c in found:
+            # Two rules can name the same path.  Delete it once.  The identity
+            # is the inode, not the spelling: this volume is case-insensitive,
+            # so "Cache" and "cache" are one directory and counting it twice
+            # inflated the total and would have deleted it twice.
+            key = (c.path, c.op)
+            if key in seen:
+                continue
+            try:
+                st = os.stat(c.path)
+                ino = (st.st_dev, st.st_ino, c.op)
+                if ino in seen_inodes:
+                    continue
+                seen_inodes.add(ino)
+            except OSError:
+                pass
+            seen.add(key)
+            out.append(c)
         if _DEADLINE is not None and budget_left() <= 0:
             _SCAN_BUDGET_EXHAUSTED = True
             break

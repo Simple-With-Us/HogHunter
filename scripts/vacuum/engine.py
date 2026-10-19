@@ -20,7 +20,23 @@ from .models import RunRecord, StepResult, StepStatus, TriggerKind
 from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 
 # Steps that run the lane doctor.  Under extreme host load they are skipped like the other heavy janitor work.
-_HEAVY_LANE_STEPS = ("janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps")
+#
+# janitor_cache_reclaim is deliberately NOT in this list, and must not be added
+# back.  It is the disk reclaim step: skipping it under load is a deadlock,
+# because the disk pressure that loads the host is exactly what the step exists
+# to clear.  The old guard made the step skip itself whenever the host was
+# loaded, so on a host that most needed cleaning it never ran, and the disk
+# slid to 100% while every run reported zero bytes freed.
+#
+# The step is safe under load.  It stays inside the cheap (safe) band and the
+# reclaim engine bounds itself with --budget-sec=600 plus a 180 s hard stop, so
+# it cannot run away on a busy host.
+#
+# Owner ruling 2026-10-02, recorded in the reclaim policy under
+# bands.chunking.pressureShapesWorkNotScope: pressure changes the SHAPE of the
+# work, never its SCOPE, and the load and swap thresholds "must never suppress
+# the safe or semi-safe tiers".
+_HEAVY_LANE_STEPS = ("janitor_worktree_retire", "pressure_apps_deps")
 
 
 def ensure_standard_mac_paths() -> None:
@@ -965,15 +981,24 @@ class VacuumEngine:
         return outcome.bytes_freed, outcome.detail, StepStatus.RAN if outcome.actions else StepStatus.SKIPPED
 
     def _janitor_cache_reclaim(self, sample: dict[str, Any], mode: str, dry_run: bool) -> tuple[int, str, StepStatus]:
-        if mode == "hard":
-            return 0, "extreme load; skipped cache reclaim", StepStatus.SKIPPED
+        # The load guard that used to open this method is gone on purpose.  It
+        # skipped the disk reclaim whenever the host was loaded, which is
+        # precisely when the disk needs clearing, so the step never ran on a
+        # host that needed it.  `mode` is still accepted because the dispatcher
+        # passes it, but it no longer decides whether this step happens.
+        #
+        # The cheap band is the safe tier, and the reclaim engine bounds itself
+        # with a time budget and a hard stop, so running it on a loaded host is
+        # bounded work, not an outage.
         free_gib = float(sample.get("disk_free_gb", 999))
         low = float(self.cfg.get("janitor", {}).get("low_free_gib", 80))
         if free_gib >= low:
             return 0, f"free {free_gib:.0f}G above {low:.0f}G threshold", StepStatus.SKIPPED
         if dry_run:
             return 0, "would reclaim caches", StepStatus.SKIPPED
-        # Lean mode skips heavy du probes; still run hoghunter cheap band as cache sweep.
+        # The cheap band is the safe tier.  The semi-safe tier (snapshots,
+        # device support, simulator runtimes) stays behind the engine's own
+        # calm-band gate, so it is not widened here.
         band = "cheap"
         return self._hoghunter_reclaim(band)
 

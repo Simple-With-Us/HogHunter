@@ -442,6 +442,48 @@ class TestHealth(unittest.TestCase):
             self.assertEqual(status["health"], "healthy")
             self.assertFalse(status["launchd_loaded"])
 
+    def _status_with_disk(self, free_gb: float | None) -> dict:
+        """Build a status whose scheduler state reports the given free disk space."""
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data = home / "rv"
+            data.mkdir(parents=True)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(data)
+            store = VacuumStore(cfg, home=home)
+            if free_gb is not None:
+                store.merge_scheduler_state({"prev_disk_free_gb": free_gb})
+            with patch("vacuum.alerts.launchd_loaded", return_value=False):
+                return build_status(store, cfg, now=time.time())
+
+    def test_a_critically_low_disk_reports_critical_health(self):
+        """The panel used to say healthy while the disk sat at 100% with 3 GB free.
+
+        Free space below the critical threshold is an emergency the owner has to
+        see, so it outranks the last run's exit code."""
+        status = self._status_with_disk(5.9)
+        self.assertEqual(status["health"], "critical")
+        self.assertEqual(status["disk"]["health"], "critical")
+        self.assertEqual(status["disk"]["free_gb"], 5.9)
+
+    def test_a_low_disk_reports_degraded_health(self):
+        status = self._status_with_disk(20.0)
+        self.assertEqual(status["health"], "degraded")
+        self.assertEqual(status["disk"]["health"], "acute")
+
+    def test_a_roomy_disk_leaves_health_alone(self):
+        status = self._status_with_disk(120.0)
+        self.assertEqual(status["health"], "healthy")
+        self.assertEqual(status["disk"]["health"], "ok")
+        self.assertEqual(status["disk"]["free_gb"], 120.0)
+
+    def test_disk_free_space_is_reported_even_when_nothing_is_known_yet(self):
+        """No sample yet means no disk block value, and the health must not crash on it."""
+        status = self._status_with_disk(None)
+        self.assertEqual(status["health"], "healthy")
+        self.assertIsNone(status["disk"]["free_gb"])
+        self.assertEqual(status["disk"]["health"], "unknown")
+
 
 class TestStatusStepResults(unittest.TestCase):
     """step_last_results holds each step's latest result, not just what the last record ran.  The Mac's Cleaning
@@ -794,6 +836,49 @@ class TestHogHunterReclaimStep(_EngineHome):
             freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "normal", dry_run=False)
         self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
         self.assertIn("--budget-sec=600", run.call_args.args[0])
+
+    def test_the_disk_reclaim_step_runs_even_under_extreme_load(self):
+        """The load guard that opened this step is gone.  Skipping the disk reclaim
+        because the host is loaded is a deadlock: the disk pressure that loads the
+        host is exactly what the step exists to clear, so the step never ran on a
+        host that needed it and the disk slid to 100% with every run reporting zero
+        bytes freed.  Owner ruling 2026-10-02: pressure changes the SHAPE of the
+        work, never its SCOPE."""
+        self.fake_cleaner()
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "hard", dry_run=False)
+        self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
+        self.assertIn("--budget-sec=600", run.call_args.args[0])
+
+    def test_a_hard_mode_janitor_run_still_reclaims_the_disk(self):
+        from unittest.mock import patch
+
+        from vacuum.engine import VacuumEngine
+        from vacuum.models import TriggerKind
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = load_config(home=home)
+            cfg["hoghunter_clean"] = str(home / "hoghunter-clean")
+            cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+            cfg.setdefault("janitor", {})["low_free_gib"] = 80
+            for step_id in steps_for_trigger(cfg, "janitor"):
+                cfg.setdefault("steps", {})[step_id] = {"enabled": False}
+            cfg["steps"]["janitor_cache_reclaim"] = {"enabled": True}
+            engine = VacuumEngine(cfg, home=home)
+            with patch(
+                "vacuum.engine.sample_mac",
+                return_value={"disk_free_gb": 4.0, "swap_used_pct": 99.0, "swap_used_gb": 30.0, "load1": 400.0},
+            ), patch("vacuum.engine.janitor_pressure_mode", return_value="hard"), patch.object(
+                sys, "platform", "darwin"
+            ), patch(
+                "vacuum.engine.VacuumEngine._hoghunter_reclaim",
+                return_value=(1234, "band=cheap", StepStatus.RAN),
+            ):
+                record = engine.run(TriggerKind.JANITOR)
+        step = next(s for s in record.steps if s.step_id == "janitor_cache_reclaim")
+        self.assertEqual(step.status, StepStatus.RAN)
+        self.assertEqual(step.bytes_freed, 1234)
 
 
 class TestCleanMyMacStep(_EngineHome):

@@ -570,6 +570,7 @@ def test_a_failed_pgrep_stops_the_dev_cache_rule(hh):
 
 
 def test_open_handles_fails_closed(hh):
+    _reset_open_snapshot(hh)
     with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("lsof", 25)):
         assert hh.open_handles("/x") == 1
     with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no lsof")):
@@ -815,12 +816,133 @@ def test_idle_build_output_survives_a_blind_capped_walk(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _reset_open_snapshot(hh):
+    """The engine keeps one snapshot per process; a test has to start over."""
+    hh._OPEN_SNAPSHOT = None
+    hh._OPEN_SNAPSHOT_TRIED = False
+
+
+def test_one_lsof_snapshot_answers_every_candidate(hh):
+    """The old shape asked lsof about each path separately, and lsof times out
+    under load.  With hundreds of candidates that is hours of blocked scanning,
+    and a scan that never reaches a decision deletes nothing: the safe tier
+    found 41.9 MB across 915 items and freed nothing else.
+
+    One snapshot turns the per-path cost into a single bounded one.
+    """
+    _reset_open_snapshot(hh)
+    listing = "p1\nfcwd\nn/tmp\nf3\nn/Users/jay/Library/Caches/Foo/blob.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)) as run:
+        assert hh.open_handles("/Users/jay/Library/Caches/Foo") == 1
+        assert hh.open_handles("/Users/jay/Library/Caches/Bar") == 0
+        assert hh.open_handles("/Users/jay/Library/Caches") == 1
+    assert run.call_count == 1, "the snapshot must be taken once, not once per path"
+
+
+def test_the_snapshot_resolves_a_relative_name_against_the_working_directory(hh):
+    """lsof prints a relative name for a file opened relative to a cwd.  An
+    unresolved name would silently hide an open handle."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nfcwd\nn/Users/jay/work\nf3\nn./thing.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+        assert hh.open_handles("/Users/jay/work") == 1
+        assert hh.open_handles("/Users/jay/other") == 0
+
+
+def test_an_untrustworthy_snapshot_falls_back_to_the_per_path_check(hh):
+    """lsof answered but found nothing at all, which on a live Mac is not
+    believable.  Treat it as untrustworthy rather than as 'nothing open'."""
+    _reset_open_snapshot(hh)
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1, "")) as run:
+        assert hh.open_handles("/x") == 0
+    assert run.call_count == 2, "one snapshot attempt plus one per-path check"
+
+
+def test_a_snapshot_that_never_answers_falls_back_to_the_per_path_check(hh):
+    _reset_open_snapshot(hh)
+    with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("lsof", 180)):
+        assert hh.open_handles("/x") == 1, "a look that failed is not an empty room"
+
+
+def test_app_caches_finds_an_idle_app_cache(hh):
+    """The measured hog on this Mac was ~/Library/Caches/org.swift.swiftpm at
+    3.6 GB.  The old rule set named a few toolchain caches and nothing else,
+    so a host whose space went into app caches got nothing back."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "SomeApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            found = hh.rule_app_caches()
+        assert [c.path for c in found] == [str(cache)]
+        assert found[0].category == "app-caches"
+        assert found[0].tier == "safe"
+        assert found[0].op == "delete"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_a_busy_cache_alone(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "BusyApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=1), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_agent_state_reports_sessions_instead_of_deleting_them(hh):
+    """The transient parts rebuild; the sessions are Jay's history."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        logs = home / ".claude" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "a.log").write_text("x", encoding="utf-8")
+        sessions = home / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "s.jsonl").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            found = hh.rule_agent_state()
+        by_path = {c.path: c for c in found}
+        assert by_path[str(logs)].tier == "safe", "transient state is safe to clear"
+        assert by_path[str(sessions)].tier == "ask-first", "session history is not cache"
+        assert by_path[str(sessions)].op == "report"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_path_two_rules_name_is_only_claimed_once(hh):
+    """dev-caches and app-caches can both name the same directory.  It has to
+    be deleted once, not twice."""
+    cand = hh.Candidate(category="dev-caches", path="/x/Cache", bytes=10, reason="r")
+    with mock.patch.dict(hh.RULES, {"dev-caches": (lambda: [cand], "a"),
+                                    "app-caches": (lambda: [cand], "b")}):
+        found = hh.scan(["dev-caches", "app-caches"])
+    assert len(found) == 1
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
     for t in tests:
         try:
+            # The engine keeps one lsof snapshot per process.  Reset it so a
+            # test never inherits an earlier test's answer.
+            _reset_open_snapshot(hh)
             t(hh)
             print(f"  ok   {t.__name__}")
         except AssertionError as e:
