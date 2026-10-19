@@ -1,5 +1,13 @@
 # Hog Hunter iOS auto-ship through the fleet script
 
+> **Superseded 2026-10-18.**  The UTC `YYYYMMDDHHmm` build stamp and the
+> "highest `1.0.N` in App Store Connect, plus one" marketing rule this file
+> describes are retired.  The fleet now takes both numbers from the repo's
+> commit count:  marketing `1.0.<commit_count>`, build `<commit_count>`.  This
+> file stays as the record of what was done on 2026-10-17;  the current
+> regimen is AGENT-SYNC.md (section "Version Numbers") and
+> `scripts/ios-fleet/ship-testflight.sh`.
+
 Owner request, Saturday, October 17, 2026:  bring every TestFlight app up to date, add deploy checks, and make the apps update automatically from now on.  Linear HH-157.  Contract:  a merge to `main` that touches the iPhone companion's native tree uploads a fresh TestFlight build with no human step.
 
 ## What the audit found, and what changed

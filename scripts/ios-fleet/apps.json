@@ -10,7 +10,7 @@
       "projectRel": "HogHunter.xcodeproj",
       "xcodegenDir": ".",
       "marketingVersionDefault": "1.0.0",
-      "notes": "Hog Hunter iPhone companion for the macOS menu bar utility.  Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios.  The Xcode project is generated from project.yml (xcodegen at the repo root) and is not committed.  Marketing train 1.0.N (ship-testflight.sh takes the highest N in App Store Connect and adds 1); build is the UTC cut time YYYYMMDDHHmm."
+      "notes": "Hog Hunter iPhone companion for the macOS menu bar utility.  Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios.  The Xcode project is generated from project.yml (xcodegen at the repo root) and is not committed.  Marketing and build are both the repo's commit count (1.0.<commit_count> and <commit_count>); UTC build stamps are retired."
     }
   }
 }

@@ -6,7 +6,7 @@
 #
 # Options:
 #   --repo-root PATH   Repo root (default: cwd)
-#   --build N          Force CURRENT_PROJECT_VERSION (default: UTC YYYYMMDDHHMM)
+#   --build N          Force CURRENT_PROJECT_VERSION (default: the repo commit count)
 #   --version X.Y.Z    Force MARKETING_VERSION (optional)
 #   --export-only      Build IPA only; do not upload
 #   --upload-only IPA  Skip archive; upload an existing IPA via ASC API key
@@ -361,27 +361,19 @@ link_private_key() {
   chmod 600 "$key_path" 2>/dev/null || true
 }
 
-# Owner directive: version naming is 1.0.# (timestamp).
-# EVERY rebuild — including a tiny tweak — adds exactly 1 to the last number.
-# MARKETING_VERSION (CFBundleShortVersionString) is 1.0.<seq>.
-# CURRENT_PROJECT_VERSION (CFBundleVersion) is a UTC timestamp YYYYMMDDHHMM.
-# ASC shows "1.0.8 (202608121315)".
+# Owner directive (unified 2026-10-18): version naming is 1.0.<commit_count>.
+# MARKETING_VERSION (CFBundleShortVersionString) is 1.0.<commit_count>.
+# CURRENT_PROJECT_VERSION (CFBundleVersion) is the same integer commit count.
+# ASC renders "<marketing> (<build>)", so a ship shows "1.0.259 (259)".
 #
-# Apple requires CFBundleVersion to be strictly increasing WITHIN a marketing
-# train, and trade.congress.ios has builds numbered 202608070253 through
-# 202608120521 sitting in the 1.0.0 train.
-#
-# So CFBundleVersion is a UTC timestamp, YYYYMMDDHHMM:
-#   - the parenthetical says WHEN the build was cut, which is the useful
-#     information the owner asked for: "1.0.8 (202608121315)"
+# The commit count replaces the UTC YYYYMMDDHHMM stamp for CFBundleVersion:
+#   - it names the EXACT commit a build came from, so a TestFlight or Sparkle
+#     build can be traced to source without a second lookup
 #   - it is monotonic by construction, so it can never regress
-#   - it is greater than every existing timestamp build, so it stays legal even
-#     if a ship ever lands back in an older train
-#   - it is demonstrably a legal CFBundleVersion for ASC: those builds
-#     were all accepted in exactly this format
-# Collisions are not a concern: two ships in the same UTC minute would need to
-# beat both the archive lock and the 1h min interval, and they would carry
-# different marketing versions anyway (Apple's uniqueness is per version+build).
+#   - it is strictly greater than every previously shipped build, so it stays
+#     legal even when a ship lands back in an older marketing train
+#   - it is path-gated: neither macOS nor iOS bumps unless that platform.s
+#     native files changed (AGENT-SYNC.md, owner 2026-10-18)
 #
 # Sequence state: ${STATE_DIR}/build-seq-<app>.txt (atomic-mkdir-guarded).
 # NOTE: flock(1) does not exist on macOS — under `set -e` a flock call would
@@ -396,17 +388,13 @@ link_private_key() {
 # which is monotonic against every record we have. Taking the max can skip a
 # number (harmless — numbers are free); reusing one is fatal.
 local_seq() {
-  local n
-  n=$(cat "${STATE_DIR}/build-seq-${APP_KEY}.txt" 2>/dev/null || echo 0)
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0
-  printf '%s' "$n"
-}
-
-# CFBundleVersion: UTC minute stamp. UTC (not local) so the value cannot go
-# backwards across a daylight-saving fall-back, which would break Apple's
-# strictly-increasing rule for an hour twice a year.
-utc_build_stamp() {
-  date -u +%Y%m%d%H%M
+  # The build-seq counter is retired under the commit-count scheme:  the
+  # ship script never advances it, so whatever is left in the file is a
+  # leftover from the retired timestamp scheme.  Reading it would inflate
+  # the floor above the commit count, and the strictly-increasing guard
+  # would then ship a number that names no commit.  The counter feeds
+  # neither MARKETING nor BUILD_NUM any more, so it contributes nothing.
+  printf '%s' "0"
 }
 
 # Highest N in MARKETING_VERSION = <prefix>.N across the project's build
@@ -485,18 +473,19 @@ resolve_seq_floor() {
     # Treat "ASC unverified" as fatal on its own.
     if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
       die "cannot determine the next build number.
-  App Store Connect could not be reached AND there is no local sequence
-  (${STATE_DIR}/build-seq-${APP_KEY}.txt) and no ${prefix}.N in project.pbxproj.
+  App Store Connect could not be reached.  That alone is fatal:  ASC is the
+  only record that is advanced by shipping, so without it a lost cache or
+  an unreachable API would silently reuse a build number.
   Shipping now would very likely reuse a build number and be rejected as a duplicate.
   Fix one of these, then re-run:
     1) restore ASC access: check the ASC_* env or Infisical /asc (fleet-secrets) and that 'node' is on PATH, then
        run: node ${FLEET_DIR}/asc-api.mjs latest-build-seq ${BUNDLE_ID} ${prefix}
-     2) or pass the number explicitly:  --version ${prefix}.<N>   (NOT --build <N>:
-        --version picks the marketing version and lets CFBundleVersion stay an
-        auto UTC timestamp, which is always higher than every build already
-        uploaded. A bare --build leaves MARKETING at ${DEFAULT_MARKETING}, which
-        re-enters an old train where Apple requires a strictly greater build than
-        everything in it -- rejected after the full archive+upload.)
+     2) or pass the number explicitly:  --build <N>
+        --build is honoured exactly:  CFBundleVersion becomes N, and MARKETING
+        moves with it to the default train's N, so the pair always describes
+        one number.  To ship into a train other than the default, pass
+        --version <prefix>.N as well.  N must be a plain integer above every
+        build already shipped in that train; UTC timestamps are retired.
     3) or, only if you are certain this train is empty, re-run with --allow-unverified-seq"
     fi
     if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 1 ]]; then
@@ -550,10 +539,16 @@ next_build_seq() {
   printf '%s' "$n"
 }
 
+# The major.minor train a marketing version belongs to: "2.0.123" -> "2.0",
+# "3" -> "3.0".  The floor is per-train, so the train has to come from the
+# version actually being shipped rather than always from the default.
+version_prefix() {
+  printf '%s' "${1:-1.0}" | awk -F. '{ if (NF >= 2) print $1"."$2; else print $1".0" }'
+}
+
 marketing_prefix() {
   # "1.0" from marketingVersionDefault (1.0 or 1.0.x both yield 1.0).
-  local d="${DEFAULT_MARKETING:-1.0}"
-  printf '%s' "$d" | awk -F. '{ if (NF >= 2) print $1"."$2; else print $1".0" }'
+  version_prefix "${DEFAULT_MARKETING:-1.0}"
 }
 
 ship_state_path() {
@@ -856,17 +851,45 @@ elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
   # than anything already uploaded — that is the whole point of the scheme, so an
   # operator picking the marketing version does not have to reason about it.
   MARKETING="${FORCE_VERSION:-$DEFAULT_MARKETING}"
-  BUILD_NUM="${FORCE_BUILD:-$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
+  if [[ -n "$FORCE_BUILD" ]]; then
+    # An explicit --build is honoured exactly.
+    BUILD_NUM="$FORCE_BUILD"
+  else
+    # UTC timestamps are retired (owner 2026-10-18): CFBundleVersion is the
+    # repo commit count, so a checkout with no readable git history cannot be
+    # numbered at all.  Fail loudly rather than mint a 12-digit stamp that no
+    # commit describes.
+    BUILD_NUM="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || true)"
+    [[ "$BUILD_NUM" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; CFBundleVersion is the commit count and UTC timestamps are retired"
+  fi
   # An explicit --build is honoured exactly.  The auto-fill still needs the
   # floor: --version against an already-shipped HEAD would otherwise ship a
   # build at or below what App Store Connect already holds for that train.
   if [[ -z "$FORCE_BUILD" ]]; then
-    _of_floor="$(resolve_seq_floor "$MARKETING_PREFIX" "$PBXPROJ" "$PLATFORM" 2>/dev/null || echo 0)"
-    [[ "$_of_floor" =~ ^[0-9]+$ ]] || _of_floor=0
+    # The floor is per-train, so it has to be read from the train this override
+    # is actually shipping to.  MARKETING_PREFIX is the *default* train and is
+    # wrong here whenever --version named another one: reading 1.0's floor for a
+    # 2.0 ship is what produced stale builds like "2.0 (build 202510190002)".
+    _override_prefix="$(version_prefix "$MARKETING")"
+    # Propagate the floor failure.  Coercing it to 0 would let an
+    # unreachable App Store Connect pass as "floor 0", so the build number
+    # would stay at the commit count and could repeat a pair ASC already
+    # holds.  The auto path below already refuses to ship in that case.
+    _of_floor="$(resolve_seq_floor "$_override_prefix" "$PBXPROJ" "$PLATFORM")" \
+      || die "override path could not resolve the build floor; refusing to ship"
+    [[ "$_of_floor" =~ ^[0-9]+$ ]] || die "override floor is not a number: ${_of_floor}"
     if [[ "$_of_floor" -ge "$BUILD_NUM" ]]; then
       BUILD_NUM="$((_of_floor + 1))"
       log "build: override would repeat an already-shipped build; using ${BUILD_NUM} instead"
     fi
+  fi
+  # The shipped pair must describe one number.  Unless the operator pinned
+  # a marketing version, MARKETING follows the build, so the ship is
+  # 1.0.N (N) rather than a version and a build that disagree.  An explicit
+  # --version names a train and is honoured exactly; the floor above still
+  # keeps the build unique inside that train.
+  if [[ -z "$FORCE_VERSION" ]]; then
+    MARKETING="${MARKETING_PREFIX}.${BUILD_NUM}"
   fi
   log "version: operator override (--build/--version); sequence not consulted"
 else
@@ -878,7 +901,18 @@ else
   # commit-count scheme it no longer feeds MARKETING or BUILD_NUM, so writing
   # to it would only drift the floor on every later run and eventually push a
   # fresh commit's build number higher than the commit count it names.
-  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo "$((SEQ_FLOOR + 1))")"
+  # The build number names a commit, so it has to be the commit count.  The
+  # old fallback invented SEQ_FLOOR + 1 here, which decoupled the shipped
+  # number from the commit it claims to be.  The guard below is the one
+  # deliberate exception:  when the floor is at or above the commit count,
+  # shipping the commit count would repeat a (version, build) pair App Store
+  # Connect already holds, so the pair is bumped together and describes one
+  # number that is not a commit count.  That is the safe direction to be
+  # wrong in.  A floor above the commit count also happens on a shallow
+  # checkout, where `git rev-list --count HEAD` understates the count;  the
+  # committed record is what keeps the build number unique there.
+  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || true)"
+  [[ "$COMMIT_COUNT" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; the build number is the commit count and UTC timestamps are retired"
   MARKETING="${MARKETING_PREFIX}.${COMMIT_COUNT}"
   BUILD_NUM="${COMMIT_COUNT}"
   # Strictly-increasing guard for a re-ship of the same commit.  App Store
