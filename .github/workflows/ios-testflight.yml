@@ -14,10 +14,10 @@ name: Hog Hunter iOS TestFlight
 # The ship goes through the fleet script (scripts/ios-fleet/ship-testflight.sh,
 # via scripts/ios-ship-testflight.sh), the same path Socratic.Trade,
 # Congress.Trade, Usage Monitor and Clutch use.  It owns:
-#   * the marketing version:  1.0.N, one above the highest N in App Store
-#     Connect, so a version string is never uploaded twice (the old release
-#     script read 1.0.6 from project.yml and reused it);
-#   * the build number:  the UTC cut time, YYYYMMDDHHmm;
+#   * the marketing version and the build number:  both are the repo's commit
+#     count, 1.0.<commit_count> and <commit_count>, so a version string is
+#     never uploaded twice (the old release script read 1.0.6 from project.yml
+#     and reused it);
 #   * the rate gate (one upload per hour) and the same-HEAD skip.  This file
 #     never sets IOS_TF_MIN_INTERVAL_SEC and never passes --force-ship;
 #   * ensure-tf-ready, which declares export compliance on the exact build and
