@@ -817,9 +817,9 @@ def test_idle_build_output_survives_a_blind_capped_walk(hh):
 
 
 def _reset_open_snapshot(hh):
-    """The engine keeps one snapshot per process; a test has to start over."""
+    """The engine memoizes one snapshot for a while; a test has to start over."""
     hh._OPEN_SNAPSHOT = None
-    hh._OPEN_SNAPSHOT_TRIED = False
+    hh._OPEN_SNAPSHOT_AT = 0.0
 
 
 def test_one_lsof_snapshot_answers_every_candidate(hh):
@@ -845,8 +845,40 @@ def test_the_snapshot_resolves_a_relative_name_against_the_working_directory(hh)
     _reset_open_snapshot(hh)
     listing = "p1\nfcwd\nn/Users/jay/work\nf3\nn./thing.bin\n"
     with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
-        assert hh.open_handles("/Users/jay/work") == 1
+        # Both the cwd itself and the resolved ./thing.bin live under
+        # /Users/jay/work, so a candidate for that directory counts 2.  A
+        # snapshot that dropped the relative name would count only the cwd.
+        assert hh.open_handles("/Users/jay/work") == 2
         assert hh.open_handles("/Users/jay/other") == 0
+
+
+def test_a_snapshot_that_exited_badly_is_not_cached(hh):
+    """lsof can print part of its listing and still fail.  Caching a partial
+    set reads every file it failed to mention as closed, and the "no open
+    handles" gate would pass on a directory a live process is holding."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nf3\nn/Users/jay/work/thing.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1, listing)) as run:
+        assert hh.open_handles("/Users/jay/work") == 1
+    assert hh._OPEN_SNAPSHOT is None, "a partial listing must not be cached"
+    assert run.call_count == 2, "one rejected snapshot attempt plus one per-path check"
+
+
+def test_the_snapshot_is_retaken_once_it_goes_stale(hh):
+    """A scan runs for the whole time budget, and the per-path lsof this
+    snapshot replaced answered each candidate as it went.  A listing kept for
+    the whole process answers for a candidate examined minutes later, so a
+    file opened in between reads as absent."""
+    _reset_open_snapshot(hh)
+    hh._OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
+    first = "p1\nf3\nn/Users/jay/work/first.bin\n"
+    second = "p1\nf3\nn/Users/jay/work/second.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, first)):
+        assert hh.open_handles("/Users/jay/work/second.bin") == 0
+    with mock.patch.object(hh.time, "monotonic", return_value=hh.time.monotonic() + 600.0), \
+         mock.patch.object(hh.subprocess, "run", return_value=completed(0, second)):
+        assert hh.open_handles("/Users/jay/work/first.bin") == 0
+        assert hh.open_handles("/Users/jay/work/second.bin") == 1
 
 
 def test_the_snapshot_matches_a_candidate_spelled_through_a_symlink(hh):
@@ -896,6 +928,7 @@ def test_app_caches_finds_an_idle_app_cache(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
              mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
             found = hh.rule_app_caches()
         assert [c.path for c in found] == [str(cache)]
@@ -915,6 +948,7 @@ def test_app_caches_leaves_a_busy_cache_alone(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=1), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
              mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
             assert hh.rule_app_caches() == []
     finally:
@@ -933,8 +967,29 @@ def test_app_caches_leaves_the_botfleet_update_generations_alone(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
              mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
             assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_does_not_call_a_big_active_cache_idle(hh):
+    """newest_file_age_min stops after 4000 entries, so an application cache
+    tree bigger than that (Chrome, Slack, Electron are all past it) can hide a
+    recent write past the cap and read as idle.  The uncapped touched_since
+    probe answers on the first recent file, so the tree is left alone."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "BigApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=True), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == [], "a cache with a recent write is not idle"
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
@@ -952,6 +1007,7 @@ def test_agent_state_reports_sessions_instead_of_deleting_them(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
              mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
             found = hh.rule_agent_state()
         by_path = {c.path: c for c in found}

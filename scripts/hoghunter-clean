@@ -378,7 +378,13 @@ def has_keep_sentinel(path: str) -> bool:
 # the safe tier found 41.9 MB across 915 items and freed nothing else.  One
 # snapshot turns that per-path cost into a single bounded one.
 _OPEN_SNAPSHOT: set[str] | None = None
-_OPEN_SNAPSHOT_TRIED = False
+_OPEN_SNAPSHOT_AT: float = 0.0
+# A scan may run for the whole 600s budget, and the per-path lsof this snapshot
+# replaced evaluated each candidate as it went.  A snapshot kept for the whole
+# process would answer for a candidate examined ten minutes after the listing
+# was taken, so a file opened in between reads as absent.  Retake it past this
+# age; 60s keeps the pass bounded without making the answer meaningfully stale.
+_OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
 
 
 def _load_open_snapshot() -> set[str] | None:
@@ -395,18 +401,26 @@ def _load_open_snapshot() -> set[str] | None:
     DARWIN_USER_TEMP_DIR` hands back the symlink).  Matching the two by string
     would read every open handle in TMPDIR as absent.
     """
-    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_TRIED
-    if _OPEN_SNAPSHOT_TRIED:
+    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_AT
+    if _OPEN_SNAPSHOT is not None and time.monotonic() - _OPEN_SNAPSHOT_AT < _OPEN_SNAPSHOT_MAX_AGE_SEC:
         return _OPEN_SNAPSHOT
-    _OPEN_SNAPSHOT_TRIED = True
+    _OPEN_SNAPSHOT_AT = time.monotonic()
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True, timeout=180)
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"system-wide lsof did not answer ({type(exc).__name__}); using per-path checks")
         return None
+    if p.returncode != 0:
+        # A lsof that exited badly can still have printed part of its listing.
+        # Caching a partial set would read every file it failed to mention as
+        # closed, and the "no open handles" gate would pass on a directory a
+        # live process is holding.  Fall back to the per-path check instead.
+        log(f"system-wide lsof exited {p.returncode}; treating the snapshot as untrustworthy")
+        return None
     cwd_by_pid: dict[str, str] = {}
     paths: set[str] = set()
     pid = ""
+    want_cwd = False
     for ln in p.stdout.splitlines():
         if not ln:
             continue
@@ -414,12 +428,16 @@ def _load_open_snapshot() -> set[str] | None:
         if tag == "p":
             pid = body
         elif tag == "f":
-            if body in ("cwd", "rtd") and pid:
-                cwd_by_pid.setdefault(pid, "")
+            want_cwd = body in ("cwd", "rtd") and bool(pid)
         elif tag == "n":
             name = body
             if name.endswith(" (deleted)"):
                 name = name[: -len(" (deleted)")]
+            if want_cwd and pid:
+                # The name line that follows an fcwd/frtd line IS the working
+                # directory, and it is what a relative name resolves against.
+                cwd_by_pid[pid] = name
+            want_cwd = False
             if name and not name.startswith("/"):
                 base = cwd_by_pid.get(pid)
                 if base:
@@ -1416,7 +1434,17 @@ def rule_app_caches() -> list[Candidate]:
                     if any(s.endswith("/" + dp) or s == str(HOME / dp)
                            for dp in _DEV_CACHE_PATHS + _APP_CACHE_KEEP):
                         continue
-                    if newest_file_age_min(s) < IDLE_MIN_OK or open_handles(s):
+                    if newest_file_age_min(s) < IDLE_MIN_OK:
+                        continue
+                    # newest_file_age_min stops after 4000 entries, so a big
+                    # cache tree (Chrome, Slack, Electron are all past that)
+                    # can hide a recent write past the cap and read as idle.
+                    # touched_since answers on the FIRST recent file, and a
+                    # failed look reads as touched: an unprovable tree is
+                    # never called idle.
+                    if touched_since(s, IDLE_MIN_OK / (24 * 60)):
+                        continue
+                    if open_handles(s):
                         continue
                     size = dir_bytes(s)
                     if size < 8 * 1024 * 1024:

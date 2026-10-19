@@ -1002,6 +1002,13 @@ class VacuumEngine:
         # The cheap band is the safe tier, and the reclaim engine bounds itself
         # with a time budget and a hard stop, so running it on a loaded host is
         # bounded work, not an outage.
+        if not sample.get("disk_sample_ok", True):
+            # A df that failed leaves disk_free_gb at zero, and zero free is
+            # below every threshold, so this would run a full cheap-band
+            # reclaim -- deleting app caches and agent state -- on a disk that
+            # is actually healthy.  Skip rather than act on a number nobody
+            # measured.
+            return 0, "disk sample unavailable; skipping cache reclaim", StepStatus.SKIPPED
         free_gib = float(sample.get("disk_free_gb", 999))
         low = float(self.cfg.get("janitor", {}).get("low_free_gib", 80))
         if free_gib >= low:

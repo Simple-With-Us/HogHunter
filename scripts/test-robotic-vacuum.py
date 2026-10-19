@@ -897,6 +897,20 @@ class TestHogHunterReclaimStep(_EngineHome):
         self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
         self.assertIn("--budget-sec=600", run.call_args.args[0])
 
+    def test_the_janitor_reclaim_does_not_act_on_a_disk_sample_that_failed(self):
+        """A df that failed leaves disk_free_gb at zero, and zero free is below
+        every threshold.  Without the disk_sample_ok guard this runs a full
+        cheap-band reclaim -- deleting app caches and agent state -- on a disk
+        that is actually healthy."""
+        self.fake_cleaner()
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            freed, reason, status = self.engine._janitor_cache_reclaim(
+                {"disk_sample_ok": False, "disk_free_gb": 0.0}, "normal", dry_run=False
+            )
+        self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
+        self.assertIn("disk sample unavailable", reason)
+        self.assertEqual(run.call_count, 0, "nothing is deleted on an unmeasured disk")
+
     def test_a_hard_mode_janitor_run_still_reclaims_the_disk(self):
         from unittest.mock import patch
 
