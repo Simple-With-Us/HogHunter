@@ -22,6 +22,8 @@ jobs:
           bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/ios-fleet/scheduled-ship-gate.sh scripts/ios-fleet/test-scheduled-ship-gate.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh scripts/mac-release-build.sh scripts/make_appcast.sh
           node --check scripts/ios-fleet/asc-api.mjs
           bash scripts/test-ios-stage-asc-key.sh
+          bash scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-credentials.mjs
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py
