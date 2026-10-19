@@ -798,6 +798,25 @@ def test_touched_since_catches_a_recent_file_past_the_walk_cap(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_touched_since_asks_find_for_a_parseable_cutoff(hh):
+    """The idle gate runs `find -newermt`, and find rejects a fractional unit.
+
+    IDLE_MIN_OK is 90 minutes, which reaches this call as 0.0625 days.  Both
+    GNU and BSD find refuse "-0.0625 days", exit non-zero, and this fails
+    closed to "touched" -- so every app cache reads as busy and the rule frees
+    nothing while looking perfectly healthy.  Every other app-caches test mocks
+    touched_since out, so nothing else here would notice.  Assert the argv.
+    """
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "")) as run:
+        hh.touched_since("/tmp", 90 / (24 * 60))
+    stamp = run.call_args[0][0][5]
+    assert stamp == "-90 minutes", f"find cannot parse {stamp!r}; it fails closed to 'touched'"
+    # The whole-day call site has to keep working the same way.
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "")) as run:
+        hh.touched_since("/tmp", 7)
+    assert run.call_args[0][0][5] == "-10080 minutes"
+
+
 def test_idle_build_output_survives_a_blind_capped_walk(hh):
     """Even when the capped walk swears a tree is idle, the uncapped find probe
     still refuses a tree holding a recent file."""

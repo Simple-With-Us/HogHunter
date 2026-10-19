@@ -503,10 +503,17 @@ def touched_since(path: str, days: float) -> bool:
     file instead, which is fast exactly when it matters (an active tree), and
     only walks everything when the tree is genuinely quiet.  A failed look
     reads as touched: an unprovable tree is never called idle.
+
+    The cutoff is expressed in whole MINUTES, not fractional days.  A day is
+    a whole unit to find's date parser and 90 minutes is not: `IDLE_MIN_OK`
+    arrives here as 0.0625 days, and both GNU and BSD find refuse "-0.0625
+    days" outright.  find then exits non-zero, this fails closed to "touched",
+    and the idle gate rejects every candidate -- so the rule silently frees
+    nothing, with no error anywhere to say why.  Minutes parse on both.
     """
     try:
         proc = subprocess.run(
-            ["find", path, "-type", "f", "-newermt", f"-{days:g} days", "-print", "-quit"],
+            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
             capture_output=True, text=True, timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):

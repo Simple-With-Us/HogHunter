@@ -5,8 +5,11 @@ The lane doctor tests live in test-vacuum-lanes.py; load_tests at the bottom pul
 command (python3 scripts/test-robotic-vacuum.py) runs both files."""
 from __future__ import annotations
 
+import argparse
 import atexit
+import contextlib
 import errno
+import io
 import json
 import os
 import re
@@ -1571,7 +1574,50 @@ class TestTickWatchdog(unittest.TestCase):
         self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout=42"]), 42.0)
         # 0 disables the watchdog, and a bad value falls back to the default.
         self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "0"]), 0.0)
-        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "soon"]), maintain.TICK_WATCHDOG_SEC)
+        with contextlib.redirect_stderr(io.StringIO()):
+            # argparse reports the bad value on the way to raising; the parse
+            # is caught inside, so only main() should ever print it.
+            self.assertEqual(
+                maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "soon"]),
+                maintain.TICK_WATCHDOG_SEC,
+            )
+
+    def test_the_pre_import_arm_agrees_with_main_on_how_to_read_the_flag(self):
+        """The pre-import arm has to read --tick-timeout exactly the way main()
+        does.  A scan of its own takes the first exact spelling and rejects
+        abbreviations, so `--tick scheduler --tick-t 60` gave main() 60s and
+        the watchdog 900s -- and because _watchdog_armed stops main() from
+        arming again, the watchdog could never correct itself mid-run."""
+        import maintain
+
+        for argv, expected in (
+            (["--tick", "scheduler", "--tick-t", "60"], 60.0),
+            (["--tick-timeout", "60", "--tick", "scheduler", "--tick-timeout", "900"], 900.0),
+            (["--tick=scheduler", "--tick-timeout=60"], 60.0),
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(maintain._argv_tick_timeout(argv), expected)
+                # Whatever the pre-import arm picks, main() must not disagree.
+                parser = argparse.ArgumentParser()
+                parser.add_argument("--tick")
+                parser.add_argument("--dry-run", dest="dry_run", action="store_true")
+                parser.add_argument("--tick-timeout", type=float, default=maintain.TICK_WATCHDOG_SEC)
+                self.assertEqual(parser.parse_args(argv).tick_timeout, expected)
+
+    def test_a_dry_run_tick_never_arms_the_watchdog(self):
+        """--dry-run promises one complete JSON document.  A watchdog armed at
+        import time can fire mid-print and exit 3, truncating it, and the
+        dry-run early-returns before main() would have armed anything."""
+        import maintain
+
+        self.assertIsNone(maintain._argv_tick_timeout(["--dry-run", "--tick", "scheduler"]))
+        self.assertEqual(
+            maintain._argv_tick_timeout(["--dry-run", "--tick", "scheduler", "--tick-timeout", "5"]),
+            None,
+            "a dry run must not get a watchdog at all, whatever budget it was given",
+        )
+        # A real tick beside it still arms.
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "5"]), 5.0)
 
     def test_a_second_arm_is_a_no_op(self):
         """The watchdog is armed once before the imports and once from main().

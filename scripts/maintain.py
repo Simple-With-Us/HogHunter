@@ -79,29 +79,56 @@ def _start_tick_watchdog(seconds: float) -> None:
 
 
 def _argv_tick_timeout(argv: list[str]) -> float | None:
-    """The watchdog budget for this invocation, or None when it is not a tick.
+    """The watchdog budget for this invocation, or None when it must not arm.
 
     Read straight off argv so the watchdog can be armed before the vacuum
     imports below, which is where the tick that prompted it wedged for 17
-    minutes.  Parsed here rather than by argparse because argparse has not
-    run yet at that point; an unparseable value falls back to the default,
-    which is the same thing argparse's `type=float` defaulting would do for
-    anyone who did not pass the flag at all.
+    minutes.  Parsed here rather than by main()'s parser because that has not
+    run yet at this point.
+
+    The parse has to agree with main()'s.  A hand-rolled scan would not:
+    argparse accepts unambiguous abbreviations (`--tick-t 60`) and lets the
+    LAST occurrence of a repeated flag win, and a scan that takes the first
+    exact spelling sends the watchdog a different budget than the tick it is
+    meant to bound.  `_watchdog_armed` then stops main() from correcting it,
+    so the watchdog cannot self-correct and the two disagree for the whole
+    run.  Using the same option semantics keeps one answer.
+
+    A dry run is not a real tick and never gets a watchdog: its contract is a
+    single complete JSON document, and a watchdog that fires mid-print would
+    truncate it and exit 3.
     """
-    if "--tick" not in argv:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=True)
+    parser.add_argument("--tick")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true")
+    parser.add_argument(
+        "--tick-timeout",
+        type=float,
+        default=TICK_WATCHDOG_SEC,
+    )
+    try:
+        args, _ = parser.parse_known_args(argv)
+    except SystemExit:
+        # `type=float` rejects a bad value by exiting, and this runs before
+        # main() has had its chance to report the mistake properly.  Fall back
+        # to the default budget rather than letting that exit escape from
+        # import time; main() still owns the error message and the exit code.
+        return TICK_WATCHDOG_SEC if _argv_is_scheduler_tick(argv) else None
+    if args.tick != "scheduler" or args.dry_run:
         return None
-    for i, arg in enumerate(argv):
-        if arg == "--tick-timeout" and i + 1 < len(argv):
-            try:
-                return float(argv[i + 1])
-            except ValueError:
-                return TICK_WATCHDOG_SEC
-        if arg.startswith("--tick-timeout="):
-            try:
-                return float(arg.split("=", 1)[1])
-            except ValueError:
-                return TICK_WATCHDOG_SEC
-    return TICK_WATCHDOG_SEC
+    return args.tick_timeout
+
+
+def _argv_is_scheduler_tick(argv: list[str]) -> bool:
+    """True when argv names a real scheduler tick, spelled out in full.
+
+    Only consulted when the parse above failed, so it deliberately sticks to
+    exact spellings rather than guessing at an abbreviation it could not read.
+    """
+    if "--dry-run" in argv:
+        return False
+    return any(arg == "--tick" and i + 1 < len(argv) and argv[i + 1] == "scheduler"
+               for i, arg in enumerate(argv))
 
 
 # Armed before the imports on purpose.  A wedge in an import happens before
