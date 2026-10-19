@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1491,6 +1492,44 @@ class TestMaintainSurface(unittest.TestCase):
             status = build_status(store, cfg)
             self.assertIn("maintenance_scripts", status)
             self.assertTrue(any(row.get("id") == "maintain_scheduler" for row in status["maintenance_scripts"]))
+
+
+class TestTickWatchdog(unittest.TestCase):
+    """launchd will not start a second instance of the job while one is running.
+
+    A tick that wedges therefore stops the maintainer for good, and silently:
+    the panel keeps showing the last status it wrote while the disk fills up
+    anyway.  Measured 2026-10-19: a launchd tick sat in PyImport_ImportModule
+    for 17 minutes and wrote nothing, while the same tick run by hand took
+    seven seconds.
+    """
+
+    def test_the_watchdog_exits_the_process_when_the_tick_overruns(self):
+        import maintain
+
+        with patch.object(maintain.os, "_exit", create=True) as exit_mock:
+            with patch.object(maintain.time, "sleep"):
+                maintain._watchdog_exit(0.01)
+        exit_mock.assert_called_once_with(3)
+
+    def test_a_zero_budget_arms_nothing(self):
+        import maintain
+
+        before = threading.active_count()
+        maintain._start_tick_watchdog(0)
+        self.assertEqual(threading.active_count(), before)
+
+    def test_the_watchdog_is_armed_for_a_scheduler_tick(self):
+        import maintain
+
+        with patch.object(maintain, "_start_tick_watchdog") as arm:
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch.object(maintain, "run_scheduler_tick", return_value={}):
+                    with patch.object(maintain, "VacuumStore") as store_cls:
+                        store_cls.open.return_value.cfg = {}
+                        maintain.main(["--tick", "scheduler"])
+        arm.assert_called_once()
+        self.assertGreater(arm.call_args[0][0], 0, "the watchdog needs a budget to fire")
 
 
 def load_tests(loader, tests, pattern):

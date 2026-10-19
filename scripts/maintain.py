@@ -20,6 +20,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +55,39 @@ def ensure_standard_mac_paths() -> None:
 ensure_standard_mac_paths()
 
 
+# The launchd job runs this every five minutes.  A tick that wedges -- on a
+# slow disk, mid-import, with the host swapping -- blocks every tick after
+# it, because launchd will not start a second instance of a StartInterval job
+# while one is running.  The maintainer then stops without ever saying so:
+# the panel keeps showing the last status it wrote and the disk fills up
+# anyway.  A tick that cannot finish has to die so the next one can start.
+#
+# Measured 2026-10-19: a launchd tick sat in PyImport_ImportModule for 17
+# minutes and had written nothing.  The same tick, run by hand, took seven
+# seconds.
+TICK_WATCHDOG_SEC = 240.0
+
+
+def _watchdog_exit(seconds: float) -> None:
+    """Exit the process once the tick has overrun its budget."""
+    time.sleep(seconds)
+    sys.stderr.write(
+        f"[hoghunter] scheduler tick exceeded {seconds:.0f}s; "
+        "exiting so the next tick can run\n"
+    )
+    sys.stderr.flush()
+    os._exit(3)
+
+
+def _start_tick_watchdog(seconds: float) -> None:
+    """Arm the watchdog.  Nothing is lost when it fires: the store writes
+    through a temporary file and renames it, so a kill leaves the last good
+    state in place."""
+    if seconds <= 0:
+        return
+    threading.Thread(target=_watchdog_exit, args=(seconds,), daemon=True).start()
+
+
 def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:
     """Plan-only run.  Stdout is one JSON document and nothing else; nothing is persisted.
 
@@ -81,6 +116,16 @@ def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Hog Hunter Maintain")
     parser.add_argument("--tick", choices=["scheduler"], help="Run the combined scheduler tick")
+    parser.add_argument(
+        "--tick-timeout",
+        type=float,
+        default=TICK_WATCHDOG_SEC,
+        help=(
+            "Seconds after which a scheduler tick gives up and exits so the next one can start. "
+            "0 disables the watchdog.  launchd will not run a second instance of the job while one "
+            "is running, so a wedged tick otherwise stops the maintainer for good."
+        ),
+    )
     parser.add_argument("--run-now", choices=["watch", "janitor", "full", "pressure"], help="Run one cadence immediately")
     parser.add_argument("--status", action="store_true", help="Print health and last run summary")
     parser.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON (with --status)")
@@ -143,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dry_run(store, args)
 
     if args.tick == "scheduler":
+        _start_tick_watchdog(args.tick_timeout)
         result = run_scheduler_tick(store)
         if args.as_json:
             print(json.dumps(result, indent=2))
