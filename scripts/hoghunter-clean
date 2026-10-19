@@ -388,6 +388,12 @@ def _load_open_snapshot() -> set[str] | None:
     name can be resolved: lsof prints "./thing" for a file opened relative to
     a working directory, and an unresolved relative name would silently hide
     an open handle.
+
+    Names are canonicalised on the way in.  lsof answers with resolved vnode
+    paths, so a file under the per-user TMPDIR arrives as /private/var/...
+    while the candidate the rule built is /var/... (`getconf
+    DARWIN_USER_TEMP_DIR` hands back the symlink).  Matching the two by string
+    would read every open handle in TMPDIR as absent.
     """
     global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_TRIED
     if _OPEN_SNAPSHOT_TRIED:
@@ -419,7 +425,7 @@ def _load_open_snapshot() -> set[str] | None:
                 if base:
                     name = os.path.join(base, name)
             if name.startswith("/"):
-                paths.add(name)
+                paths.add(os.path.realpath(name))
     if not paths:
         # lsof answered but found nothing at all, which on a live Mac is not
         # believable.  Treat it as untrustworthy rather than as "nothing open".
@@ -447,7 +453,10 @@ def open_handles(path: str) -> int:
     """
     snapshot = _load_open_snapshot()
     if snapshot is not None:
-        target = str(path).rstrip("/")
+        # Canonicalised for the same reason the snapshot is: the candidate may
+        # be spelled through a symlink (/var, /tmp) and the handle it names is
+        # not, and a mismatch here reads as "nothing holds this open".
+        target = os.path.realpath(str(path)).rstrip("/")
         prefix = target + "/"
         return sum(1 for n in snapshot if n == target or n.startswith(prefix))
     try:
@@ -1336,6 +1345,14 @@ _DEV_CACHE_PATHS = (
     "Library/pnpm/store",
 )
 
+# Not a dev cache and not ours to sweep.  `Library/Caches/BotFleet/updates`
+# holds the update generations the ask-first inventory reports and never
+# deletes; the catch-all below works on whole directories, so without this it
+# would purge a pending update before BotFleet ever applied it.
+_APP_CACHE_KEEP = (
+    "Library/Caches/BotFleet",
+)
+
 
 def rule_app_caches() -> list[Candidate]:
     """Per-application cache directories that no other rule covered.
@@ -1396,7 +1413,8 @@ def rule_app_caches() -> list[Candidate]:
                     s = str(target)
                     if is_forbidden(s) or has_keep_sentinel(s):
                         continue
-                    if any(s.endswith("/" + dp) or s == str(HOME / dp) for dp in _DEV_CACHE_PATHS):
+                    if any(s.endswith("/" + dp) or s == str(HOME / dp)
+                           for dp in _DEV_CACHE_PATHS + _APP_CACHE_KEEP):
                         continue
                     if newest_file_age_min(s) < IDLE_MIN_OK or open_handles(s):
                         continue

@@ -101,6 +101,14 @@ class TestPressure(unittest.TestCase):
         hits = evaluate_hits(s, None, {"disk_free_crit_gb": 15, "disk_free_warn_gb": 25})
         self.assertTrue(any(h["metric"] == "disk_free_gb" for h in hits))
 
+    def test_a_df_that_did_not_answer_is_not_a_full_disk(self):
+        """A df that fails leaves disk_free_gb at zero, and zero free reads as
+        a critical shortage that would put the tick into pressure cleanup."""
+        s = {"disk_sample_ok": False, "disk_free_gb": 0, "swap_used_pct": 0,
+             "swap_used_gb": 0, "load1": 0}
+        hits = evaluate_hits(s, None, {"disk_free_crit_gb": 15, "disk_free_warn_gb": 25})
+        self.assertFalse([h for h in hits if h["metric"].startswith("disk")], hits)
+
     def test_janitor_modes(self):
         self.assertEqual(janitor_pressure_mode({"load1": 300, "swap_used_pct": 50}, {}), "hard")
         self.assertEqual(janitor_pressure_mode({"load1": 160, "swap_used_pct": 50}, {}), "lean")
@@ -706,6 +714,45 @@ class TestRunOutcome(unittest.TestCase):
                     record, _hits, cleaned = engine.run_watch_tick({}, None)
             self.assertTrue(cleaned)
             self.assertEqual((record.exit_code, record.outcome), expected, statuses)
+
+    def test_the_watch_tick_reports_the_disk_after_its_own_cleanup(self):
+        """The tick samples the disk before it cleans.  Persisting that made the
+        status published moments later still call the disk critical, for the
+        space the run had just freed, until the next tick five minutes on."""
+        from vacuum.engine import VacuumEngine
+
+        def sample(free):
+            return {"disk_sample_ok": True, "disk_free_gb": free, "load1": 0.0,
+                    "swap_used_pct": 0.0, "swap_used_gb": 0.0}
+
+        def run(self, trigger, pressure=False, band="cheap", dry_run=False):
+            rec = RunRecord("p", trigger, started_at=time.time())
+            rec.finish()
+            return rec
+
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine(Path(td), [])
+            state: dict = {}
+            with patch("vacuum.engine.sample_mac", side_effect=[sample(8.0), sample(60.0)]), patch.object(
+                VacuumEngine, "run", run
+            ):
+                _record, _hits, cleaned = engine.run_watch_tick(state, None)
+        self.assertTrue(cleaned)
+        self.assertEqual(state["prev_disk_free_gb"], 60.0)
+
+    def test_a_failed_df_does_not_overwrite_the_last_known_free_space(self):
+        """Zero free is the df answer when df does not answer, and the panel
+        reads that number as a critical disk."""
+        from vacuum.engine import VacuumEngine
+
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine(Path(td), [])
+            state = {"prev_disk_free_gb": 90.0}
+            with patch("vacuum.engine.sample_mac", return_value={
+                    "disk_sample_ok": False, "disk_free_gb": 0, "load1": 0.0,
+                    "swap_used_pct": 0.0, "swap_used_gb": 0.0}):
+                engine.run_watch_tick(state, 90.0)
+        self.assertEqual(state["prev_disk_free_gb"], 90.0)
 
     def test_the_run_failed_banner_follows_failed_steps_so_a_partial_run_still_speaks(self):
         """The decision, written down: a partial run exits 0 and is not a failed run, but a step that fails

@@ -849,6 +849,26 @@ def test_the_snapshot_resolves_a_relative_name_against_the_working_directory(hh)
         assert hh.open_handles("/Users/jay/other") == 0
 
 
+def test_the_snapshot_matches_a_candidate_spelled_through_a_symlink(hh):
+    """lsof answers with resolved vnode paths, so a handle under the per-user
+    TMPDIR arrives as /private/var/... while `getconf DARWIN_USER_TEMP_DIR`
+    hands the rule the /var/... spelling.  Matched as plain strings, every open
+    handle in TMPDIR reads as absent and an in-use scratch dir gets deleted."""
+    _reset_open_snapshot(hh)
+    real = Path(tempfile.mkdtemp(prefix="hhclean-real-"))
+    holder = Path(tempfile.mkdtemp(prefix="hhclean-link-"))
+    link = holder / "var"
+    try:
+        link.symlink_to(real)
+        listing = f"p1\nf3\nn{real}/ssr-abc/thing.bin\n"
+        with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+            assert hh.open_handles(str(link / "ssr-abc")) == 1
+            assert hh.open_handles(str(link / "other")) == 0
+    finally:
+        shutil.rmtree(real, ignore_errors=True)
+        shutil.rmtree(holder, ignore_errors=True)
+
+
 def test_an_untrustworthy_snapshot_falls_back_to_the_per_path_check(hh):
     """lsof answered but found nothing at all, which on a live Mac is not
     believable.  Treat it as untrustworthy rather than as 'nothing open'."""
@@ -894,6 +914,24 @@ def test_app_caches_leaves_a_busy_cache_alone(hh):
         (cache / "blob.bin").write_bytes(b"x" * 1024)
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=1), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_the_botfleet_update_generations_alone(hh):
+    """The ask-first inventory reports BotFleet's update generations and never
+    deletes them.  This rule works on whole directories, so without a skip it
+    would purge a pending update before BotFleet ever applied it."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        gens = home / "Library" / "Caches" / "BotFleet" / "updates" / "gen-2"
+        gens.mkdir(parents=True)
+        (gens / "app.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
              mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
             assert hh.rule_app_caches() == []

@@ -222,7 +222,11 @@ class VacuumEngine:
     ) -> tuple[RunRecord, list[dict[str, Any]], bool]:
         sample = sample_mac()
         hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
-        rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
+        # Only a sample that really came back from df is worth keeping.  A df
+        # that failed reads as zero free, and writing that here would report a
+        # critical shortage the disk does not have until the next tick lands.
+        if sample.get("disk_sample_ok", True):
+            rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
         record = RunRecord(
             run_id=uuid.uuid4().hex[:12],
             trigger=TriggerKind.WATCH,
@@ -253,6 +257,14 @@ class VacuumEngine:
                         pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full", dry_run=dry_run)
                         record.steps.extend(pressure_record.steps)
                         rw_state["last_clean_at"] = now
+                        if not dry_run:
+                            # The sample above is the disk as it was BEFORE the
+                            # cleanup.  Keeping it makes the status this same
+                            # tick publishes report the shortage the run just
+                            # resolved, so measure the disk again afterwards.
+                            after = sample_mac()
+                            if after.get("disk_sample_ok", True):
+                                rw_state["prev_disk_free_gb"] = after.get("disk_free_gb")
                 record.finish(summary="watch tick")
         except LockHeld as exc:
             record.steps.append(
