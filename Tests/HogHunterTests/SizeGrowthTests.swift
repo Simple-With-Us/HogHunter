@@ -113,4 +113,47 @@ final class SizeGrowthTests: XCTestCase {
         XCTAssertEqual(store.rows.first?.isUnavailable, true)
         XCTAssertNil(store.rows.first?.percentChange)
     }
+    func testLaneRootsFollowOnlyLayoutLinksAndDeduplicateAliases() throws {
+        let manager = FileManager.default
+        let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: fixture) }
+        let lanes = fixture.appendingPathComponent("local/lanes")
+        let external = fixture.appendingPathComponent("external/Lanes/Repo")
+        let canonicalLane = external.appendingPathComponent("codex-task")
+        let legacy = lanes.appendingPathComponent("legacy")
+        try manager.createDirectory(at: canonicalLane, withIntermediateDirectories: true)
+        try manager.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: lanes.appendingPathComponent("Repo"), withDestinationURL: external)
+        try manager.createSymbolicLink(at: legacy.appendingPathComponent("alias"), withDestinationURL: canonicalLane)
+        try manager.createSymbolicLink(at: lanes.appendingPathComponent("duplicate"), withDestinationURL: external)
+        try manager.createSymbolicLink(at: legacy.appendingPathComponent("local-alias"), withDestinationURL: legacy)
+        try manager.createSymbolicLink(at: lanes.appendingPathComponent("loop"), withDestinationURL: lanes)
+        XCTAssertEqual(DirectoryUsageStore.measurementRoots(lanes.path, includeLaneLinks: true),
+                       [lanes.path, external.path])
+        XCTAssertEqual(DirectoryUsageStore.measurementRoots(lanes.path, includeLaneLinks: false), [lanes.path])
+    }
+
+    func testDirectoryMeasurementValidatesAllRootsAndOverflow() {
+        XCTAssertEqual(DirectoryUsageStore.measuredBytes("2\t/local/lanes\n3\t/external/Repo\n",
+                                                        roots: ["/local/lanes", "/external/Repo"]), 5120)
+        XCTAssertNil(DirectoryUsageStore.measuredBytes("2\t/local/lanes\n", roots: ["/local/lanes", "/external/Repo"]))
+        XCTAssertNil(DirectoryUsageStore.measuredBytes("2\t/wrong\n", roots: ["/local/lanes"]))
+        let large = Int64.max / 1024
+        XCTAssertNil(DirectoryUsageStore.measuredBytes("\(large)\t/a\n\(large)\t/b\n", roots: ["/a", "/b"]))
+    }
+
+    @MainActor
+    func testDirectoryRowPreservesLogicalDisplayPath() throws {
+        let manager = FileManager.default
+        let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: fixture) }
+        let target = fixture.appendingPathComponent("target")
+        let link = fixture.appendingPathComponent("lanes")
+        try manager.createDirectory(at: target, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: link, withDestinationURL: target)
+        let store = DirectoryUsageStore(history: SizeGrowthHistory(fileURL: nil), candidates: [("Coding Lanes", link.path)], probe: { _ in nil })
+        XCTAssertEqual(store.rows.first?.displayPath, link.path)
+        XCTAssertEqual(store.rows.first?.path, target.path)
+    }
+
 }

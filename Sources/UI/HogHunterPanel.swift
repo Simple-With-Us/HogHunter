@@ -323,6 +323,7 @@ struct HogHunterPanel: View {
                 }
                 pillRow(thermalPills)
                 diskCard
+                MountedDriveUsageView()
                 pillRow(memoryPills)
             }
             .frame(width: Self.contentWidth * 0.48)

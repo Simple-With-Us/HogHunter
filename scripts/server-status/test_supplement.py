@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,6 +11,24 @@ spec.loader.exec_module(module)
 
 
 class SupplementTests(unittest.TestCase):
+    def test_collector_and_launcher_do_not_make_tools_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            for pid in (os.getpid(), os.getppid()):
+                path = proc / str(pid)
+                path.mkdir(exist_ok=True)
+                (path / 'comm').write_text('python3')
+            names, complete = module.process_inventory(proc)
+            self.assertEqual(names, [])
+            self.assertTrue(complete)
+
+    def test_shellular_helper_failure_preserves_verified_service_state(self):
+        output = module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
+                                   lambda _: 'running', lambda _: 'unknown')
+        row = next(row for row in output['tool_statuses'] if row['id'] == 'shellular')
+        self.assertEqual(row['state'], 'running')
+        self.assertEqual(row['count'], 1)
+
     def test_preserves_existing_database_device_and_source_timestamp(self):
         source = dict(generated_at='2026-01-01T00:00:00Z', host='fixture',
                       devices={'root': {'free_bytes': 123}}, app_dbs={'app': 456})

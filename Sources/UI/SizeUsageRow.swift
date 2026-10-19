@@ -48,7 +48,7 @@ struct CodingDirectoriesView: View {
                 if store.isRefreshing { ProgressView().controlSize(.mini) }
             }
             ForEach(store.rows) { row in
-                SizeUsageRow(name: row.title == "Derived Data" ? row.title : displayPath(row.path), bytes: row.bytes,
+                SizeUsageRow(name: row.title == "Derived Data" ? row.title : displayPath(row.displayPath), bytes: row.bytes,
                              percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10)
                     .help(row.path)
             }

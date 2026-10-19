@@ -42,6 +42,8 @@ def process_inventory(proc=Path('/proc')):
     for entry in entries:
         if not entry.name.isdigit():
             continue
+        if int(entry.name) in {os.getpid(), os.getppid()}:
+            continue  # The collector and its launcher are not watched tools.
         try:
             name = (entry / 'comm').read_text().strip()
             # Kernel comm truncates names.  The symlink is executable identity only.
@@ -166,8 +168,10 @@ def supplement(snapshot, home, measure=directory_bytes, inventory=None, services
                 row['count'] = 1 if state == 'running' else 0
     for row in rows:
         if row['id'] == 'shellular':
-            row['state'] = shellular(home)
-            row['count'] = 1 if row['state'] == 'running' else 0
+            state = shellular(home)
+            if state in {'running', 'stopped'} or row['state'] not in {'running', 'stopped'}:
+                row['state'] = state
+                row['count'] = 1 if state == 'running' else 0
     result['tool_statuses'] = rows
     return result
 

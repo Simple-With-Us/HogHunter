@@ -48,6 +48,25 @@ final class StorageGrowthLayoutTests: XCTestCase {
         try render(row, size: CGSize(width: 320, height: 110), name: "hh165-size-rows")
     }
 
+    func testExternalAndBackupDrivesFitCompactStorageWidth() async throws {
+        let store = MountedDriveStore(probe: {
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 2_500_000_000),
+             MountedDriveCandidate(name: "Time Machine", path: "/Volumes/Time Machine", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 75_000_000_000)]
+        })
+        await store.refresh()
+        let width = HogHunterPanel.contentWidth * 0.48
+        let view = MountedDriveUsageView(store: store).frame(width: width)
+            .background(Color(nsColor: .windowBackgroundColor))
+        let host = NSHostingView(rootView: view)
+        host.appearance = NSAppearance(named: .aqua)
+        XCTAssertLessThanOrEqual(host.fittingSize.width, width + 1)
+        try render(host, size: CGSize(width: width, height: 170), name: "hh165-external-drives")
+    }
+
     private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {
         host.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
