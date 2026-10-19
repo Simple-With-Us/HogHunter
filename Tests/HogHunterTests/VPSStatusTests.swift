@@ -204,6 +204,52 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertFalse(store.isLoading)
     }
 
+    /// The store owns its polling: setting a host starts it, clearing the
+    /// host stops it, and nothing a view does can leave it stuck.  A view's
+    /// lifetime is not a reliable signal (a panel that is hidden without
+    /// being torn down never says so), so no view hands out shares.
+    @MainActor
+    func testTheStoreOwnsItsPolling() {
+        let store = VPSStatusStore(initialHost: "", fetcher: { _ in
+            throw NSError(domain: "test", code: 1, userInfo: nil)
+        })
+        XCTAssertFalse(store.isPolling, "no host, no polling")
+        store.setHost("coolify")
+        XCTAssertTrue(store.isPolling, "a host starts the readings")
+        store.setHost("coolify")
+        XCTAssertTrue(store.isPolling, "setting the same host again changes nothing")
+        store.setHost("")
+        XCTAssertFalse(store.isPolling, "clearing the host stops the readings")
+    }
+
+    /// The headline is the one-line answer the panel strip and the Maintain
+    /// line are built from: the host, then each number with its own severity.
+    func testTheHeadlineCarriesEachNumberWithItsOwnSeverity() throws {
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: sampleJSON)
+        let headline = try XCTUnwrap(snapshot.headline)
+        XCTAssertEqual(headline.host, "fleet-hetzner-nbg1")
+        XCTAssertEqual(headline.cpuText, "25%")
+        XCTAssertEqual(headline.cpuSeverity, .calm)
+        XCTAssertEqual(headline.memoryText, "28%")
+        XCTAssertEqual(headline.memorySeverity, .calm)
+        // The root disk: 74 GB (69 GiB) free of an estimated 301 GiB.
+        XCTAssertEqual(headline.diskText, "77% used")
+        XCTAssertEqual(headline.diskSeverity, .elevated, "three quarters spent is worth a colour")
+    }
+
+    /// A snapshot with nothing in it still names its host, and nothing else.
+    func testTheHeadlineOfAnEmptySnapshotIsTheHostAlone() throws {
+        let json = """
+        {"generated_at": "2026-10-18T19:15:03Z", "host": "empty-host", "devices": {}}
+        """.data(using: .utf8)!
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: json)
+        let headline = try XCTUnwrap(snapshot.headline)
+        XCTAssertEqual(headline.host, "empty-host")
+        XCTAssertNil(headline.cpuText)
+        XCTAssertNil(headline.memoryText)
+        XCTAssertNil(headline.diskText)
+    }
+
     @MainActor
     func testMaintainStoreVPSStoreIntegration() async throws {
         let tempDir = FileManager.default.temporaryDirectory
