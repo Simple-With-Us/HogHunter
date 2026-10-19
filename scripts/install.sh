@@ -121,7 +121,7 @@ SPARKLE_FEED_URL="https://github.com/Simple-With-Us/HogHunter/releases/latest/do
 # Same shape as scripts/mac-release-build.sh: an overridable default so the
 # release path and the local path cannot drift apart.  This is Sparkle's PUBLIC
 # EdDSA key - it verifies a downloaded archive, it cannot sign one.
-SPARKLE_PUBLIC_ED_KEY="${HOGHUNTER_SPARKLE_PUBLIC_KEY:-8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE=}"
+SPARKLE_PUBLIC_ED_KEY="${HOGHUNTER_SPARKLE_PUBLIC_KEY:-8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE=}"  # gitleaks:allow
 
 # Resolved before the Sparkle gate below, which needs the answer.  Kept in one
 # place so the signing block further down cannot disagree with it.
