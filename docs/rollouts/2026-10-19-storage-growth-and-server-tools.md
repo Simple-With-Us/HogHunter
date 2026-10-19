@@ -22,9 +22,9 @@ The original 15-minute cron entry now calls a wrapper holding one writer lock ac
 
 ## Verification
 
-- Full local macOS suite: 681 passed, no failures.
+- Full local macOS suite: 688 passed, no failures.
 - Final focused history/store/layout checks passed after tightening baseline age and moving imports off the main actor.
-- Server supplement: 12 synthetic Python checks passed.
+- Server supplement: 21 synthetic Python checks passed.
 - Native AppKit renders inspected for compact rows, readable suffixes, visible directory rows, tool dots, and removal of the explanatory subtitle.
 - Server wrapper activation: original watch preserved, same cron cadence, collector exit 0, 582 database observations, 13 directory rows, and 12 tool states.
 
