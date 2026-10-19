@@ -84,17 +84,29 @@ env ASC_KEY_ID=ENVKEY0001 ASC_ISSUER_ID=env-issuer ASC_KEY_PATH="${tmp}/env-key.
 # 2b. An env key id that is NOT the /asc one never gets the /asc key:  its own .p8 comes from
 # /authkey-<id>-p8, and /asc ASC_KEY_P8 is not requested.
 : > "$FAKE_LOG"
-env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=OTHERKEY01 bash -c '
+env -u ASC_KEY_PATH ASC_KEY_ID=OTHERKEY01 ASC_ISSUER_ID=issuer-other bash -c '
   set -euo pipefail
   source "'"$funcs"'"
   load_secrets
   [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == OTHERKEY01 ]]
+  [[ "$ASC_ISSUER_ID" == issuer-other ]]
   grep -q OTHERKEYMATERIAL "$ASC_KEY_PATH"
   ! grep -q SYNTHETIC$ "$ASC_KEY_PATH"
   cleanup_asc_tmp
 ' || fail "env key id different from /asc was not given its own key"
 grep -q '^AUTHKEY_OTHERKEY01 /authkey-otherkey01-p8$' "$FAKE_LOG" || fail "did not ask the per-key folder"
 if grep -q '^ASC_KEY_P8 ' "$FAKE_LOG"; then fail "mixed an env key id with the /asc key"; fi
+
+# 2b2. An env key id that is not the /asc one with NO env issuer fails closed:  the /asc issuer
+# is never paired with another key's .p8.
+: > "$FAKE_LOG"
+env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=OTHERKEY01 bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+  [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
+' || fail "mixed the /asc issuer with another key"
+if grep -q '^ASC_ISSUER_ID ' "$FAKE_LOG"; then fail "asked /asc for an issuer for a different key id"; fi
 
 # 2c. An env key id equal to the /asc one uses the /asc key.
 : > "$FAKE_LOG"
@@ -110,7 +122,7 @@ grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "did not ask /asc ASC_KEY_P8"
 
 # 2d. An env key id with no key material anywhere fails closed (no api_key mode).
 : > "$FAKE_LOG"
-env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=NOSUCHKEY0 bash -c '
+env -u ASC_KEY_PATH ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer bash -c '
   set -euo pipefail
   source "'"$funcs"'"
   load_secrets

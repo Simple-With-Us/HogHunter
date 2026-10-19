@@ -80,14 +80,21 @@ test("an env key id equal to the /asc one is served from /asc", async () => {
   assert.equal(r.kid, "ASCKEY0001");
 });
 
-test("an env key id that is not the /asc one gets its own .p8, never the /asc key", async () => {
-  const r = await run({ ASC_KEY_ID: "OTHERKEY01" });
+test("an env key id that is not the /asc one gets its own .p8 and its own issuer, never the /asc pair", async () => {
+  const r = await run({ ASC_KEY_ID: "OTHERKEY01", ASC_ISSUER_ID: "issuer-other" });
   assert.equal(r.code, 0);
   assert.equal(r.kid, "OTHERKEY01");
+  assert.equal(r.iss, "issuer-other");
+});
+
+test("an env key id that is not the /asc one with no env issuer fails closed", async () => {
+  const r = await run({ ASC_KEY_ID: "OTHERKEY01" });
+  assert.notEqual(r.code, 0);
+  assert.equal(r.kid, null);
 });
 
 test("an env key id with no key material anywhere fails closed", async () => {
-  const r = await run({ ASC_KEY_ID: "NOSUCHKEY0" });
+  const r = await run({ ASC_KEY_ID: "NOSUCHKEY0", ASC_ISSUER_ID: "any-issuer" });
   assert.notEqual(r.code, 0);
   assert.equal(r.kid, null);
 });

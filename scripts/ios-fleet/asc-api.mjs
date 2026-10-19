@@ -53,7 +53,8 @@ function resolveAscCredentials() {
   if (!keyId) {
     keyId = ascKeyId;
     issuerId = fleetSecretsGet("ASC_ISSUER_ID", "/asc");
-  } else if (!issuerId) {
+  } else if (!issuerId && keyId === ascKeyId) {
+    // env named the /asc key itself:  its issuer is the /asc one
     issuerId = fleetSecretsGet("ASC_ISSUER_ID", "/asc");
   }
   if (!keyId || !issuerId) {

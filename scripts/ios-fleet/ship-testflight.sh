@@ -214,7 +214,8 @@ load_secrets() {
   if [[ -z "$kid" ]]; then
     kid="$fkid"
     iss="$(fs_get ASC_ISSUER_ID /asc)" || iss=""
-  elif [[ -z "$iss" ]]; then
+  elif [[ -z "$iss" && "$kid" == "$fkid" ]]; then
+    # env named the /asc key itself:  its issuer is the /asc one
     iss="$(fs_get ASC_ISSUER_ID /asc)" || iss=""
   fi
   if [[ -z "$kid" || -z "$iss" ]]; then
