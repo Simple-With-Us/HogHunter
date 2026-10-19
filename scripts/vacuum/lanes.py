@@ -258,7 +258,9 @@ def run_doctor_process(argv: list, timeout: float) -> "subprocess.CompletedProce
 @dataclass
 class LaneReport:
     """The doctor's report after the gates that apply to every use.  ok is False when ANY of them fails;
-    gh_ok is a separate gate because only removal (not dependency folders) needs the PR lookups.
+    gh_ok and gh_reason record whether EVERY repository's PR lookup came back.  They are facts about the
+    report, not a gate: a candidate is judged on its own repository's lookup (report_gate_retire), so one
+    failed lookup does not throw away the rest of the report.
     cached is True when this came from the on-disk cache after a fresh run failed; generated_at_text
     still names the report's own generation time, so the log shows how old the evidence is."""
 
@@ -1225,10 +1227,13 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
     if not report.ok:
         return LaneScan(False, report.reason, doctor_seconds=report.seconds)
     scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds)
-    if not report.gh_ok:
-        scan.ok = False
-        scan.reason = report.gh_reason
-        return scan
+    # The doctor's overall gh status is NOT a gate here.  It says whether every
+    # repository's PR lookup came back, and one failed lookup (a retired repo,
+    # a network blip) used to throw away the whole report, so a single bad
+    # repository stopped every lane on the machine from being retired.  The
+    # precise gate already exists per candidate: report_gate_retire refuses a
+    # candidate whose OWN repository's lookup failed, and a candidate with no
+    # merged-PR evidence has none to trust either way.
     listed = report.data.get("cleaner_candidates")
     if not isinstance(listed, list):
         scan.ok = False

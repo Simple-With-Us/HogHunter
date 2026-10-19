@@ -488,10 +488,15 @@ class TestReportGates(unittest.TestCase):
         _rep, scan = self.scan({}, text="[1, 2, 3]")
         self.assert_nothing(scan, "not a JSON object")
 
-    def test_gh_not_ok_yields_nothing(self) -> None:
+    def test_one_failed_gh_lookup_does_not_throw_the_whole_report_away(self) -> None:
+        """The doctor's overall gh status says whether EVERY repository's PR
+        lookup came back.  One failed lookup (a retired repo, a network blip)
+        used to stop every lane on the machine from being retired, even the
+        ones in repositories whose lookup was fine."""
         for status in ("failed", "partial", "skipped"):
             _rep, scan = self.scan(self.sb.report([self.row], gh=status))
-            self.assert_nothing(scan, "gh status")
+            self.assertTrue(scan.ok, status)
+            self.assertEqual([c.path for c in scan.choices], [str(self.lane)], status)
 
     def test_gh_repo_not_ok_refuses_that_candidate(self) -> None:
         _rep, scan = self.scan(self.sb.report([self.row], gh_repos={REPO_SLUG: "failed"}))
