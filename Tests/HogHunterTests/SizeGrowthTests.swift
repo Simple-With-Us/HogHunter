@@ -44,9 +44,12 @@ final class SizeGrowthTests: XCTestCase {
         let history = SizeGrowthHistory(fileURL: nil, now: { now })
         history.record(host: "a", metric: "size", path: "distant", bytes: 100, sampledAt: now.addingTimeInterval(-22 * 3600))
         history.record(host: "a", metric: "size", path: "distant", bytes: 120, sampledAt: now)
+        history.record(host: "a", metric: "size", path: "shortDay", bytes: 100, sampledAt: now.addingTimeInterval(-23 * 3600))
+        history.record(host: "a", metric: "size", path: "shortDay", bytes: 120, sampledAt: now)
         history.record(host: "a", metric: "size", path: "stale", bytes: 100, sampledAt: now.addingTimeInterval(-26 * 3600))
         history.record(host: "a", metric: "size", path: "stale", bytes: 120, sampledAt: now.addingTimeInterval(-2 * 3600))
         XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "distant"))
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "shortDay"))
         XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "stale"))
     }
 

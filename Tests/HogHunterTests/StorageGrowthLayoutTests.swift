@@ -25,7 +25,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         let history = SizeGrowthHistory(fileURL: nil, now: { now })
         let store = VPSStatusStore(initialHost: "fixture", fetcher: { _ in snapshot }, history: history)
         store.fetch(force: true)
-        for _ in 0..<100 where store.isLoading { await Task.yield() }
+        for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(store.databasePercentChange(key: "st_app_db") ?? 0, 8, accuracy: 0.01)
 
         let width = HogHunterPanel.contentWidth

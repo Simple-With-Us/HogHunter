@@ -107,18 +107,21 @@ final class VPSStatusStore: ObservableObject {
             }
 
             guard let self else { return }
-            self.isLoading = false
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.configuredHost == host else { return }
             switch result {
             case .success(let snap):
-                guard self.configuredHost == host else { return }
-                self.recordSizes(snap, configuredHost: host)
+                let history = self.history
+                await Task.detached(priority: .utility) {
+                    Self.recordSizes(snap, configuredHost: host, history: history)
+                }.value
+                guard !Task.isCancelled, self.configuredHost == host else { return }
                 self.snapshot = snap
                 self.errorMessage = nil
                 self.lastFetchDate = Date()
             case .failure(let err):
                 self.errorMessage = err.localizedDescription
             }
+            self.isLoading = false
         }
     }
 
@@ -126,7 +129,7 @@ final class VPSStatusStore: ObservableObject {
         configuredHost + "|" + source.host
     }
 
-    private func recordSizes(_ source: VPSStatusSnapshot, configuredHost: String) {
+    nonisolated private static func recordSizes(_ source: VPSStatusSnapshot, configuredHost: String, history: SizeGrowthHistory) {
         guard let sampledAt = source.generatedAtDate else { return }
         let host = configuredHost + "|" + source.host
         func observations(_ samples: [VPSSizeSample]?, path: String, bytes: Int64) -> [SizeGrowthSample] {

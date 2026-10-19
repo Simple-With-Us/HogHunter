@@ -27,7 +27,7 @@ final class VPSSizeGrowthTests: XCTestCase {
                                          directorySamples: [VPSSizeSample(path: "/fixture/Code", bytes: 100, sampledAt: now.addingTimeInterval(-86_400).timeIntervalSince1970)])
         let store = VPSStatusStore(initialHost: "fixture", fetcher: { _ in snapshot }, history: history)
         store.fetch(force: true)
-        for _ in 0..<100 where store.isLoading { await Task.yield() }
+        for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(store.databasePercentChange(key: "app"), 50)
         XCTAssertEqual(store.directoryPercentChange(path: "/fixture/Code"), 100)
         XCTAssertNil(history.latest(host: "other|server", metric: "database", path: "app"))

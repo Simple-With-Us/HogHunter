@@ -18,7 +18,7 @@ final class SizeGrowthHistory: @unchecked Sendable {
     private let now: () -> Date
     private let retention: TimeInterval = 48 * 3600
     private let bucket: TimeInterval = 15 * 60
-    private let tolerance: TimeInterval = 60 * 60
+    private let tolerance: TimeInterval = 15 * 60
 
     init(fileURL: URL? = SizeGrowthHistory.defaultURL, now: @escaping () -> Date = Date.init) {
         self.fileURL = fileURL
@@ -108,7 +108,11 @@ final class SizeGrowthHistory: @unchecked Sendable {
               let latest = samples.last,
               now().timeIntervalSince(latest.sampledAt) <= 3600 else { return nil }
         let target = latest.sampledAt.addingTimeInterval(-24 * 3600)
-        guard let baseline = samples.dropLast().filter({ abs($0.sampledAt.timeIntervalSince(target)) <= tolerance })
+        guard let baseline = samples.dropLast().filter({
+            // Allow timestamp precision drift, rather than calling 23 hours a full day.
+            latest.sampledAt.timeIntervalSince($0.sampledAt) >= 24 * 3600 - 60
+                && abs($0.sampledAt.timeIntervalSince(target)) <= tolerance
+        })
             .min(by: { abs($0.sampledAt.timeIntervalSince(target)) < abs($1.sampledAt.timeIntervalSince(target)) }),
               baseline.bytes > 0 else { return nil }
         return (Double(latest.bytes) - Double(baseline.bytes)) / Double(baseline.bytes) * 100
