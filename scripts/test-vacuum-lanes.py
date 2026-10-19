@@ -887,7 +887,36 @@ class TestRecheck(unittest.TestCase):
         row = self.sb.row(self.lane, realpath=str(link), path=str(link))
         scan = self.removable([row])
         self.assertEqual(scan.choices, [])
-        self.assertIn("resolves somewhere else", refused_reason(scan, link))
+        # The lane itself is a symlink, so it is not a plain directory.  The
+        # guard that used to catch it (the path resolving elsewhere) now
+        # compares the two resolved forms, and both point at the same place.
+        self.assertIn("not a plain directory", refused_reason(scan, link))
+
+    def test_lane_behind_a_symlinked_parent_is_not_refused(self) -> None:
+        """The fleet keeps ~/apps/lanes/<Repo> on the external disk behind a
+        symlink, and the doctor reports the ~/apps/lanes spelling without
+        resolving it.  Such a lane must still be removable, or every lane on
+        the external drive is stuck for good."""
+        external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
+        self.addCleanup(shutil.rmtree, str(external), True)
+        link = self.sb.lanes_root / "external"
+        link.symlink_to(external)
+        lane = link / "claude-external"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/external", str(lane))
+        self.sb.push(lane)
+        # The doctor reports the symlinked spelling, not the real one.
+        row = self.sb.row(lane, realpath=str(lane), path=str(lane))
+        scan = self.removable([row])
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+        self.assertEqual(scan.choices[0].path, str(lane))
+
+    def test_a_lane_that_moved_to_another_repository_is_still_refused(self) -> None:
+        """The point of the guard: the lane must still belong to the repository
+        the doctor saw, whatever a symlinked parent does."""
+        row = self.sb.row(self.lane, parent_repo=str(self.sb.root / "some-other-repo"))
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [])
+        self.assertIn("different repository", refused_reason(scan, self.lane))
 
     def test_dirty_report_facts_refuse(self) -> None:
         for over, needle in (
