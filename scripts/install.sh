@@ -118,7 +118,10 @@ INFO_PLIST="$APP_PATH/Contents/Info.plist"
 # working copy under the developer — losing the very build they were testing.
 # Gate the feed on the same conditions that make it legitimate.
 SPARKLE_FEED_URL="https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml"
-SPARKLE_PUBLIC_ED_KEY="8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE="
+# Same shape as scripts/mac-release-build.sh: an overridable default so the
+# release path and the local path cannot drift apart.  This is Sparkle's PUBLIC
+# EdDSA key — it verifies a downloaded archive, it cannot sign one.
+SPARKLE_PUBLIC_ED_KEY="${HOGHUNTER_SPARKLE_PUBLIC_KEY:-8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE=}"
 
 # Resolved before the Sparkle gate below, which needs the answer.  Kept in one
 # place so the signing block further down cannot disagree with it.
