@@ -83,9 +83,13 @@ function materializeP8(pem) {
 }
 
 // Infisical Fleet-OPS through `fleet-secrets get` (AFC-359).  "" when absent.
-// FLEET_SECRETS_BIN overrides the binary (tests).  Values stay in memory.
+// FLEET_SECRETS_BIN (ship-testflight.sh, the sh test) then FLEET_SECRETS (the js
+// test), then ~/.local/bin, then whatever "fleet-secrets" is on PATH.  Values stay
+// in memory.
 function fleetSecretsGet(name, folder) {
-  const bin = process.env.FLEET_SECRETS_BIN || join(homedir(), ".local", "bin", "fleet-secrets");
+  const localBin = join(homedir(), ".local", "bin", "fleet-secrets");
+  const bin = process.env.FLEET_SECRETS_BIN || process.env.FLEET_SECRETS
+    || (existsSync(localBin) ? localBin : "fleet-secrets");
   try {
     return execFileSync(bin, ["get", name, "--path", folder], {
       encoding: "utf8",
@@ -110,7 +114,7 @@ function resolveCredential() {
   // 1) Already-exported ASC_* (DealDex's workflow does this).
   const envKeyId = String(process.env.ASC_KEY_ID || "").trim();
   const envIssuer = String(process.env.ASC_ISSUER_ID || "").trim();
-  const envKeyPath = String(process.env.ASC_KEY_PATH || "").trim();
+  const envKeyPath = String(process.env.ASC_KEY_PATH || "").replace(/^~(?=\/)/, homedir()).trim();
   if (envKeyId && envIssuer && envKeyPath && existsSync(envKeyPath)) {
     const got = fromFile(envKeyId, envIssuer, envKeyPath, "ASC_KEY_* environment");
     if (got) return got;
@@ -136,11 +140,17 @@ function resolveCredential() {
   //    has them) and the PEM as ASC_KEY_P8 when the key id is the /asc one;  another
   //    key id falls back to AUTHKEY_<KEY_ID> in /authkey-<key id lower case>-p8.
   //    Kept in memory, never written to disk.
-  const infKeyId = envKeyId || fleetSecretsGet("ASC_KEY_ID", "/asc").trim();
-  const infIssuer = envIssuer || fleetSecretsGet("ASC_ISSUER_ID", "/asc").trim();
+  //
+  //    The issuer belongs to the key id:  the /asc issuer is only borrowed when
+  //    there is no env key id, or when the env key id IS the /asc one.  An env
+  //    key id that differs gets its OWN issuer or none -- pairing it with the
+  //    /asc issuer is the bug eaae2e8 fixed, and it fails closed below.
+  const ascKeyId = fleetSecretsGet("ASC_KEY_ID", "/asc").trim();
+  const infKeyId = envKeyId || ascKeyId;
+  const infIssuer = envIssuer || (infKeyId === ascKeyId ? fleetSecretsGet("ASC_ISSUER_ID", "/asc").trim() : "");
   if (/^[A-Za-z0-9]+$/.test(infKeyId) && infIssuer) {
     let pem = "";
-    if (infKeyId === fleetSecretsGet("ASC_KEY_ID", "/asc").trim()) pem = fleetSecretsGet("ASC_KEY_P8", "/asc");
+    if (infKeyId === ascKeyId) pem = fleetSecretsGet("ASC_KEY_P8", "/asc");
     if (!pem) pem = fleetSecretsGet(`AUTHKEY_${infKeyId}`, `/authkey-${infKeyId.toLowerCase()}-p8`);
     if (pem) {
       if (!pem.endsWith("\n")) pem += "\n";
@@ -189,7 +199,13 @@ function signJwt({ keyId, issuerId, privateKeyPem }) {
 // violation (AGENT-SYNC forbids agent names in release notes). Offending
 // bullets are dropped whole -- never word-deleted in place, which yields
 // mangled copy like "Fix:  lane".
-const AGENT_NAMES = "grok|claude|monet|codex|antigravity|cursor|kimi|fable|gemini|deepseek|opus|sonnet|haiku";
+// HogHunter vendor patch (HH-157): also deny the seat names that appear in this
+// repo's lanes and commit subjects (minimax, clutch, opencode), and the short
+// bracketed seat tags below.  Bare two-letter tags stay out of the word list
+// because they fire on ordinary English ("mm", "ma", "fx"); the bracketed form
+// is unambiguous.
+const AGENT_NAMES = "grok|claude|monet|codex|antigravity|cursor|kimi|fable|gemini|deepseek|opus|sonnet|haiku|minimax|clutch|opencode";
+const SEAT_TAGS = "ag|mm|mc|ma|fx|dsh|jet|grok-web";
 // Bracketed agent markers, stripped ANYWHERE in the subject -- not only at
 // position 0. The fleet's actual convention puts the tag at the END, e.g.
 // "fix(ios): set App Category to Finance (#1030) [AG] (#1264)". Measured
@@ -199,11 +215,11 @@ const AGENT_NAMES = "grok|claude|monet|codex|antigravity|cursor|kimi|fable|gemin
 // the stated assumption that the strip covered it. It did not: every one of
 // those 48 subjects would have published "[AG]" straight to TestFlight, which
 // AGENT-SYNC's STRICT no-agent-names rule names explicitly.
-const AGENT_MARKER = new RegExp(`\\[\\s*(?:ag|${AGENT_NAMES})\\s*\\]`, "gi");
+const AGENT_MARKER = new RegExp(`\\[\\s*(?:${SEAT_TAGS}|${AGENT_NAMES})\\s*\\]`, "gi");
 // Bare "AG" stays OUT of the word-boundary deny-list -- as a naked token it
 // fires on ordinary English and on tickers. The bracketed form is unambiguous,
 // so the final rendered-body assertion tests for that form specifically.
-const AGENT_NAME_DENY = new RegExp(`(?:\\b(?:${AGENT_NAMES})\\b|\\[\\s*ag\\s*\\])`, "i");
+const AGENT_NAME_DENY = new RegExp(`(?:\\b(?:${AGENT_NAMES})\\b|\\[\\s*(?:${SEAT_TAGS})\\s*\\])`, "i");
 
 function centralTimestamp(now = new Date()) {
   // AGENT-SYNC template: "Wed, Aug 12, 2026 at 1:15am" -- the owner's clock
