@@ -139,89 +139,99 @@ final class VPSStatusStore: ObservableObject {
                 throw CocoaError(.fileWriteUnknown)
             }
 
-            return try await withCheckedThrowingContinuation { continuation in
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-                proc.arguments = [
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=5",
-                    "-o", "ServerAliveInterval=3",
-                    "-o", "ServerAliveCountMax=2",
-                    trimmedHost,
-                    "cat /root/vps-storage-status.json"
-                ]
-                proc.standardOutput = outHandle
-                proc.standardError = errHandle
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = [
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=3",
+                "-o", "ServerAliveCountMax=2",
+                trimmedHost,
+                "cat /root/vps-storage-status.json"
+            ]
 
-                let resumeLock = NSLock()
-                var hasResumed = false
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    proc.standardOutput = outHandle
+                    proc.standardError = errHandle
 
-                let timeoutTimer = DispatchSource.makeTimerSource()
-                timeoutTimer.schedule(deadline: .now() + 15.0)
-                timeoutTimer.setEventHandler {
-                    if proc.isRunning {
-                        proc.terminate()
+                    let resumeLock = NSLock()
+                    var hasResumed = false
+
+                    let timeoutTimer = DispatchSource.makeTimerSource()
+                    timeoutTimer.schedule(deadline: .now() + 15.0)
+                    timeoutTimer.setEventHandler {
+                        if proc.isRunning {
+                            proc.terminate()
+                        }
                     }
-                }
-                timeoutTimer.resume()
+                    timeoutTimer.resume()
 
-                proc.terminationHandler = { finished in
-                    timeoutTimer.cancel()
-                    try? outHandle.close()
-                    try? errHandle.close()
-                    let outData = (try? Data(contentsOf: outURL)) ?? Data()
-                    let errData = (try? Data(contentsOf: errURL)) ?? Data()
-                    try? FileManager.default.removeItem(at: outURL)
-                    try? FileManager.default.removeItem(at: errURL)
+                    proc.terminationHandler = { finished in
+                        timeoutTimer.cancel()
+                        try? outHandle.close()
+                        try? errHandle.close()
+                        let outData = (try? Data(contentsOf: outURL)) ?? Data()
+                        let errData = (try? Data(contentsOf: errURL)) ?? Data()
+                        try? FileManager.default.removeItem(at: outURL)
+                        try? FileManager.default.removeItem(at: errURL)
 
-                    resumeLock.lock()
-                    if hasResumed {
+                        resumeLock.lock()
+                        if hasResumed {
+                            resumeLock.unlock()
+                            return
+                        }
+                        hasResumed = true
                         resumeLock.unlock()
-                        return
-                    }
-                    hasResumed = true
-                    resumeLock.unlock()
 
-                    if finished.terminationStatus == 0 {
-                        do {
-                            let decoder = JSONDecoder()
-                            let snapshot = try decoder.decode(VPSStatusSnapshot.self, from: outData)
-                            continuation.resume(returning: snapshot)
-                        } catch {
+                        if finished.terminationStatus == 0 {
+                            do {
+                                let decoder = JSONDecoder()
+                                let snapshot = try decoder.decode(VPSStatusSnapshot.self, from: outData)
+                                continuation.resume(returning: snapshot)
+                            } catch {
+                                continuation.resume(throwing: NSError(
+                                    domain: "VPSStatusStore",
+                                    code: 3,
+                                    userInfo: [NSLocalizedDescriptionKey: "Failed to decode server snapshot: \(error.localizedDescription)"]
+                                ))
+                            }
+                        } else {
+                            let rawErr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            let desc = rawErr.isEmpty ? "SSH connection failed (status \(finished.terminationStatus))." : rawErr
                             continuation.resume(throwing: NSError(
                                 domain: "VPSStatusStore",
-                                code: 3,
-                                userInfo: [NSLocalizedDescriptionKey: "Failed to decode server snapshot: \(error.localizedDescription)"]
+                                code: Int(finished.terminationStatus),
+                                userInfo: [NSLocalizedDescriptionKey: desc]
                             ))
                         }
-                    } else {
-                        let rawErr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        let desc = rawErr.isEmpty ? "SSH connection failed (status \(finished.terminationStatus))." : rawErr
-                        continuation.resume(throwing: NSError(
-                            domain: "VPSStatusStore",
-                            code: Int(finished.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: desc]
-                        ))
+                    }
+
+                    do {
+                        try proc.run()
+                    } catch {
+                        timeoutTimer.cancel()
+                        try? outHandle.close()
+                        try? errHandle.close()
+                        try? FileManager.default.removeItem(at: outURL)
+                        try? FileManager.default.removeItem(at: errURL)
+
+                        resumeLock.lock()
+                        let already = hasResumed
+                        hasResumed = true
+                        resumeLock.unlock()
+
+                        if !already {
+                            continuation.resume(throwing: error)
+                        }
                     }
                 }
-
-                do {
-                    try proc.run()
-                } catch {
-                    timeoutTimer.cancel()
-                    try? outHandle.close()
-                    try? errHandle.close()
-                    try? FileManager.default.removeItem(at: outURL)
-                    try? FileManager.default.removeItem(at: errURL)
-
-                    resumeLock.lock()
-                    let already = hasResumed
-                    hasResumed = true
-                    resumeLock.unlock()
-
-                    if !already {
-                        continuation.resume(throwing: error)
-                    }
+            } onCancel: {
+                // A cancelled read must not leave an ssh process behind: the
+                // child is killed here instead of running on until the timeout
+                // timer fires.
+                if proc.isRunning {
+                    proc.terminate()
                 }
             }
         }

@@ -42,9 +42,12 @@ struct VPSStatusStripView: View {
                         .foregroundStyle(.orange)
                         .help(error)
                 } else {
-                    Text("Reading the server…")
+                    // Not reading and nothing to show: a different state from
+                    // the reading one, so the strip never looks like it is
+                    // working when it is not.
+                    Text("No readings yet")
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                 }
 
                 Spacer(minLength: 6)
