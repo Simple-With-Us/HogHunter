@@ -162,6 +162,63 @@ def fake_time(hh, clock):
         hh.set_budget(0)
 
 
+def test_dir_bytes_uses_du_once_without_counting_its_descendants(hh):
+    root = Path(tempfile.mkdtemp(prefix="hhclean-dir-bytes-"))
+    try:
+        deep = root / "child" / "grandchild"
+        deep.mkdir(parents=True)
+        (deep / "payload").write_bytes(b"x" * 8192)
+        seen = []
+
+        def fake_run(cmd, timeout):
+            seen.append((cmd, timeout))
+            return "8\t"
+
+        with mock.patch.object(hh, "_run", side_effect=fake_run):
+            size = hh.dir_bytes(str(root), max_depth=0)
+        assert size == 8192, f"deep subtree should be counted once, got {size}"
+        assert len(seen) == 1, seen
+        assert seen[0][0][-1] == str(root / "child"), seen
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dir_bytes_cuts_du_timeout_to_remaining_run_budget(hh):
+    root = Path(tempfile.mkdtemp(prefix="hhclean-dir-budget-"))
+    try:
+        (root / "child").mkdir()
+        clock = FakeClock()
+        seen = []
+
+        def fake_run(cmd, timeout):
+            seen.append(timeout)
+            clock.now += timeout
+            return "4\t"
+
+        with fake_time(hh, clock):
+            hh.set_budget(2.0)
+            with mock.patch.object(hh, "_run", side_effect=fake_run):
+                size = hh.dir_bytes(str(root), max_depth=0)
+            assert size == 4096
+            assert len(seen) == 1 and 0 < seen[0] <= 2.0, seen
+            assert hh.budget_left() == 0
+            assert hh._SCAN_BUDGET_EXHAUSTED is True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dir_bytes_keeps_du_timeout_at_30_seconds_without_run_budget(hh):
+    root = Path(tempfile.mkdtemp(prefix="hhclean-dir-no-budget-"))
+    try:
+        (root / "child").mkdir()
+        seen = []
+        with mock.patch.object(hh, "_run", side_effect=lambda cmd, timeout: seen.append(timeout) or "4\t"):
+            assert hh.dir_bytes(str(root), max_depth=0) == 4096
+        assert seen == [30.0], seen
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def marker(hh, i, size=2048):
     return hh.Candidate(category="temp-scratch", path=f"/t/.com.openai.codex.{i:04d}", bytes=size,
                         reason="Codex per-run marker file (auto-rotated by Codex)")
@@ -239,6 +296,64 @@ def run_main(hh, argv, cands, band, clock, apply_cost=0.0):
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = hh.main(argv)
     return code, json.loads(out.getvalue()), err.getvalue()
+
+
+def test_scan_stops_starting_rules_at_budget_and_reports_exhaustion(hh):
+    clock = FakeClock()
+    called = []
+
+    def slow_empty_rule():
+        called.append("first")
+        clock.now += 6
+        return []
+
+    def later_rule():
+        called.append("later")
+        return []
+
+    original_rules = hh.RULES
+    hh.RULES = {"first": (slow_empty_rule, ""), "later": (later_rule, "")}
+    try:
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = hh.main(["--scan", "--json", "--budget-sec=5"])
+        report = json.loads(out.getvalue())
+        assert code == 0
+        assert called == ["first"], called
+        assert report["candidates"] == []
+        assert report["budget_exhausted"] is True
+    finally:
+        hh.RULES = original_rules
+
+
+def test_main_resets_prior_scan_budget_state_when_scan_is_mocked(hh):
+    clock = FakeClock()
+    hh._SCAN_BUDGET_EXHAUSTED = True
+    code, report, _err = run_main(hh, ["--scan", "--json"], [], calm_band(hh), clock)
+    assert code == 0
+    assert report["budget_exhausted"] is False
+
+
+def test_snapshot_prune_report_tracks_increased_free_space(hh):
+    clock = FakeClock()
+    output = []
+    for before_free, after_free in ((10.0, 11.0), (11.0, 10.0)):
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "scan", return_value=[]), \
+                mock.patch.object(hh, "read_band", side_effect=[
+                    hh.Band(disk_free_gb=before_free, disk_used_pct=90, swap_used_pct=0,
+                            load1=0, cheap_only=False),
+                    hh.Band(disk_free_gb=after_free, disk_used_pct=90, swap_used_pct=0,
+                            load1=0, cheap_only=False),
+                ]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hh.main(["--clean", "--json", "--budget-sec=60"])
+        output.append(err.getvalue())
+    assert "disk free increased by 1024M" in output[0], output[0]
+    assert "disk free increased" not in output[1], output[1]
 
 
 def calm_band(hh, chunk_size=3, pause=5.0):
