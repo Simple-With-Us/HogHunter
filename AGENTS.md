@@ -83,7 +83,7 @@ ASCII spaces.
 | Capability | Value |
 |---|---|
 | App Group | `group.com.simplewithus.hoghunter` (`com.apple.security.application-groups` in `HogHunter.entitlements`) |
-| Associated Domain | `simplewithus.com` (`com.apple.developer.associated-domains` in `HogHunter.entitlements` — `applinks` + `webcredentials`) |
+| Associated Domain | **Absent.**  `com.apple.developer.associated-domains` was removed from `HogHunter.entitlements` on 2026-10-19 (`HH-160`).  It is a restricted entitlement, and with no Developer ID provisioning profile embedded in the bundle macOS refused to spawn the process at all (Finder: *The application "Hog Hunter" can't be opened*; `amfid -413 "No matching profile found"`).  No code uses `applinks` or `webcredentials`, and the `apple-app-site-association` file was never hosted.  **Do not re-add it** without also enabling the capability on the App ID *and* embedding a profile that carries it — `HogHunter.entitlements` lists the three restore steps. |
 
 `XcodeGen` is the project source of truth (`project.yml`); the generated
 `HogHunter.xcodeproj/` is git-ignored.  Always regenerate after editing
