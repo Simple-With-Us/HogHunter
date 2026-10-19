@@ -19,13 +19,11 @@
 #                           AND no local/project sequence exists (dangerous:
 #                           may reuse a build number ASC rejects as duplicate)
 #
-# Version numbering (owner directive 2026-08-12, revised same day):
-#   MARKETING_VERSION       = 1.0.<seq>          +1 on EVERY rebuild
-#   CURRENT_PROJECT_VERSION = <UTC YYYYMMDDHHMM> when the build was cut
+# Version numbering (owner directive 2026-08-12, unified 2026-10-18):
+#   MARKETING_VERSION       = 1.0.<commit_count> (from git rev-list --count HEAD)
+#   CURRENT_PROJECT_VERSION = <commit_count>
 # App Store Connect renders "<marketing> (<build>)", so a ship shows
-# "1.0.8 (202609012215)". Marketing +1 every rebuild; build is the cut time.
-# The sequence is max(local cache, App Store Connect, project.pbxproj) + 1, so a
-# lost or reset local counter cannot silently reuse a shipped version.
+# "1.0.148 (148)".  Unified across macOS and iOS; timestamps permanently retired.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS HOLDING BACK AUTOMATIC SHIPPING: THE MIN-INTERVAL RATE LIMIT
@@ -78,7 +76,7 @@
 # Secrets (never printed):
 #   ~/.secrets/appstore-connect.env  (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH)
 #   or Xcode-signed-in session for destination=upload export
-#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or `fleet-secrets get`)
+#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or Infisical via fleet-secrets)
 #   SENTRY_DSN         (injected into xcodebuild so Cocoa plist $(SENTRY_DSN) is set)
 #
 # Sentry after a successful archive (2026-09-01):
@@ -206,11 +204,15 @@ sentry_project_for_app() {
 }
 
 # Pull SENTRY_AUTH_TOKEN from the environment, else from `fleet-secrets get`
-# when that helper is installed (Mac).  Extract into a var, never echo.
+# when that helper is installed.  Extract into a var, never echo.
 load_sentry_auth() {
   if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
     return 0
   fi
+  # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired
+  # flat file.  Resolve through PATH: a hardcoded /Users/jay path silently
+  # leaves the token unset on every other machine and on CI, which is exactly
+  # where a dSYM upload would then fail quietly.
   if command -v fleet-secrets &>/dev/null; then
     local token
     token="$(fleet-secrets get SENTRY_AUTH_TOKEN 2>/dev/null | tr -d '\r')" || token=""
@@ -785,30 +787,51 @@ if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
   BUILD_NUM="(from IPA)"
   log "version: taken from the existing IPA (--upload-only); sequence neither consulted nor consumed"
 elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
-  # Explicit operator override: honour exactly what was asked. A bare --version
-  # still gets an auto timestamp build number, which is always higher than
-  # anything already uploaded — that is the whole point of the scheme, so an
+  # Explicit operator override: honour exactly what was asked.  A bare --version
+  # still gets an auto build number from the repo commit count, which is higher
+  # than anything already uploaded — that is the whole point of the scheme, so an
   # operator picking the marketing version does not have to reason about it.
   MARKETING="${FORCE_VERSION:-$DEFAULT_MARKETING}"
-  BUILD_NUM="${FORCE_BUILD:-$(utc_build_stamp)}"
+  BUILD_NUM="${FORCE_BUILD:-$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
+  # An explicit --build is honoured exactly.  The auto-fill still needs the
+  # floor: --version against an already-shipped HEAD would otherwise ship a
+  # build at or below what App Store Connect already holds for that train.
+  if [[ -z "$FORCE_BUILD" ]]; then
+    _of_floor="$(resolve_seq_floor "$MARKETING_PREFIX" "$PBXPROJ" "$PLATFORM" 2>/dev/null || echo 0)"
+    [[ "$_of_floor" =~ ^[0-9]+$ ]] || _of_floor=0
+    if [[ "$_of_floor" -ge "$BUILD_NUM" ]]; then
+      BUILD_NUM="$((_of_floor + 1))"
+      log "build: override would repeat an already-shipped build; using ${BUILD_NUM} instead"
+    fi
+  fi
   log "version: operator override (--build/--version); sequence not consulted"
 else
   # resolve_seq_floor runs in a subshell, so its die() cannot exit this script
   # on its own — check explicitly rather than leaning on set -e.
   SEQ_FLOOR="$(resolve_seq_floor "$MARKETING_PREFIX" "$PBXPROJ" "$PLATFORM")" || exit 1
   [[ "$SEQ_FLOOR" =~ ^[0-9]+$ ]] || die "could not resolve a build sequence floor (got '${SEQ_FLOOR}')"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    # Dry-run must not consume a sequence number — peek only.
-    SEQ=$((SEQ_FLOOR + 1))
-  else
-    # The only remaining consumer. A gated run exited above; a dry-run peeks;
-    # an --upload-only run never gets here. So the counter advances only on a
-    # run that is really about to archive, and by exactly 1.
-    SEQ="$(next_build_seq "$SEQ_FLOOR")"
+  # The local build-seq counter is deliberately NOT advanced here.  Under the
+  # commit-count scheme it no longer feeds MARKETING or BUILD_NUM, so writing
+  # to it would only drift the floor on every later run and eventually push a
+  # fresh commit's build number higher than the commit count it names.
+  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo "$((SEQ_FLOOR + 1))")"
+  MARKETING="${MARKETING_PREFIX}.${COMMIT_COUNT}"
+  BUILD_NUM="${COMMIT_COUNT}"
+  # Strictly-increasing guard for a re-ship of the same commit.  App Store
+  # Connect treats CFBundleVersion as a uniqueness key inside a marketing
+  # train, so repeating the pair is rejected as a duplicate.  --force-ship and
+  # a retry after an upload that actually landed both produce exactly that, so
+  # never ship at or below the floor that local cache / ASC / project.pbxproj
+  # already know about.
+  #
+  # When the guard fires, MARKETING moves with BUILD_NUM.  The invariant is
+  # that the two always describe the same commit count, so leaving MARKETING
+  # at the raw count would record a version whose build does not match it.
+  if [[ "$SEQ_FLOOR" -ge "$BUILD_NUM" ]]; then
+    BUILD_NUM="$((SEQ_FLOOR + 1))"
+    MARKETING="${MARKETING_PREFIX}.${BUILD_NUM}"
+    log "build: commit count ${COMMIT_COUNT} already shipped; shipping ${MARKETING} (${BUILD_NUM}) instead"
   fi
-  MARKETING="${MARKETING_PREFIX}.${SEQ}"
-  # NOT "$MARKETING" — see the CFBundleVersion note above utc_build_stamp.
-  BUILD_NUM="$(utc_build_stamp)"
 fi
 
 # The project file and the shipped version must never disagree silently. The

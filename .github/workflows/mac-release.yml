@@ -219,7 +219,7 @@ jobs:
           {
             echo "short=$short"
             echo "build=$build"
-            echo "tag=v$short-build.$build"
+            echo "tag=v$short"
             echo "feed=$feed"
           } >> "$GITHUB_OUTPUT"
           echo "Hog Hunter $short (build $build), feed $feed"
