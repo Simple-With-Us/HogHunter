@@ -106,10 +106,11 @@ final class MaintainLayoutTests: XCTestCase {
                     Text("Activity").tag(PanelTab.activity)
                     Text("Storage").tag(PanelTab.storage)
                     Text("Network").tag(PanelTab.network)
+                    Text("Server").tag(PanelTab.server)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 290)
+                .frame(width: 360)
                 Spacer()
             }
             .frame(width: HogHunterPanel.contentWidth)
