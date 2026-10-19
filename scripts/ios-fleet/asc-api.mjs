@@ -3,9 +3,8 @@
  * Minimal App Store Connect API client. No dependencies beyond Node's
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
- * Auth: reads ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH from
- * ~/.secrets/appstore-connect.env (never prints values -- see
- * scripts/infisical-secrets-safe.sh pattern used elsewhere in the fleet).
+ * Auth: ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH from the environment, else Infisical
+ * Fleet-OPS via fleet-secrets (never prints values).
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -17,23 +16,48 @@
  * echoing anything secret-shaped from the response (ASC responses don't
  * carry credentials, only app metadata, so this is safe to print as-is).
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createSign } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-function loadEnvFile(path) {
-  const text = readFileSync(path, "utf8");
-  const env = {};
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+// AFC-359: credentials come from the environment (CI sets ASC_KEY_ID / ASC_ISSUER_ID /
+// ASC_KEY_PATH), else Infisical Fleet-OPS through fleet-secrets: /appstore-connect holds
+// ASC_KEY_ID + ASC_ISSUER_ID and /authkey-<key id lowercase>-p8 holds AUTHKEY_<KEY_ID> (the
+// .p8 contents).  The key is used in memory only; nothing is written to disk or printed.
+function fleetSecretsGet(name, folder) {
+  const bin = process.env.FLEET_SECRETS || join(homedir(), ".local", "bin", "fleet-secrets");
+  try {
+    return execFileSync(bin, ["get", name, "--path", folder], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).replace(/\n$/, "");
+  } catch {
+    return "";
   }
-  return env;
+}
+
+function resolveAscCredentials() {
+  let keyId = process.env.ASC_KEY_ID || "";
+  let issuerId = process.env.ASC_ISSUER_ID || "";
+  const envKeyPath = (process.env.ASC_KEY_PATH || "").replace(/^~(?=\/)/, homedir());
+  if (keyId && issuerId && envKeyPath && existsSync(envKeyPath)) {
+    return { keyId, issuerId, privateKeyPem: readFileSync(envKeyPath, "utf8") };
+  }
+  keyId = keyId || fleetSecretsGet("ASC_KEY_ID", "/appstore-connect");
+  issuerId = issuerId || fleetSecretsGet("ASC_ISSUER_ID", "/appstore-connect");
+  if (!keyId || !issuerId) {
+    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID: set them in the environment or add them to Infisical /appstore-connect");
+    process.exit(1);
+  }
+  const folder = `/authkey-${keyId.toLowerCase()}-p8`;
+  const privateKeyPem = fleetSecretsGet(`AUTHKEY_${keyId}`, folder);
+  if (!privateKeyPem) {
+    console.error(`Missing AUTHKEY_${keyId} in Infisical ${folder}`);
+    process.exit(1);
+  }
+  return { keyId, issuerId, privateKeyPem: privateKeyPem + "\n" };
 }
 
 function base64url(input) {
@@ -321,16 +345,7 @@ async function setWhatToTest({ api, buildId, appId, marketing }) {
 }
 
 async function main() {
-  const envPath = join(homedir(), ".secrets", "appstore-connect.env");
-  const env = loadEnvFile(envPath);
-  const keyId = env.ASC_KEY_ID;
-  const issuerId = env.ASC_ISSUER_ID;
-  const keyPath = env.ASC_KEY_PATH;
-  if (!keyId || !issuerId || !keyPath) {
-    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in ~/.secrets/appstore-connect.env");
-    process.exit(1);
-  }
-  const privateKeyPem = readFileSync(keyPath, "utf8");
+  const { keyId, issuerId, privateKeyPem } = resolveAscCredentials();
   const token = signJwt({ keyId, issuerId, privateKeyPem });
 
   const [method, path, body, arg4, arg5] = process.argv.slice(2);
