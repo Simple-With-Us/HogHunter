@@ -8,6 +8,7 @@ The Mac app is a direct download: grab the latest signed, notarized build (DMG o
 
 - Menu bar: live machine CPU percent.
 - Panel meters: CPU and memory.
+- **Server** - a strip under the meters with the remote server's CPU, memory and disk, and a **Server** tab with the full report (CPU, RAM, swap, disks, the app databases and the largest folders).  The strip appears when a server host is configured, in Settings > Maintenance.
 - **Now** — live snapshot.  100% CPU is one core fully busy (same idea as Activity Monitor).
 - **Past Hour** / **Past 24 Hours** — averages from samples Hog Hunter took while it was open.
 - **Apps** groups helpers (Chrome, Electron, …) under one row.  **Processes** lists pids.

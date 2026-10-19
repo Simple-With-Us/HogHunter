@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Server status on the main window (HH-163):
+
+- The remote server's readings moved out of the Maintain tab and onto the main window.  A strip under the meters shows the host with its CPU, RAM and disk, each coloured by its own severity, and a new top-level **Server** tab holds the full card (CPU, RAM, swap, disks, the app databases, the largest folders).  The strip appears when a host is configured, and it is a button: one click opens the Server tab.
+- The Maintain tab gets its content back.  The card that sat at the top of it took over the tab and pushed the maintenance steps and the run history out of sight, and the readings themselves were below the fold, so the server status was hard to find.  The Maintain tab now carries no server figures at all: the server is a peer machine, so its readings live in their own top-level tab.
+- The panel is a little bigger: 620 by 680 became 680 by 720, which gives the strip its own line and the four tab segments room for their labels.
+- The server readings are now fetched while the panel is open, not only while the Maintain tab was on screen.  The store counts its owners, so the panel and the Maintain tab can both hold the readings at once and neither switches the other off.
+
 Mac panel swaps figures with the sort (HH-144):
 
 - Sorting the main window by Memory puts the RAM amount on top in the large style, with %CPU small beneath it; sorting by CPU keeps %CPU large with its severity color.  The Mac rows did not do this before: `HogRowView` always led with %CPU, and the HH-143 notes wrongly said the Mac already swapped.  The swap itself reached `main` with the panel overhaul (#158), which carries the same row change this issue called for; HH-144 corrects the HH-143 notes and records the check.

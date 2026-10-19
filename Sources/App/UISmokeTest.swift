@@ -96,6 +96,11 @@ final class UISmokeTest {
                 .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
                 .clipped()
         }
+        checkTabFits("Server") { store in
+            ServerStatusView(store: store.maintain.vpsStore)
+                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+                .clipped()
+        }
 
         let failed = results.filter { !$0.passed }
         log("RESULT: \(failed.isEmpty ? "PASS" : "FAIL") (\(results.count - failed.count)/\(results.count) checks)")

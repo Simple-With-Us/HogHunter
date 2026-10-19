@@ -16,6 +16,11 @@ final class VPSStatusStore: ObservableObject {
     private let fetcher: Fetcher
     private var timer: Timer?
     private var activeFetchTask: Task<Void, Never>?
+    /// How many views currently want server readings.  The panel shows a
+    /// server strip on its Activity tab and the Server tab shows the full
+    /// card, so the store outlives any one of them: polling stops only when
+    /// the last owner lets go, never when one of them closes.
+    private var pollingOwners: Int = 0
 
     init(initialHost: String = "", fetcher: Fetcher? = nil) {
         self.configuredHost = initialHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -30,6 +35,32 @@ final class VPSStatusStore: ObservableObject {
         errorMessage = nil
         if !configuredHost.isEmpty {
             fetch(force: true)
+        }
+    }
+
+    /// Whether the readings are still being fetched.  True while at least one
+    /// owner holds a share.
+    var isPolling: Bool {
+        pollingOwners > 0
+    }
+
+    /// Takes a share of the polling.  The first owner starts it; the last one
+    /// to let go stops it.  A view that shows server readings acquires on
+    /// appear and releases on disappear, so two views showing them at once
+    /// cannot switch each other's readings off.
+    func acquirePolling() {
+        pollingOwners += 1
+        if pollingOwners == 1 {
+            startPolling()
+        }
+    }
+
+    /// Gives up a share of the polling.  Polling stops when the last owner
+    /// lets go.
+    func releasePolling() {
+        pollingOwners = max(0, pollingOwners - 1)
+        if pollingOwners == 0 {
+            stopPolling()
         }
     }
 

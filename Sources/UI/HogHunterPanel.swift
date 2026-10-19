@@ -6,6 +6,7 @@ enum PanelTab: String, CaseIterable, Identifiable {
     case activity = "Activity"
     case storage = "Storage"
     case network = "Network"
+    case server = "Server"
 
     var id: String { rawValue }
 }
@@ -20,6 +21,7 @@ struct HogHunterPanel: View {
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage: Bool = false
     @State private var hasVisitedNetwork: Bool = false
+    @State private var hasVisitedServer: Bool = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
 
@@ -30,6 +32,7 @@ struct HogHunterPanel: View {
             ZStack(alignment: .topLeading) {
                 VStack(alignment: .leading, spacing: 12) {
                     meters
+                    serverStrip
                     captions
                     controls
                     list
@@ -65,6 +68,15 @@ struct HogHunterPanel: View {
                         .allowsHitTesting(selectedTab == .network)
                         .accessibilityHidden(selectedTab != .network)
                 }
+
+                if hasVisitedServer {
+                    ServerStatusView(store: store.maintain.vpsStore)
+                        .frame(width: Self.contentWidth, alignment: .leading)
+                        .clipped()
+                        .opacity(selectedTab == .server ? 1 : 0)
+                        .allowsHitTesting(selectedTab == .server)
+                        .accessibilityHidden(selectedTab != .server)
+                }
             }
             // Every child is laid out at exactly the panel's inner width.  A
             // `VStack` sizes itself to its widest child's *ideal* width, and a
@@ -92,21 +104,31 @@ struct HogHunterPanel: View {
                 hasVisitedStorage = true
             } else if newTab == .network {
                 hasVisitedNetwork = true
+            } else if newTab == .server {
+                hasVisitedServer = true
             }
         }
         .onAppear {
             store.registerPanelVisible(panelInstanceId)
+            // The panel shows the server's headline, so it keeps the readings
+            // coming while it is open.  The share is given back on close: the
+            // store outlives the panel, and other views (the Maintain tab) can
+            // hold their own share at the same time.
+            store.maintain.vpsStore.acquirePolling()
             if selectedTab == .storage {
                 hasVisitedStorage = true
             } else if selectedTab == .network {
                 hasVisitedNetwork = true
+            } else if selectedTab == .server {
+                hasVisitedServer = true
             }
         }
         .onDisappear {
             store.unregisterPanelVisible(panelInstanceId)
+            store.maintain.vpsStore.releasePolling()
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(selectedTab == .activity ? "Hog Hunter — top processes" : (selectedTab == .storage ? "Hog Hunter — storage and disk cleaner" : "Hog Hunter — network activity"))
+        .accessibilityLabel(panelAccessibilityLabel)
         .alert(
             pendingQuit.map { "Quit \($0.name)?" } ?? "Quit Process?",
             isPresented: Binding(
@@ -130,12 +152,24 @@ struct HogHunterPanel: View {
 
     // MARK: - Metrics
 
-    static let panelWidth: CGFloat = 620
-    static let panelHeight: CGFloat = 680
+    /// A little bigger than it was: the server strip below the meters needs a
+    /// line of its own, and four tab segments need room for their labels.
+    static let panelWidth: CGFloat = 680
+    static let panelHeight: CGFloat = 720
     static let inset: CGFloat = 14
     /// What is left of the panel once the inset is taken off both sides.
     static var contentWidth: CGFloat { panelWidth - inset * 2 }
     /// Fixed so the control row cannot resize itself when a segment changes.
+
+    /// What the panel is showing, for screen readers.
+    private var panelAccessibilityLabel: String {
+        switch selectedTab {
+        case .activity: return "Hog Hunter — top processes"
+        case .storage: return "Hog Hunter — storage and disk cleaner"
+        case .network: return "Hog Hunter — network activity"
+        case .server: return "Hog Hunter — remote server status"
+        }
+    }
 
     private var quitMessage: String {
         guard let row = pendingQuit else { return "" }
@@ -183,10 +217,11 @@ struct HogHunterPanel: View {
                 Label("Activity", image: "HogProfile").tag(PanelTab.activity)
                 Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
                 Label("Network", systemImage: "network").tag(PanelTab.network)
+                Label("Server", systemImage: "server.rack").tag(PanelTab.server)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 290)
+            .frame(width: 360)
 
             Spacer()
 
@@ -247,6 +282,21 @@ struct HogHunterPanel: View {
         // The scene builds its window asynchronously, so the "already
         // open? come forward" pass has to be retried, not run once.
         HogActions.scheduleFrontSettingsWindow()
+    }
+
+    // MARK: - Server
+
+    /// The remote server's headline, always on the Activity tab.  Hidden when
+    /// no host is configured: with no server there is nothing to report, and
+    /// the Server tab says how to set one up.
+    @ViewBuilder
+    private var serverStrip: some View {
+        if !store.maintain.vpsStore.configuredHost.isEmpty {
+            VPSStatusStripView(store: store.maintain.vpsStore) {
+                selectedTab = .server
+                hasVisitedServer = true
+            }
+        }
     }
 
     // MARK: - Meters
