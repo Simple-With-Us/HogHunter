@@ -26,7 +26,9 @@ import { join } from "node:path";
 // ASC_KEY_PATH), else Infisical Fleet-OPS /asc through fleet-secrets: ASC_KEY_ID, ASC_ISSUER_ID and
 // ASC_KEY_P8 (the .p8 contents).  The key is used in memory only; nothing is written to disk or printed.
 function fleetSecretsGet(name, folder) {
-  const bin = process.env.FLEET_SECRETS || join(homedir(), ".local", "bin", "fleet-secrets");
+  const localBin = join(homedir(), ".local", "bin", "fleet-secrets");
+  // $FLEET_SECRETS, then ~/.local/bin, then whatever "fleet-secrets" is on PATH.
+  const bin = process.env.FLEET_SECRETS || (existsSync(localBin) ? localBin : "fleet-secrets");
   try {
     return execFileSync(bin, ["get", name, "--path", folder], {
       encoding: "utf8",

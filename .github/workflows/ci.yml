@@ -23,6 +23,7 @@ jobs:
           node --check scripts/ios-fleet/asc-api.mjs
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-credentials.mjs
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py

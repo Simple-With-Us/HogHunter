@@ -35,7 +35,7 @@ export FAKE_LOG="${tmp}/fake.log"
 
 extract() {
   awk '
-    /^fs_get\(\) \{/ || /^load_secrets\(\) \{/ || /^cleanup_asc_tmp\(\) \{/ { grab = 1 }
+    /^fs_get\(\) \{/ || /^load_secrets\(\) \{/ || /^cleanup_asc_tmp\(\) \{/ || /^expand_tilde\(\) \{/ { grab = 1 }
     grab { print }
     grab && /^\}/ { grab = 0 }
   ' "$script"
@@ -116,6 +116,15 @@ env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=NOSUCHKEY0 bash -c '
   load_secrets
   [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
 ' || fail "missing key material did not fail closed"
+
+# 2e. Only a leading "~/" is expanded:  "~user/x" must not be merged with $HOME.
+env ASC_KEY_ID=TILDE00001 ASC_ISSUER_ID=tilde-issuer bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  [[ "$(expand_tilde "~/k.p8")" == "$HOME/k.p8" ]]
+  [[ "$(expand_tilde "~other/k.p8")" == "~other/k.p8" ]]
+  [[ "$(expand_tilde "/abs/k.p8")" == "/abs/k.p8" ]]
+' || fail "expand_tilde"
 
 # 3. Nothing is created under the old secrets folder or ~/.appstoreconnect.
 [[ ! -e "${HOME}/.secrets" ]] || fail "created the old secrets folder"
