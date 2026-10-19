@@ -65,13 +65,22 @@ INSTALLED_PATH="$DEST_DIR/Hog Hunter.app"
 LEGACY_PATH="$DEST_DIR/HogHunter.app"
 
 version_of() {
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || echo "unknown"
+  local short build
+  short="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || echo "unknown")"
+  build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$1/Contents/Info.plist" 2>/dev/null || echo "")"
+  if [[ -n "$build" && "$build" != "$short" ]]; then
+    echo "$short ($build)"
+  else
+    echo "$short"
+  fi
 }
 
 echo "Generating the Xcode project."
 xcodegen generate
 
-echo "Building Release."
+BUILD_COUNT="$(git rev-list --count HEAD 2>/dev/null || echo "1")"
+MARKETING_VERSION="1.0.${BUILD_COUNT}"
+echo "Building Release version $MARKETING_VERSION (build $BUILD_COUNT)."
 # SENTRY_DSN_MACOS wins when both are set (fleet split).  The value is passed
 # as an xcodebuild setting and never printed.  Empty keeps Sentry inert.
 { set +x; } 2>/dev/null
@@ -85,6 +94,8 @@ else
 fi
 unset MAC_SENTRY_DSN
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build \
+  MARKETING_VERSION="$MARKETING_VERSION" \
+  CURRENT_PROJECT_VERSION="$BUILD_COUNT" \
   ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO CODE_SIGNING_ALLOWED=NO \
   ${SENTRY_DSN_FLAGS[@]+"${SENTRY_DSN_FLAGS[@]}"}
 
@@ -92,6 +103,26 @@ if [[ ! -d "$APP_PATH" ]]; then
   echo "Build did not produce $APP_PATH." >&2
   exit 1
 fi
+
+INFO_PLIST="$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$INFO_PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $MARKETING_VERSION" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_COUNT" "$INFO_PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_COUNT" "$INFO_PLIST"
+
+# Sparkle auto-update feed and public key for the installed Release bundle
+SPARKLE_FEED_URL="https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml"
+SPARKLE_PUBLIC_ED_KEY="8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE="
+/usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$INFO_PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $SPARKLE_FEED_URL" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST"
+for key in SUEnableAutomaticChecks SUAutomaticallyUpdate SUAllowsAutomaticUpdates SUVerifyUpdateBeforeExtraction; do
+  /usr/libexec/PlistBuddy -c "Set :$key true" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :$key bool true" "$INFO_PLIST"
+done
+/usr/libexec/PlistBuddy -c "Set :SUScheduledCheckInterval 3600" "$INFO_PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :SUScheduledCheckInterval integer 3600" "$INFO_PLIST"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "Dry run: built $APP_PATH."

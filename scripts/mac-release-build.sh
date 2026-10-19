@@ -128,8 +128,8 @@ write_sparkle_plist_entries() {
 
 write_versions() {
   local short build
-  short="$(short_version)"; build="$(bundle_version)"
-  [[ -n "$short" ]] || { echo "error: MARKETING_VERSION not found in project.yml" >&2; exit 1; }
+  build="$(bundle_version)"
+  short="1.0.${build}"
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $short" "$INFO_PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build" "$INFO_PLIST"
   echo "version $short (build $build)"
