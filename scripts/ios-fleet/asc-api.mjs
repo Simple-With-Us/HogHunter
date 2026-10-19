@@ -23,9 +23,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 // AFC-359: credentials come from the environment (CI sets ASC_KEY_ID / ASC_ISSUER_ID /
-// ASC_KEY_PATH), else Infisical Fleet-OPS through fleet-secrets: /appstore-connect holds
-// ASC_KEY_ID + ASC_ISSUER_ID and /authkey-<key id lowercase>-p8 holds AUTHKEY_<KEY_ID> (the
-// .p8 contents).  The key is used in memory only; nothing is written to disk or printed.
+// ASC_KEY_PATH), else Infisical Fleet-OPS /asc through fleet-secrets: ASC_KEY_ID, ASC_ISSUER_ID and
+// ASC_KEY_P8 (the .p8 contents).  The key is used in memory only; nothing is written to disk or printed.
 function fleetSecretsGet(name, folder) {
   const bin = process.env.FLEET_SECRETS || join(homedir(), ".local", "bin", "fleet-secrets");
   try {
@@ -45,16 +44,15 @@ function resolveAscCredentials() {
   if (keyId && issuerId && envKeyPath && existsSync(envKeyPath)) {
     return { keyId, issuerId, privateKeyPem: readFileSync(envKeyPath, "utf8") };
   }
-  keyId = keyId || fleetSecretsGet("ASC_KEY_ID", "/appstore-connect");
-  issuerId = issuerId || fleetSecretsGet("ASC_ISSUER_ID", "/appstore-connect");
+  keyId = keyId || fleetSecretsGet("ASC_KEY_ID", "/asc");
+  issuerId = issuerId || fleetSecretsGet("ASC_ISSUER_ID", "/asc");
   if (!keyId || !issuerId) {
-    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID: set them in the environment or add them to Infisical /appstore-connect");
+    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID: set them in the environment or add them to Infisical /asc");
     process.exit(1);
   }
-  const folder = `/authkey-${keyId.toLowerCase()}-p8`;
-  const privateKeyPem = fleetSecretsGet(`AUTHKEY_${keyId}`, folder);
+  const privateKeyPem = fleetSecretsGet("ASC_KEY_P8", "/asc");
   if (!privateKeyPem) {
-    console.error(`Missing AUTHKEY_${keyId} in Infisical ${folder}`);
+    console.error("Missing ASC_KEY_P8 in Infisical /asc");
     process.exit(1);
   }
   return { keyId, issuerId, privateKeyPem: privateKeyPem + "\n" };

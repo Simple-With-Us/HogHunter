@@ -22,9 +22,9 @@ cat > "${tmp}/fleet-secrets" <<'FAKE'
 name="$2"; folder="$4"
 echo "${name} ${folder}" >> "${FAKE_LOG}"
 case "${folder}:${name}" in
-  /appstore-connect:ASC_KEY_ID) printf 'ABCDE12345\n' ;;
-  /appstore-connect:ASC_ISSUER_ID) printf 'issuer-synthetic\n' ;;
-  /authkey-abcde12345-p8:AUTHKEY_ABCDE12345) printf -- '-----BEGIN PRIVATE KEY-----\nSYNTHETIC\n-----END PRIVATE KEY-----\n' ;;
+  /asc:ASC_KEY_ID) printf 'ABCDE12345\n' ;;
+  /asc:ASC_ISSUER_ID) printf 'issuer-synthetic\n' ;;
+  /asc:ASC_KEY_P8) printf -- '-----BEGIN PRIVATE KEY-----\nSYNTHETIC\n-----END PRIVATE KEY-----\n' ;;
   *) exit 3 ;;
 esac
 FAKE
@@ -66,8 +66,8 @@ out="$(env -u ASC_KEY_ID -u ASC_ISSUER_ID -u ASC_KEY_PATH bash -c '
   [[ ! -e "$ASC_KEY_PATH" ]]
 ')" || fail "load_secrets from Infisical"
 [[ ! -e "$out" ]] || fail "temp key file survived cleanup"
-grep -q '^ASC_KEY_ID /appstore-connect$' "$FAKE_LOG" || fail "did not ask Infisical /appstore-connect"
-grep -q '^AUTHKEY_ABCDE12345 /authkey-abcde12345-p8$' "$FAKE_LOG" || fail "did not ask the per-key folder"
+grep -q '^ASC_KEY_ID /asc$' "$FAKE_LOG" || fail "did not ask Infisical /asc for the key id"
+grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "did not ask Infisical /asc for the key"
 
 # 2. An explicit ASC_* environment wins and fleet-secrets is not called.
 : > "$FAKE_LOG"
