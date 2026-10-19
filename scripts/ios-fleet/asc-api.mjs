@@ -7,8 +7,8 @@
  * (never prints values):
  *   1. ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the environment
  *   2. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64
- *      (hosted ios-ship / Infisical; p8 is base64, decoded to a 0600 temp
- *      file and removed on exit)
+ *      (hosted ios-ship / Infisical; p8 is base64, decoded to a PEM held in
+ *      memory and never written to disk)
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -20,10 +20,10 @@
  * echoing anything secret-shaped from the response (ASC responses don't
  * carry credentials, only app metadata, so this is safe to print as-is).
  */
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, createSign } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -44,18 +44,10 @@ function base64url(input) {
 // authenticate, and because asc_latest_seq() in ship-testflight.sh discarded
 // this script's stderr, the resulting rc=2 was undiagnosable from the run log.
 //
-// APPLE_API_KEY_P8_BASE64 is base64, so it is decoded into a 0600 file inside a
-// 0700 temp directory and unlinked on exit.  Values are never printed; only the
-// source and the key-id LENGTH are logged.
-const TEMP_KEY_DIRS = [];
-
-function cleanupTempKeys() {
-  while (TEMP_KEY_DIRS.length) {
-    const dir = TEMP_KEY_DIRS.pop();
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
-}
-process.on("exit", cleanupTempKeys);
+// APPLE_API_KEY_P8_BASE64 is base64, so it is decoded straight into the PEM held in
+// memory; signJwt() signs from that string, so the key is never written to disk by
+// this module.  Values are never printed; only the source and the key-id LENGTH are
+// logged.
 
 // Accepts either a raw PEM (some callers store the .p8 body verbatim) or the
 // base64 encoding GitHub Actions + Infisical use. Returns null when the input
@@ -71,15 +63,6 @@ function decodeP8(b64) {
     return null;
   }
   return pem.includes("-----BEGIN ") ? pem : null;
-}
-
-function materializeP8(pem) {
-  const dir = mkdtempSync(join(tmpdir(), "asc-key-"));
-  try { chmodSync(dir, 0o700); } catch { /* best effort */ }
-  const p = join(dir, "AuthKey.p8");
-  writeFileSync(p, pem, { mode: 0o600 });
-  TEMP_KEY_DIRS.push(dir);
-  return p;
 }
 
 // Infisical Fleet-OPS through `fleet-secrets get` (AFC-359).  "" when absent.
@@ -132,7 +115,6 @@ function resolveCredential() {
   if (keyId && issuerId && process.env.APPLE_API_KEY_P8_BASE64) {
     const pem = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
     if (!pem) return { error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key" };
-    materializeP8(pem);
     return { keyId, issuerId, privateKeyPem: pem, source: "APPLE_API_* environment (base64 p8)" };
   }
 
