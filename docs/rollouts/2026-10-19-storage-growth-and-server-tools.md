@@ -28,4 +28,4 @@ The original 15-minute cron entry now calls a wrapper holding one writer lock ac
 - Native AppKit renders inspected for compact rows, readable suffixes, visible directory rows, tool dots, and removal of the explanatory subtitle.
 - Server wrapper activation: original watch preserved, same cron cadence, collector exit 0, 582 database observations, 13 directory rows, and 12 tool states.
 
-The app UI still requires merge and installation verification.  Shellular has one approved iPhone and no pending devices; a successful phone reconnection has not yet been observed.
+The app UI still requires merge and installation verification.  Shellular has one approved iPhone and no pending devices; the owner confirmed a successful connection after approval.
