@@ -77,6 +77,37 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     var shmDevice: VPSDevice? {
         devices["shm"]
     }
+
+    /// The one-line answer to "is the server all right?", for the panel strip
+    /// and the Maintain tab.  Each number carries its own severity so a
+    /// reader sees which one is the problem, not just that something is.
+    struct Headline: Equatable {
+        var host: String
+        var cpuText: String?
+        var cpuSeverity: Severity?
+        var memoryText: String?
+        var memorySeverity: Severity?
+        var diskText: String?
+        var diskSeverity: Severity?
+    }
+
+    /// The headline, or nil when the snapshot carries nothing worth showing.
+    var headline: Headline? {
+        guard !host.isEmpty else { return nil }
+        let cpuText = cpu.map { String(format: "%.0f%%", $0.pct) }
+        let memoryText = memory.map { String(format: "%.0f%%", $0.usedPercentage) }
+        let diskFraction = rootDevice?.usedFraction
+        let diskText = diskFraction.map { String(format: "%.0f%% used", $0 * 100) }
+        return Headline(
+            host: host,
+            cpuText: cpuText,
+            cpuSeverity: cpu?.severity,
+            memoryText: memoryText,
+            memorySeverity: memory?.severity,
+            diskText: diskText,
+            diskSeverity: diskFraction.map { Severity.forDisk($0) }
+        )
+    }
 }
 
 struct VPSDevice: Codable, Equatable, Sendable {

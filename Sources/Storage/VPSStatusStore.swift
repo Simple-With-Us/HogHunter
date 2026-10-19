@@ -2,7 +2,8 @@ import Foundation
 
 /// Fetches and caches remote VPS resource snapshots over SSH.
 ///
-/// Owned by `MaintainStore` and consumed by `VPSResourceCardView` in the Maintenance tab.
+/// Owned by `MaintainStore`, and read by the panel's server strip and the
+/// panel's Server tab.
 @MainActor
 final class VPSStatusStore: ObservableObject {
     typealias Fetcher = @Sendable (_ host: String) async throws -> VPSStatusSnapshot
@@ -22,6 +23,14 @@ final class VPSStatusStore: ObservableObject {
         self.fetcher = fetcher ?? Self.sshFetcher()
     }
 
+    /// Sets the host to watch, and starts or stops the readings with it.
+    ///
+    /// The store owns its polling; the window does not hand out shares.  A
+    /// share was the obvious design, but a view's lifetime is not a reliable
+    /// signal (a panel that is hidden without being torn down never says so),
+    /// and a counter that never comes back down would keep polling forever.
+    /// One small file read a minute on the host is a fair price for watching a
+    /// machine, and it cannot get stuck.
     func setHost(_ host: String) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != configuredHost else { return }
@@ -29,8 +38,17 @@ final class VPSStatusStore: ObservableObject {
         snapshot = nil
         errorMessage = nil
         if !configuredHost.isEmpty {
+            startPolling()
+            // A new host wants fresh readings now, not in a minute.
             fetch(force: true)
+        } else {
+            stopPolling()
         }
+    }
+
+    /// Whether the readings are being fetched.
+    var isPolling: Bool {
+        timer != nil
     }
 
     func startPolling() {
