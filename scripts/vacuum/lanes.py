@@ -994,6 +994,15 @@ def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     why = never_touch_reason(path, ctx.home_real)
     if why:
         return why
+    # The spelling above proves nothing about where the lane really lives: a symlinked parent is
+    # allowed now, so ~/apps/lanes/<Repo> can point at ~/Desktop or ~/Documents, and the old
+    # realpath check no longer refuses it.  git worktree remove follows the link and deletes the
+    # resolved directory, so the never-touch rule has to be read against the resolved path too.
+    # A lane on the external disk resolves outside home and is unaffected: the rule names folders
+    # under home, and /Volumes is not one of them.
+    why = never_touch_reason(os.path.realpath(path), ctx.home_real)
+    if why:
+        return why
     git_entry = os.path.join(path, ".git")
     if os.path.islink(git_entry) or not os.path.isfile(git_entry):
         return "not a linked worktree (.git is not a file)"
@@ -1365,8 +1374,13 @@ def safe_target_path(lane: str, rel: str) -> str:
     full = os.path.join(lane, rel)
     if os.path.islink(full) or not os.path.isdir(full):
         return ""
+    # Containment is decided on the resolved paths, because a lane behind a symlinked parent (the
+    # external-disk lanes root) has a resolved target that never matches its spelling, and spelling
+    # equality would refuse every target in it.  The target must still be a plain folder, and must
+    # still resolve inside the resolved lane, so a link out of the lane is refused as before.
+    real_lane = os.path.realpath(lane)
     real = os.path.realpath(full)
-    if real != os.path.normpath(full) or not real.startswith(lane + os.sep):
+    if not real.startswith(real_lane + os.sep):
         return ""
     return real
 

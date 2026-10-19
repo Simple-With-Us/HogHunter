@@ -918,6 +918,25 @@ class TestRecheck(unittest.TestCase):
         self.assertEqual(scan.choices, [])
         self.assertIn("different repository", refused_reason(scan, self.lane))
 
+    def test_a_symlinked_parent_may_not_redirect_a_lane_into_a_never_touch_folder(self) -> None:
+        """Allowing a symlinked parent must not reopen the path the removed
+        realpath check used to close: a lane spelled inside ~/apps/lanes that
+        resolves under ~/Documents is still a never-touch location, and
+        `git worktree remove` would follow the link and delete it there."""
+        bait = self.sb.home / "Documents" / "hoghunter"
+        bait.mkdir(parents=True)
+        link = self.sb.lanes_root / "redirected"
+        link.symlink_to(bait)
+        lane = link / "claude-redirected"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/redirected", str(lane))
+        self.sb.push(lane)
+        # The doctor reports the ~/apps/lanes spelling, so the resolved path is the only place the
+        # never-touch folder shows up.
+        row = self.sb.row(lane, realpath=str(lane), path=str(lane))
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [], scan.refused)
+        self.assertIn("~/Documents", refused_reason(scan, lane))
+
     def test_dirty_report_facts_refuse(self) -> None:
         for over, needle in (
             ({"cwd_procs": [123]}, "process is using"),
@@ -1879,6 +1898,30 @@ class TestEngineDependencies(unittest.TestCase):
             self.assertTrue((self.lane / name).exists(), name)
         self.assertEqual(sorted(a["action"] for a in engine.plan), ["would-remove-folder"] * 3)
         self.assertFalse((Path(self.cfg["data_dir"]) / lanes.ACTION_LOG_NAME).exists())
+
+    def test_clears_a_lane_behind_a_symlinked_parent(self) -> None:
+        """The fleet keeps ~/apps/lanes/<Repo> on the external disk behind a symlink, so the lane's
+        resolved path never matches its spelling.  Containment is decided on the resolved paths, and
+        the folders there must still be clearable rather than refused as 'not a plain folder inside
+        the lane' one by one."""
+        external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
+        self.addCleanup(shutil.rmtree, str(external), True)
+        link = self.sb.lanes_root / "external"
+        link.symlink_to(external)
+        lane = link / "claude-external"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/external", str(lane))
+        (lane / "node_modules").mkdir()
+        (lane / "node_modules" / "blob.js").write_text("x" * 2048, encoding="utf-8")
+        old = time.time() - 3 * 86400
+        for target in (lane, lane / "node_modules", lane / "node_modules" / "blob.js"):
+            os.utime(target, (old, old))
+        # The doctor reports the symlinked spelling, not the real one.
+        row = self.sb.row(lane, pr_state="NONE", safety="NEEDS-REVIEW", idle_days=2.0, lane_age_days=2.0)
+        engine = self.engine([row])
+        freed, reason, status = engine._pressure_apps_deps(dry_run=False)
+        self.assertEqual(status, StepStatus.RAN, reason)
+        self.assertFalse((lane / "node_modules").exists())
+        self.assertGreater(freed, 0)
 
     def assert_untouched(self, engine, needle: str = "") -> None:
         _freed, reason, status = engine._pressure_apps_deps(dry_run=False)
