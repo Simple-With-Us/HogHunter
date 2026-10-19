@@ -156,12 +156,14 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------
 
 _DEADLINE: float | None = None
+_SCAN_BUDGET_EXHAUSTED = False
 
 
 def set_budget(seconds: float) -> None:
     """Start the clock.  Zero or less clears any budget."""
-    global _DEADLINE
+    global _DEADLINE, _SCAN_BUDGET_EXHAUSTED
     _DEADLINE = time.monotonic() + seconds if seconds and seconds > 0 else None
+    _SCAN_BUDGET_EXHAUSTED = False
 
 
 def budget_left() -> float:
@@ -476,7 +478,8 @@ def proc_count(pattern: str) -> int:
 
 
 def dir_bytes(path: str, max_depth: int = 8) -> int:
-    """Bytes under a path, bounded, without following symlinks."""
+    """Bytes under a path, bounded by depth and time, without following symlinks."""
+    global _SCAN_BUDGET_EXHAUSTED
     p = Path(path)
     if not p.exists():
         return 0
@@ -486,8 +489,17 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
         except OSError:
             return 0
     total = 0
+    started = time.monotonic()
+    deadline = started + RULE_BUDGET_SEC
+    if _DEADLINE is not None:
+        deadline = min(deadline, _DEADLINE)
     stack = [(p, 0)]
     while stack:
+        now = time.monotonic()
+        if now >= deadline:
+            if _DEADLINE is not None and now >= _DEADLINE:
+                _SCAN_BUDGET_EXHAUSTED = True
+            break
         cur, depth = stack.pop()
         try:
             if cur.is_symlink():
@@ -497,17 +509,34 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
                 continue
             if not cur.is_dir():
                 continue
-            for child in cur.iterdir():
-                stack.append((child, depth + 1))
         except OSError:
             continue
         if depth > max_depth:
-            # Deep tree: fall back to du rather than walking forever.
-            du = _run(["/usr/bin/du", "-sk", str(cur)], timeout=30)
+            # Deep tree: size it once, without also queueing its descendants.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if _DEADLINE is not None and budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                break
+            du = _run(["/usr/bin/du", "-sk", str(cur)], timeout=min(30.0, remaining))
             try:
                 total += int(du.split()[0]) * 1024
             except (IndexError, ValueError):
                 pass
+            if _DEADLINE is not None and budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                break
+            continue
+        try:
+            for child in cur.iterdir():
+                now = time.monotonic()
+                if now >= deadline:
+                    if _DEADLINE is not None and now >= _DEADLINE:
+                        _SCAN_BUDGET_EXHAUSTED = True
+                    break
+                stack.append((child, depth + 1))
+        except OSError:
+            continue
     return total
 
 
@@ -1352,14 +1381,23 @@ def read_band() -> Band:
 # --------------------------------------------------------------------------
 
 def scan(cats: Sequence[str] | None) -> list[Candidate]:
+    global _SCAN_BUDGET_EXHAUSTED
+    _SCAN_BUDGET_EXHAUSTED = False
     out: list[Candidate] = []
     for name, (fn, _desc) in RULES.items():
         if cats and name not in cats:
             continue
+        if budget_left() <= 0:
+            if _DEADLINE is not None:
+                _SCAN_BUDGET_EXHAUSTED = True
+            break
         try:
             out.extend(fn())
         except Exception as exc:  # a broken rule must not kill the scan
             log(f"rule {name} failed: {type(exc).__name__}: {exc}")
+        if _DEADLINE is not None and budget_left() <= 0:
+            _SCAN_BUDGET_EXHAUSTED = True
+            break
     return out
 
 
@@ -1507,7 +1545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     actionable = [c for c in cands if c.tier in allowed]
-    budget_exhausted = False
+    budget_exhausted = _SCAN_BUDGET_EXHAUSTED
     attempted = 0
     if args.clean:
         # CHUNKED APPLY.  Under pressure the work is split into small batches
@@ -1554,9 +1592,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Snapshots report zero bytes by nature, so trust df, not the tally.
         if budget_left() > 0:
             after = read_band()
-            snapshot_delta = (band.disk_free_gb - after.disk_free_gb) * 1024
+            snapshot_delta = (after.disk_free_gb - band.disk_free_gb) * 1024
             if snapshot_delta > 512:
-                log(f"snapshot prune freed {snapshot_delta:.0f}M (df-verified)")
+                log(f"disk free increased by {snapshot_delta:.0f}M during cleanup (df-verified)")
 
     cleanmymac_report: dict = {
         "requested": bool(args.cleanmymac),
