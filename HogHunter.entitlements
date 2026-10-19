@@ -1,24 +1,60 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  2026-09-22 — bundle ID migration added these two entitlements:
+  2026-10-19 - com.apple.developer.associated-domains removed (HH-160).
 
-    com.apple.security.application-groups    -> [group.com.simplewithus.hoghunter]
-        New App Group.  No shared container or UserDefaults suite is wired
-        up by the app yet, but the entitlement must be present (and the
-        App Group must be registered in the Apple Developer Portal per
-        App ID) before any future share-with-helper feature lands.
-        Existing local state lives under ~/Library/Logs/HogHunter/ and the
-        internal Application Support directory "HogHunter"; renaming those
-        would orphan user history, so they are intentionally NOT renamed —
-        only the bundle ID and the new App Group + Associated Domain move.
+    The 2026-09-22 bundle ID migration added an Associated Domain
+    (applinks:simplewithus.com, webcredentials:simplewithus.com).  It made
+    the app unlaunchable, because that entitlement is restricted: macOS only
+    honours it when a Developer ID provisioning profile carrying it is
+    embedded at Contents/embedded.provisionprofile.  This project signs with
+    CODE_SIGN_STYLE Automatic and embeds no profile, so every launch died
+    before main:
 
-    com.apple.developer.associated-domains -> [applinks:simplewithus.com, webcredentials:simplewithus.com]
-        New Associated Domain on simplewithus.com (Jay-owned, resolves).
-        Universal Links (applinks) and shared Safari webcredentials
-        (webcredentials) are wired up; they will validate once the
-        apple-app-site-association file is hosted at
-        https://simplewithus.com/.well-known/apple-app-site-association.
+      taskgated-helper: Unsatisfied entitlements: com.apple.developer.associated-domains
+      amfid:            AppleMobileFileIntegrityError -413 "No matching profile found"
+      launchd:          NSPOSIXErrorDomain 163 "Launchd job spawn failed"
+
+    A strict deep codesign verify still passed, and Gatekeeper still accepted
+    the bundle, so the fault was invisible until the process was actually
+    spawned.  Finder's only clue was the generic "The application cannot be
+    opened" dialog, which sends you looking at the bundle instead of the
+    launch log.  Do not add this entitlement back without the profile.
+
+    Nothing used it.  There is no NSUserActivity, applinks, webcredentials,
+    or associatedDomain anywhere in Sources/ or ios/Sources/, and the
+    apple-app-site-association file it depended on was never hosted, so the
+    domain could not have validated even if the process had started.
+
+    To restore it, do all three or the app goes dead again:
+
+      1. Enable the Associated Domains capability on the App ID
+         com.simplewithus.hoghunter.macos in the Apple Developer Portal.
+      2. Add a Developer ID Application provisioning profile that carries the
+         entitlement, embed it in the bundle, and reference it from
+         project.yml so that every build ships it.  The profile is the part
+         that is easy to forget: the portal capability alone does nothing.
+      3. Host https://simplewithus.com/.well-known/apple-app-site-association
+         naming the bundle ID, or applinks stays a no-op.
+
+  com.apple.security.application-groups    -> [group.com.simplewithus.hoghunter]
+    New App Group from the 2026-09-22 migration, and this one IS load
+    bearing: DiskCleaner, CleanRegimen and InfisicalSettings all read
+    UserDefaults(suiteName:) from it, InfisicalSettings resolves its shared
+    container URL from it, and the iPhone companion writes the same suite.
+    Removing it would silently break Mac-to-iPhone state sharing, so it
+    stays.  taskgated-helper accepts it without a provisioning profile, which
+    is the one asymmetry that made the other entitlement so hard to spot.
+
+    Existing local state lives under ~/Library/Logs/HogHunter/ and the
+    internal Application Support directory "HogHunter"; renaming those would
+    orphan user history, so they are intentionally NOT renamed.
+
+    NOTE: this is an XML comment, so it may never contain a double hyphen.
+    Writing a command flag like codesign -verify -deep inside one produces
+    "Failed to parse entitlements: AMFIUnserializeXML: syntax error" at
+    signing time, and the build silently falls back to an unusable adhoc
+    signature.  Spell flags without the leading dashes.
 
   See docs/rollouts/2026-09-22-bundle-id-migration.md for the full
   fleet-wide migration context.
@@ -28,11 +64,6 @@
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.com.simplewithus.hoghunter</string>
-	</array>
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:simplewithus.com</string>
-		<string>webcredentials:simplewithus.com</string>
 	</array>
 </dict>
 </plist>

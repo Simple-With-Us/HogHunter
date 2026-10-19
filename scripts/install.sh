@@ -163,10 +163,22 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
+# The bundle is built with CODE_SIGNING_ALLOWED=NO, so it carries no
+# entitlement in its signature yet.  Every re-sign below must therefore name
+# the entitlements file explicitly: omit it and the App Group is dropped in
+# silence, and the installed app loses the shared container that DiskCleaner,
+# CleanRegimen and InfisicalSettings read (and that the iPhone companion
+# writes).  scripts/mac-release-build.sh passes the same flag.
+ENTITLEMENTS_FILE="$REPO_ROOT/HogHunter.entitlements"
+if [[ ! -f "$ENTITLEMENTS_FILE" ]]; then
+  echo "error: entitlements file missing at $ENTITLEMENTS_FILE" >&2
+  exit 1
+fi
+
 sign_adhoc() {
   local reason="$1"
   echo "Signing adhoc ($reason)."
-  codesign --force --deep --sign - "$APP_PATH"
+  codesign --force --deep --entitlements "$ENTITLEMENTS_FILE" --sign - "$APP_PATH"
 }
 
 # DEVELOPER_ID_AVAILABLE is resolved above, before the Sparkle gate needs it.
@@ -174,6 +186,7 @@ if [[ "$DEVELOPER_ID_AVAILABLE" -eq 1 ]]; then
   echo "Signing with Developer ID Application.  20 second timeout."
   # macOS has no `timeout` binary, so bound codesign with perl's alarm instead.
   if perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --deep --options runtime --timestamp=none \
+      --entitlements "$ENTITLEMENTS_FILE" \
       --sign "Developer ID Application" "$APP_PATH"; then
     echo "Signed with Developer ID Application."
   else
