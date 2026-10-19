@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Three reasons worktree retirement never removed anything (HH-166, HH-168):
+
+- A lane that lives behind a symlinked parent was refused.  The fleet keeps `~/apps/lanes/<Repo>` on the external disk behind a symlink, and the doctor reports that spelling on purpose, but the Vacuum compared the path with its own realpath and refused anything that resolved elsewhere: "path resolves somewhere else now".  On this Mac that was every nested lane, 33 of the doctor's 35 cleaner candidates.  The path itself must still be a plain directory, and the lane must still belong to the repository the doctor recorded; where it lives on disk no longer decides.
+- lsof reports the physical path the kernel sees, so a process sitting in a lane behind a symlinked parent went unseen.  The process check compares the resolved path as well.
+- One failed PR lookup (a retired repository) threw away the whole doctor report, so no lane anywhere could be retired.  The overall gh status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused.
+
+None of these removes anything by itself: the Vacuum still decides what is eligible, and it keeps a day of grace on a fresh update rollback.
+
 Server status on the main window (HH-163):
 
 - The remote server's readings moved out of the Maintain tab and onto the main window.  A strip under the meters shows the host with its CPU, RAM and disk, each coloured by its own severity, and a new top-level **Server** tab holds the full card (CPU, RAM, swap, disks, the app databases, the largest folders).  The strip appears when a host is configured, and it is a button: one click opens the Server tab.
