@@ -199,15 +199,29 @@ load_secrets() {
     fi
     log "ASC_KEY_PATH set but file missing (not printing path contents)"
   fi
-  local kid="${ASC_KEY_ID:-}" iss="${ASC_ISSUER_ID:-}" p8
-  [[ -n "$kid" ]] || kid="$(fs_get ASC_KEY_ID /asc)" || kid=""
-  [[ -n "$iss" ]] || iss="$(fs_get ASC_ISSUER_ID /asc)" || iss=""
+  local kid="${ASC_KEY_ID:-}" iss="${ASC_ISSUER_ID:-}" p8="" fkid="" lower
+  # The key id, issuer and private key must belong together:  with nothing named in the
+  # environment all three come from /asc;  an env key id that is not the /asc one gets its
+  # own .p8 from /authkey-<id>-p8, never the /asc key.
+  fkid="$(fs_get ASC_KEY_ID /asc)" || fkid=""
+  if [[ -z "$kid" ]]; then
+    kid="$fkid"
+    iss="$(fs_get ASC_ISSUER_ID /asc)" || iss=""
+  elif [[ -z "$iss" ]]; then
+    iss="$(fs_get ASC_ISSUER_ID /asc)" || iss=""
+  fi
   if [[ -z "$kid" || -z "$iss" ]]; then
-    log "ASC credentials missing: set ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_PATH or add ASC_KEY_ID and ASC_ISSUER_ID to Infisical /asc"
+    log "ASC credentials missing: set ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_PATH or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc"
     return 0
   fi
-  if ! p8="$(fs_get ASC_KEY_P8 /asc)"; then
-    log "missing ASC_KEY_P8 in Infisical /asc"
+  if [[ "$kid" == "$fkid" ]]; then
+    p8="$(fs_get ASC_KEY_P8 /asc)" || p8=""
+  else
+    lower="$(printf '%s' "$kid" | tr 'A-Z' 'a-z')"
+    p8="$(fs_get "AUTHKEY_${kid}" "/authkey-${lower}-p8")" || p8=""
+  fi
+  if [[ -z "$p8" ]]; then
+    log "missing the .p8 for key ${kid}: Infisical /asc ASC_KEY_P8 (the /asc key) or /authkey-<id>-p8 AUTHKEY_<id>"
     return 0
   fi
   if [[ -z "$ASC_TMP_DIR" ]]; then

@@ -25,6 +25,7 @@ case "${folder}:${name}" in
   /asc:ASC_KEY_ID) printf 'ABCDE12345\n' ;;
   /asc:ASC_ISSUER_ID) printf 'issuer-synthetic\n' ;;
   /asc:ASC_KEY_P8) printf -- '-----BEGIN PRIVATE KEY-----\nSYNTHETIC\n-----END PRIVATE KEY-----\n' ;;
+  /authkey-otherkey01-p8:AUTHKEY_OTHERKEY01) printf -- '-----BEGIN PRIVATE KEY-----\nOTHERKEYMATERIAL\n-----END PRIVATE KEY-----\n' ;;
   *) exit 3 ;;
 esac
 FAKE
@@ -79,6 +80,42 @@ env ASC_KEY_ID=ENVKEY0001 ASC_ISSUER_ID=env-issuer ASC_KEY_PATH="${tmp}/env-key.
   [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == ENVKEY0001 && -z "$ASC_TMP_DIR" ]]
 ' || fail "environment credentials were not honored"
 [[ ! -s "$FAKE_LOG" ]] || fail "fleet-secrets was called although the environment was complete"
+
+# 2b. An env key id that is NOT the /asc one never gets the /asc key:  its own .p8 comes from
+# /authkey-<id>-p8, and /asc ASC_KEY_P8 is not requested.
+: > "$FAKE_LOG"
+env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=OTHERKEY01 bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+  [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == OTHERKEY01 ]]
+  grep -q OTHERKEYMATERIAL "$ASC_KEY_PATH"
+  ! grep -q SYNTHETIC$ "$ASC_KEY_PATH"
+  cleanup_asc_tmp
+' || fail "env key id different from /asc was not given its own key"
+grep -q '^AUTHKEY_OTHERKEY01 /authkey-otherkey01-p8$' "$FAKE_LOG" || fail "did not ask the per-key folder"
+if grep -q '^ASC_KEY_P8 ' "$FAKE_LOG"; then fail "mixed an env key id with the /asc key"; fi
+
+# 2c. An env key id equal to the /asc one uses the /asc key.
+: > "$FAKE_LOG"
+env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=ABCDE12345 bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+  [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == ABCDE12345 ]]
+  grep -q SYNTHETIC "$ASC_KEY_PATH"
+  cleanup_asc_tmp
+' || fail "env key id equal to /asc was not served from /asc"
+grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "did not ask /asc ASC_KEY_P8"
+
+# 2d. An env key id with no key material anywhere fails closed (no api_key mode).
+: > "$FAKE_LOG"
+env -u ASC_KEY_PATH -u ASC_ISSUER_ID ASC_KEY_ID=NOSUCHKEY0 bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+  [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
+' || fail "missing key material did not fail closed"
 
 # 3. Nothing is created under the old secrets folder or ~/.appstoreconnect.
 [[ ! -e "${HOME}/.secrets" ]] || fail "created the old secrets folder"

@@ -44,15 +44,25 @@ function resolveAscCredentials() {
   if (keyId && issuerId && envKeyPath && existsSync(envKeyPath)) {
     return { keyId, issuerId, privateKeyPem: readFileSync(envKeyPath, "utf8") };
   }
-  keyId = keyId || fleetSecretsGet("ASC_KEY_ID", "/asc");
-  issuerId = issuerId || fleetSecretsGet("ASC_ISSUER_ID", "/asc");
+  // The key id, issuer and private key must belong together:  with no key id in the
+  // environment all three come from /asc;  an env key id that is not the /asc one gets its
+  // own .p8 from /authkey-<id>-p8, never the /asc key.
+  const ascKeyId = fleetSecretsGet("ASC_KEY_ID", "/asc");
+  if (!keyId) {
+    keyId = ascKeyId;
+    issuerId = fleetSecretsGet("ASC_ISSUER_ID", "/asc");
+  } else if (!issuerId) {
+    issuerId = fleetSecretsGet("ASC_ISSUER_ID", "/asc");
+  }
   if (!keyId || !issuerId) {
-    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID: set them in the environment or add them to Infisical /asc");
+    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID: set them in the environment or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc");
     process.exit(1);
   }
-  const privateKeyPem = fleetSecretsGet("ASC_KEY_P8", "/asc");
+  const privateKeyPem = keyId === ascKeyId
+    ? fleetSecretsGet("ASC_KEY_P8", "/asc")
+    : fleetSecretsGet(`AUTHKEY_${keyId}`, `/authkey-${keyId.toLowerCase()}-p8`);
   if (!privateKeyPem) {
-    console.error("Missing ASC_KEY_P8 in Infisical /asc");
+    console.error(`Missing the .p8 for key ${keyId}: Infisical /asc ASC_KEY_P8 (the /asc key) or /authkey-<id>-p8 AUTHKEY_<id>`);
     process.exit(1);
   }
   return { keyId, issuerId, privateKeyPem: privateKeyPem + "\n" };
