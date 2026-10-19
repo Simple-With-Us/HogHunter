@@ -115,12 +115,12 @@ INFO_PLIST="$APP_PATH/Contents/Info.plist"
 # Only for a build cut from main and signed with the real Developer ID.  A
 # developer build sits at a commit no release has published, so a working feed
 # points it at a newer production release and Sparkle silently replaces the
-# working copy under the developer — losing the very build they were testing.
+# working copy under the developer - losing the very build they were testing.
 # Gate the feed on the same conditions that make it legitimate.
 SPARKLE_FEED_URL="https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml"
 # Same shape as scripts/mac-release-build.sh: an overridable default so the
 # release path and the local path cannot drift apart.  This is Sparkle's PUBLIC
-# EdDSA key — it verifies a downloaded archive, it cannot sign one.
+# EdDSA key - it verifies a downloaded archive, it cannot sign one.
 SPARKLE_PUBLIC_ED_KEY="${HOGHUNTER_SPARKLE_PUBLIC_KEY:-8nQ6+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE=}"
 
 # Resolved before the Sparkle gate below, which needs the answer.  Kept in one
