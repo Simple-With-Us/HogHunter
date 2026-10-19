@@ -674,7 +674,20 @@ class VacuumEngine:
         failed = int(report.get("failed_count") or 0)
         total = int(report.get("actionable_count") or 0)
         freed = int(report.get("applied_bytes") or 0)
+        # `applied_bytes` is the size the scan ESTIMATED before each delete,
+        # not proof that the bytes came back.  The cleaner's df-verified
+        # `disk_free_delta_gb` is the measured truth, so prefer it when the
+        # cleaner is new enough to report it.  Reporting the estimate as
+        # "freed" is how a run that deleted nothing still looked like a
+        # success.  (Measured 2026-10-19: 6.48 GB estimated, 0.05 GB of
+        # actual change, because the host spent it as fast as it was freed.)
+        delta_gb = report.get("disk_free_delta_gb")
+        if delta_gb is not None:
+            measured = int(float(delta_gb) * (1024 ** 3))
+            freed = measured
         reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
+        if report.get("scan_truncated"):
+            reason += "; the scan hit its budget share, more may be left"
         if report.get("budget_exhausted"):
             reason += f"; time budget spent, {int(report.get('remaining_count') or 0)} left for the next run"
         if failed:

@@ -183,7 +183,7 @@ def test_dir_bytes_uses_du_once_without_counting_its_descendants(hh):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_dir_bytes_cuts_du_timeout_to_remaining_run_budget(hh):
+def test_dir_bytes_cuts_du_timeout_to_remaining_scan_budget(hh):
     root = Path(tempfile.mkdtemp(prefix="hhclean-dir-budget-"))
     try:
         (root / "child").mkdir()
@@ -200,11 +200,93 @@ def test_dir_bytes_cuts_du_timeout_to_remaining_run_budget(hh):
             with mock.patch.object(hh, "_run", side_effect=fake_run):
                 size = hh.dir_bytes(str(root), max_depth=0)
             assert size == 4096
+            # The du timeout is cut to the SCAN's share of the budget, not the whole run: the
+            # deletes need the rest.
             assert len(seen) == 1 and 0 < seen[0] <= 2.0, seen
-            assert hh.budget_left() == 0
+            assert seen[0] < 2.0, (
+                f"the du timeout must be cut to the scan share "
+                f"({2.0 * hh.SCAN_BUDGET_FRACTION:.1f}s), not the whole run budget")
             assert hh._SCAN_BUDGET_EXHAUSTED is True
+            # And the run budget still has time in it, which is the whole point of the split.
+            assert hh.budget_left() > 0, hh.budget_left()
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_scan_cannot_spend_the_budget_the_deletes_need(hh):
+    """A slow scan used to eat the whole budget: the apply phase then started with nothing, deleted
+    nothing, and the next run rescanned the same tree and ate the budget again -- a livelock, not
+    progress.  Measured 2026-10-19: a 900 s budget, 1 of 23 applied, zero bytes freed.  The scan now
+    gets a fixed share, so the deletes always get the rest."""
+    clock = FakeClock()
+    called = []
+
+    def slow_rule():
+        called.append("slow")
+        clock.now += 8.0      # past the scan's 6 s share, short of the 10 s run budget
+        return []
+
+    def later_rule():
+        called.append("later")
+        return []
+
+    original_rules = hh.RULES
+    hh.RULES = {"slow": (slow_rule, ""), "later": (later_rule, "")}
+    try:
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = hh.main(["--scan", "--json", "--budget-sec=10"])
+        report = json.loads(out.getvalue())
+        assert code == 0
+        assert called == ["slow"], called
+        assert report["scan_truncated"] is True
+        assert report["budget_exhausted"] is True
+        # The scan stopped at its share and the run budget still has time for the deletes.
+        assert hh.budget_left() > 0, hh.budget_left()
+    finally:
+        hh.RULES = original_rules
+
+
+def test_the_report_carries_the_measured_free_space_not_just_the_estimate(hh):
+    """`applied_bytes` is the size the scan ESTIMATED before each delete; it is not proof that the
+    bytes came back.  A delete can free nothing (the file is open elsewhere) and the host can spend
+    what was freed in the same minute, so the report carries df's measured change next to the
+    estimate.  (Measured 2026-10-19: 6.48 GB estimated, 0.05 GB of actual change.)"""
+    clock = FakeClock()
+    cands = [marker(hh, i) for i in range(2)]
+    out, err = io.StringIO(), io.StringIO()
+    with fake_time(hh, clock), \
+            mock.patch.object(hh, "scan", return_value=cands), \
+            mock.patch.object(hh, "read_band", side_effect=[
+                hh.Band(disk_free_gb=10.0, disk_used_pct=90, swap_used_pct=0, load1=0, cheap_only=False),
+                hh.Band(disk_free_gb=11.5, disk_used_pct=88, swap_used_pct=0, load1=0, cheap_only=False),
+            ]), \
+            mock.patch.object(hh, "apply_candidate", side_effect=lambda c: setattr(c, "applied", True)), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = hh.main(["--clean", "--json", "--budget-sec=60"])
+    report = json.loads(out.getvalue())
+    assert code == 0
+    assert report["disk_free_gb_before"] == 10.0
+    assert report["disk_free_gb_after"] == 11.5
+    assert report["disk_free_delta_gb"] == 1.5
+    # The estimate is still there, and it is still the estimate.
+    assert report["applied_bytes"] == 2 * 2048
+
+
+def test_the_measured_free_space_is_absent_when_the_run_could_not_measure(hh):
+    """A run that spends its budget cannot take the final reading.  That is not "freed nothing", so
+    the field is absent rather than zero."""
+    clock = FakeClock()
+    cands = [heavy(hh, i) for i in range(3)]
+    band = calm_band(hh, chunk_size=1, pause=0.0)
+    # The second heavy item overshoots the deadline, so the run ends with no time left to measure.
+    code, report, _err = run_main(hh, ["--clean", "--json", "--budget-sec=100"], cands, band, clock, apply_cost=60.0)
+    assert code == 0
+    assert report["budget_exhausted"] is True
+    assert report["disk_free_delta_gb"] is None
+    assert report["disk_free_gb_after"] is None
 
 
 def test_dir_bytes_keeps_du_timeout_at_30_seconds_without_run_budget(hh):

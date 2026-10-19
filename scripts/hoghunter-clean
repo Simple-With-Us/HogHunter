@@ -153,16 +153,36 @@ def log(msg: str) -> None:
 # instead of a kill.  The clock starts when main() starts, so the scan counts.
 # Nothing is lost when the budget runs out: the next run rescans, what was
 # removed is gone, and the rest is the new list.  No flag means no limit.
+#
+# The scan does NOT get the whole budget.  The scan is the part that gets
+# slower as the host gets busier, and a scan that eats the whole budget
+# leaves the apply phase with nothing: no file is deleted, and the next run
+# rescans the same tree and eats the budget again.  That is a livelock, not
+# progress.  Measured 2026-10-19: a 900 s budget went entirely to the scan,
+# 1 of 23 candidates was applied, and the run ended with
+# `budget_exhausted=True` and zero bytes freed -- on the very run meant to
+# free the disk.  So the scan gets a fixed share and the rest is reserved
+# for the deletes.
 # --------------------------------------------------------------------------
 
+# The scan's share of the budget.  The remaining 40% belongs to the deletes.
+SCAN_BUDGET_FRACTION = 0.6
+
 _DEADLINE: float | None = None
+_SCAN_DEADLINE: float | None = None
 _SCAN_BUDGET_EXHAUSTED = False
 
 
 def set_budget(seconds: float) -> None:
     """Start the clock.  Zero or less clears any budget."""
-    global _DEADLINE, _SCAN_BUDGET_EXHAUSTED
-    _DEADLINE = time.monotonic() + seconds if seconds and seconds > 0 else None
+    global _DEADLINE, _SCAN_DEADLINE, _SCAN_BUDGET_EXHAUSTED
+    if seconds and seconds > 0:
+        now = time.monotonic()
+        _DEADLINE = now + seconds
+        _SCAN_DEADLINE = now + seconds * SCAN_BUDGET_FRACTION
+    else:
+        _DEADLINE = None
+        _SCAN_DEADLINE = None
     _SCAN_BUDGET_EXHAUSTED = False
 
 
@@ -171,6 +191,17 @@ def budget_left() -> float:
     if _DEADLINE is None:
         return float("inf")
     return max(0.0, _DEADLINE - time.monotonic())
+
+
+def scan_budget_left() -> float:
+    """Seconds left for the SCAN alone, or infinity when there is no budget.
+
+    The scan stops at its own deadline so the deletes always get the rest of
+    the budget.  A scan that runs out of time is not a failure: it returns
+    what it found, and the apply phase deletes it."""
+    if _SCAN_DEADLINE is None:
+        return float("inf")
+    return max(0.0, _SCAN_DEADLINE - time.monotonic())
 
 
 # A heavy candidate (a tree, a snapshot, a brew run) is not started with less than this left.  Starting
@@ -584,8 +615,13 @@ def proc_count(pattern: str) -> int:
     return len([ln for ln in p.stdout.splitlines() if ln.strip()])
 
 
-def dir_bytes(path: str, max_depth: int = 8) -> int:
-    """Bytes under a path, bounded by depth and time, without following symlinks."""
+def dir_bytes(path: str, max_depth: int = 8, deadline_cap: float | None = None) -> int:
+    """Bytes under a path, bounded by depth and time, without following symlinks.
+
+    deadline_cap is the wall clock this walk may not pass.  During a scan it
+    is the SCAN deadline, so one huge tree cannot spend the budget the
+    deletes need; the apply phase passes the full budget instead.  With no
+    cap (no budget at all) the walk is bounded only by RULE_BUDGET_SEC."""
     global _SCAN_BUDGET_EXHAUSTED
     p = Path(path)
     if not p.exists():
@@ -598,13 +634,14 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
     total = 0
     started = time.monotonic()
     deadline = started + RULE_BUDGET_SEC
-    if _DEADLINE is not None:
-        deadline = min(deadline, _DEADLINE)
+    cap = deadline_cap if deadline_cap is not None else _SCAN_DEADLINE
+    if cap is not None:
+        deadline = min(deadline, cap)
     stack = [(p, 0)]
     while stack:
         now = time.monotonic()
         if now >= deadline:
-            if _DEADLINE is not None and now >= _DEADLINE:
+            if cap is not None and now >= cap:
                 _SCAN_BUDGET_EXHAUSTED = True
             break
         cur, depth = stack.pop()
@@ -622,7 +659,7 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
             # Deep tree: size it once, without also queueing its descendants.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                if _DEADLINE is not None and budget_left() <= 0:
+                if cap is not None and time.monotonic() >= cap:
                     _SCAN_BUDGET_EXHAUSTED = True
                 break
             du = _run(["/usr/bin/du", "-sk", str(cur)], timeout=min(30.0, remaining))
@@ -630,7 +667,7 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
                 total += int(du.split()[0]) * 1024
             except (IndexError, ValueError):
                 pass
-            if _DEADLINE is not None and budget_left() <= 0:
+            if cap is not None and time.monotonic() >= cap:
                 _SCAN_BUDGET_EXHAUSTED = True
                 break
             continue
@@ -638,7 +675,7 @@ def dir_bytes(path: str, max_depth: int = 8) -> int:
             for child in cur.iterdir():
                 now = time.monotonic()
                 if now >= deadline:
-                    if _DEADLINE is not None and now >= _DEADLINE:
+                    if cap is not None and now >= cap:
                         _SCAN_BUDGET_EXHAUSTED = True
                     break
                 stack.append((child, depth + 1))
@@ -668,7 +705,7 @@ def apply_delete(path: str, known_bytes: int | None = None) -> tuple[int, str]:
         return 0, f"{KEEP_SENTINEL} sentinel present"
     if not p.exists():
         return 0, ""
-    before = known_bytes if known_bytes is not None else dir_bytes(path)
+    before = known_bytes if known_bytes is not None else dir_bytes(path, deadline_cap=_DEADLINE)
     try:
         if p.is_dir() and not p.is_symlink():
             # -depth so children go before parents; -delete removes empty
@@ -1716,8 +1753,8 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
     for name, (fn, _desc) in RULES.items():
         if cats and name not in cats:
             continue
-        if budget_left() <= 0:
-            if _DEADLINE is not None:
+        if scan_budget_left() <= 0:
+            if _SCAN_DEADLINE is not None:
                 _SCAN_BUDGET_EXHAUSTED = True
             break
         try:
@@ -1743,7 +1780,7 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
                 pass
             seen.add(key)
             out.append(c)
-        if _DEADLINE is not None and budget_left() <= 0:
+        if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
             _SCAN_BUDGET_EXHAUSTED = True
             break
     return out
@@ -1893,7 +1930,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     actionable = [c for c in cands if c.tier in allowed]
-    budget_exhausted = _SCAN_BUDGET_EXHAUSTED
+    # Two different things end a run early, and the report must not conflate
+    # them.  `scan_truncated` means the SCAN hit its own share of the budget
+    # and there may be more to find than this run listed.  `budget_spent`
+    # means the whole budget ran out, so some candidates were never started.
+    # Either one means the run did not finish everything, which is what
+    # `budget_exhausted` reports.
+    scan_truncated = _SCAN_BUDGET_EXHAUSTED
+    budget_spent = False
+    after_band = None
     attempted = 0
     if args.clean:
         # CHUNKED APPLY.  Under pressure the work is split into small batches
@@ -1907,42 +1952,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         chunks = plan_chunks(ordered, band.chunk_size)
         for n, batch in enumerate(chunks, 1):
             if budget_left() <= 0:
-                budget_exhausted = True
+                budget_spent = True
                 break
             applied_here = 0
             for c in batch:
                 left = budget_left()
                 if left <= 0:
-                    budget_exhausted = True
+                    budget_spent = True
                     break
                 if not is_light(c) and left < MIN_HEAVY_START_SEC:
-                    budget_exhausted = True  # too little time to start this one; a light item may still fit
+                    budget_spent = True  # too little time to start this one; a light item may still fit
                     continue
                 apply_candidate(c)
                 attempted += 1
                 applied_here += 1
             log(f"chunk {n}/{len(chunks)}: applied {applied_here} "
                 f"({len(ordered)} total)")
-            if budget_exhausted:
+            if budget_spent:
                 break
             if n < len(chunks) and band.chunk_pause_sec > 0:
                 time.sleep(min(band.chunk_pause_sec, budget_left()))
                 if budget_left() <= 0:
-                    budget_exhausted = True
+                    budget_spent = True
                     break
                 mid = read_band()
                 log(f"  after chunk: load1 {mid.load1:.0f}, "
                     f"{mid.cpu_idle_pct:.0f}% idle, "
                     f"swap {mid.swap_used_pct:.0f}%, {mid.pressure_label}")
-        if budget_exhausted:
+        if budget_spent:
             log(f"budget of {args.budget_sec:.0f}s spent: {attempted} of {len(ordered)} "
                 f"applied, {len(ordered) - attempted} left for the next run")
+        if scan_truncated:
+            log(f"scan stopped at {SCAN_BUDGET_FRACTION:.0%} of the budget, leaving the "
+                f"rest for the deletes; there may be more to find than this run listed")
         # Snapshots report zero bytes by nature, so trust df, not the tally.
         if budget_left() > 0:
             after = read_band()
+            after_band = after
             snapshot_delta = (after.disk_free_gb - band.disk_free_gb) * 1024
             if snapshot_delta > 512:
                 log(f"disk free increased by {snapshot_delta:.0f}M during cleanup (df-verified)")
+
+    budget_exhausted = scan_truncated or budget_spent
+    # The MEASURED change in free space.  `applied_bytes` above is the size the
+    # scan estimated before each delete; it is not proof that the bytes came
+    # back.  A delete can free nothing on disk (the file is still open
+    # elsewhere) and the host can spend what was freed in the same minute
+    # (swap churn, log writes, rebuilds).  df is the only number that cannot
+    # lie, so the report carries it next to the estimate.  None means the run
+    # spent its budget before it could measure, which is not the same as
+    # "freed nothing".
+    disk_free_delta_gb = (round(after_band.disk_free_gb - band.disk_free_gb, 3)
+                          if after_band is not None else None)
 
     cleanmymac_report: dict = {
         "requested": bool(args.cleanmymac),
@@ -1974,6 +2035,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "failed_count": sum(1 for c in actionable if c.error),
             "actionable_count": len(actionable),
             "budget_exhausted": budget_exhausted,
+            # `scan_truncated` is the precise reason a run stopped early: the
+            # scan hit its own share of the budget and there may be more to
+            # find.  `budget_spent` is the other reason: the whole budget ran
+            # out.  `budget_exhausted` is either one.
+            "scan_truncated": scan_truncated,
+            "budget_spent": budget_spent,
+            # The measured change in free space, next to the estimate above.
+            "disk_free_gb_before": round(band.disk_free_gb, 3),
+            "disk_free_gb_after": (round(after_band.disk_free_gb, 3)
+                                   if after_band is not None else None),
+            "disk_free_delta_gb": disk_free_delta_gb,
             "remaining_count": (len(actionable) - attempted) if args.clean else 0,
             "elapsed_sec": round(time.monotonic() - started, 1),
             "cleanmymac": cleanmymac_report,
@@ -1988,6 +2060,16 @@ def main(argv: Sequence[str] | None = None) -> int:
               + (f"  [pressure: {band.pressure_label}"
                  f"{', ' + ', '.join(band.reasons) if band.reasons else ''}]"))
         print(f"tiers applied: {', '.join(sorted(allowed))}\n")
+        if args.clean:
+            estimate = sum(c.bytes for c in actionable if c.applied)
+            print(f"applied {sum(1 for c in actionable if c.applied)} items, "
+                  f"estimated {estimate / 1e9:.2f} GB")
+            if disk_free_delta_gb is None:
+                print("free space: not measured (the budget ran out before the final reading)")
+            else:
+                print(f"free space: {band.disk_free_gb:.2f} GB -> "
+                      f"{after_band.disk_free_gb:.2f} GB "
+                      f"({disk_free_delta_gb:+.2f} GB measured by df)")
         if cleanmymac_report["requested"]:
             if cleanmymac_report["ran"]:
                 exits = ",".join(str(c.get("exit")) for c in cleanmymac_report["commands"])
