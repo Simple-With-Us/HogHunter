@@ -107,10 +107,10 @@ struct StorageView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 230)
+            .frame(width: 210)
             .disabled(cleanerStore.isCleaning)
 
-            Spacer(minLength: 6)
+            Spacer(minLength: 8)
 
             switch selectedTab {
             case .diskCleaner:
@@ -135,7 +135,7 @@ struct StorageView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 170)
+            .frame(width: 215)
             .disabled(cleanerStore.isBusy)
 
             Text(cleanerStore.selectedTier.badge)

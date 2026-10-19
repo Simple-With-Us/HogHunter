@@ -19,6 +19,9 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     /// the loser never gets far enough to own anything.
     func applicationWillFinishLaunching(_ notification: Notification) {
         let isRunningTests = NSClassFromString("XCTestCase") != nil
+            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+            || ProcessInfo.processInfo.arguments.contains("-XCTest")
         let handOver = SingleInstance.shouldHandOver(
             argumentStrings: ProcessInfo.processInfo.arguments,
             isRunningTests: isRunningTests,

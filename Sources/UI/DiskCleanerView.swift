@@ -121,19 +121,12 @@ struct DiskCleanerView: View {
     private var heroHeader: some View {
         switch store.state {
         case .idle:
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(Color.accentColor)
-                    Text("Ready to scan system clutter")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                Text("Select Reclaim to start cleaning")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            VStack(spacing: 4) {
+                Text("Ready to scan system clutter")
+                    .font(.system(size: 13, weight: .medium))
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+            .padding(.vertical, 12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
 
         case .scanning(let category):
@@ -155,15 +148,6 @@ struct DiskCleanerView: View {
         case .scanned(let report):
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 16) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.accentColor.opacity(0.12))
-                            .frame(width: 52, height: 52)
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 24))
-                            .foregroundStyle(Color.accentColor)
-                    }
-
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Text("\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))")

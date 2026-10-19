@@ -23,6 +23,7 @@ struct MaintainView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     statusCard
+                    VPSResourceCardView(store: store.vpsStore)
                     stepsSection
                     historySection
                 }
