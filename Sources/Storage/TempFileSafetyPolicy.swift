@@ -10,8 +10,21 @@ struct TempFileSafetyPolicy: Equatable, Sendable {
     let minimumUntouchedHours: Double
 
     init(hours: Double = defaultHours) {
-        minimumUntouchedHours = hours.isFinite && Self.allowedHours.contains(hours) && hours.rounded() == hours
-            ? hours : Self.defaultHours
+        minimumUntouchedHours = Self.isValid(hours) ? hours : Self.defaultHours
+    }
+
+    static func isValid(_ hours: Double) -> Bool {
+        hours.isFinite && allowedHours.contains(hours) && hours.rounded() == hours
+    }
+
+    // Process-local generation catches A → B → A edits before queued actor
+    // notifications run.  Every report remains bound to its starting generation.
+    private static let revisionLock = NSLock()
+    private static var revision: UInt64 = 0
+    static var currentRevision: UInt64 {
+        revisionLock.lock()
+        defer { revisionLock.unlock() }
+        return revision
     }
 
     var minimumUntouchedInterval: TimeInterval { minimumUntouchedHours * 3_600 }
@@ -28,8 +41,13 @@ struct TempFileSafetyPolicy: Equatable, Sendable {
 
     @discardableResult
     static func save(hours: Double, to defaults: UserDefaults = CleanerExclusions.sharedDefaults) -> Self {
+        // Invalid user edits cannot lower an existing stricter safety choice.
+        guard isValid(hours) else { return load(from: defaults) }
         let policy = Self(hours: hours)
         defaults.set(policy.minimumUntouchedHours, forKey: defaultsKey)
+        revisionLock.lock()
+        revision &+= 1
+        revisionLock.unlock()
         NotificationCenter.default.post(name: .tempFileSafetyPolicyChanged, object: defaults)
         return policy
     }

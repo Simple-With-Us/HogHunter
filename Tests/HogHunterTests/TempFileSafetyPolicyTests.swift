@@ -33,9 +33,9 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         return url
     }
 
-    private func cleaner(cap: Int = 25_000, fileManager: FileManager = .default,
+    private func cleaner(cap: Int = 25_000, deniedEnumerationPath: String? = nil,
                          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) -> DiskCleaner {
-        DiskCleaner(fileManager: fileManager, tempRootDirectory: root, worktreePathsProvider: { self.worktrees },
+        DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { self.worktrees },
             tempPolicyProvider: { TempFileSafetyPolicy.load(from: self.defaults) },
             tempMetadataProvider: { url in
                 self.metadataObserver?(url)
@@ -43,7 +43,14 @@ final class TempFileSafetyPolicyTests: XCTestCase {
                 var info = try TempEntryMetadata.read(url)
                 info.latestActivity = self.activity[url.path] ?? self.clock.addingTimeInterval(-96 * 3_600)
                 return info
-            }, tempNow: { self.clock }, tempEntryCap: cap, tempUptime: uptime)
+            }, tempNow: { self.clock }, tempEntryCap: cap, tempUptime: uptime,
+            tempEnumerationProvider: { url, options, handler in
+                if url.path == deniedEnumerationPath {
+                    _ = handler?(url, CocoaError(.fileReadNoPermission))
+                    return nil
+                }
+                return FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil, options: options, errorHandler: handler)
+            })
     }
 
     func testDefaultOmits24Through71HoursEvenAsUncheckedRows() throws {
@@ -70,6 +77,14 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         }
         XCTAssertEqual(TempFileSafetyPolicy.save(hours: .nan, to: defaults).minimumUntouchedHours, 72)
         XCTAssertEqual(TempFileSafetyPolicy.save(hours: 1, to: defaults).minimumUntouchedHours, 1)
+    }
+
+    func testInvalidEditsRetainAnExistingStricterPolicy() {
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        for invalid in [0, -1, 8_761, 1.5, Double.nan, Double.infinity] {
+            XCTAssertEqual(TempFileSafetyPolicy.save(hours: invalid, to: defaults).minimumUntouchedHours, 168)
+            XCTAssertEqual(TempFileSafetyPolicy.load(from: defaults).minimumUntouchedHours, 168)
+        }
     }
 
     func testNestedActivityIncludingCopiedAndAccessedFilesBlocksContainer() throws {
@@ -120,19 +135,10 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertFalse(cleaner().isSafeToDelete(url: root.appendingPathComponent("container"), category: .tempFiles))
     }
 
-    private final class UnreadableDirectoryManager: FileManager, @unchecked Sendable {
-        var deniedPath = ""
-        override func enumerator(at url: URL, includingPropertiesForKeys keys: [URLResourceKey]?, options mask: FileManager.DirectoryEnumerationOptions = [], errorHandler handler: ((URL, Error) -> Bool)? = nil) -> FileManager.DirectoryEnumerator? {
-            if url.path == deniedPath { _ = handler?(url, CocoaError(.fileReadNoPermission)); return nil }
-            return super.enumerator(at: url, includingPropertiesForKeys: keys, options: mask, errorHandler: handler)
-        }
-    }
-
     func testDirectoryListingFailureFailsClosed() throws {
         let nested = try file("container/deep/data.bin")
-        let manager = UnreadableDirectoryManager()
-        manager.deniedPath = nested.deletingLastPathComponent().deletingLastPathComponent().path
-        XCTAssertTrue(cleaner(fileManager: manager).scanTempFiles().isEmpty)
+        let denied = nested.deletingLastPathComponent().deletingLastPathComponent().path
+        XCTAssertTrue(cleaner(deniedEnumerationPath: denied).scanTempFiles().isEmpty)
     }
 
     func testElapsedBudgetFailsClosed() throws {
@@ -147,6 +153,22 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         var reads = 0
         metadataObserver = { url in
             if url == candidate {
+                reads += 1
+                if reads == 2 {
+                    try! Data([1]).write(to: candidate.appendingPathComponent(".git"))
+                    self.activity[candidate.path] = self.clock
+                }
+            }
+        }
+        XCTAssertTrue(cleaner().scanTempFiles().isEmpty)
+    }
+
+    func testMarkerAddedWhileChildrenAreReverifiedIsCaughtByParentLastCheck() throws {
+        let nested = try file("container/deep/data.bin")
+        let candidate = root.appendingPathComponent("container")
+        var reads = 0
+        metadataObserver = { entry in
+            if entry == nested {
                 reads += 1
                 if reads == 2 {
                     try! Data([1]).write(to: candidate.appendingPathComponent(".git"))
@@ -225,4 +247,16 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertFalse(store.showConfirmation)
         XCTAssertEqual(store.state, .idle)
     }
+    @MainActor
+    func testPolicyRoundTripInvalidatesHiddenStoreBeforeNotificationDelivery() {
+        let store = DiskCleanerStore(cleaner: cleaner(), historyStore: CleanupHistoryStore(inMemory: true),
+            exclusionsDefaults: defaults, rescanAfterExclusionChange: false)
+        store.selectedItemIds = ["stale-selection"]
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        TempFileSafetyPolicy.save(hours: 72, to: defaults)
+        store.reloadTempFilePolicy()
+        XCTAssertTrue(store.selectedItemIds.isEmpty)
+        XCTAssertEqual(store.state, .idle)
+    }
+
 }

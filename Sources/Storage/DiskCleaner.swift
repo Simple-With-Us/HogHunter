@@ -614,6 +614,8 @@ final class DiskCleaner: @unchecked Sendable {
     private let tempEntryCap: Int
     private let tempUptime: () -> TimeInterval
     private let tempWalkTimeLimit: TimeInterval
+    typealias TempEnumerationProvider = (URL, FileManager.DirectoryEnumerationOptions, ((URL, Error) -> Bool)?) -> FileManager.DirectoryEnumerator?
+    private let tempEnumerationProvider: TempEnumerationProvider
 
     init(fileManager: FileManager = .default,
          makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
@@ -627,7 +629,8 @@ final class DiskCleaner: @unchecked Sendable {
          tempNow: @escaping () -> Date = { Date() },
          tempEntryCap: Int = 25_000,
          tempUptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         tempWalkTimeLimit: TimeInterval = 2) {
+         tempWalkTimeLimit: TimeInterval = 2,
+         tempEnumerationProvider: TempEnumerationProvider? = nil) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
         self.listSnapshots = listSnapshots
@@ -641,6 +644,9 @@ final class DiskCleaner: @unchecked Sendable {
         self.tempEntryCap = tempEntryCap
         self.tempUptime = tempUptime
         self.tempWalkTimeLimit = tempWalkTimeLimit
+        self.tempEnumerationProvider = tempEnumerationProvider ?? { url, options, handler in
+            fileManager.enumerator(at: url, includingPropertiesForKeys: nil, options: options, errorHandler: handler)
+        }
     }
 
     // MARK: - Full Scan
@@ -778,8 +784,8 @@ final class DiskCleaner: @unchecked Sendable {
     /// require explicit review: idle plain files have no inferred backup status.
     func scanTempFiles() -> [CleanItem] {
         var enumerationFailed = false
-        guard let entries = fileManager.enumerator(at: tempRootURL, includingPropertiesForKeys: nil,
-            options: [.skipsSubdirectoryDescendants], errorHandler: { _, _ in enumerationFailed = true; return false }) else { return [] }
+        guard let entries = tempEnumerationProvider(tempRootURL,
+            [.skipsSubdirectoryDescendants], { _, _ in enumerationFailed = true; return false }) else { return [] }
         let policy = tempPolicyProvider()
         let cutoff = tempNow().addingTimeInterval(-policy.minimumUntouchedInterval)
         let worktrees = Set(worktreePathsProvider().map(Self.resolvedPath))
@@ -864,8 +870,8 @@ final class DiskCleaner: @unchecked Sendable {
         guard let rootInfo = inspect(url) else { return nil }
         if rootInfo.isDirectory {
             var enumerationFailed = false
-            guard let entries = fileManager.enumerator(at: url, includingPropertiesForKeys: nil,
-                options: [], errorHandler: { _, _ in enumerationFailed = true; return false }) else { return nil }
+            guard let entries = tempEnumerationProvider(url,
+                [], { _, _ in enumerationFailed = true; return false }) else { return nil }
             while let entry = entries.nextObject() {
                 guard !enumerationFailed, let child = entry as? URL, inspect(child) != nil else { return nil }
             }
@@ -874,7 +880,9 @@ final class DiskCleaner: @unchecked Sendable {
         // A second metadata read (no second directory traversal) rejects an
         // inode replacement, nested write, or project/lock added during the
         // walk.  Directory ctime catches additions even with preserved mtime.
-        for (entry, observed) in observations {
+        // Enumeration records each parent before its descendants.  Reversing
+        // that order verifies every containing directory after its children.
+        for (entry, observed) in observations.reversed() {
             guard !Task.isCancelled, tempUptime() < deadline,
                   let current = try? tempMetadataProvider(entry), current == observed else { return nil }
         }

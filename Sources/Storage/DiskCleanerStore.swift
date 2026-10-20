@@ -43,12 +43,15 @@ final class DiskCleanerStore: ObservableObject {
     private let rescanAfterExclusionChange: Bool
     @Published private(set) var tempFilePolicy: TempFileSafetyPolicy
     private var tempPolicyObserver: AnyCancellable?
+    private var tempPolicyRevision = TempFileSafetyPolicy.currentRevision
 
     /// Invalidate hidden dashboard stores too; changing safety never starts a scan.
     func reloadTempFilePolicy() {
         let policy = TempFileSafetyPolicy.load(from: exclusionsDefaults)
-        guard policy != tempFilePolicy else { return }
+        let revision = TempFileSafetyPolicy.currentRevision
+        guard policy != tempFilePolicy || revision != tempPolicyRevision else { return }
         tempFilePolicy = policy
+        tempPolicyRevision = revision
         cancelScan()
         report = nil
         selectedItemIds.removeAll()

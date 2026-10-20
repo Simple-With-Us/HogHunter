@@ -545,6 +545,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
         history = CleanupHistoryStore(inMemory: true)
         store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), cleanupHistory: history, startImmediately: false)
         store.remoteExclusions = { CleanerExclusions() }
+        store.remoteTempPolicy = { TempFileSafetyPolicy.load(from: defaults) }
     }
 
     override func tearDown() async throws {
@@ -743,6 +744,75 @@ final class CompanionCleanerStoreTests: XCTestCase {
         store.remoteScanner = { tier, _, _ in CleanerFixtures.sampleReport(tier: tier) }
         XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202, "an old one is replaced")
         try await waitForScan()
+    }
+
+    func testTempPolicyChangeDiscardsReadyReportAndRejectsItsID() async throws {
+        let ready = try await scanReady()
+        let defaults = UserDefaults(suiteName: suite)!
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
+        let response = await store.runRemoteClean(request: CompanionCleanRequest(scanId: ready.scanId, tier: "standard", items: ["0.0"]))
+        XCTAssertEqual(response.status, 409)
+    }
+
+    func testTempPolicyRoundTripCannotReviveReadyReportBeforeNotificationDelivery() async throws {
+        _ = try await scanReady()
+        let defaults = UserDefaults(suiteName: suite)!
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        TempFileSafetyPolicy.save(hours: 72, to: defaults)
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
+    }
+
+    func testTempPolicyNotificationClearsHiddenCompanionReport() async throws {
+        _ = try await scanReady()
+        TempFileSafetyPolicy.save(hours: 168, to: UserDefaults(suiteName: suite)!)
+        for _ in 0..<100 {
+            if case .idle = store.remoteScanState { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("the hidden companion report was not invalidated")
+    }
+
+    func testTempPolicyInvalidationKeepsAnActiveCleanBusy() async throws {
+        _ = try await scanReady()
+        let began = expectation(description: "legacy clean scanning")
+        let release = CompanionLocked(false)
+        let files = RecordingFileManager()
+        store.remoteCleanerFactory = { DiskCleaner(fileManager: files, makeSnapshot: { (true, "snapshot-fixture") }) }
+        store.remoteScanner = { tier, _, _ in
+            began.fulfill()
+            while !release.value { try? await Task.sleep(for: .milliseconds(10)) }
+            return CleanerFixtures.sampleReport(tier: tier)
+        }
+        let first = Task { await store.runRemoteClean(request: nil) }
+        await fulfillment(of: [began], timeout: 2)
+        TempFileSafetyPolicy.save(hours: 168, to: UserDefaults(suiteName: suite)!)
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
+        XCTAssertEqual(store.activeCleanProgress?.isCleaning, true)
+        let second = await store.runRemoteClean(request: nil)
+        XCTAssertEqual(second.status, 409)
+        release.value = true
+        let completed = await first.value
+        XCTAssertEqual(completed.status, 200)
+        XCTAssertFalse(files.trashed.isEmpty)
+    }
+
+    func testTempPolicyChangeRejectsInFlightCompletionAndQueuedProgress() async throws {
+        let began = expectation(description: "scanner began")
+        let release = CompanionLocked(false)
+        store.remoteScanner = { tier, _, progress in
+            began.fulfill()
+            while !release.value { try? await Task.sleep(for: .milliseconds(10)) }
+            progress("Late progress")
+            return CleanerFixtures.sampleReport(tier: tier)
+        }
+        XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202)
+        await fulfillment(of: [began], timeout: 2)
+        TempFileSafetyPolicy.save(hours: 168, to: UserDefaults(suiteName: suite)!)
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
+        release.value = true
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
     }
 
     func testTheScanHonorsTheExclusionsTheMacHolds() async throws {
