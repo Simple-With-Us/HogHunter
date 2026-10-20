@@ -164,7 +164,8 @@ final class DirectoryUsageStore: ObservableObject {
                     let bytes = probe(path).flatMap { $0 >= 0 ? $0 : nil }
                     request.put(.init(path: path, bytes: bytes ?? 0, entries: 0, startedAt: start,
                                       finishedAt: bytes == nil ? nil : start,
-                                      failure: bytes == nil ? "Size could not be measured" : nil))
+                                      failure: bytes == nil ? "Size could not be measured" : nil,
+                                      hasResolvedRoot: bytes != nil))
                 }
             } else {
                 executor.advance(path: path, startedAt: start, pressured: currentPressure == .reduced) { request.put($0) }
@@ -176,19 +177,23 @@ final class DirectoryUsageStore: ObservableObject {
 
     private func apply(_ result: DirectorySizeWalker.Observation, id: String) {
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
-        if rows[index].path != result.path {
+        if result.hasResolvedRoot, rows[index].path != result.path {
             // A retargeted alias must not inherit the previous target's cached total or delta.
             rows[index].bytes = nil
             rows[index].sampledAt = nil
             rows[index].completedAt = nil
             rows[index].percentChange = nil
         }
-        rows[index].path = result.path
-        rows[index].hasResolvedPath = true
-        if rows[index].bytes == nil, let sample = history.latest(host: host, metric: "directory", path: result.path) {
-            rows[index].bytes = sample.bytes
-            rows[index].sampledAt = sample.sampledAt
-            rows[index].percentChange = history.percentChange(host: host, metric: "directory", path: result.path)
+        if result.hasResolvedRoot {
+            rows[index].path = result.path
+            rows[index].hasResolvedPath = true
+            if rows[index].bytes == nil, let sample = history.latest(host: host, metric: "directory", path: result.path) {
+                rows[index].bytes = sample.bytes
+                rows[index].sampledAt = sample.sampledAt
+                rows[index].percentChange = history.percentChange(host: host, metric: "directory", path: result.path)
+            }
+        } else {
+            rows[index].hasResolvedPath = false
         }
         rows[index].progressBytes = result.bytes
         rows[index].progressEntries = result.entries
@@ -221,17 +226,19 @@ final class DirectoryUsageStore: ObservableObject {
             rows[index].nextAttempt = .distantPast
         }
         // Canonicalization and alias/ancestor dedup happen after the background resolution.
-        let canonical = result.path
-        let discarded: [String]
-        if rows.contains(where: { $0.id != id && $0.hasResolvedPath
-            && (canonical == $0.path || canonical.hasPrefix($0.path + "/")) }) {
-            discarded = rows.filter { $0.id == id }.map(\.displayPath)
-            rows.removeAll { $0.id == id }
-        } else {
-            discarded = rows.filter { $0.id != id && $0.hasResolvedPath && $0.path.hasPrefix(canonical + "/") }.map(\.displayPath)
-            rows.removeAll { $0.id != id && $0.hasResolvedPath && $0.path.hasPrefix(canonical + "/") }
+        if result.hasResolvedRoot {
+            let canonical = result.path
+            let discarded: [String]
+            if rows.contains(where: { $0.id != id && $0.hasResolvedPath
+                && (canonical == $0.path || canonical.hasPrefix($0.path + "/")) }) {
+                discarded = rows.filter { $0.id == id }.map(\.displayPath)
+                rows.removeAll { $0.id == id }
+            } else {
+                discarded = rows.filter { $0.id != id && $0.hasResolvedPath && $0.path.hasPrefix(canonical + "/") }.map(\.displayPath)
+                rows.removeAll { $0.id != id && $0.hasResolvedPath && $0.path.hasPrefix(canonical + "/") }
+            }
+            if !discarded.isEmpty { executor.discard(paths: discarded) }
         }
-        if !discarded.isEmpty { executor.discard(paths: discarded) }
         if !rows.isEmpty { nextIndex %= rows.count }
     }
 

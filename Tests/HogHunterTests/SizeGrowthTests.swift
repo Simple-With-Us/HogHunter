@@ -178,7 +178,41 @@ final class SizeGrowthTests: XCTestCase {
         let store = DirectoryUsageStore(history: SizeGrowthHistory(fileURL: nil), candidates: [("Coding Lanes", link.path)], pressure: { .normal })
         await store.refreshIfNeeded()
         XCTAssertEqual(store.rows.first?.displayPath, link.path)
-        XCTAssertEqual(store.rows.first?.path, target.path)
+        XCTAssertEqual(store.rows.first?.path, DirectorySizeWalker.canonicalPath(target.path))
+    }
+
+    @MainActor
+    func testBrokenMeasuredSymlinkKeepsLastCompleteCache() async throws {
+        let manager = FileManager.default
+        let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: fixture) }
+        let target = fixture.appendingPathComponent("target")
+        let link = fixture.appendingPathComponent("lanes")
+        try manager.createDirectory(at: target, withIntermediateDirectories: true)
+        try Data(repeating: 0x5a, count: 4096).write(to: target.appendingPathComponent("payload"))
+        try manager.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let history = SizeGrowthHistory(fileURL: nil)
+        let store = DirectoryUsageStore(history: history, candidates: [("Coding Lanes", link.path)],
+                                        host: "test", pressure: { .normal })
+        for _ in 0..<32 where store.rows.first?.bytes == nil {
+            await store.refreshIfNeeded(force: true)
+        }
+        let completed = try XCTUnwrap(store.rows.first)
+        let completedBytes = try XCTUnwrap(completed.bytes)
+        let physicalTarget = try XCTUnwrap(DirectorySizeWalker.canonicalPath(target.path))
+        XCTAssertEqual(completed.path, physicalTarget)
+        XCTAssertEqual(history.latest(host: "test", metric: "directory", path: link.path)?.sourcePath, physicalTarget)
+
+        try manager.removeItem(at: link)
+        await store.refreshIfNeeded(force: true)
+
+        let failed = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(failed.bytes, completedBytes)
+        XCTAssertEqual(failed.path, physicalTarget)
+        XCTAssertTrue(failed.isUnavailable)
+        XCTAssertFalse(failed.hasResolvedPath)
+        XCTAssertEqual(history.latest(host: "test", metric: "directory", path: link.path)?.sourcePath, physicalTarget)
     }
 
 }
