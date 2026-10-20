@@ -142,14 +142,23 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 The Windows `.ico` needs the same treatment as the `.icns`.  The single-source `magick` command above always produces the scaled-down full emblem, which is the exact defect the small variants exist to fix, so build the small entries from the zoomed files instead:
 
 ```bash
-# 16 px straight from the 16 px variant; 24 px and 32 px from the 32 px variant:
+# 16 px straight from the 16 px variant; 24 px and 32 px from the 32 px variant.
+# 24 px has no crop of its own, so it takes the face crop: the SVG is rendered
+# at 24 px rather than downscaled, and the face keeps more structure than the
+# bare snout does at that size.  The larger entries come from the full emblem:
 magick -background none Brand/HogHunter-Icon-Small-16.svg -resize 16x16 icon16.png
 magick -background none Brand/HogHunter-Icon-Small-32.svg -resize 24x24 icon24.png
 magick -background none Brand/HogHunter-Icon-Small-32.svg -resize 32x32 icon32.png
+magick -background none Brand/HogHunter-Icon-Rotated.svg -resize 48x48 icon48.png
+magick -background none Brand/HogHunter-Icon-Rotated.svg -resize 64x64 icon64.png
+magick -background none Brand/HogHunter-Icon-Rotated.svg -resize 128x128 icon128.png
+magick -background none Brand/HogHunter-Icon-Rotated.svg -resize 256x256 icon256.png
 icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.png icon128.png icon256.png
 ```
 
 Keep `-background none` on those renders, or the rounded corners of the tile come out white instead of transparent.
+
+`icotool -c` stores every entry as a BMP/DIB whose transparency is a 1-bit AND mask, the same limitation the `magick` command above has, so the 16, 24 and 32 px corners are transparent but hard-edged rather than antialiased.  Pass `-r icon16.png` (and likewise for the other small entries) to embed those PNGs verbatim when the target reader accepts PNG-backed entries.
 
 Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
