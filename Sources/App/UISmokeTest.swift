@@ -22,6 +22,7 @@ final class UISmokeTest {
 
     private var results: [(name: String, passed: Bool, detail: String)] = []
     private var panelWindow: NSWindow?
+    private var panelStore: HogStore?
 
     static func run() -> Never {
         let test = UISmokeTest()
@@ -60,9 +61,10 @@ final class UISmokeTest {
         if let panelWindow {
             // contentView, not the window: the window frame includes the title bar.
             let size = panelWindow.contentView?.frame.size ?? .zero
-            let expected = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
-            let ok = abs(size.width - expected.width) < 1 && abs(size.height - expected.height) < 1
-            record("panel window is its declared size", ok, "got \(size) want \(expected)")
+            let ok = abs(size.width - HogHunterPanel.panelWidth) < 1
+                && size.height > 180 && size.height < HogHunterPanel.panelHeight
+            record("quick view fits its content", ok, "got \(size)")
+            checkRenderedContent(panelWindow, name: "quick-view")
         }
 
         // **The bug that shipped.**  The gear button did nothing at all: no
@@ -71,7 +73,7 @@ final class UISmokeTest {
         openSettingsAndWait()
         let afterOpen = realWindows.filter { $0 !== panelWindow }
         record("Settings opens from the panel", afterOpen.contains { isSettingsWindow($0) },
-               "titled windows: \(afterOpen.map { "\($0.title ?? "<untitled>")" })")
+               "titled windows: \(afterOpen.map(\.title))")
 
         let before = realWindows.count
         openSettingsAndWait()
@@ -82,23 +84,65 @@ final class UISmokeTest {
         let settingsCount = realWindows.filter { isSettingsWindow($0) }.count
         record("exactly one Settings window", settingsCount == 1, "found \(settingsCount)")
 
-        // Measured the way HogHunterPanel composes it -- pinned to the panel
-        // width and clipped.  Measuring the bare view would report the content's
-        // own appetite for width, which is not what ships and would make this
-        // test fail forever.
+        if let panelStore {
+            DetachedWindowManager.shared.openDetachedWindow(store: panelStore)
+            wait(0.5)
+            // Query NSApp again after opening: the earlier Settings snapshot predates this window.
+            if let dashboard = NSApp.windows.first(where: {
+                $0.isVisible && $0.title == "Hog Hunter" && $0 !== panelWindow
+            }) {
+                let initial = dashboard.contentView?.frame.size ?? .zero
+                let declared = NSSize(width: HogHunterPanel.dashboardWidth,
+                                      height: HogHunterPanel.dashboardHeight)
+                // A headless runner can have less usable screen height than
+                // the requested window.  AppKit clamps to that visible area.
+                let titlebarHeight = dashboard.frame.height - initial.height
+                let visibleContentHeight = (dashboard.screen?.visibleFrame.height ?? declared.height + titlebarHeight)
+                    - titlebarHeight
+                let initialHeight = min(declared.height, visibleContentHeight)
+                record("dashboard opens at its declared size",
+                       abs(initial.width - declared.width) < 1 && abs(initial.height - initialHeight) < 1,
+                       "got \(initial) requested \(declared), visible height cap \(visibleContentHeight)")
+                checkRenderedContent(dashboard, name: "dashboard-default")
+                dashboard.setContentSize(NSSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580))
+                wait(0.2)
+                let minimum = dashboard.contentView?.frame.size ?? .zero
+                record("dashboard fits its minimum size", minimum.width >= 859 && minimum.height >= 579,
+                       "got \(minimum)")
+                checkRenderedContent(dashboard, name: "dashboard-minimum")
+                dashboard.setContentSize(NSSize(width: 1050, height: 780))
+                wait(0.2)
+                let grown = dashboard.contentView?.frame.size ?? .zero
+                let grownHeight = min(780, visibleContentHeight)
+                record("dashboard content resizes",
+                       grown.width >= 1049 && abs(grown.height - grownHeight) < 1
+                           && grown.height > minimum.height,
+                       "got \(grown) requested 1050×780, visible height cap \(visibleContentHeight)")
+                checkRenderedContent(dashboard, name: "dashboard-grown")
+            } else {
+                record("dashboard opens at its declared size", false, "no dashboard window")
+                record("dashboard fits its minimum size", false, "no dashboard window")
+                record("dashboard content resizes", false, "no dashboard window")
+            }
+            DetachedWindowManager.shared.closeDetachedWindow()
+        }
+
+        // Measure detail views at the dashboard stage width.  The menu bar
+        // view is intentionally compact and no longer hosts full detail pages.
         checkTabFits("Storage") { store in
-            StorageView(runningBundleIds: { [] }, maintainStore: MaintainStore(), embeddedInPanel: true, isTabActive: true)
-                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+            StorageView(runningBundleIds: { [] }, maintainStore: MaintainStore(), embeddedInPanel: true,
+                        isTabActive: true, autoScanCleaner: false)
+                .frame(width: dashboardStageWidth, alignment: .leading)
                 .clipped()
         }
         checkTabFits("Network") { store in
             NetworkView(bundleResolver: { _ in (nil, "unknown") }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: true)
-                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+                .frame(width: dashboardStageWidth, alignment: .leading)
                 .clipped()
         }
         checkTabFits("Server") { store in
             ServerStatusView(store: store.maintain.vpsStore)
-                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+                .frame(width: dashboardStageWidth, alignment: .leading)
                 .clipped()
         }
 
@@ -110,23 +154,25 @@ final class UISmokeTest {
 
     private func isSettingsWindow(_ window: NSWindow) -> Bool {
         if AppActivationManager.shared.window(for: .settings) === window { return true }
-        let title = window.title ?? ""
+        let title = window.title
         return title.contains("Settings") || title.contains("Hog Hunter Settings")
     }
 
     private func openPanel() {
         let store = HogStore(historyURL: URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("uismoke-panel.sqlite"))
-        let size = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
+        panelStore = store
+        let hosting = NSHostingController(
+            rootView: HogHunterPanel(isQuickView: true).environmentObject(store)
+        )
+        let size = hosting.view.fittingSize
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-        window.contentViewController = NSHostingController(
-            rootView: HogHunterPanel().environmentObject(store).frame(width: size.width, height: size.height)
-        )
+        window.contentViewController = hosting
         window.contentMinSize = size
         window.setContentSize(size)
         window.makeKeyAndOrderFront(nil)
@@ -164,9 +210,55 @@ final class UISmokeTest {
             .appendingPathComponent("uismoke-\(name).sqlite"))
         let hosting = NSHostingView(rootView: view(store))
         let fitting = hosting.fittingSize
-        let limit = HogHunterPanel.contentWidth
-        record("\(name) tab fits the panel width", fitting.width <= limit + 1,
+        let limit = dashboardStageWidth
+        record("\(name) view fits the dashboard width", fitting.width <= limit + 1,
                "ideal \(Int(fitting.width))pt vs \(Int(limit))pt")
+    }
+
+    private var dashboardStageWidth: CGFloat {
+        HogHunterPanel.dashboardMinimumWidth - 154 - 24 - 36
+    }
+
+    /// Capture the actual hosted SwiftUI content after each resize.  A frame
+    /// check alone can pass while a fixed child is blank or clipped inside it.
+    private func checkRenderedContent(_ window: NSWindow, name: String) {
+        guard let view = window.contentView else {
+            record("\(name) content renders", false, "missing content view")
+            return
+        }
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            record("\(name) content renders", false, "bitmap unavailable")
+            return
+        }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        var colors = Set<String>()
+        var rightEdgeColors = Set<String>()
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: max(1, bitmap.pixelsHigh / 90)) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: max(1, bitmap.pixelsWide / 90)) {
+                if let color = bitmap.colorAt(x: x, y: y) {
+                    colors.insert(color.description)
+                }
+            }
+            for x in stride(from: bitmap.pixelsWide * 9 / 10, to: bitmap.pixelsWide,
+                            by: max(1, bitmap.pixelsWide / 100)) {
+                if let color = bitmap.colorAt(x: x, y: y) {
+                    rightEdgeColors.insert(color.description)
+                }
+            }
+        }
+        let expected = view.bounds.size
+        let rendered = bitmap.pixelsWide >= Int(expected.width)
+            && bitmap.pixelsHigh >= Int(expected.height) && colors.count >= 3
+            && (name == "quick-view" || rightEdgeColors.count >= 2)
+        record("\(name) content renders", rendered,
+               "pixels=\(bitmap.pixelsWide)×\(bitmap.pixelsHigh), colors=\(colors.count), right edge=\(rightEdgeColors.count)")
+        if let folder = ProcessInfo.processInfo.environment["HOGHUNTER_RENDER_DIR"],
+           let png = bitmap.representation(using: .png, properties: [:]) {
+            let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? png.write(to: directory.appendingPathComponent("\(name).png"))
+        }
     }
 }
 

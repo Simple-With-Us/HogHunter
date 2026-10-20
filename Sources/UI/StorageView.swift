@@ -18,7 +18,7 @@ enum StorageTab: String, CaseIterable, Identifiable {
 /// panel's cadence.
 struct StorageView: View {
     @StateObject private var store: StorageStore
-    @StateObject private var cleanerStore = DiskCleanerStore()
+    @StateObject private var cleanerStore: DiskCleanerStore
     /// Owned by `HogStore`, which the iPhone route also uses, so the Mac and
     /// the phone cannot start a second run over each other.
     @ObservedObject private var maintainStore: MaintainStore
@@ -30,16 +30,23 @@ struct StorageView: View {
 
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
+    private let includesMaintenance: Bool
+    private let autoScanCleaner: Bool
 
     /// `initialTab` is the mode the view opens on.  The app always takes the
     /// default; a layout test opens the Maintain mode directly instead of
     /// clicking the segmented control.
-    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner) {
+    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+        // The same mode the cleaner view honours on appear: with it off, a tier
+        // or exclusion change must not start a walk either.
+        _cleanerStore = StateObject(wrappedValue: DiskCleanerStore(manualScanOnly: !autoScanCleaner))
         _selectedTab = State(initialValue: initialTab)
         self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
+        self.includesMaintenance = includesMaintenance
+        self.autoScanCleaner = autoScanCleaner
     }
 
     var body: some View {
@@ -53,7 +60,8 @@ struct StorageView: View {
                 list
                 footer
             case .diskCleaner:
-                DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
+                DiskCleanerView(store: cleanerStore, isTabActive: isTabActive,
+                                autoScanOnAppear: autoScanCleaner)
             case .maintain:
                 MaintainView(store: maintainStore)
             }
@@ -102,7 +110,7 @@ struct StorageView: View {
         HStack(alignment: .center, spacing: 10) {
             Picker("Mode", selection: $selectedTab) {
                 Text("Clean").tag(StorageTab.diskCleaner)
-                Text("Maintain").tag(StorageTab.maintain)
+                if includesMaintenance { Text("Maintain").tag(StorageTab.maintain) }
                 Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)
