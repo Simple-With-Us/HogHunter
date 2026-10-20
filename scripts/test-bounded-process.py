@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Synthetic process trees only; no GUI or app capture is launched."""
 from pathlib import Path
+import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -33,14 +35,33 @@ class BoundedProcessTests(unittest.TestCase):
     def test_sigterm_reports_128_plus_signal_and_cleans_up(self):
         # The Actions runner cancels a step by signalling the process group, so
         # the supervisor must report 128+signum rather than dying on a traceback.
-        process = subprocess.Popen([sys.executable, str(SUPERVISOR), '--timeout', '30', '--grace', '0.1',
-                                    '--', sys.executable, '-c', 'import time; time.sleep(60)'],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.wait_for_readiness(process)
-        process.send_signal(signal.SIGTERM)
-        _, stderr = process.communicate(timeout=10)
-        self.assertEqual(process.returncode, 128 + signal.SIGTERM)
-        self.assertIn(f'exit status: {128 + signal.SIGTERM}', stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            child_pidfile = Path(directory) / 'child.pid'
+            child = ('import os,pathlib,time; '
+                     f'pathlib.Path({str(child_pidfile)!r}).write_text(str(os.getpid())); '
+                     'time.sleep(60)')
+            process = subprocess.Popen([sys.executable, str(SUPERVISOR), '--timeout', '30', '--grace', '0.1',
+                                        '--', sys.executable, '-c', child],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                       start_new_session=True)
+            try:
+                self.wait_for_readiness(process)
+            except BaseException:
+                if child_pidfile.exists():
+                    try:
+                        os.kill(int(child_pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                process.communicate(timeout=2)
+                raise
+            process.send_signal(signal.SIGTERM)
+            _, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 128 + signal.SIGTERM)
+            self.assertIn(f'exit status: {128 + signal.SIGTERM}', stderr)
 
     def wait_for_readiness(self, process):
         """Block until the supervisor has installed its signal handlers.
@@ -49,12 +70,21 @@ class BoundedProcessTests(unittest.TestCase):
         arrive mid-install, take the default action, and crash the supervisor.
         """
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if 'Supervisor ready.' in process.stderr.readline():
-                return
-            if process.poll() is not None:
-                self.fail(f'supervisor exited {process.returncode} before becoming ready')
-        self.fail('supervisor never reported readiness')
+        ready_marker = b'Supervisor ready.'
+        pending = bytearray()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stderr, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    self.fail('supervisor never reported readiness')
+                chunk = os.read(process.stderr.fileno(), 4096)
+                if not chunk:
+                    process.poll()
+                    self.fail(f'supervisor exited {process.returncode} before becoming ready')
+                pending.extend(chunk)
+                if ready_marker in pending:
+                    return
 
     def test_successful_parent_does_not_leave_orphan_holding_output(self):
         with tempfile.TemporaryDirectory() as directory:
