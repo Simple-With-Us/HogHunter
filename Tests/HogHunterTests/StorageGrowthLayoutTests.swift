@@ -159,6 +159,29 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
     }
 
+    func testActivityStageRendersAtMinimumAndGrownSizes() throws {
+        let suite = "hh174-activity-layout-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = HogStore(historyURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("hh174-activity-layout-\(UUID().uuidString).sqlite"),
+            defaults: preferences, startImmediately: false)
+
+        for (name, size) in [
+            ("minimum", CGSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)),
+            ("grown", CGSize(width: 1050, height: 780))
+        ] {
+            let activity = NSHostingView(rootView: HogHunterPanel(initialTab: .activity)
+                .environmentObject(store).defaultAppStorage(preferences)
+                .frame(width: size.width, height: size.height))
+            activity.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(activity.fittingSize.width, size.width + 1)
+            XCTAssertLessThanOrEqual(activity.fittingSize.height, size.height + 1)
+            try render(activity, size: size, name: "hh174-activity-\(name)")
+        }
+    }
+
     private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {
         host.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
