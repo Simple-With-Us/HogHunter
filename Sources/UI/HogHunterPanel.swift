@@ -118,7 +118,7 @@ struct HogHunterPanel: View {
                                 .frame(maxWidth: .infinity, alignment: .topLeading)
                         }
                     }
-                    if hasVisitedStorage {
+                    if hasVisitedStorage || selectedTab == .storage {
                         GeometryReader { stage in
                             VStack(alignment: .leading, spacing: 10) {
                                 capacityCards
@@ -149,7 +149,7 @@ struct HogHunterPanel: View {
                         .allowsHitTesting(selectedTab == .storage && hostScope == .mac)
                         .accessibilityHidden(selectedTab != .storage || hostScope != .mac)
                     }
-                    if hasVisitedNetwork {
+                    if hasVisitedNetwork || selectedTab == .network {
                         // Kept mounted for the same reason as Storage: NetworkView
                         // owns a NetworkStore that scans with lsof, and rebuilding it
                         // on every tab switch would drop the snapshot, the sort order,
@@ -477,19 +477,17 @@ struct HogHunterPanel: View {
         }
         .preferredColorScheme(store.appearance.colorScheme)
         .task(id: selectedTab.rawValue + hostScope.rawValue) {
-            guard selectedTab == .storage && hostScope == .mac && !isQuickView else { return }
             while !Task.isCancelled {
-                await directoryUsage.refreshIfNeeded()
+                let storageForeground = !isQuickView && selectedTab == .storage && hostScope == .mac
+                await directoryUsage.refreshIfNeeded(background: !storageForeground)
                 do { try await Task.sleep(for: .seconds(directoryUsage.nextRefreshDelay)) }
                 catch { break }
             }
         }
         .task {
-            var firstRefresh = true
             while !Task.isCancelled {
-                await mountedDrives.refresh(force: isQuickView && firstRefresh)
+                await mountedDrives.refresh()
                 driveReadAttempted = true
-                firstRefresh = false
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { break }
             }
