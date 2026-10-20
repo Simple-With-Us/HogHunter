@@ -51,7 +51,7 @@ jobs:
       - name: Set Up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: '3.15'
 
       - name: Test Capture Supervisor on macOS
         run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
