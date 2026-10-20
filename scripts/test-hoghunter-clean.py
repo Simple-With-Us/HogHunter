@@ -1209,13 +1209,16 @@ def test_app_caches_finds_an_idle_app_cache(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
-             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False) as touched, \
              mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
             found = hh.rule_app_caches()
         assert [c.path for c in found] == [str(cache)]
         assert found[0].category == "app-caches"
         assert found[0].tier == "safe"
         assert found[0].op == "delete"
+        # The window is the gate: a wider one would delete a cache the app
+        # wrote to in the last 90 minutes.
+        touched.assert_called_once_with(str(cache), hh.IDLE_MIN_OK / (24 * 60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
@@ -1301,9 +1304,12 @@ def test_app_caches_does_not_call_a_big_active_cache_idle(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
-             mock.patch.object(hh, "touched_since", return_value=True), \
+             mock.patch.object(hh, "touched_since", return_value=True) as touched, \
              mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
             assert hh.rule_app_caches() == [], "a cache with a recent write is not idle"
+            # The window is the gate, and this is the destructive path: a
+            # wider one would delete a cache the app wrote to recently.
+            touched.assert_called_once_with(str(cache), hh.IDLE_MIN_OK / (24 * 60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
