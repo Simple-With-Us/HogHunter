@@ -37,8 +37,8 @@ final class DiskCleanerStore: ObservableObject {
     @Published var exclusions: CleanerExclusions
     /// Where exclusions live.  Tests pass a throwaway suite.
     private let exclusionsDefaults: UserDefaults
-    /// A scan follows every exclusion edit.  Tests turn that off so they do
-    /// not walk the real disk.
+    /// Dashboard option edits require an explicit Scan.  The standalone
+    /// Storage window keeps its existing automatic rescan behavior.
     private let rescanAfterExclusionChange: Bool
 
     var isCleaning: Bool {
@@ -56,12 +56,14 @@ final class DiskCleanerStore: ObservableObject {
     /// Re-reads the stored exclusions.  The phone and the Settings window edit
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {
-        exclusions = CleanerExclusions.load(from: exclusionsDefaults)
+        let updated = CleanerExclusions.load(from: exclusionsDefaults)
+        if updated != exclusions && !rescanAfterExclusionChange { invalidateScan() }
+        exclusions = updated
     }
 
     func toggleCategoryExclusion(_ category: CleanCategory) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.toggleCategory(category) }
-        if rescanAfterExclusionChange { scan() }
+        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
     }
 
     func addExcludedPath(_ path: String) {
@@ -70,12 +72,12 @@ final class DiskCleanerStore: ObservableObject {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { current in
             if !current.excludedPaths.contains(normalized) { current.excludedPaths.append(normalized) }
         }
-        if rescanAfterExclusionChange { scan() }
+        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
     }
 
     func removeExcludedPath(_ path: String) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.removePath(path) }
-        if rescanAfterExclusionChange { scan() }
+        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
     }
 
     let cleaner: DiskCleaner
@@ -112,7 +114,18 @@ final class DiskCleanerStore: ObservableObject {
     func setTier(_ tier: CleanTier) {
         guard tier != selectedTier else { return }
         selectedTier = tier
-        scan()
+        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
+    }
+
+    /// An option edit makes the previous report stale.  Keep the selected
+    /// tier and exclusions, but require a new explicit Scan before Reclaim.
+    private func invalidateScan() {
+        cancelScan()
+        report = nil
+        selectedItemIds.removeAll()
+        expandedCategoryIds.removeAll()
+        showConfirmation = false
+        if !isCleaning { state = .idle }
     }
 
     /// Cancels any in-flight clutter scan.
