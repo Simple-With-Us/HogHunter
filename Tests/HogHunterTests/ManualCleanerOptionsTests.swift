@@ -37,6 +37,50 @@ final class ManualCleanerOptionsTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
 
+    func testAnExclusionEditDuringACleanStillDropsTheStaleReport() async throws {
+        let suite = "hh174-mid-clean-edit-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        let logs = home.appendingPathComponent("Library/Logs/FixtureLogs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try Data(repeating: 65, count: 1024).write(to: logs.appendingPathComponent("fixture.log"))
+        defer { try? FileManager.default.removeItem(at: home) }
+        CleanerExclusions.update(in: defaults) { exclusions in
+            exclusions.excludedCategories = Set(CleanCategory.allCases
+                .filter { $0 != .logsAndDiagnostics }.map(\.rawValue))
+        }
+        let store = DiskCleanerStore(cleaner: DiskCleaner(homeDirectory: home),
+                                     historyStore: CleanupHistoryStore(inMemory: true),
+                                     exclusionsDefaults: defaults, manualScanOnly: true)
+
+        store.scan()
+        for _ in 0..<100 {
+            if case .scanned = store.state { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .scanned = store.state else { return XCTFail("fixture scan did not finish") }
+        store.selectAll()
+        XCTAssertGreaterThan(store.totalSelectedItemsCount(), 0)
+
+        // `cleanSelected` moves the store to `.cleaning` before it returns, and
+        // everything below runs on the MainActor without an await in between, so
+        // the edit is guaranteed to land while the clean is still in flight.
+        store.cleanSelected(createSnapshot: false)
+        XCTAssertTrue(store.isCleaning)
+        CleanerExclusions.update(in: defaults) { $0.excludedPaths.append(home.appendingPathComponent("from-phone").path) }
+        store.reloadExclusions()
+        XCTAssertNotNil(store.report, "a mid-clean edit must not blank the page mid-clean")
+
+        for _ in 0..<600 {
+            if !store.isCleaning { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(store.isCleaning, "the fixture clean did not finish")
+        XCTAssertNil(store.report, "an edit during a clean must still invalidate the report afterwards")
+        XCTAssertEqual(store.exclusions.excludedPaths, [home.appendingPathComponent("from-phone").path])
+    }
+
     func testDashboardOptionsInvalidateReportWithoutStartingAnotherScan() async throws {
         let suite = "hh174-manual-cleaner-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

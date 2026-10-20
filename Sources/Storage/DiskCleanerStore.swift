@@ -43,6 +43,9 @@ final class DiskCleanerStore: ObservableObject {
     /// The dashboard's Storage tab requires an explicit Scan, so changing a
     /// tier or an exclusion updates the stored options without starting a walk.
     private let manualScanOnly: Bool
+    /// Set when an exclusion edit arrives while a clean is in flight, so the
+    /// report it was scanned under is dropped as soon as that clean finishes.
+    private var reportIsStale = false
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
@@ -61,8 +64,12 @@ final class DiskCleanerStore: ObservableObject {
     func reloadExclusions() {
         let updated = CleanerExclusions.load(from: exclusionsDefaults)
         // A clean in flight is already running against the items the report
-        // held, so dropping it here would blank the page mid-clean.
-        if updated != exclusions && manualScanOnly && !isCleaning { discardResults() }
+        // held, so dropping it here would blank the page mid-clean.  Remember
+        // it instead: `exclusions` is about to equal `updated`, so without the
+        // flag this edit could never invalidate the report again.
+        if updated != exclusions && manualScanOnly {
+            if isCleaning { reportIsStale = true } else { discardResults() }
+        }
         exclusions = updated
     }
 
@@ -100,6 +107,7 @@ final class DiskCleanerStore: ObservableObject {
     /// shown or cleaned under a tier or an exclusion set the scan never saw.
     private func discardResults() {
         cancelScan()
+        reportIsStale = false
         report = nil
         selectedItemIds.removeAll()
         expandedCategoryIds.removeAll()
@@ -196,6 +204,8 @@ final class DiskCleanerStore: ObservableObject {
             await MainActor.run {
                 guard let self, self.currentScanId == scanId else { return }
                 self.report = scanReport
+                // A fresh scan supersedes any report an edit marked stale.
+                self.reportIsStale = false
 
                 // Initialize selections according to category defaultSelected and item isSelected
                 var initialSelected: Set<String> = []
@@ -406,6 +416,13 @@ final class DiskCleanerStore: ObservableObject {
 
             await MainActor.run {
                 guard let self, self.currentCleanId == cleanId else { return }
+                // An exclusion edit that landed mid-clean left this report
+                // describing paths the scan never saw.  Drop it now that the
+                // deletion is done; `state` is still `.cleaning`, so the result
+                // banner below survives.
+                if self.reportIsStale {
+                    self.discardResults()
+                }
                 self.selectedItemIds.removeAll()
                 self.state = .cleaned(result)
                 self.cleanTask = nil
