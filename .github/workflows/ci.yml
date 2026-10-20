@@ -27,6 +27,7 @@ jobs:
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-ci-report.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-wiring.py
 
@@ -80,27 +81,10 @@ jobs:
       - name: Capture app screenshots
         if: always()
         continue-on-error: true
-        # Hard cap: the shared macOS-15 runner has hung twice on this step
-        # (simulator boot / window detection).  Without a wall-clock limit the
-        # 30-minute job timeout fires and fails the whole `test` check, which
-        # blocks PR merge because branch protection does not allow admin
-        # override of a `cancelled` required status check.  The screenshots are
-        # a nice-to-have artifact, not a gate; cap them and let them fail
-        # softly so build / unit tests / UI smoke test are what gate merge.
-        run: |
-          if command -v gtimeout >/dev/null 2>&1; then
-            gtimeout --kill-after=30 8m bash scripts/capture-app-screenshots.sh || true
-          else
-            ( bash scripts/capture-app-screenshots.sh & CAP_PID=$!
-              sleep 480
-              if kill -0 "$CAP_PID" 2>/dev/null; then
-                echo "Capture app screenshots exceeded 8m; killing."
-                kill -TERM "$CAP_PID" 2>/dev/null || true
-                sleep 5
-                kill -KILL "$CAP_PID" 2>/dev/null || true
-              fi
-              wait "$CAP_PID" 2>/dev/null || true ) || true
-          fi
+        timeout-minutes: 10
+        # The supervisor finishes when capture exits and kills its whole process
+        # group, including orphan helpers that could retain runner output handles.
+        run: python3 scripts/bounded-process.py --timeout 480 --grace 2 -- bash scripts/capture-app-screenshots.sh
 
       - name: Upload screenshots artifact
         if: always()
