@@ -133,7 +133,11 @@ magick -background none -type TrueColorAlpha \
 magick identify -verbose HogHunter.ico
 ```
 
-`-background none` and `-type TrueColorAlpha` are load bearing.  Without them the ICO coder writes every entry below 256 px as a BMP/DIB whose transparency is only a 1-bit AND mask, which discards the antialiased edge of the rounded tile and leaves hard corners.  Add `-compress zip` if the target reader accepts PNG-backed entries.
+`-background none` and `-type TrueColorAlpha` are load bearing.  The first keeps the rounded corners transparent instead of baking a backdrop into the render, and the second keeps the frame direct-class with an alpha channel, which is the form the coder writes as a 32-bit DIB.
+
+In `coders/icon.c` a direct-class frame is written as 32-bit BGRA, and the fourth byte of every pixel is that pixel's alpha, so the antialiased edge of the rounded tile survives in the alpha channel.  The coder also writes the 1-bit AND matte mask, and it sets a bit only where the alpha is exactly transparent, so the mask carries the shape and the alpha channel carries the soft edge.
+
+That coder only switches to a PNG-compressed entry, the `BI_PNG` form, when the image is larger than 256x256, or when the `icon:png-compression-size` option asks for it.  Every entry at or below 256 px is therefore a DIB, which every Windows version reads, and `-compress zip` does not change that for the small entries.
 
 `icotool -c` does the same from a set of rendered PNGs, and it needs the output path and every input, or it writes ICO bytes to stdout.
 
