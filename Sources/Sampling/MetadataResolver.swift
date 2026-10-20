@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 /// The part of `NSRunningApplication` the resolver reads.  It exists so a test
@@ -61,9 +62,12 @@ final class MetadataResolver {
     private var iconByBundle: [String: NSImage] = [:]
     private var nameByBundle: [String: String] = [:]
     private let enumerate: () -> [RunningApplicationInfo]
+    private let iconSourceAllowed: (URL?) -> Bool
 
-    init(runningApplications: @escaping () -> [RunningApplicationInfo] = { NSWorkspace.shared.runningApplications }) {
+    init(runningApplications: @escaping () -> [RunningApplicationInfo] = { NSWorkspace.shared.runningApplications },
+         iconSourceAllowed: ((URL?) -> Bool)? = nil) {
         self.enumerate = runningApplications
+        self.iconSourceAllowed = iconSourceAllowed ?? { Self.isSafeIconSource($0) }
     }
 
     /// Refreshes the running-application table and returns it.  Enumerating is
@@ -86,17 +90,23 @@ final class MetadataResolver {
                 continue
             }
             let bundleURL = app.bundleURL
+            // A forced refresh re-reads the mutable properties, but a running
+            // app's icon is stable: reuse the one already fetched so the main
+            // actor does not re-request it for every local app on every forced
+            // refresh.  Only a genuinely new pid pays the read.
+            let memoizedIcon = runningApps[pid].flatMap { $0.bundleURL == bundleURL ? $0.icon : nil }
             table[pid] = AppInfo(
                 bundleId: app.bundleIdentifier,
                 localizedName: app.localizedName,
                 activationPolicy: app.activationPolicy,
                 bundleURL: bundleURL,
-                icon: Self.isSafeIconSource(bundleURL) ? app.icon : nil
+                icon: memoizedIcon ?? (iconSourceAllowed(bundleURL) ? app.icon : nil)
             )
         }
         runningApps = table
-        iconByBundle.removeAll(keepingCapacity: true)
-        nameByBundle.removeAll(keepingCapacity: true)
+        // The bundle-keyed maps are a session-long memo: an app that quits
+        // keeps its icon and name for the history rows that still reference it.
+        // Only overwrite, never clear.
         for info in table.values {
             guard let bundleId = info.bundleId else { continue }
             if let icon = info.icon { iconByBundle[bundleId] = icon }
@@ -107,11 +117,29 @@ final class MetadataResolver {
 
     /// A running app may live on an external volume.  Asking AppKit for that
     /// icon can touch the bundle, so automatic icon reads use local app roots.
-    private static func isSafeIconSource(_ url: URL?) -> Bool {
+    static func isSafeIconSource(_ url: URL?, localRoots: [String]? = nil) -> Bool {
         guard let url, url.isFileURL else { return false }
-        let path = url.standardizedFileURL.path
-        let roots = ["/Applications/", "/System/Applications/", "/System/Library/CoreServices/", NSHomeDirectory() + "/Applications/"]
-        return roots.contains { path.hasPrefix($0) }
+        // Normalize lexically before touching the filesystem.  realpath or URL symlink
+        // resolution here would itself visit an external target and request access.
+        var components: [Substring] = []
+        for component in url.path.split(separator: "/") {
+            if component == "." { continue }
+            if component == ".." { if !components.isEmpty { components.removeLast() }; continue }
+            components.append(component)
+        }
+        guard components.count <= 64 else { return false }
+        let path = "/" + components.joined(separator: "/")
+        let roots = localRoots ?? ["/Applications/", "/System/Applications/", "/System/Library/CoreServices/", NSHomeDirectory() + "/Applications/"]
+        guard roots.contains(where: { path.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }) else { return false }
+        // Check local components without following links.  A local alias to an external
+        // bundle is rejected at the link itself, before any target is inspected.
+        var prefix = ""
+        for component in components {
+            prefix += "/" + component
+            var info = stat()
+            guard lstat(prefix, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
+        }
+        return true
     }
 
     func isRegularApp(_ pid: pid_t) -> Bool {
