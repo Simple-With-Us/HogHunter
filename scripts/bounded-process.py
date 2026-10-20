@@ -43,17 +43,21 @@ def wait_unreaped(process, timeout):
 
 
 def run(command, timeout, grace=2):
-    process = subprocess.Popen(command, start_new_session=True)
+    process = None
     previous = {}
 
     def interrupted(signum, _frame):
         raise Interrupted(signum)
 
     try:
+        # Install the handlers before the child exists: a signal arriving during
+        # the spawn window would otherwise take the default action and skip the
+        # cleanup below, leaving the child holding the runner's output handles.
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous[signum] = signal.signal(signum, interrupted)
-        # Readiness marker for the cancellation test: it is emitted only once both
-        # handlers are installed, so a test never signals into the install window.
+        process = subprocess.Popen(command, start_new_session=True)
+        # Readiness marker for the cancellation test: it is emitted only once the
+        # child is spawned and both handlers are installed.
         print('Supervisor ready.', file=sys.stderr, flush=True)
         try:
             return wait_unreaped(process, timeout)
@@ -69,26 +73,29 @@ def run(command, timeout, grace=2):
         for signum in previous:
             signal.signal(signum, signal.SIG_IGN)
         try:
-            if signal_group(process.pid, signal.SIGTERM):
-                deadline = time.monotonic() + grace
-                while time.monotonic() < deadline:
-                    if not signal_group(process.pid, 0):
-                        break
-                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-            # Escalate the whole group even when the graceful signal was refused:
-            # killpg reports EPERM for members it may not signal while still
-            # signalling the rest, so a False return is not proof the group is gone.
-            signal_group(process.pid, signal.SIGKILL)
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=max(grace, 5))
-            except subprocess.TimeoutExpired:
-                print('Capture process did not exit after group cleanup.',
-                      file=sys.stderr, flush=True)
-                raise
+            # A signal in the spawn window raises Interrupted before process is
+            # bound; there is no child to clean up in that case.
+            if process is not None:
+                if signal_group(process.pid, signal.SIGTERM):
+                    deadline = time.monotonic() + grace
+                    while time.monotonic() < deadline:
+                        if not signal_group(process.pid, 0):
+                            break
+                        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                # Escalate the whole group even when the graceful signal was refused:
+                # killpg reports EPERM for members it may not signal while still
+                # signalling the rest, so a False return is not proof the group is gone.
+                signal_group(process.pid, signal.SIGKILL)
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=max(grace, 5))
+                except subprocess.TimeoutExpired:
+                    print('Capture process did not exit after group cleanup.',
+                          file=sys.stderr, flush=True)
+                    raise
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
