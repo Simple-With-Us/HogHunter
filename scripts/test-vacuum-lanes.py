@@ -488,10 +488,36 @@ class TestReportGates(unittest.TestCase):
         _rep, scan = self.scan({}, text="[1, 2, 3]")
         self.assert_nothing(scan, "not a JSON object")
 
-    def test_gh_not_ok_yields_nothing(self) -> None:
+    def test_one_failed_gh_lookup_does_not_throw_the_whole_report_away(self) -> None:
+        """The doctor's overall gh status says whether EVERY repository's PR
+        lookup came back.  One failed lookup (a retired repo, a network blip)
+        used to stop every lane on the machine from being retired, even the
+        ones in repositories whose lookup was fine."""
         for status in ("failed", "partial", "skipped"):
             _rep, scan = self.scan(self.sb.report([self.row], gh=status))
-            self.assert_nothing(scan, "gh status")
+            self.assertTrue(scan.ok, status)
+            self.assertEqual([c.path for c in scan.choices], [str(self.lane)], status)
+            # The report's status travels with the plan, so a reader can see
+            # that the report was partial.
+            self.assertIn(status, scan.lookup_status, status)
+
+    def test_the_evidence_names_the_lane_own_repository_lookup(self) -> None:
+        """The per-lane evidence must not claim a flat "gh ok" when the
+        report's overall lookup was partial.  A listed lane is one whose OWN
+        repository answered, so its line says so, and a lane whose own
+        repository did not answer is refused rather than listed."""
+        report = self.sb.report([self.row], gh="partial")
+        report["gh_repos"] = {REPO_SLUG: "ok"}
+        _rep, scan = self.scan(report)
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+        self.assertIn("gh ok", scan.choices[0].reasons)
+        # The report's own status travels with the plan, so a reader sees
+        # that the report was partial even where the lane is fine.
+        self.assertIn("partial", scan.lookup_status)
+        report["gh_repos"] = {REPO_SLUG: "partial"}
+        _rep, scan = self.scan(report)
+        self.assertEqual(scan.choices, [])
+        self.assertIn("gh lookup", refused_reason(scan, self.lane))
 
     def test_gh_repo_not_ok_refuses_that_candidate(self) -> None:
         _rep, scan = self.scan(self.sb.report([self.row], gh_repos={REPO_SLUG: "failed"}))

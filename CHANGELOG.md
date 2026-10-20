@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+One failed PR lookup no longer throws away the whole doctor report (HH-168):
+
+- The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.
+
 Mac self-update stopped moving (HH-172):
 
 - The release for build 158 died at the stapling step with `NSURLErrorDomain -1005` against Apple's CloudKit ticket-delivery endpoint, even though both notarizations were already Accepted, and the run behind it was cancelled too.  The published feed sat at 1.0.154 while main carried on, so an installed copy that could self-update had nothing new to take.  `scripts/mac-release-build.sh` now staples through a retry (five attempts, 30 seconds apart) for the app and the disk image, the same helper ContactLogo uses for the same flake.

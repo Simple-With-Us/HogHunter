@@ -44,6 +44,9 @@ class RetirePlan:
     generated_at: str = ""
     doctor_seconds: float = 0.0
     dry_run: bool = False
+    # The doctor's overall PR lookup status.  Not a gate, but a reader has to
+    # be able to see that the report was partial.
+    lookup_status: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -52,6 +55,7 @@ class RetirePlan:
             "dry_run": self.dry_run,
             "report_generated_at": self.generated_at,
             "doctor_seconds": round(self.doctor_seconds, 1),
+            "lookup_status": self.lookup_status,
             "candidates": [c.as_dict() for c in self.choices],
             "refused": list(self.refused),
         }
@@ -95,6 +99,7 @@ def plan_retire_worktrees(
         generated_at=scan.generated_at,
         doctor_seconds=scan.doctor_seconds,
         dry_run=dry_run,
+        lookup_status=scan.lookup_status,
     )
 
 
