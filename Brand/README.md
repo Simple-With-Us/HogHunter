@@ -11,6 +11,11 @@ These files are the **standalone emblem**: the artwork the owner uses for their 
 | `HogHunter-Logo.svg` | The emblem, upright, on a 1024 square cream field. |
 | `HogHunter-Logo-Rotated.svg` | The same emblem rotated 9.5 degrees counter-clockwise. |
 | `HogHunter-Icon-Rotated.svg` | The emblem on a pre-cropped rounded tile (240 px corner radius at 1024, transparent corners), rotated, scaled and shifted to match the owner's `.icns`.  Display only. |
+| `HogHunter-Logo-Small-16.svg` | The emblem zoomed to the snout, upright, for a 16 px mark. |
+| `HogHunter-Logo-Small-32.svg` | The emblem zoomed to the face, upright, for a 32 px mark. |
+| `HogHunter-Icon-Small-16.svg` | The same 16 px snout crop, with the owner's rotation, scale and shift applied. |
+| `HogHunter-Icon-Small-32.svg` | The same 32 px face crop, with the owner's rotation, scale and shift applied. |
+| `preview-small-icons.png` | The small variants at their true pixel size, against the owner's shipped 16 px and 32 px icons. |
 
 `HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon: the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
 
@@ -36,6 +41,52 @@ The owner's `.icns` additionally scales the artwork 1.0463x, shifts it by (-11.8
 
 In SVG, a positive `rotate()` is clockwise, so the counter-clockwise rotation is written `rotate(-9.5 512 512)`.
 
+## Small sizes
+
+At 16 px and 32 px the whole head does not survive.  Scaled down, the snout, the tusks and the eye all collapse into one brown mass, and the mark stops reading as a boar.  The small variants zoom into the part of the head that still reads.
+
+| File | Crop | What survives |
+|---|---|---|
+| `HogHunter-Logo-Small-16.svg` | the snout | the oval snout, both nostrils, and the cream crescent along its right edge |
+| `HogHunter-Logo-Small-32.svg` | the face | the snout, the tusks, the eye and the brow |
+| `HogHunter-Icon-Small-16.svg` | the snout, rotated | the same, with the owner's rotation, scale and shift applied |
+| `HogHunter-Icon-Small-32.svg` | the face, rotated | the same, with the owner's rotation, scale and shift applied |
+
+`preview-small-icons.png` shows the owner's shipped 16 px and 32 px icons next to the new variants at their true pixel size, and the same files at full size below.
+
+These are **crop windows over the unchanged artwork**, not new drawings.  Every small file carries the same traced paths as `HogHunter-Logo.svg`; the crop is a `translate()` on a wrapper group, so nothing is re-traced and the files still hold up if they are scaled up again.
+
+The crop windows in the owner's 1024 space:
+
+| Variant | Window |
+|---|---|
+| Logo small 16 | `10, 470, 230, 230` |
+| Logo small 32 | `55, 350, 460, 460` |
+| Icon small 16 | `-1.559, 553.563, 230, 230` (tile space) |
+| Icon small 32 | `47.69, 405.773, 460, 460` (tile space) |
+
+The Icon windows are in **tile space**, the space the owner's `.icns` uses, so the emblem keeps its rotation and its scale inside the crop.  Every small file has a `viewBox` that starts at `0 0` and expresses the crop as a `translate()`, so no file has an offset viewBox.
+
+### Verifying a small size
+
+Render at the true pixel size and inspect the real device pixels.  Do not zoom the vector and judge that instead: a zoomed render is a fresh rasterization, and it hides exactly the detail being judged.
+
+```bash
+# 1. A page that shows the file at exactly 16 device pixels:
+cat > /tmp/icon16.html <<'HTML'
+<html><head><style>html,body{margin:0;padding:0;background:#fff;overflow:hidden}
+img{position:absolute;top:0;left:0;width:16px;height:16px}</style></head>
+<body><img src="HogHunter-Logo-Small-16.svg"></body></html>
+HTML
+# 2. Screenshot it at 16x16 with no device scaling:
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=old \
+  --disable-gpu --no-sandbox --force-device-scale-factor=1 --virtual-time-budget=4000 \
+  --screenshot=/tmp/icon16.png --window-size=16,16 --user-data-dir=/tmp/chrome-profile \
+  file:///tmp/icon16.html
+```
+
+Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of the tusks or the eye reads cleanly at 16 px as well, and the same method is how the snout and the face were chosen.
+
 ## Rebuilding a standalone .icns
 
 Render `HogHunter-Icon-Rotated.svg` into a folder with the exact names and pixel sizes `iconutil` requires, then pack it:
@@ -53,6 +104,8 @@ iconutil -c icns iconset.iconset -o HogHunter.icns
 ```
 
 `iconutil -c iconset` reads the rendered PNG folder and writes `iconset.iconset`, and `iconutil -c icns` then packs that folder.
+
+For the two smallest entries, render `HogHunter-Icon-Small-16.svg` as `icon_16x16.png` and `HogHunter-Icon-Small-32.svg` as `icon_32x32.png` instead of scaling the full emblem down.  The same applies to `icon_16x16@2x.png` at 32 px.
 
 ## Rebuilding a Windows .ico
 
@@ -82,3 +135,5 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
 Render the SVG with a rasterizer that keeps transparency.  Note that `qlmanage -t` renders SVG but flattens transparency onto white, so it is fine for checking the emblem and not for the icon tile.
+
+QuickLook sizes an SVG thumbnail from the content bounding box, and it mis-renders a file whose `viewBox` has an offset: the artwork lands in the top-left corner of the canvas at the wrong size.  Every file here keeps `viewBox` at `0 0` and expresses the crop as a `translate()`, so QuickLook renders them correctly.  Chrome, Safari and every other standards-compliant renderer handle an offset viewBox correctly too.
