@@ -94,7 +94,7 @@ HTML
   --user-data-dir="$tmpdir/chrome-profile" "file://$tmpdir/icon16.html"
 ```
 
-Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of the tusks or the eye reads cleanly at 16 px as well, and the same method is how the snout and the face were chosen.
+Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of a tusk also reads cleanly at 16 px, as a distinct cream curve, but it reads as a shape rather than as the animal, and a tight crop of the eye comes out as a plain slash.  The snout is the candidate that still reads as a hog, and the same method is how the snout and the face were chosen.
 
 ## Rebuilding a standalone .icns
 
