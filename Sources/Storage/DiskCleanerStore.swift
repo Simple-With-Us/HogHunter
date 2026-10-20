@@ -63,6 +63,15 @@ final class DiskCleanerStore: ObservableObject {
             // results after the existing clean finishes.
             reportIsStale = true
             showConfirmation = false
+        } else if case .cleaned = state {
+            // The notification is deferred to the main run loop, so a policy
+            // edit saved as a clean finishes can land after it.  The report is
+            // still stale, but the clean's result must stay on screen.
+            reportIsStale = false
+            report = nil
+            selectedItemIds.removeAll()
+            expandedCategoryIds.removeAll()
+            showConfirmation = false
         } else {
             discardResults()
         }

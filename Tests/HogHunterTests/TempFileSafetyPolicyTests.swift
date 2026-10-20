@@ -347,6 +347,14 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertFalse(store.isCleaning, "the fixture clean did not finish")
         XCTAssertNil(store.report, "policy changes must discard stale results after cleaning")
         guard case .cleaned = store.state else { return XCTFail("the original clean result must remain visible") }
+        // The notification is deferred to the main run loop, so it can land
+        // after the completion above rather than during the clean.
+        TempFileSafetyPolicy.save(hours: 24, to: defaults)
+        store.reloadTempFilePolicy()
+        XCTAssertNil(store.report)
+        guard case .cleaned = store.state else {
+            return XCTFail("a policy reload arriving after the clean must keep the result visible")
+        }
     }
 
 }
