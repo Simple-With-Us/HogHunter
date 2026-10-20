@@ -2,12 +2,16 @@
 
 ## Unreleased
 
+One failed PR lookup no longer throws away the whole doctor report (HH-168):
+
+- The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.
+
 The Vacuum can now retire a lane that sits behind a symlinked parent (HH-166):
 
 - A lane behind a symlinked parent was refused outright, so on this Mac — where the fleet keeps its lanes on an external disk behind such a link — not one lane could be retired.  The path itself must still be a plain directory, and the lane must still belong to the repository the doctor recorded; where it lives on disk no longer decides.
 - A process sitting in such a lane went unseen, because the working-directory check compared the path as spelled with the physical paths the system reports.
 - The never-touch rule and the folder containment check are now read on the resolved path, so a symlinked parent cannot redirect a lane into a folder that is never touched, and a dependency folder behind such a link can still be cleared.
-- A report that does not name the lane's repository is refused rather than taken on trust.
+- A report that does not name the lane's repository leaves an ordinary lane retirable and refuses only a lane whose identity cannot be confirmed, so an older report cannot make retirement a no-op for everything.
 
 None of these removes anything by itself: the Vacuum still decides what is eligible, and it keeps a day of grace on a fresh update rollback.
 
