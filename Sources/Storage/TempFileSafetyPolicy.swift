@@ -33,10 +33,14 @@ struct TempFileSafetyPolicy: Equatable, Sendable {
         "Temporary files in /tmp untouched for at least \(hoursLabel) hours.  Preserves Git checkouts, source projects, staging, locks, and links."
     }
 
-    static func load(from defaults: UserDefaults = CleanerExclusions.sharedDefaults) -> Self {
+    private static func storedHours(from defaults: UserDefaults) -> Double? {
         guard let value = defaults.object(forKey: defaultsKey) as? NSNumber,
-              CFGetTypeID(value) != CFBooleanGetTypeID() else { return Self() }
-        return Self(hours: value.doubleValue)
+              CFGetTypeID(value) != CFBooleanGetTypeID(), isValid(value.doubleValue) else { return nil }
+        return value.doubleValue
+    }
+
+    static func load(from defaults: UserDefaults = CleanerExclusions.sharedDefaults) -> Self {
+        Self(hours: storedHours(from: defaults) ?? defaultHours)
     }
 
     @discardableResult
@@ -44,10 +48,15 @@ struct TempFileSafetyPolicy: Equatable, Sendable {
         // Invalid user edits cannot lower an existing stricter safety choice.
         guard isValid(hours) else { return load(from: defaults) }
         let policy = Self(hours: hours)
-        // Re-saving the stored hours is not an edit: bumping the revision would
-        // void an unchanged policy's scan report, selections, and phone report.
         let current = load(from: defaults)
-        guard policy != current else { return current }
+        if policy == current {
+            // An explicit default choice still survives a future default
+            // change and repairs corrupt storage, without invalidating scans.
+            if storedHours(from: defaults) == nil {
+                defaults.set(policy.minimumUntouchedHours, forKey: defaultsKey)
+            }
+            return current
+        }
         defaults.set(policy.minimumUntouchedHours, forKey: defaultsKey)
         revisionLock.lock()
         revision &+= 1

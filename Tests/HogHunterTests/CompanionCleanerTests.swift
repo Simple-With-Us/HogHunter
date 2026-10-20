@@ -746,6 +746,18 @@ final class CompanionCleanerStoreTests: XCTestCase {
         try await waitForScan()
     }
 
+    func testNoOpTempPolicySaveKeepsTheReadyCompanionReport() async throws {
+        let ready = try await scanReady()
+        let defaults = UserDefaults(suiteName: suite)!
+        let policy = TempFileSafetyPolicy.load(from: defaults)
+        let revision = TempFileSafetyPolicy.currentRevision
+        TempFileSafetyPolicy.save(hours: policy.minimumUntouchedHours, to: defaults)
+        let after = try report(of: store.remoteCleanReportReply())
+        XCTAssertEqual(TempFileSafetyPolicy.currentRevision, revision)
+        XCTAssertEqual(after.state, "ready")
+        XCTAssertEqual(after.scanId, ready.scanId)
+    }
+
     func testTempPolicyChangeDiscardsReadyReportAndRejectsItsID() async throws {
         let ready = try await scanReady()
         let defaults = UserDefaults(suiteName: suite)!

@@ -105,6 +105,31 @@ final class TempFileSafetyPolicyTests: XCTestCase {
                        "a no-op save must not void an unchanged policy's report and selections")
     }
 
+    func testExplicitDefaultRepairsMissingOrCorruptStorageWithoutARevisionChange() {
+        let revision = TempFileSafetyPolicy.currentRevision
+        XCTAssertNil(defaults.object(forKey: TempFileSafetyPolicy.defaultsKey))
+        TempFileSafetyPolicy.save(hours: 72, to: defaults)
+        XCTAssertEqual(defaults.object(forKey: TempFileSafetyPolicy.defaultsKey) as? Double, 72)
+        XCTAssertEqual(TempFileSafetyPolicy.currentRevision, revision)
+        defaults.set("corrupt", forKey: TempFileSafetyPolicy.defaultsKey)
+        TempFileSafetyPolicy.save(hours: 72, to: defaults)
+        XCTAssertEqual(defaults.object(forKey: TempFileSafetyPolicy.defaultsKey) as? Double, 72)
+        XCTAssertEqual(TempFileSafetyPolicy.currentRevision, revision)
+    }
+
+    @MainActor
+    func testUnchangedValidPolicyKeepsRevisionAndNativeSelections() {
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        let store = DiskCleanerStore(cleaner: cleaner(), historyStore: CleanupHistoryStore(inMemory: true),
+            exclusionsDefaults: defaults, rescanAfterExclusionChange: false)
+        store.selectedItemIds = ["keep-selection"]
+        let revision = TempFileSafetyPolicy.currentRevision
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        store.reloadTempFilePolicy()
+        XCTAssertEqual(TempFileSafetyPolicy.currentRevision, revision)
+        XCTAssertEqual(store.selectedItemIds, ["keep-selection"])
+    }
+
     func testNestedActivityIncludingCopiedAndAccessedFilesBlocksContainer() throws {
         let nested = try file("container/deep/data.bin")
         let engine = cleaner()
@@ -309,7 +334,8 @@ final class TempFileSafetyPolicyTests: XCTestCase {
             exclusions.excludedCategories = Set(CleanCategory.allCases
                 .filter { $0 != .logsAndDiagnostics }.map(\.rawValue))
         }
-        let store = DiskCleanerStore(cleaner: DiskCleaner(homeDirectory: root),
+        let files = RecordingFileManager()
+        let store = DiskCleanerStore(cleaner: DiskCleaner(fileManager: files, homeDirectory: root),
             historyStore: CleanupHistoryStore(inMemory: true), exclusionsDefaults: defaults,
             manualScanOnly: true)
         store.scan()
@@ -355,6 +381,9 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         guard case .cleaned = store.state else {
             return XCTFail("a policy reload arriving after the clean must keep the result visible")
         }
+        XCTAssertEqual(files.trashed.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logs.appendingPathComponent("fixture.log").path),
+            "the recording file manager must keep fixture cleanup out of the real Trash")
     }
 
 }
