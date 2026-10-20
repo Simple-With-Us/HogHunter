@@ -105,46 +105,43 @@ struct VPSResourceCardView: View {
 
     @ViewBuilder
     private func snapshotContent(_ snapshot: VPSStatusSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                if let cpu = snapshot.cpu {
-                    cpuBox(cpu)
+        VStack(alignment: .leading, spacing: 10) {
+            // Three metrics across uses the panel's width before adding height.
+            // Missing readings do not reserve empty metric cards.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .top), count: 3), spacing: 8) {
+                if let cpu = snapshot.cpu { cpuBox(cpu) }
+                if let mem = snapshot.memory { memoryBox(mem) }
+                if let root = snapshot.rootDevice { deviceBox(root, title: "Disk (/)") }
+                if let swap = snapshot.swap { swapBox(swap) }
+                if let tmp = snapshot.tmpDevice {
+                    deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
                 }
-                if let mem = snapshot.memory {
-                    memoryBox(mem)
-                }
-            }
-
-            HStack(spacing: 8) {
-                if let root = snapshot.rootDevice {
-                    deviceBox(root, title: "Disk (/)")
-                }
-                if let swap = snapshot.swap {
-                    swapBox(swap)
+                if let shm = snapshot.shmDevice {
+                    deviceBox(shm, title: "Shared Mem (/dev/shm)", tooltip: shm.note)
                 }
             }
 
-            if snapshot.tmpDevice != nil || snapshot.shmDevice != nil {
-                HStack(spacing: 8) {
-                    if let tmp = snapshot.tmpDevice {
-                        deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
-                    }
-                    if let shm = snapshot.shmDevice {
-                        deviceBox(shm, title: "Shared Mem (/dev/shm)", tooltip: shm.note)
-                    }
+            let dbs = snapshot.appDbs ?? [:]
+            let tools = snapshot.toolStatuses ?? []
+            let dirs = snapshot.largestDirs ?? []
+            if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
+                HStack(alignment: .top, spacing: 16) {
+                    supportingReadings(dbs: dbs, tools: tools)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    largestDirsView(dirs)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
+            } else {
+                supportingReadings(dbs: dbs, tools: tools)
+                if !dirs.isEmpty { largestDirsView(dirs) }
             }
+        }
+    }
 
-            if let dbs = snapshot.appDbs, !dbs.isEmpty {
-                appDbsRow(dbs)
-            }
-
-            if let dirs = snapshot.largestDirs, !dirs.isEmpty {
-                largestDirsView(dirs)
-            }
-            if let tools = snapshot.toolStatuses, !tools.isEmpty {
-                toolsView(tools)
-            }
+    private func supportingReadings(dbs: [String: Int64], tools: [VPSToolStatus]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !dbs.isEmpty { appDbsRow(dbs) }
+            if !tools.isEmpty { toolsView(tools) }
         }
     }
 
@@ -264,7 +261,7 @@ struct VPSResourceCardView: View {
         VStack(alignment: .leading, spacing: 5) {
             Text("Tools")
                 .font(.system(size: 11, weight: .semibold))
-            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 5) {
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 6) {
                 ForEach(tools) { tool in
                     HStack(spacing: 5) {
                         Circle()
@@ -272,9 +269,8 @@ struct VPSResourceCardView: View {
                             .frame(width: 6, height: 6)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(tool.name)
-                                .lineLimit(1)
                             Text(toolStatusLabel(tool.state))
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
                         if tool.state == .running, tool.count > 1 {
@@ -283,10 +279,11 @@ struct VPSResourceCardView: View {
                                 .monospacedDigit()
                         }
                     }
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .help("\(tool.name): \(toolStatusLabel(tool.state))")
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("\(tool.name), \(toolStatusLabel(tool.state))")
+                    .accessibilityValue(tool.state == .running && tool.count > 1 ? "\(tool.count) processes" : "")
                 }
             }
         }

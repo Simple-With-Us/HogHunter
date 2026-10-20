@@ -135,14 +135,13 @@ struct ServerStatusView: View {
     @ObservedObject var store: VPSStatusStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Remote Server")
-                    .font(.system(size: 13, weight: .semibold))
-            }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Remote Server")
+                .font(.system(size: 13, weight: .semibold))
 
             VPSResourceCardView(store: store)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

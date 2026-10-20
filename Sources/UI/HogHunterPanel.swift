@@ -71,11 +71,8 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedServer {
-                    ScrollView {
-                        ServerStatusView(store: store.maintain.vpsStore)
-                    }
-                        .frame(width: Self.contentWidth, alignment: .leading)
-                        .clipped()
+                    ServerStatusView(store: store.maintain.vpsStore)
+                        .frame(width: Self.contentWidth, alignment: .topLeading)
                         .opacity(selectedTab == .server ? 1 : 0)
                         .allowsHitTesting(selectedTab == .server)
                         .accessibilityHidden(selectedTab != .server)
