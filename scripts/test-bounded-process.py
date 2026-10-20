@@ -58,6 +58,29 @@ class BoundedProcessTests(unittest.TestCase):
                 CAPTURE.run(['synthetic'], 1, 0)
         process.kill.assert_called_once()
 
+    def test_cancellation_during_spawn_keeps_child_owned(self):
+        original_popen = subprocess.Popen
+        children = []
+
+        def cancel_after_creation(*args, **kwargs):
+            handler = signal.getsignal(signal.SIGTERM)
+            self.assertTrue(callable(handler), 'handler must precede child creation')
+            child = original_popen(*args, **kwargs)
+            children.append(child)
+            handler(signal.SIGTERM, None)
+            return child
+
+        try:
+            with mock.patch.object(CAPTURE.subprocess, 'Popen', side_effect=cancel_after_creation):
+                result = CAPTURE.run([sys.executable, '-c', 'import time; time.sleep(60)'], 2, 0)
+            self.assertEqual(result, 128 + signal.SIGTERM)
+            self.assertIsNotNone(children[0].returncode)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+
     def test_timeout_kills_term_resistant_process(self):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)
         self.assertEqual(result.returncode, 124)

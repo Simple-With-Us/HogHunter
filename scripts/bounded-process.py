@@ -29,10 +29,12 @@ def signal_group(group, signum):
         return False
 
 
-def wait_unreaped(process, timeout):
+def wait_unreaped(process, timeout, cancellation=lambda: None):
     """Observe exit without releasing the leader PID before group cleanup."""
     deadline = time.monotonic() + timeout
     while True:
+        if signum := cancellation():
+            raise Interrupted(signum)
         event = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         if event is not None and event.si_pid == process.pid:
             return event.si_status if event.si_code == os.CLD_EXITED else -event.si_status
@@ -43,20 +45,24 @@ def wait_unreaped(process, timeout):
 
 
 def run(command, timeout, grace=2):
-    process = subprocess.Popen(command, start_new_session=True)
+    process = None
     previous = {}
+    requested_signal = None
 
     def interrupted(signum, _frame):
-        raise Interrupted(signum)
+        # Never raise inside Popen: it may already own a child not yet returned.
+        nonlocal requested_signal
+        requested_signal = signum
 
     try:
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous[signum] = signal.signal(signum, interrupted)
+        process = subprocess.Popen(command, start_new_session=True)
         # Readiness marker for the cancellation test: it is emitted only once both
         # handlers are installed, so a test never signals into the install window.
         print('Supervisor ready.', file=sys.stderr, flush=True)
         try:
-            return wait_unreaped(process, timeout)
+            return wait_unreaped(process, timeout, lambda: requested_signal)
         except subprocess.TimeoutExpired:
             print('Optional capture exceeded its deadline.', file=sys.stderr, flush=True)
             raise
@@ -69,26 +75,27 @@ def run(command, timeout, grace=2):
         for signum in previous:
             signal.signal(signum, signal.SIG_IGN)
         try:
-            if signal_group(process.pid, signal.SIGTERM):
-                deadline = time.monotonic() + grace
-                while time.monotonic() < deadline:
-                    if not signal_group(process.pid, 0):
-                        break
-                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-            # Escalate the whole group even when the graceful signal was refused:
-            # killpg reports EPERM for members it may not signal while still
-            # signalling the rest, so a False return is not proof the group is gone.
-            signal_group(process.pid, signal.SIGKILL)
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=max(grace, 5))
-            except subprocess.TimeoutExpired:
-                print('Capture process did not exit after group cleanup.',
-                      file=sys.stderr, flush=True)
-                raise
+            if process is not None:
+                if signal_group(process.pid, signal.SIGTERM):
+                    deadline = time.monotonic() + grace
+                    while time.monotonic() < deadline:
+                        if not signal_group(process.pid, 0):
+                            break
+                        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                # Escalate the whole group even when the graceful signal was refused:
+                # killpg reports EPERM for members it may not signal while still
+                # signalling the rest, so a False return is not proof the group is gone.
+                signal_group(process.pid, signal.SIGKILL)
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=max(grace, 5))
+                except subprocess.TimeoutExpired:
+                    print('Capture process did not exit after group cleanup.',
+                          file=sys.stderr, flush=True)
+                    raise
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
