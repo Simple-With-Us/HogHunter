@@ -39,6 +39,8 @@ jobs:
   test:
     runs-on: macos-15
     timeout-minutes: 30
+    env:
+      HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
     steps:
       - name: Checkout
         uses: actions/checkout@v7
