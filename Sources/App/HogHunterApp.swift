@@ -44,6 +44,12 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
         exit(0)
     }
 
+    /// History writes are queued off the main actor, and termination does not wait for utility
+    /// queues.  Without this drain the newest size observations are lost on an immediate quit.
+    func applicationWillTerminate(_ notification: Notification) {
+        SizeGrowthHistory.shared.flushPersistence()
+    }
+
     private func screenshotLog(_ message: String) {
         // FileHandle.standardError.write is unbuffered - each line hits the log immediately.
         FileHandle.standardError.write(Data(("[HogHunterScreenshot] " + message + "\n").utf8))
