@@ -69,6 +69,8 @@ The Icon windows are in **tile space**, the space the owner's `.icns` uses, so t
 
 The Icon variants also carry the owner's rounded tile, clipped to the crop, so a set built from them has one silhouette at every size.  The owner's own iconset entries have transparent rounded corners from 16 px upward, and a square crop would break that; the Logo variants stay flat on cream, like `HogHunter-Logo.svg`.
 
+Each crop is designed for the size it is used at.  The snout crop is a 230 unit window, so at 16 px it still holds its nostril slits and its cream crescent, and it holds at 24 px too, because more pixels fall on each feature.  The face crop is a 460 unit window, so at 24 px it is below its own design size and the tusks and the eye merge back into the mass.  Choose the crop by rendering it at the size it will be used at and looking at those pixels, not by which crop looks best large.
+
 ### Verifying a small size
 
 Render at the true pixel size and inspect the real device pixels.  Do not zoom the vector and judge that instead: a zoomed render is a fresh rasterization, and it hides exactly the detail being judged.
@@ -112,7 +114,7 @@ iconutil -c icns iconset.iconset -o HogHunter.icns
 
 `iconutil -c iconset` reads the rendered PNG folder and writes `iconset.iconset`, and `iconutil -c icns` then packs that folder.
 
-For the two smallest entries, render `HogHunter-Icon-Small-16.svg` as `icon_16x16.png` and `HogHunter-Icon-Small-32.svg` as `icon_32x32.png` instead of scaling the full emblem down.  The same applies to `icon_16x16@2x.png` at 32 px.  Both files carry the rounded tile, so the set keeps one silhouette.
+For the two smallest entries, render `HogHunter-Icon-Small-16.svg` as `icon_16x16.png` and `HogHunter-Icon-Small-32.svg` as `icon_32x32.png` instead of scaling the full emblem down.  `icon_16x16@2x.png` is a 32 px entry, so it takes the 32 px variant as well.  Both files carry the rounded tile, so the set keeps one silhouette.
 
 ## Rebuilding a Windows .ico
 
@@ -142,12 +144,13 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 The Windows `.ico` needs the same treatment as the `.icns`.  The single-source `magick` command above always produces the scaled-down full emblem, which is the exact defect the small variants exist to fix, so build the small entries from the zoomed files instead:
 
 ```bash
-# 16 px straight from the 16 px variant; 24 px and 32 px from the 32 px variant.
-# 24 px has no crop of its own, so it takes the face crop: the SVG is rendered
-# at 24 px rather than downscaled, and the face keeps more structure than the
-# bare snout does at that size.  The larger entries come from the full emblem:
+# 16 px and 24 px from the 16 px snout crop; 32 px from the 32 px face crop.
+# 24 px is below the face crop's design size, and there the snout crop wins:
+# rendered at true 24 px the snout keeps its nostril slits and its cream
+# crescent, while the face crop falls back into the brown mass the small
+# variants exist to prevent.  The larger entries come from the full emblem:
 magick -background none Brand/HogHunter-Icon-Small-16.svg -resize 16x16 icon16.png
-magick -background none Brand/HogHunter-Icon-Small-32.svg -resize 24x24 icon24.png
+magick -background none Brand/HogHunter-Icon-Small-16.svg -resize 24x24 icon24.png
 magick -background none Brand/HogHunter-Icon-Small-32.svg -resize 32x32 icon32.png
 magick -background none Brand/HogHunter-Icon-Rotated.svg -resize 48x48 icon48.png
 magick -background none Brand/HogHunter-Icon-Rotated.svg -resize 64x64 icon64.png
@@ -158,7 +161,7 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 
 Keep `-background none` on those renders, or the rounded corners of the tile come out white instead of transparent.
 
-`icotool -c` stores every entry as a BMP/DIB whose transparency is a 1-bit AND mask, the same limitation the `magick` command above has, so the 16, 24 and 32 px corners are transparent but hard-edged rather than antialiased.  Pass `-r icon16.png` (and likewise for the other small entries) to embed those PNGs verbatim when the target reader accepts PNG-backed entries.
+`icotool -c` stores every entry as a BMP/DIB whose transparency is a 1-bit AND mask, the same limitation the `magick` command above has, so the 16, 24 and 32 px corners are transparent but hard-edged rather than antialiased.  `icotool`'s `-r, --raw=FILENAME` option stores the named input file as a raw PNG (Vista) entry instead, so name the small PNGs with it when the target reader accepts PNG-backed entries.
 
 Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
