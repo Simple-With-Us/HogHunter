@@ -28,22 +28,6 @@ final class TempFileSafetyPolicyTests: XCTestCase {
     /// Canonicalize both writes and reads, including injected failure hooks.
     private static func key(_ url: URL) -> String { DiskCleaner.resolvedPath(url.path) }
 
-    /// A quarantined candidate is read back under a staging name, but it is
-    /// the same entry: fixture metadata belongs to the original path.
-    private static func fixtureKey(_ url: URL) -> String {
-        var components = key(url).split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        if let index = components.firstIndex(where: { $0.hasPrefix(DiskCleaner.tempQuarantineNamePrefix) }), index > 0 {
-            components.remove(at: index)
-        }
-        return components.joined(separator: "/")
-    }
-
-    /// Quarantine is transient; nothing may be left behind in the temp root.
-    private func quarantineEntries() -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
-            .filter { $0.hasPrefix(DiskCleaner.tempQuarantineNamePrefix) }
-    }
-
     @discardableResult
     private func file(_ name: String, hours: Double = 96) throws -> URL {
         let url = root.appendingPathComponent(name)
@@ -62,9 +46,9 @@ final class TempFileSafetyPolicyTests: XCTestCase {
                 if self.failedMetadataPaths.contains(Self.key(url)) { throw CocoaError(.fileReadNoPermission) }
                 var info = try TempEntryMetadata.read(url)
                 if info.isRegularFile {
-                    XCTAssertNotNil(self.activity[Self.fixtureKey(url)], "Missing fixture metadata for \(url.path)")
+                    XCTAssertNotNil(self.activity[Self.key(url)], "Missing fixture metadata for \(url.path)")
                 }
-                info.latestActivity = self.activity[Self.fixtureKey(url)] ?? self.clock.addingTimeInterval(-96 * 3_600)
+                info.latestActivity = self.activity[Self.key(url)] ?? self.clock.addingTimeInterval(-96 * 3_600)
                 return info
             }, tempNow: { self.clock }, tempEntryCap: cap, tempUptime: uptime,
             tempEnumerationProvider: { url, options, handler in
@@ -256,51 +240,6 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertFalse(cleaner().isSafeToDelete(url: nested, category: .tempFiles))
     }
 
-    func testVerifiedCandidateIsQuarantinedThenTrashed() async throws {
-        let url = try file("data.bin")
-        let engine = cleaner()
-        let items = engine.scanTempFiles()
-        XCTAssertEqual(items.count, 1)
-
-        let result = await engine.clean(items: items, createSnapshot: false, exclusions: CleanerExclusions())
-
-        XCTAssertEqual(result.itemsRemoved, 1)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
-        XCTAssertEqual(quarantineEntries(), [], "a successful clean must leave no quarantine entry behind")
-    }
-
-    /// The verification-to-Trash gap: the caller learns a candidate is safe,
-    /// then a producer writes into it before the Trash move resolves the path.
-    func testWriteAfterVerificationIsRestoredAndNeverTrashed() async throws {
-        let nested = try file("container/deep/data.bin")
-        let candidate = root.appendingPathComponent("container")
-        let late = candidate.appendingPathComponent("late.bin")
-        let engine = cleaner()
-        let items = engine.scanTempFiles()
-        XCTAssertEqual(items.count, 1)
-
-        // Each verification reads the candidate root twice — once on entry and
-        // once in the closing reverse pass.  The fourth read therefore lands
-        // after every check and before the atomic quarantine move.
-        var rootReads = 0
-        metadataObserver = { entry in
-            guard Self.key(entry) == Self.key(candidate) else { return }
-            rootReads += 1
-            if rootReads == 4 {
-                try! Data([1]).write(to: late)
-                self.activity[Self.key(late)] = self.clock
-            }
-        }
-
-        let result = await engine.clean(items: items, createSnapshot: false, exclusions: CleanerExclusions())
-
-        XCTAssertEqual(result.itemsRemoved, 0, "a write that landed after verification must not reach the Trash")
-        XCTAssertTrue(result.errors.contains { $0.contains("Safety check failed") })
-        XCTAssertTrue(FileManager.default.fileExists(atPath: late.path), "the producer's write must be left in place")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: nested.path))
-        XCTAssertEqual(quarantineEntries(), [], "a rejected quarantine must be renamed back, not left behind")
-    }
-
     @MainActor
     func testSettingsChangeInvalidatesHiddenStoreWithoutStartingScan() async {
         let store = DiskCleanerStore(cleaner: cleaner(), historyStore: CleanupHistoryStore(inMemory: true),
@@ -334,7 +273,7 @@ final class TempFileSafetyPolicyTests: XCTestCase {
     func testCleanDroppedByAPolicyChangeAsksForAScanInsteadOfReturningSilently() {
         let store = DiskCleanerStore(cleaner: cleaner(), historyStore: CleanupHistoryStore(inMemory: true),
             exclusionsDefaults: defaults, rescanAfterExclusionChange: false)
-        // The phone edits the policy after the scan; the notification reaches
+        // Settings edits the policy after the scan; the notification reaches
         // the store on the main loop, so this turn still sees the old report.
         TempFileSafetyPolicy.save(hours: 168, to: defaults)
         store.showConfirmation = true

@@ -57,7 +57,7 @@ extension Notification.Name {
     static let tempFileSafetyPolicyChanged = Notification.Name("hoghunter.tempFileSafetyPolicyChanged")
 }
 
-/// lstat never follows links.  Creation and metadata-change dates catch freshly
+/// lstat does not follow the final entry's symlink.  Creation and change dates catch freshly
 /// copied entries whose modification date was preserved.  File access counts;
 /// directory access does not, because listing a directory can itself update it.
 struct TempEntryMetadata: Equatable {

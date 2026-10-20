@@ -779,20 +779,6 @@ final class DiskCleaner: @unchecked Sendable {
     /// batch staging (e.g. `vc-012`).  Always skipped, even without markers.
     static let batchStagingNamePrefixes = ["vc-"]
 
-    /// Name prefix of the same-volume staging entry that closes the gap
-    /// between a verified temp candidate and the Trash.  A quarantined entry
-    /// is already being removed, so it must never itself become a candidate.
-    static let tempQuarantineNamePrefix = ".hoghunter-quarantine-"
-
-    /// A temp candidate that passed every check, carrying the identity of the
-    /// inode that passed so a later Trash move can be bound to it rather
-    /// than to the path alone.
-    struct VerifiedTempEntry {
-        let stats: DirectoryStats
-        let device: UInt64
-        let inode: UInt64
-    }
-
     /// One bounded walk checks age, protections, and size together.  Incomplete
     /// walks produce no suggestion, including unchecked rows.  Temp items still
     /// require explicit review: idle plain files have no inferred backup status.
@@ -810,13 +796,13 @@ final class DiskCleaner: @unchecked Sendable {
             guard !Task.isCancelled, !enumerationFailed, visited < tempEntryCap,
                   tempUptime() < deadline, let url = entry as? URL else { return [] }
             visited += 1
-            guard let verified = eligibleTempEntry(url, cutoff: cutoff, worktrees: worktrees),
-                  verified.stats.bytes > 0 else { continue }
+            guard let stats = eligibleTempEntry(url, cutoff: cutoff, worktrees: worktrees),
+                  stats.bytes > 0 else { continue }
             let itemURL = URL(fileURLWithPath: Self.resolvedPath(url.path))
             items.append(CleanItem(
                 category: .tempFiles, title: url.lastPathComponent, subtitle: itemURL.path,
-                url: itemURL, bytes: verified.stats.bytes, fileCount: verified.stats.fileCount,
-                lastModified: verified.stats.lastModified, isSelected: false,
+                url: itemURL, bytes: stats.bytes, fileCount: stats.fileCount,
+                lastModified: stats.lastModified, isSelected: false,
                 detail: "Temporary file — untouched for at least \(policy.hoursLabel) hours; review before cleaning"
             ))
         }
@@ -849,56 +835,39 @@ final class DiskCleaner: @unchecked Sendable {
             || name.hasSuffix(".lock")
             || Self.batchActiveMarkerNames.contains(url.lastPathComponent)
             || Self.batchStagingNamePrefixes.contains(where: { name.hasPrefix($0) })
-            || name.hasPrefix(Self.tempQuarantineNamePrefix)
     }
 
     /// nil means protected, recent, or unverified.  Do not skip packages or
     /// hidden entries: a checkout, lock, or new write at any depth protects all
     /// of its enclosing candidate.  Symlinks protect the container without being
     /// followed.  Every directory listing and metadata failure fails closed.
-    private func eligibleTempEntry(_ url: URL, cutoff: Date, worktrees: Set<String>,
-                                   allowNonChildPath: Bool = false,
-                                   pinnedRoot: (device: UInt64, inode: UInt64)? = nil) -> VerifiedTempEntry? {
+    private func eligibleTempEntry(_ url: URL, cutoff: Date, worktrees: Set<String>) -> DirectoryStats? {
         let root = tempRootURL.path
         let path = Self.resolvedPath(url.path)
         // Candidates are direct children only; a forged report cannot clean a
         // nested file while sidestepping a parent's project/lock protection.
-        // Quarantine re-verification is exempt: it inspects an entry this
-        // cleaner just renamed, and the location rules were enforced on the
-        // original path before the move.
-        if !allowNonChildPath {
-            guard url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path == root,
-                  path.hasPrefix(root + "/"), path != root,
-                  !worktrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }) else { return nil }
-        }
-        guard !hasAdjacentTempLock(url) else { return nil }
+        guard url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path == root,
+              path.hasPrefix(root + "/"), path != root,
+              !worktrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }),
+              !hasAdjacentTempLock(url) else { return nil }
         let deadline = tempUptime() + tempWalkTimeLimit
         var observations: [(URL, TempEntryMetadata)] = []
         var bytes: UInt64 = 0
         var count = 0
         var latestModified: Date?
-        func inspect(_ entry: URL, pinned: (device: UInt64, inode: UInt64)? = nil) -> TempEntryMetadata? {
+        func inspect(_ entry: URL) -> TempEntryMetadata? {
             guard !Task.isCancelled, observations.count < tempEntryCap,
-                  tempUptime() < deadline else { return nil }
-            // A pinned root is the quarantine entry this cleaner just wrote
-            // its own name onto, so the name rules cannot apply to it.  The
-            // rename also bumped its own change time, which is not producer
-            // activity; its identity is what still has to match.
-            if pinned == nil, protectedTempName(entry) { return nil }
-            guard let info = try? tempMetadataProvider(entry), !info.isSymbolicLink,
+                  tempUptime() < deadline, !protectedTempName(entry),
+                  let info = try? tempMetadataProvider(entry), !info.isSymbolicLink,
                   info.isDirectory || info.isRegularFile,
-                  info.latestActivity.timeIntervalSince1970.isFinite else { return nil }
-            if let pinned {
-                guard info.device == pinned.device, info.inode == pinned.inode else { return nil }
-            } else {
-                guard info.latestActivity <= cutoff else { return nil }
-            }
+                  info.latestActivity.timeIntervalSince1970.isFinite,
+                  info.latestActivity <= cutoff else { return nil }
             observations.append((entry, info))
             latestModified = max(latestModified ?? info.modified, info.modified)
             if info.isRegularFile { bytes &+= info.bytes; count += 1 }
             return info
         }
-        guard let rootInfo = inspect(url, pinned: pinnedRoot) else { return nil }
+        guard let rootInfo = inspect(url) else { return nil }
         if rootInfo.isDirectory {
             var enumerationFailed = false
             guard let entries = tempEnumerationProvider(url,
@@ -908,9 +877,10 @@ final class DiskCleaner: @unchecked Sendable {
             }
             guard !enumerationFailed else { return nil }
         }
-        // A second metadata read (no second directory traversal) rejects an
-        // inode replacement, nested write, or project/lock added during the
-        // walk.  Directory ctime catches additions even with preserved mtime.
+        // A second metadata read (no second directory traversal) detects
+        // changes visible at these observations, including inode replacement
+        // and directory activity since enumeration.  Later writes/replacements
+        // are not atomically excluded from the path-based Trash operation.
         // Enumeration records each parent before its descendants.  Reversing
         // that order verifies every containing directory after its children.
         for (entry, observed) in observations.reversed() {
@@ -918,9 +888,7 @@ final class DiskCleaner: @unchecked Sendable {
                   let current = try? tempMetadataProvider(entry), current == observed else { return nil }
         }
         guard !hasAdjacentTempLock(url) else { return nil }
-        return VerifiedTempEntry(
-            stats: DirectoryStats(bytes: bytes, fileCount: count, lastModified: latestModified),
-            device: rootInfo.device, inode: rootInfo.inode)
+        return DirectoryStats(bytes: bytes, fileCount: count, lastModified: latestModified)
     }
 
     /// lstat sees even dangling lock symlinks.  Permission and I/O failures
@@ -938,43 +906,11 @@ final class DiskCleaner: @unchecked Sendable {
     /// Fresh local policy and metadata checks are shared by all deletion paths,
     /// including native regimen and companion cleans of an older report.
     private func isTempEntrySafeNow(_ url: URL) -> Bool {
-        verifiedTempEntry(url) != nil
-    }
-
-    /// The deletion-time verification, keeping the verified identity so the
-    /// Trash move can be bound to the inode rather than to the path.
-    private func verifiedTempEntry(_ url: URL) -> VerifiedTempEntry? {
         let policy = tempPolicyProvider()
         let cutoff = tempNow().addingTimeInterval(-policy.minimumUntouchedInterval)
-        let verified = eligibleTempEntry(url, cutoff: cutoff,
-            worktrees: Set(worktreePathsProvider().map(Self.resolvedPath)))
-        return policy == tempPolicyProvider() ? verified : nil
-    }
-
-    /// `trashItem` resolves the path again after verification returns, so a
-    /// producer can write into — or atomically replace — a candidate in
-    /// between.  `rename` is atomic and same-volume, so it binds the name to
-    /// the inode that passed every check; the quarantined tree is then walked
-    /// again with its root pinned to that inode.  A write that landed after
-    /// verification now has a fresh entry of its own, and a replacement no
-    /// longer matches the pinned root, so neither reaches the Trash.  Any
-    /// failure puts the entry back exactly where it was.
-    private func quarantineVerifiedTempEntry(_ url: URL) -> URL? {
-        guard let verified = verifiedTempEntry(url) else { return nil }
-        let quarantine = tempRootURL.appendingPathComponent(
-            Self.tempQuarantineNamePrefix + UUID().uuidString)
-        guard rename(url.path, quarantine.path) == 0 else { return nil }
-        let policy = tempPolicyProvider()
-        let cutoff = tempNow().addingTimeInterval(-policy.minimumUntouchedInterval)
-        let intact = eligibleTempEntry(quarantine, cutoff: cutoff, worktrees: [:],
-            allowNonChildPath: true,
-            pinnedRoot: (device: verified.device, inode: verified.inode)) != nil
+        return eligibleTempEntry(url, cutoff: cutoff,
+            worktrees: Set(worktreePathsProvider().map(Self.resolvedPath))) != nil
             && policy == tempPolicyProvider()
-        guard intact else {
-            rename(quarantine.path, url.path)
-            return nil
-        }
-        return quarantine
     }
 
     /// Registered git worktree paths, via `git worktree list --porcelain`
@@ -2094,25 +2030,9 @@ final class DiskCleaner: @unchecked Sendable {
                     removedCount += 1
                     noteSuccess(item)
                 } else {
-                    // Safe removal: move to macOS Trash.  A temp candidate is
-                    // first renamed into quarantine and re-verified there, so
-                    // a write or replacement landing after verification
-                    // cannot reach the Trash by pathname.
-                    let target: URL? = item.category == .tempFiles
-                        ? quarantineVerifiedTempEntry(item.url) : item.url
-                    guard let target else {
-                        errors.append("Safety check failed for path: \(item.url.path)")
-                        continue
-                    }
+                    // Safe removal: move to macOS Trash
                     var trashedURL: NSURL?
-                    do {
-                        try fileManager.trashItem(at: target, resultingItemURL: &trashedURL)
-                    } catch {
-                        // Never strand the candidate in quarantine: put it back
-                        // where the user expects to find it.
-                        if item.category == .tempFiles { rename(target.path, item.url.path) }
-                        throw error
-                    }
+                    try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
                     reclaimed &+= item.bytes
                     removedCount += 1
                     noteSuccess(item)
