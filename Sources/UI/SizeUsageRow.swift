@@ -7,7 +7,6 @@ struct SizeUsageRow: View {
     let percentChange: Double?
     var unavailable = false
     var fontSize: CGFloat = 11
-    var detail: String? = nil
 
     private let gap = "\u{00A0} "
 
@@ -38,13 +37,6 @@ struct SizeUsageRow: View {
                     .monospacedDigit()
                     .fixedSize()
             }
-            if let detail {
-                Text(gap + detail)
-                    .font(.system(size: max(8, fontSize - 1)))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
             Spacer(minLength: 0)
         }
         .font(.system(size: fontSize))
@@ -64,27 +56,20 @@ struct CodingDirectoriesView: View {
                 Text("Directories").font(.system(size: 11, weight: .semibold))
                 Text("(daily change)").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
-                if store.isRefreshing { ProgressView().controlSize(.mini) }
+                if store.isRefreshing {
+                    ProgressView().controlSize(.mini)
+                        .accessibilityLabel("Measuring directories")
+                }
             }
             ForEach(store.rows) { row in
                 SizeUsageRow(name: row.title == "Derived Data" ? row.title : displayPath(row.displayPath), bytes: row.bytes,
-                             percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10,
-                             detail: status(row))
+                             percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10)
                     .help(detail(row))
+                    .accessibilityHint(detail(row))
             }
         }
         .padding(9)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-    }
-
-    private func status(_ row: DirectoryUsageRow) -> String {
-        if row.scanStartedAt != nil, row.progressEntries > 0 {
-            return "\(HogFormat.memory(UInt64(max(0, row.progressBytes)))) scanned · \(row.progressEntries) entries · \(row.statusText.lowercased())"
-        }
-        if row.statusText == "Complete", let sampledAt = row.sampledAt {
-            return "walk began " + timestamp(sampledAt)
-        }
-        return row.statusText
     }
 
     private func detail(_ row: DirectoryUsageRow) -> String {

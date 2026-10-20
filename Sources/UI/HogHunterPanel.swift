@@ -548,19 +548,20 @@ struct HogHunterPanel: View {
 
     /// What the panel is showing, for screen readers.
     private var panelAccessibilityLabel: String {
-        // The stage shows the server report in that scope, so never announce
-        // local process or cleaner content there.
-        let scope = hostScope == .server ? "server " : ""
+        if hostScope == .server {
+            switch selectedTab {
+            case .overview: return "Hog Hunter — server overview"
+            case .activity, .network: return "Hog Hunter — server status"
+            case .storage: return "Hog Hunter — server storage"
+            case .maintenance: return "Hog Hunter — server maintenance"
+            }
+        }
         switch selectedTab {
-        case .overview: return "Hog Hunter — \(scope)overview"
-        case .activity: return hostScope == .server
-            ? "Hog Hunter — server status"
-            : "Hog Hunter — top processes"
-        case .storage: return "Hog Hunter — \(scope)storage and disk cleaner"
-        case .maintenance: return "Hog Hunter — \(scope)maintenance"
-        case .network: return hostScope == .server
-            ? "Hog Hunter — server status"
-            : "Hog Hunter — network activity"
+        case .overview: return "Hog Hunter — overview"
+        case .activity: return "Hog Hunter — top processes"
+        case .storage: return "Hog Hunter — storage and disk cleaner"
+        case .maintenance: return "Hog Hunter — maintenance"
+        case .network: return "Hog Hunter — network activity"
         }
     }
 
