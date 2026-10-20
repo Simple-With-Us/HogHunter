@@ -94,7 +94,7 @@ final class MetadataResolverTests: XCTestCase {
     @MainActor
     func testRunningApplicationPropertiesAreReadOncePerPid() {
         let editor = app(pid: 501)
-        let resolver = MetadataResolver(runningApplications: { [editor] })
+        let resolver = MetadataResolver(runningApplications: { [editor] }, iconSourceAllowed: { _ in true })
 
         resolver.refreshRunningApps()
         XCTAssertEqual(editor.propertyReads, 4, "one read of each metadata property on first sight")
@@ -215,11 +215,31 @@ final class MetadataResolverTests: XCTestCase {
             url: URL(fileURLWithPath: "/Applications/Local.app"),
             icon: image
         )
-        let resolver = MetadataResolver(runningApplications: { [local] })
+        let resolver = MetadataResolver(runningApplications: { [local] }, iconSourceAllowed: { _ in true })
         resolver.refreshRunningApps()
 
         XCTAssertTrue(resolver.icon(bundleId: "com.example.Local", path: nil) === image)
         XCTAssertEqual(resolver.displayName(bundleId: "com.example.Local", fallback: "Stored"), "Local App")
         XCTAssertEqual(local.iconReads, 1)
+        resolver.refreshRunningApps(force: true)
+        XCTAssertEqual(local.iconReads, 1, "forced metadata refresh reuses the icon")
+    }
+
+    @MainActor
+    func testIconPolicyRejectsLocalSymlinkWithoutResolvingItsTarget() throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: root) }
+        let physicalPath = try XCTUnwrap(DirectorySizeWalker.canonicalPath(root.path))
+        let physicalRoot = URL(fileURLWithPath: physicalPath)
+        let app = physicalRoot.appendingPathComponent("Local.app")
+        try manager.createDirectory(at: app, withIntermediateDirectories: true)
+        XCTAssertTrue(MetadataResolver.isSafeIconSource(app, localRoots: [physicalPath]))
+        let alias = physicalRoot.appendingPathComponent("Alias.app")
+        try manager.createSymbolicLink(atPath: alias.path, withDestinationPath: "/Volumes/Unavailable/External.app")
+        XCTAssertFalse(MetadataResolver.isSafeIconSource(alias, localRoots: [physicalPath]))
+        XCTAssertFalse(MetadataResolver.isSafeIconSource(URL(fileURLWithPath: "/Volumes/Unavailable/External.app")))
+        XCTAssertFalse(MetadataResolver.isSafeIconSource(URL(fileURLWithPath: "/Applications/../Volumes/Unavailable/External.app")))
     }
 }
