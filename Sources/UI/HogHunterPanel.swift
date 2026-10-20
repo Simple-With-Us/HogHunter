@@ -122,29 +122,31 @@ struct HogHunterPanel: View {
                         }
                     }
                     if hasVisitedStorage {
-                        VStack(alignment: .leading, spacing: 10) {
-                            capacityCards
-                            if externalDrives.count > 1 {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("External Drives").font(.system(size: 11, weight: .semibold))
-                                    ForEach(externalDrives) { drive in
-                                        HStack {
-                                            Text(drive.name).lineLimit(1)
-                                            Spacer(minLength: 8)
-                                            Text(capacityAmountsText(drive)).lineLimit(1)
+                        GeometryReader { stage in
+                            VStack(alignment: .leading, spacing: 10) {
+                                capacityCards
+                                if externalDrives.count > 1 {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("External Drives").font(.system(size: 11, weight: .semibold))
+                                        ForEach(externalDrives) { drive in
+                                            HStack {
+                                                Text(drive.name).lineLimit(1)
+                                                Spacer(minLength: 8)
+                                                Text(capacityAmountsText(drive)).lineLimit(1)
+                                            }
+                                            .font(.system(size: 10))
                                         }
-                                        .font(.system(size: 10))
                                     }
                                 }
+                                ScrollView { CodingDirectoriesView(store: directoryUsage) }
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: min(260, max(200, stage.size.height * 0.4)))
+                                StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
+                                            maintainStore: store.maintain, embeddedInPanel: true,
+                                            isTabActive: selectedTab == .storage && hostScope == .mac,
+                                            includesMaintenance: false, autoScanCleaner: false)
+                                    .frame(maxHeight: .infinity)
                             }
-                            ScrollView { CodingDirectoriesView(store: directoryUsage) }
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 150)
-                            StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
-                                        maintainStore: store.maintain, embeddedInPanel: true,
-                                        isTabActive: selectedTab == .storage && hostScope == .mac,
-                                        includesMaintenance: false, autoScanCleaner: false)
-                                .frame(maxHeight: .infinity)
                         }
                         .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage && hostScope == .mac)
