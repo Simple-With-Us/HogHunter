@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -23,13 +24,13 @@ class BoundedProcessTests(unittest.TestCase):
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(SUPERVISOR), '--timeout', str(timeout),
                                  '--grace', '0.1', '--', sys.executable, '-c', source],
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, timeout=5)
         return result, time.monotonic() - started
 
     def test_quick_completion_does_not_wait_for_deadline(self):
         result, elapsed = self.invoke('raise SystemExit(7)', timeout=20)
         self.assertEqual(result.returncode, 7)
-        self.assertLess(elapsed, 10)
+        self.assertLess(elapsed, 2)
         self.assertIn('exit status: 7', result.stderr)
 
     def test_leader_remains_unreaped_until_group_cleanup(self):
@@ -65,25 +66,44 @@ class BoundedProcessTests(unittest.TestCase):
             with self.subTest(group_accepts_term=group_accepts_term):
                 process = mock.Mock(pid=999999, args=['synthetic'])
                 elapsed = 0.0
+                clock_reads = 0
+
+                def monotonic():
+                    nonlocal clock_reads
+                    clock_reads += 1
+                    self.assertLessEqual(clock_reads, 20, 'Grace loop exceeded the fake clock budget')
+                    return elapsed
 
                 def sleep(duration):
                     nonlocal elapsed
+                    self.assertGreater(duration, 0, 'Grace sleep must advance the fake clock')
                     elapsed += duration
+                    self.assertLessEqual(elapsed, 0.2, 'Grace sleep exceeded the fixture budget')
 
                 events = mock.Mock()
-                with mock.patch.object(CAPTURE.subprocess, 'Popen', return_value=process), \
+                # Bind the fakes to the supervisor's own globals: patching the
+                # shared stdlib time/subprocess modules would install this test's
+                # fake clock and Popen process-wide for anything else running.
+                fake_time = types.SimpleNamespace(monotonic=monotonic, sleep=sleep)
+                fake_subprocess = types.SimpleNamespace(
+                    Popen=mock.Mock(return_value=process),
+                    TimeoutExpired=subprocess.TimeoutExpired)
+                with mock.patch.object(CAPTURE, 'subprocess', fake_subprocess), \
+                     mock.patch.object(CAPTURE, 'time', fake_time), \
                      mock.patch.object(CAPTURE, 'wait_unreaped', return_value=0), \
                      mock.patch.object(CAPTURE, 'signal_group',
-                                       return_value=group_accepts_term) as group_signal, \
-                     mock.patch.object(CAPTURE.time, 'monotonic', side_effect=lambda: elapsed), \
-                     mock.patch.object(CAPTURE.time, 'sleep', side_effect=sleep):
+                                       return_value=group_accepts_term) as group_signal:
                     events.attach_mock(group_signal, 'group_signal')
                     events.attach_mock(process.kill, 'kill')
                     events.attach_mock(process.wait, 'wait')
                     self.assertEqual(CAPTURE.run(['synthetic'], 1, 0.1), 0)
-                self.assertLessEqual(elapsed, 0.1)
+                # A group that refuses SIGTERM skips the grace block entirely, so
+                # assert each branch exactly: a regression that always waits the
+                # grace window must not stay green behind a <= bound.
                 if group_accepts_term:
                     self.assertAlmostEqual(elapsed, 0.1)
+                else:
+                    self.assertEqual(elapsed, 0.0)
                 self.assertEqual(events.mock_calls[0], mock.call.group_signal(999999, signal.SIGTERM))
                 self.assertEqual(events.mock_calls[-3:], [
                     mock.call.group_signal(999999, signal.SIGKILL),
@@ -187,7 +207,7 @@ class BoundedProcessTests(unittest.TestCase):
     def test_timeout_kills_term_resistant_process(self):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)
         self.assertEqual(result.returncode, 124)
-        self.assertLess(elapsed, 10)
+        self.assertLess(elapsed, 2)
 
     def test_sigterm_reports_128_plus_signal_and_cleans_up(self):
         # The Actions runner cancels a step by signalling the process group, so
@@ -301,7 +321,7 @@ class BoundedProcessTests(unittest.TestCase):
                       '\nwhile not p.exists(): time.sleep(0.01)\n')
             result, elapsed = self.invoke(parent)
             self.assertEqual(result.returncode, 0)
-            self.assertLess(elapsed, 10)
+            self.assertLess(elapsed, 2)
             pid = int(pidfile.read_text())
             # A killed orphan can briefly remain a zombie awaiting its adopter.
             status = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
