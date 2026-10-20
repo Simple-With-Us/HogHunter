@@ -35,6 +35,7 @@ final class SizeGrowthTests: XCTestCase {
         XCTAssertFalse(history.record(host: "a", metric: "size", path: "p", bytes: 8, sampledAt: now.addingTimeInterval(-49 * 3600)))
         history.record(host: "a", metric: "size", path: "p", bytes: 80, sampledAt: now)
         XCTAssertFalse(history.record(host: "a", metric: "size", path: "p", bytes: -1, sampledAt: now.addingTimeInterval(1)))
+        history.flushPersistence()
         XCTAssertEqual(SizeGrowthHistory(fileURL: url, now: { now }).latest(host: "a", metric: "size", path: "p")?.bytes, 80)
         XCTAssertNil(SizeGrowthHistory(fileURL: url, now: { now.addingTimeInterval(49 * 3600) }).latest(host: "a", metric: "size", path: "p"))
     }
@@ -65,6 +66,7 @@ final class SizeGrowthTests: XCTestCase {
         let history = SizeGrowthHistory(fileURL: url, now: { now })
         history.record(host: "mac", metric: "directory", path: "/code", bytes: 123, sampledAt: now)
         history.record(host: "remote", metric: "database", path: "/db", bytes: 456, sampledAt: now)
+        history.flushPersistence()
         let restored = SizeGrowthHistory(fileURL: url, now: { now })
         XCTAssertEqual(restored.latest(host: "mac", metric: "directory", path: "/code")?.bytes, 123)
         XCTAssertEqual(restored.latest(host: "remote", metric: "database", path: "/db")?.bytes, 456)
@@ -89,6 +91,28 @@ final class SizeGrowthTests: XCTestCase {
         XCTAssertEqual(history.latest(host: "remote", metric: "db", path: "/db")?.bytes, 120)
     }
 
+    func testCoalescedWriterKeepsNewestSnapshotAndFailedWritesKeepMemory() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("history.json")
+        let now = Date()
+        let history = SizeGrowthHistory(fileURL: url, now: { now })
+        for index in 0..<1000 {
+            XCTAssertTrue(history.record(host: "mac", metric: "directory", path: "/code", bytes: Int64(index),
+                                         sampledAt: now.addingTimeInterval(Double(index) / 100)))
+        }
+        history.flushPersistence()
+        XCTAssertEqual(SizeGrowthHistory(fileURL: url, now: { now }).latest(host: "mac", metric: "directory", path: "/code")?.bytes, 999)
+        // Making the parent path a file causes a write failure without corrupting another cache.
+        let blocker = folder.appendingPathComponent("blocker")
+        try Data("kept".utf8).write(to: blocker)
+        let failed = SizeGrowthHistory(fileURL: blocker.appendingPathComponent("history.json"), now: { now })
+        failed.record(host: "mac", metric: "directory", path: "/code", bytes: 5, sampledAt: now)
+        failed.flushPersistence()
+        XCTAssertEqual(try String(contentsOf: blocker, encoding: .utf8), "kept")
+        XCTAssertEqual(failed.latest(host: "mac", metric: "directory", path: "/code")?.bytes, 5)
+    }
+
     func testGrowthFormatting() {
         XCTAssertEqual(SizeGrowthFormat.delta(8.4), "↑8%")
         XCTAssertEqual(SizeGrowthFormat.delta(-8.4), "↓-8%")
@@ -107,7 +131,7 @@ final class SizeGrowthTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 2_000_000)
         let history = SizeGrowthHistory(fileURL: nil, now: { now })
         history.record(host: "test", metric: "directory", path: "/example", bytes: 123, sampledAt: now)
-        let store = DirectoryUsageStore(history: history, candidates: [("Example", "/example")], host: "test", now: { now }, probe: { _ in nil })
+        let store = DirectoryUsageStore(history: history, candidates: [("Example", "/example")], host: "test", now: { now }, probe: { _ in nil }, pressure: { .normal })
         await store.refreshIfNeeded()
         XCTAssertEqual(store.rows.first?.bytes, 123)
         XCTAssertEqual(store.rows.first?.isUnavailable, true)
@@ -143,7 +167,7 @@ final class SizeGrowthTests: XCTestCase {
     }
 
     @MainActor
-    func testDirectoryRowPreservesLogicalDisplayPath() throws {
+    func testDirectoryRowPreservesLogicalDisplayPath() async throws {
         let manager = FileManager.default
         let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
         defer { try? manager.removeItem(at: fixture) }
@@ -151,7 +175,8 @@ final class SizeGrowthTests: XCTestCase {
         let link = fixture.appendingPathComponent("lanes")
         try manager.createDirectory(at: target, withIntermediateDirectories: true)
         try manager.createSymbolicLink(at: link, withDestinationURL: target)
-        let store = DirectoryUsageStore(history: SizeGrowthHistory(fileURL: nil), candidates: [("Coding Lanes", link.path)], probe: { _ in nil })
+        let store = DirectoryUsageStore(history: SizeGrowthHistory(fileURL: nil), candidates: [("Coding Lanes", link.path)], pressure: { .normal })
+        await store.refreshIfNeeded()
         XCTAssertEqual(store.rows.first?.displayPath, link.path)
         XCTAssertEqual(store.rows.first?.path, target.path)
     }
