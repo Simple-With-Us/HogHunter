@@ -161,11 +161,13 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 
 Keep `-background none` on those renders, or the rounded corners of the tile come out white instead of transparent.
 
-`icotool -c` decodes every input into a native BMP/DIB entry whose transparency is a 1-bit AND mask, the same limitation the `magick` command above has, so the small entries' rounded corners come out hard-edged rather than antialiased.  `icotool`'s `-r, --raw=FILENAME` adds that file as a PNG-compressed (Vista) entry instead and stores its PNG bytes verbatim.  Each `--raw` is an input in its own right, not a modifier on a later argument, so the small entries are named with `--raw` and the rest stay positional, and because the options are read before the positional inputs those small entries land at the front of the file and the set stays in ascending size order:
+`icotool -c` keeps variable transparency in the alpha channel.  When a source PNG carries more than two distinct alpha values, which these renders do because the rounded tile is antialiased, it writes the entry as a 32-bit DIB and the soft edge of the tile survives in that alpha channel.  The 1-bit AND mask only carries transparency for an image whose alpha is binary, so it is not the reason the tile edge would be lost here.  Passing `-r, --raw=FILENAME` embeds that file's PNG payload verbatim instead, and each `--raw` is an input in its own right, not a modifier on a later argument, so the small entries are named with `--raw` and the rest stay positional:
 
 ```bash
 icotool -c -o HogHunter.ico --raw=icon16.png --raw=icon24.png --raw=icon32.png icon48.png icon64.png icon128.png icon256.png
 ```
+
+That form is optional, and it is a size and compatibility choice rather than a transparency fix: a PNG-backed entry below 256 px is a Vista-era format that Windows XP and earlier cannot read, while the 32-bit DIB above is read everywhere.  Leave the entries as DIB unless the target reader is known to accept PNG-backed entries.
 
 Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
