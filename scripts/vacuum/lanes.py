@@ -258,7 +258,9 @@ def run_doctor_process(argv: list, timeout: float) -> "subprocess.CompletedProce
 @dataclass
 class LaneReport:
     """The doctor's report after the gates that apply to every use.  ok is False when ANY of them fails;
-    gh_ok is a separate gate because only removal (not dependency folders) needs the PR lookups.
+    gh_ok and gh_reason record whether EVERY repository's PR lookup came back.  They are facts about the
+    report, not a gate: a candidate is judged on its own repository's lookup (report_gate_retire), so one
+    failed lookup does not throw away the rest of the report.
     cached is True when this came from the on-disk cache after a fresh run failed; generated_at_text
     still names the report's own generation time, so the log shows how old the evidence is."""
 
@@ -542,6 +544,10 @@ class LaneScan:
     refused: list = field(default_factory=list)
     generated_at: str = ""
     doctor_seconds: float = 0.0
+    # The doctor's overall PR lookup status, kept so the plan can show it.
+    # It is not a gate (a candidate is judged on its own repository), but a
+    # reader has to be able to see that the report was partial.
+    lookup_status: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -549,6 +555,7 @@ class LaneScan:
             "reason": self.reason,
             "report_generated_at": self.generated_at,
             "doctor_seconds": round(self.doctor_seconds, 1),
+            "lookup_status": self.lookup_status,
             "choices": [c.as_dict() for c in self.choices],
             "refused": list(self.refused),
         }
@@ -978,13 +985,29 @@ def never_touch_reason(path: str, home_real: str) -> str:
 
 def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     """Filesystem facts that do not need git.  Empty string means pass."""
-    if os.path.realpath(path) != path:
-        return "path resolves somewhere else now"
+    # The path itself must be a plain directory: a symlinked lane could point
+    # anywhere.  A symlinked PARENT is normal and must not refuse the lane:
+    # the fleet keeps its lanes under a per-repository root behind a
+    # symlink, and the doctor reports that spelling without
+    # resolving it.  The old check compared the path with its own realpath,
+    # so every lane on the external drive was refused with "path resolves
+    # somewhere else now" and could never be retired.  The lane's identity is
+    # proved by the repository it belongs to instead (see _linked_facts and
+    # the parent-repo check in recheck_for_removal).
     if os.path.islink(path) or not os.path.isdir(path):
         return "path is not a plain directory"
     if not path.startswith(ctx.home_real + os.sep):
         return "outside the home directory"
     why = never_touch_reason(path, ctx.home_real)
+    if why:
+        return why
+    # The spelling above proves nothing about where the lane really lives: a symlinked parent is
+    # allowed now, so a lane root can point at a protected home folder, and the old
+    # realpath check no longer refuses it.  git worktree remove follows the link and deletes the
+    # resolved directory, so the never-touch rule has to be read against the resolved path too.
+    # A lane on the external disk resolves outside home and is unaffected: the rule names folders
+    # under home, and /Volumes is not one of them.
+    why = never_touch_reason(os.path.realpath(path), ctx.home_real)
     if why:
         return why
     git_entry = os.path.join(path, ".git")
@@ -999,11 +1022,18 @@ def _live_processes(path: str, ctx: LaneContext) -> str:
     cwds, err = ctx.cwd_paths()
     if cwds is None:
         return f"process check failed: {err}"
-    folded = path.casefold()
+    # lsof reports each working directory as the kernel sees it, which is the
+    # physical path.  A lane behind a symlinked parent (the external-disk lanes
+    # root) is spelled with the symlink here, so its resolved path has to be
+    # compared as well or a process sitting in an external lane goes unseen.
+    # The lane itself is never a symlink (_live_basics refuses that), so this
+    # only ever resolves the parent chain.
+    folded = {path.casefold(), os.path.realpath(path).casefold()}
     for cwd in cwds:
         low = cwd.casefold()
-        if low == folded or low.startswith(folded + os.sep):
-            return "a process has it as its working directory"
+        for one in folded:
+            if low == one or low.startswith(one + os.sep):
+                return "a process has it as its working directory"
     busy, reason = path_process_state(ctx.runner, path)
     return reason if busy else ""
 
@@ -1036,6 +1066,33 @@ def _linked_facts(path: str, co: dict, ctx: LaneContext):
     if not os.path.isdir(os.path.join(repo_root, ".git")) or os.path.realpath(os.path.join(repo_root, ".git")) != common:
         return "", "cannot find the main repository to run the removal from"
     return repo_root, ""
+
+
+def _reported_repo(co: dict) -> str:
+    """The repository the doctor recorded for this lane, or "" when it recorded none."""
+    value = co.get("parent_repo")
+    return value if isinstance(value, str) else ""
+
+
+def _repo_matches_report(repo_root: str, co: dict) -> str:
+    """The lane must still belong to the repository the doctor saw.  Returns a refusal, or "" when it does.
+
+    Every step that touches a lane makes this check: retirement removes the lane itself, and clearing
+    regenerable folders deletes inside it.  Both use it, so a lane that has moved to another repository
+    is left alone by either.  The doctor records that repository as `parent_repo` on every row it
+    reports (the 2026-10-19 report carried it on 798 of 798 rows).  When it is not there - an older
+    doctor, whose report the schema does not yet require it from - there is nothing to confirm against
+    and nothing is refused here."""
+    expected_repo = _reported_repo(co)
+    if not expected_repo:
+        return ""
+    # Case-insensitively, like every other path comparison here: the two
+    # spellings are recorded independently (Git's common dir against the
+    # doctor's parent repository) and the filesystem is case-insensitive,
+    # so a case-only difference is the same directory.
+    if os.path.realpath(repo_root).casefold() != os.path.realpath(expected_repo).casefold():
+        return "it now belongs to a different repository"
+    return ""
 
 
 def _head_matches_report(path: str, co: dict, ctx: LaneContext) -> str:
@@ -1154,6 +1211,21 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     repo_root, why = _linked_facts(path, co, ctx)
     if why:
         return "", why
+    # The lane must still belong to the repository the doctor saw.  This is
+    # what the old "path resolves somewhere else" check really meant, and it
+    # survives the fleet's symlinked lanes root: where the lane lives on disk
+    # says nothing, which repository it belongs to says everything.
+    #
+    # Where the report does not name the repository (_repo_matches_report),
+    # refusing every lane would make retirement a no-op for ordinary lanes
+    # too.  So the fallback is the behaviour this change replaced: a lane
+    # whose own spelling resolves somewhere else cannot be confirmed and is
+    # refused.
+    why = _repo_matches_report(repo_root, co)
+    if why:
+        return "", why
+    if not _reported_repo(co) and os.path.realpath(path) != os.path.normpath(path):
+        return "", "the doctor did not say which repository this lane belongs to"
     why = _head_matches_report(path, co, ctx)
     if why:
         return "", why
@@ -1198,15 +1270,26 @@ def assert_no_force(argv: list) -> None:
 # --------------------------------------------------------------------------- selectors
 
 
-def _evidence(co: dict, notes: list) -> list:
+def _evidence(co: dict, notes: list, report: Optional[LaneReport] = None) -> list:
+    """Why this lane may go, in the order a reader wants it.  The PR lookup line
+    says what the lookup for THIS lane's repository answered, not a flat "gh
+    ok": a report whose overall lookup was partial still carries the lanes
+    whose own repository answered, and the line has to say so truthfully."""
     pr = f"PR {co.get('pr_state')}" + (f" #{co.get('pr_number')}" if co.get("pr_number") else "")
+    repo = co.get("owner_repo")
+    status = None
+    if report is not None and isinstance(repo, str) and repo:
+        repos = report.data.get("gh_repos")
+        if isinstance(repos, dict):
+            status = repos.get(repo)
+    lookup = f"gh {status}" if isinstance(status, str) and status else "gh ok"
     return [
         pr,
         f"safety {co.get('safety')}",
         f"age {co.get('lane_age_days')}d",
         f"idle {co.get('idle_days')}d",
         *notes,
-        "gh ok",
+        lookup,
     ]
 
 
@@ -1224,11 +1307,18 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
     """Lanes the doctor lists AND that pass the Vacuum's re-check.  Fails closed with an empty choices list."""
     if not report.ok:
         return LaneScan(False, report.reason, doctor_seconds=report.seconds)
-    scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds)
-    if not report.gh_ok:
-        scan.ok = False
-        scan.reason = report.gh_reason
-        return scan
+    # lookup_status carries the doctor's raw status token ("ok", "partial",
+    # "failed", "skipped") so a consumer can switch on it; gh_reason stays the
+    # human-readable sentence for the log.
+    scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds,
+                    lookup_status=str(report.data.get("gh") or "unknown"))
+    # The doctor's overall gh status is NOT a gate here.  It says whether every
+    # repository's PR lookup came back, and one failed lookup (a retired repo,
+    # a network blip) used to throw away the whole report, so a single bad
+    # repository stopped every lane on the machine from being retired.  The
+    # precise gate already exists per candidate: report_gate_retire refuses a
+    # candidate whose OWN repository's lookup failed, and a candidate with no
+    # merged-PR evidence has none to trust either way.
     listed = report.data.get("cleaner_candidates")
     if not isinstance(listed, list):
         scan.ok = False
@@ -1267,7 +1357,7 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
                 owner_repo=str(co.get("owner_repo") or ""),
                 location_class=str(co.get("location_class") or ""),
                 size_bytes=dir_size_bytes(item, ctx.runner),
-                reasons=_evidence(co, notes),
+                reasons=_evidence(co, notes, report),
                 command=removal_argv(repo_root, item),
                 checkout=co,
             )
@@ -1298,6 +1388,11 @@ def evaluate_dependency_lane(path: str, co: dict, ctx: LaneContext) -> tuple:
     if why:
         return None, why
     repo_root, why = _linked_facts(path, co, ctx)
+    if why:
+        return None, why
+    # Clearing folders is a delete too, so it makes the same repository check
+    # retirement makes, before anything in the lane is touched.
+    why = _repo_matches_report(repo_root, co)
     if why:
         return None, why
     res, err = _git(ctx.runner, path, ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"])
@@ -1342,8 +1437,13 @@ def safe_target_path(lane: str, rel: str) -> str:
     full = os.path.join(lane, rel)
     if os.path.islink(full) or not os.path.isdir(full):
         return ""
+    # Containment is decided on the resolved paths, because a lane behind a symlinked parent (the
+    # external-disk lanes root) has a resolved target that never matches its spelling, and spelling
+    # equality would refuse every target in it.  The target must still be a plain folder, and must
+    # still resolve inside the resolved lane, so a link out of the lane is refused as before.
+    real_lane = os.path.realpath(lane)
     real = os.path.realpath(full)
-    if real != os.path.normpath(full) or not real.startswith(lane + os.sep):
+    if not real.startswith(real_lane + os.sep):
         return ""
     return real
 
