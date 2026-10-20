@@ -199,7 +199,7 @@ final class BandwidthStore: ObservableObject {
     }
 
     func start() {
-        guard timer == nil else { return }
+        guard ApplicationRunMode.current.allowsLiveProbes, timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: Self.sampleInterval)
         timer.setEventHandler { [weak self] in

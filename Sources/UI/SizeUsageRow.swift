@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Shared database and directory typography.  The time suffix is four points smaller.
+/// Shared database and directory typography with appreciable daily changes.
 struct SizeUsageRow: View {
     let name: String
     let bytes: Int64?
@@ -62,6 +62,7 @@ struct CodingDirectoriesView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Directories").font(.system(size: 11, weight: .semibold))
+                Text("(daily change)").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
                 if store.isRefreshing { ProgressView().controlSize(.mini) }
             }

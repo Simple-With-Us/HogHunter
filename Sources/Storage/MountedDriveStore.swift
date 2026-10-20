@@ -119,8 +119,7 @@ final class MountedDriveStore: ObservableObject {
     }
 
     nonisolated static func discover() -> [MountedDriveCandidate] {
-        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
-              NSClassFromString("XCTest.XCTestCase") == nil,
+        guard ApplicationRunMode.current.allowsLiveProbes,
               let session = DASessionCreate(kCFAllocatorDefault) else { return [] }
         return cachedMountRecords().compactMap { mount -> MountedDriveCandidate? in
             guard mount.isLocal, !mount.isHidden, let fallbackName = mount.volumeName,

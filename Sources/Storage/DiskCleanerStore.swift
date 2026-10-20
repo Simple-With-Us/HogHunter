@@ -139,6 +139,7 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Initiates a full disk clutter scan for the active tier.
     func scan() {
+        guard ApplicationRunMode.current != .uiHarness else { return }
         cancelScan()
         reloadExclusions()
         isScanInFlight = true

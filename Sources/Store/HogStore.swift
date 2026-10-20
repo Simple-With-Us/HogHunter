@@ -406,7 +406,7 @@ final class HogStore: ObservableObject {
             object: infisical
         )
         applyInfisicalOverrides()
-        if startImmediately { start() }
+        if startImmediately && ApplicationRunMode.current.allowsLiveProbes { start() }
     }
 
     deinit {
@@ -419,7 +419,7 @@ final class HogStore: ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
-        guard !started else { return }
+        guard !started, ApplicationRunMode.current.allowsLiveProbes else { return }
         started = true
         directoryUsage.setMeasurementEnabled(true)
         directoryIdleTask = Task { @MainActor [weak self] in

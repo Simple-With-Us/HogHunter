@@ -61,8 +61,7 @@ final class DirectoryUsageStore: ObservableObject {
         self.host = host
         self.pressure = pressure
         self.idlePressure = idlePressure
-        allowsMeasurement = candidates != nil || (ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-            && NSClassFromString("XCTestCase") == nil && NSClassFromString("XCTest.XCTestCase") == nil)
+        allowsMeasurement = candidates != nil || ApplicationRunMode.current.allowsLiveProbes
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let defaults = [("Code", "\(home)/Code"), ("Coding Lanes", "\(home)/apps/lanes"),
                         ("Codex", "\(home)/.codex"), ("Claude", "\(home)/.claude"),
