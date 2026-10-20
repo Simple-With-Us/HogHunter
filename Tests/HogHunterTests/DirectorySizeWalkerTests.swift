@@ -110,6 +110,35 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertNil(result.finishedAt, "A renamed open root must not enter complete history")
     }
 
+    func testRetargetedSymlinkRootRejectsCompletedWalk() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("old")
+        let target = root.appendingPathComponent("new")
+        let link = root.appendingPathComponent("lanes")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        for index in 0..<3 {
+            try Data(repeating: 1, count: 4096).write(to: old.appendingPathComponent(String(index)))
+            try Data(repeating: 2, count: 4096).write(to: target.appendingPathComponent(String(index)))
+        }
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: old)
+        let walker = DirectorySizeWalker(path: link.path, startedAt: Date())
+        XCTAssertFalse(walker.advance(maxEntries: 1, maxDuration: 1).isComplete)
+        // The alias now names a different tree, yet every open frame still validates by inode.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        var result = walker.observation
+        for _ in 0..<30 {
+            result = walker.advance(maxEntries: 1, maxDuration: 1)
+            if result.failure != nil || result.finishedAt != nil { break }
+        }
+        XCTAssertEqual(result.path, DirectorySizeWalker.canonicalPath(old.path))
+        XCTAssertNil(result.finishedAt, "A retargeted alias must not publish the old target's total")
+        XCTAssertNotNil(result.failure)
+        XCTAssertFalse(result.isComplete)
+    }
+
     func testOverlappingExternalRootPartitionsCountExtraParentDataOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

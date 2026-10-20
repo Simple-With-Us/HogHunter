@@ -42,10 +42,13 @@ final class DirectorySizeWalker {
     private var countedRoots: [String: dev_t] = [:]
     private var initialized = false
     private let includesLaneLinks: Bool
+    /// Retained because `observation.path` becomes the physical root after the first slice.
+    private let logicalPath: String
 
     init(path: String, startedAt: Date) {
         observation = Observation(path: path, bytes: 0, entries: 0, startedAt: startedAt)
         includesLaneLinks = URL(fileURLWithPath: path).lastPathComponent == "lanes"
+        logicalPath = path
     }
 
     func advance(maxEntries: Int = 256, maxDuration: TimeInterval = 0.04) -> Observation {
@@ -115,7 +118,16 @@ final class DirectorySizeWalker {
                 }
             }
         }
-        if observation.failure == nil, frames.isEmpty { observation.finishedAt = Date() }
+        if observation.failure == nil, frames.isEmpty {
+            // A logical symlink can be retargeted while a long walk runs.  The open frames still
+            // validate, but the total belongs to the old target, so it must not be published under
+            // the alias the row is displayed by.  Re-resolving here keeps the syscall off the caller.
+            guard Self.canonicalPath(logicalPath) == observation.path else {
+                fail("Symlink target changed while measuring")
+                return observation
+            }
+            observation.finishedAt = Date()
+        }
         return observation
     }
 
