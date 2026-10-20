@@ -463,13 +463,20 @@ def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
     """
     tree = ast.parse(ENGINE.read_text())
     helpers = {"probe_timeout", "op_timeout", "scan_op_timeout",
-               "apply_probe_timeout", "budget_left", "scan_budget_left"}
+               "delete_timeout", "budget_left", "scan_budget_left"}
+    # `apply_probe_timeout` is deliberately NOT one of the phase clocks: it
+    # reads the whole-run budget, so a scan-phase probe that used it would
+    # draw on the reserve the deletes need -- the round-5 hole, reopened
+    # under a different name.  It is allowed in exactly one place,
+    # `apply_delete`, and its call sites are checked separately below.
 
-    def mentions_budget(node):
+    def mentions_budget(node, scope=""):
         for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
-                    and n.func.id in helpers:
-                return True
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                if n.func.id in helpers:
+                    return True
+                if n.func.id == "apply_probe_timeout" and scope == "apply_delete":
+                    return True
         return False
 
     # Functions that take the timeout as a parameter: the CALLER owns the
@@ -493,21 +500,23 @@ def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
         def __init__(self):
             self.timeout_param = None
             self.derived = set()
+            self.scope = ""
 
         def visit_FunctionDef(self, node):
-            prev_param, prev_derived = self.timeout_param, self.derived
+            prev = (self.timeout_param, self.derived, self.scope)
             self.timeout_param = None
             self.derived = set()
+            self.scope = node.name
             for a in list(node.args.args) + list(node.args.kwonlyargs):
                 if a.arg == "timeout":
                     self.timeout_param = a.arg
             for sub in ast.walk(node):
-                if isinstance(sub, ast.Assign) and mentions_budget(sub.value):
+                if isinstance(sub, ast.Assign) and mentions_budget(sub.value, self.scope):
                     for t in sub.targets:
                         if isinstance(t, ast.Name):
                             self.derived.add(t.id)
             self.generic_visit(node)
-            self.timeout_param, self.derived = prev_param, prev_derived
+            self.timeout_param, self.derived, self.scope = prev
 
         def visit_Call(self, node):
             fname = None
@@ -527,7 +536,7 @@ def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
                         and arg.id == self.timeout_param:
                     # The enclosing function owns it; its call sites are checked.
                     pass
-                elif mentions_budget(arg):
+                elif mentions_budget(arg, self.scope):
                     pass
                 elif isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)):
                     if arg.value > hh.MIN_HEAVY_START_SEC:
@@ -544,11 +553,33 @@ def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
                     arg = node.args[-1]
                 if arg is None:
                     problems.append((node.func.id, node.lineno, "no timeout argument"))
-                elif not mentions_budget(arg):
+                elif not mentions_budget(arg, self.scope):
                     problems.append((node.func.id, node.lineno, ast.unparse(arg)))
             self.generic_visit(node)
 
     V().visit(tree)
+
+    # Every `apply_probe_timeout` call site must live inside `apply_delete`.
+    # It reads the whole-run budget, not the phase clock, so a scan rule
+    # that used it would spend the reserve the deletes need while passing
+    # every check above -- the round-5 hole reopened under a new name.
+    class S(ast.NodeVisitor):
+        def __init__(self):
+            self.stack = []
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id == "apply_probe_timeout":
+                where = self.stack[-1] if self.stack else "<module>"
+                if where != "apply_delete":
+                    problems.append(("apply_probe_timeout", node.lineno, where))
+            self.generic_visit(node)
+
+    S().visit(tree)
     assert not problems, problems
 
     # Every use of RULE_BUDGET_SEC must be a default handed to a timeout helper
@@ -865,13 +896,17 @@ def test_apply_delete_cannot_outlive_the_budget(hh):
         # cut to what is left of the budget.
         deletes = [t for cmd, t in seen if "-delete" in cmd]
         probes = [t for cmd, t in seen if ".janitor-keep" in cmd]
-        assert deletes == [600.0, 20.0, 5.0], seen
+        # The delete gets the budget it has and no more.  Its floor is 1 s
+        # rather than `op_timeout`'s 5 s: the delete is the one command
+        # that can be cut off mid-walk and leave a half-removed tree, so
+        # it must not overrun the budget by several seconds.
+        assert deletes == [600.0, 20.0, 1.0], seen
         # The probe walks the SAME tree the delete walks, so it is a second
         # full walk of it.  It gets at most a tenth of what is left of the
         # budget, never the whole thing: 30 s of guard per candidate could
         # eat the delete reserve and free nothing.
         assert probes == [30.0, 2.0, 1.0], seen
-        assert deletes[-1] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
+        assert deletes[-1] == 1.0, "a floor, so a nearly spent budget still gives find a moment"
         assert probes[-1] >= 1.0, "the probe gets a floor, so it can still answer"
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -883,8 +918,8 @@ def test_apply_delete_trusts_the_size_the_scan_measured(hh):
         f = work / "f.bin"
         f.write_bytes(b"x" * 10)
         with mock.patch.object(hh, "dir_bytes", side_effect=AssertionError("walked the tree twice")):
-            freed, err = hh.apply_delete(str(f), known_bytes=4096)
-        assert (freed, err) == (4096, ""), (freed, err)
+            freed, err, status = hh.apply_delete(str(f), known_bytes=4096)
+        assert (freed, err, status) == (4096, "", "applied"), (freed, err, status)
         assert not f.exists()
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -1631,10 +1666,11 @@ def test_the_delete_says_the_probe_failed_and_not_that_the_operator_marked_it(hh
         (tree / "f").write_text("x")
         with mock.patch.object(hh, "holds_keep_sentinel",
                                return_value=hh.MarkerVerdict(False, False, "probe timed out")):
-            freed, err = hh.apply_delete(str(tree))
+            freed, err, status = hh.apply_delete(str(tree))
         assert freed == 0, freed
         assert "probe failed" in err, err
         assert "sentinel" not in err, err
+        assert status == "failed", status
         assert tree.exists(), "an unprovable tree is never deleted"
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -1643,20 +1679,151 @@ def test_the_delete_says_the_probe_failed_and_not_that_the_operator_marked_it(hh
 def test_the_apply_phase_does_not_walk_the_tree_again(hh):
     """The scan already asked whether the tree holds a marker, and the delete
     walks the tree anyway.  Asking again is a second full walk of the same
-    tree -- measured at up to 5.99 s on one real cache tree -- so the verdict
-    is carried on the candidate."""
+    tree -- measured at up to 5.99 s on one real cache tree -- so a verdict
+    that is still fresh is carried on the candidate."""
     work = Path(tempfile.mkdtemp(prefix="hhclean-carry-"))
     try:
         tree = work / "tree"
         tree.mkdir()
         (tree / "f").write_text("x")
+        verdict_at, verdict_inode = hh._verdict_stamp(str(tree))
         with mock.patch.object(hh, "holds_keep_sentinel",
                                side_effect=AssertionError("walked the tree twice")) as probe:
             cand = hh.Candidate(category="app-caches", path=str(tree), bytes=10,
-                                reason="r", keep_verdict=hh.MarkerVerdict(False, True, ""))
+                                reason="r", keep_verdict=hh.MarkerVerdict(False, True, ""),
+                                keep_verdict_at=verdict_at,
+                                keep_verdict_inode=verdict_inode)
             hh.apply_candidate(cand)
         assert probe.call_count == 0, "the scan verdict was carried, so no second walk"
         assert not tree.exists(), "the delete still happened"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_stale_marker_verdict_is_probed_again_before_the_delete(hh):
+    """A verdict the scan took minutes ago cannot vouch for the tree.
+
+    The scan can spend 60% of the budget before the apply phase starts, so a
+    carried verdict is routinely many minutes old when the delete runs.  An
+    operator who drops a `.janitor-keep` into the tree in that window must
+    not have it deleted together with the tree, so an aged verdict is
+    re-probed instead of being trusted."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-stale-"))
+    try:
+        tree = work / "tree"
+        (tree / "inner").mkdir(parents=True)
+        (tree / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
+        (tree / "blob.bin").write_bytes(b"x" * 1024)
+        verdict_at, verdict_inode = hh._verdict_stamp(str(tree))
+        # Age the verdict past the window it is good for.
+        verdict_at -= hh.KEEP_VERDICT_MAX_AGE_SEC + 1.0
+        freed, err, status = hh.apply_delete(
+            str(tree), keep_verdict=hh.MarkerVerdict(False, True, ""),
+            keep_verdict_at=verdict_at, keep_verdict_inode=verdict_inode)
+        assert freed == 0, "nothing was deleted"
+        assert "janitor-keep" in err, err
+        assert status == "skipped", status
+        assert tree.exists(), "the tree is still there"
+        assert (tree / "inner" / ".janitor-keep").exists(), "the marker is still there"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_verdict_for_a_replaced_directory_is_probed_again(hh):
+    """The app may replace its cache directory between the scan and the
+    delete.  The carried verdict then describes a directory that is no
+    longer there, so it cannot vouch for the one that is."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-replaced-"))
+    try:
+        tree = work / "tree"
+        (tree / "inner").mkdir(parents=True)
+        (tree / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
+        (tree / "blob.bin").write_bytes(b"x" * 1024)
+        verdict_at, verdict_inode = hh._verdict_stamp(str(tree))
+        # The directory was replaced: the inode the verdict was taken
+        # against is not the one the delete is about to walk.
+        assert verdict_inode is not None
+        freed, err, status = hh.apply_delete(
+            str(tree), keep_verdict=hh.MarkerVerdict(False, True, ""),
+            keep_verdict_at=verdict_at, keep_verdict_inode=(verdict_inode[0], verdict_inode[1] + 1))
+        assert freed == 0, "nothing was deleted"
+        assert "janitor-keep" in err, err
+        assert status == "skipped", status
+        assert tree.exists(), "the tree is still there"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_path_that_vanished_is_not_counted_as_an_applied_delete(hh):
+    """The path was already gone when the apply phase reached it.  Nothing
+    was deleted, so the scan estimate must not be counted as bytes this run
+    freed -- counting it is how a run that freed nothing still looked like
+    a success."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-vanished-"))
+    try:
+        # The path is never created: it was already gone when the apply
+        # phase reached it.
+        victim = work / "tree"
+        with mock.patch.object(hh, "dir_bytes", side_effect=AssertionError("walked a path that is gone")):
+            freed, err, status = hh.apply_delete(str(victim), known_bytes=4096)
+        assert freed == 0, freed
+        assert status == "skipped", status
+        assert "no longer exists" in err, err
+        # And the candidate must not be counted as applied.
+        cand = hh.Candidate(category="app-caches", path=str(victim), bytes=4096, reason="r")
+        with mock.patch.object(hh, "apply_delete", return_value=(0, "path no longer exists", "skipped")):
+            hh.apply_candidate(cand)
+        assert not cand.applied, "a vanished path is not an applied delete"
+        assert cand.bytes == 4096, "the estimate is left alone, not counted as freed"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_candidate_with_no_budget_left_is_skipped_not_attempted(hh):
+    """`op_timeout` floors at 5 s, so a candidate started with the budget
+    already spent still cost 5 s each.  A run with no budget left says so
+    and skips instead."""
+    clock = FakeClock()
+    work = Path(tempfile.mkdtemp(prefix="hhclean-nobudget-"))
+    try:
+        victim = work / "tree"
+        victim.mkdir()
+        (victim / "f").write_text("x")
+        with fake_time(hh, clock):
+            hh.set_budget(10)
+            clock.now += 10
+            assert hh.budget_left() <= 0
+            freed, err, status = hh.apply_delete(str(victim))
+        assert freed == 0, freed
+        assert status == "skipped", status
+        assert "budget" in err, err
+        assert victim.exists(), "nothing was deleted"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_the_delete_reports_a_timeout_as_a_partial_removal(hh):
+    """A delete cut off mid-walk leaves a half-removed tree.  The report has
+    to say that, not that the path is merely still present."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-timeout-"))
+    try:
+        victim = work / "tree"
+        victim.mkdir()
+        (victim / "f").write_text("x")
+
+        def fake_run(cmd, **kw):
+            # Only the delete times out.  The marker probe runs through the
+            # same subprocess.run and must still answer.
+            if "-delete" in cmd:
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 0))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+            freed, err, status = hh.apply_delete(str(victim))
+        assert freed == 0, freed
+        assert "timed out" in err, err
+        assert "partially removed" in err, err
+        assert status == "failed", status
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -1670,9 +1837,10 @@ def test_the_delete_refuses_a_tree_with_a_marker_inside_it(hh):
         (tree / "inner").mkdir(parents=True)
         (tree / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
         (tree / "blob.bin").write_bytes(b"x" * 1024)
-        freed, err = hh.apply_delete(str(tree))
+        freed, err, status = hh.apply_delete(str(tree))
         assert freed == 0, "nothing was deleted"
         assert "janitor-keep" in err, err
+        assert status == "skipped", status
         assert tree.exists(), "the tree is still there"
         assert (tree / "inner" / ".janitor-keep").exists(), "the marker is still there"
     finally:
@@ -1861,6 +2029,34 @@ def test_agent_state_leaves_a_project_working_tree_alone(hh):
              mock.patch.object(hh, "touched_since", return_value=False), \
              mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
             found = hh.rule_agent_state()
+        assert [c.path for c in found] == [], "a project working tree is not transient state"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_agent_rule_probes_for_a_marker_after_the_cheap_filters(hh):
+    """The marker probe is a full-tree walk, and `-quit` only stops early
+    when the marker is there -- so the common no-marker case walks every
+    file in the tree.  A tree the cheap filters already discard must not pay
+    for that walk: `~/.gemini/tmp` holds one project working tree per
+    project the agent has opened, and each of them used to pay for a full
+    walk before the depth-2 `.project_root` check threw it away."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        tmp = home / ".gemini" / "tmp"
+        proj = tmp / "code"
+        proj.mkdir(parents=True)
+        (proj / ".project_root").write_text("/Users/jay/Code\n", encoding="utf-8")
+        (proj / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "holds_keep_sentinel",
+                               side_effect=AssertionError("walked a tree the filters discard")) as probe, \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            found = hh.rule_agent_state()
+        assert probe.call_count == 0, "the project-root filter ran before the marker walk"
         assert [c.path for c in found] == [], "a project working tree is not transient state"
     finally:
         shutil.rmtree(home, ignore_errors=True)

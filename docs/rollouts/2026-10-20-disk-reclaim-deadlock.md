@@ -25,7 +25,7 @@ The owner ruling of 2026-10-02 settles the shape of the answer: pressure changes
 - Every probe a rule starts takes its timeout from the clock of the phase it runs in: the **scan share** during the scan, the whole run budget after it.  `probe_timeout()` is the one door, and `_SCAN_PHASE` says which phase is running.  One candidate pays for three probes (the capped walk, the `find` walk and the `lsof` look), and together they can exceed the 60% share.  The scan share is always the smaller budget, so the whole-budget bound still holds on top of it.  A rule's own wall clock is bounded the same way, by `rule_deadline()`.  That includes the rules that predate the split — `proc_count`, `rule_snapshots`, `rule_temp_scratch`, `rule_unbounded_logs`, `rule_sqlite_wals` and `rule_brew` — whose probes used to pass a fixed 15 s / 60 s / 90 s and could spend the share `scan()` only checks between rules.  The marker walk that guards a tree in `apply_delete` is an **apply**-side probe, so it draws on the whole run budget; the sixth round below caps it to a tenth of what is left, so the guard can never eat the delete reserve.
 - Two new safe-tier rules: `app-caches` (idle application caches) and `agent-state` (transient agent logs, tmp and cache).  Both are registered in `config/reclaim-policy.json` *and* in `CleanRegimen.swift`, because a rule that is not in both places does not run.
 - A tree named like scratch is not necessarily scratch.  A directory holding a `.project_root` marker is left alone whatever it is called.
-- `holds_keep_sentinel(path, timeout)` asks whether a `.janitor-keep` marker exists *anywhere under* a tree, with a bounded `find -iname` walk and no per-file stat.  `-iname`, not `-name`, because the sibling `has_keep_sentinel` resolves the same marker with `Path.exists()`, which is case-insensitive on the default volume: both probes have to recognize exactly the same markers, or a `.JANITOR-KEEP` is honored at a tree root and invisible inside one.  It fails closed: a timeout, an `OSError` or a non-zero return all count as "marked".  It lives in `apply_delete`, the single choke point every delete passes through, so it covers every rule, and the two new rules also ask it at scan time so a marked tree is never offered in the first place.
+- `holds_keep_sentinel(path, timeout)` asks whether a `.janitor-keep` marker exists *anywhere under* a tree, with a bounded `find -iname` walk and no per-file stat.  `-iname`, not `-name`, because the sibling `has_keep_sentinel` resolves the same marker with `Path.exists()`, which is case-insensitive on the default volume: both probes have to recognize exactly the same markers, or a `.JANITOR-KEEP` is honored at a tree root and invisible inside one.  It answers with **three** states, not two: a marker was found, the tree is clean, or the probe could not answer (see the sixth and seventh rounds below).  An unknown tree is never deleted, and the report says the probe failed rather than that the operator marked it.  It lives in `apply_delete`, the single choke point every delete passes through, so it covers every rule, and the two new rules also ask it at scan time so a marked tree is never offered in the first place.
 
 **`scripts/vacuum/engine.py`**
 
@@ -86,6 +86,24 @@ The probe now answers with three states rather than two: a marker was found, the
 
 Four mutations were checked against the new tests and each is caught by the test meant to catch it:  the old exit-code reading, the old budget, the walk that was not carried, and the unknown verdict that deleted anyway.
 
+## The seventh review round: a verdict that cannot vouch, and a report that cannot claim
+
+Six findings.  The first was critical, and it was the price of the sixth round's own optimisation: the verdict the scan carries to the apply phase was trusted without a freshness check, so the delete could take a tree together with a marker the operator had dropped into it after the scan.
+
+**A carried verdict has to be re-checked at delete time.**  The scan spends 60% of the budget before the apply phase starts, and the apply queue adds chunk pauses and a band re-read between chunks, so a carried verdict can be fifteen minutes old by the time `find -depth -delete` runs.  The verdict also belongs to an inode: an app that recreates its cache directory between the scan and the delete leaves a verdict that describes a tree that is no longer there.  The carry is kept, because the duplicate walk was measured at up to 5.99 s on one real cache tree, but the verdict now carries the moment it was taken and the directory it was taken against.  `apply_delete` re-probes when the verdict is older than `KEEP_VERDICT_MAX_AGE_SEC` (120 s) or when the inode no longer matches, and a re-probe that cannot answer refuses the delete.  A verdict that is still fresh and still describes the same directory is used as it is, so the walk is saved exactly while the answer is worth trusting.
+
+**A path that is already gone is not a delete.**  `apply_delete` returned `(0, "")` for a path that had disappeared, and the caller read that as success: the candidate was counted as an applied delete and its scan estimate was counted as bytes the run freed, for a path that was never touched.  Before this work the same condition raised `FileNotFoundError` and counted as a failure.  The apply step now has three outcomes -- applied, skipped, failed -- and a vanished path is a skip.  The report counts the three apart, so a skip is never read as "freed" and never as "failed".
+
+**A run with no budget left says so instead of starting work.**  `op_timeout` floors at 5 s, so a candidate started with the budget already spent still cost 5 s each, and the delete's `find -depth -delete` was bounded by that same floor -- a delete cut off mid-walk leaves a half-removed tree.  A candidate with no budget left is now skipped and says so, and the delete is given the budget it actually has (`delete_timeout()`, a 1 s floor) rather than a floor that lets it overrun.  A delete that is cut off mid-walk now reports itself as a partial removal instead of as a path that is merely still present.
+
+**A rejected tree must not pay for the full-tree walk.**  `rule_agent_state` probed for a marker before the cheap `.project_root` and inode filters, and `find -quit` only stops early when the marker is there, so every project working tree under `~/.gemini/tmp` paid for a complete traversal before the filter that discards it.  The probe now runs after the cheap filters, exactly as `rule_app_caches` runs its probe after its policy filter.
+
+**The source-level check was too generous.**  `apply_probe_timeout` reads the whole-run budget, not the phase clock, but it was accepted as one of the budget clocks, so a scan rule could use it and pass the check while spending the reserve the deletes need.  It is out of the clock set now, and a separate check refuses any `apply_probe_timeout` call site outside `apply_delete`.
+
+**The docstring still described a boolean.**  `holds_keep_sentinel` returns a `MarkerVerdict`, and a NamedTuple is always truthy, so `if holds_keep_sentinel(...)` would read every tree as marked and `if not holds_keep_sentinel(...)` would read every tree as clean.  The contract is now stated in the docstring, and the three states are described in the operator-facing bullet above.
+
+Seven mutations were checked against the new tests and each is caught by the test meant to catch it: the stale verdict, the replaced directory, the vanished path counted as a delete, the missing no-budget skip, the probe back in front of the cheap filters, a scan rule using the whole-run clock, and the delete that is not bounded by the budget it has.
+
 ## One deliberate divergence from a review suggestion
 
 The suggestion clamped the scan probes to the whole run budget.  That stops a probe outliving the run's hard stop, but not outliving the scan's own 60% share.  The clamp is to the scan share instead, which is always the smaller of the two budgets, so the whole-budget bound still holds on top of it.
@@ -95,20 +113,20 @@ The suggestion clamped the scan probes to the whole run budget.  That stops a pr
 | | Before | After |
 |---|---|---|
 | Free space | 3.3 GB | ~46 GB |
-| Load average | 611 | ~45 |
+| Load average | 611 | ~10 |
 | Deleted by the engine | 0 | 6.48 GB across 43 safe-tier candidates, 0 failures |
 
 The agent session transcripts (5.4 GB) are report-only by policy and were left intact.
 
 ## Verify
 
-- `python3 scripts/test-hoghunter-clean.py` -> ok (83 tests)
+- `python3 scripts/test-hoghunter-clean.py` -> ok (89 tests)
 - `python3 scripts/test-robotic-vacuum.py` -> ok (299 tests)
 - `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` -> ok
 
 ## Still open
 
-- A restart is the biggest remaining win on the host: about 25 GB, being 21.3 GB of swap plus 4.05 GB that LaunchServices still holds open in deleted files.  It is the owner's call because it kills the running agent sessions.
+- A restart is the biggest remaining win on the host: about 22 GB, which is the 22.2 GB of swap this Mac is carrying.  The 4.05 GB that LaunchServices held open in deleted files was released on its own during the run -- `lsof` now reports zero deleted-but-open handles.  A restart is the owner's call because it kills the running agent sessions.
 - `scripts/vacuum/store.py` `_locked_json_update()` still uses a blocking `fcntl.flock(LOCK_EX)` with no timeout.  That is a latent hang hazard and is unchanged here.
 - `newest_file_age_min()` is bounded by an entry count (4000) rather than by a wall clock, so on a very slow volume one call can run long.  It starts no subprocess, so it cannot outrun the scan share the way a subprocess could, but it is not on the same clock as the probes around it.
 - The open item in `docs/rollouts/2026-10-09-vacuum-full-run-fixes.md` — expand `janitor_cache_reclaim` if janitor parity gaps appear in production — still stands.
