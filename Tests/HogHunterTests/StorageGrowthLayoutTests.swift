@@ -199,6 +199,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         pulse.cpuPercent = 68
         pulse.visibleCpuPercent = 61
         pulse.coreCount = 12
+        pulse.readableProcessCount = 7
         pulse.memoryUsedBytes = 24_000_000_000
         pulse.appMemoryBytes = 15_000_000_000
         pulse.wiredBytes = 5_000_000_000
