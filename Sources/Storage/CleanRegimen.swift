@@ -150,7 +150,7 @@ struct CleanRegimen: Codable, Equatable, Sendable {
     /// in that tier is ever deleted without a human, so a regimen has no
     /// business listing it.
     static let defaultRules: Set<String> = [
-        "temp-scratch", "app-staging", "dev-caches",
+        "temp-scratch", "app-staging", "dev-caches", "app-caches", "agent-state",
         "xcode-artifacts", "logs", "sqlite-wal", "brew",
     ]
 
@@ -159,6 +159,7 @@ struct CleanRegimen: Codable, Equatable, Sendable {
     /// pressure*, not a rule the user enables.
     static let schedulableRules: [String] = [
         "snapshots", "temp-scratch", "tmp-files", "app-staging", "dev-caches",
+        "app-caches", "agent-state",
         "xcode-artifacts", "simulator-runtimes", "logs", "sqlite-wal", "brew",
     ]
 

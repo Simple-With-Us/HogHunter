@@ -84,6 +84,22 @@
       "skipWhenAny": ["xcodebuild alive", "swift-frontend alive", "clang alive", "node count > 20"]
     },
     {
+      "name": "app-caches",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Per-application cache directories",
+      "$rationale": "The measured hog on this Mac was ~/Library/Caches/org.swift.swiftpm at 3.6 GB, with Codex (624 MB), pnpm (552 MB), antigravity (349 MB) and electron (248 MB) on top of it. The old rule set named a handful of specific toolchain caches and nothing else, so a host whose space went into app caches got nothing back. Everything under ~/Library/Caches is rebuildable by its app. In Application Support and the container trees only the cache-shaped children are touched (Cache, CachedData, Code Cache, GPUCache, logs, CacheStorage) -- everything else there is app state and stays untouched.",
+      "skipWhenAny": ["a file under the path was touched in the last 90 minutes", "any process holds the path open"]
+    },
+    {
+      "name": "agent-state",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Transient state left behind by coding agents",
+      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, cache, debug, shell-snapshots) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.",
+      "skipWhenAny": ["a file under the path was touched in the last 90 minutes", "any process holds the path open"]
+    },
+    {
       "name": "xcode-artifacts",
       "tier": "safe",
       "op": "delete",

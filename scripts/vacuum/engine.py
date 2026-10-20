@@ -20,7 +20,23 @@ from .models import RunRecord, StepResult, StepStatus, TriggerKind
 from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 
 # Steps that run the lane doctor.  Under extreme host load they are skipped like the other heavy janitor work.
-_HEAVY_LANE_STEPS = ("janitor_worktree_retire", "janitor_cache_reclaim", "pressure_apps_deps")
+#
+# janitor_cache_reclaim is deliberately NOT in this list, and must not be added
+# back.  It is the disk reclaim step: skipping it under load is a deadlock,
+# because the disk pressure that loads the host is exactly what the step exists
+# to clear.  The old guard made the step skip itself whenever the host was
+# loaded, so on a host that most needed cleaning it never ran, and the disk
+# slid to 100% while every run reported zero bytes freed.
+#
+# The step is safe under load.  It stays inside the cheap (safe) band and the
+# reclaim engine bounds itself with --budget-sec=600 plus a 180 s hard stop, so
+# it cannot run away on a busy host.
+#
+# Owner ruling 2026-10-02, recorded in the reclaim policy under
+# bands.chunking.pressureShapesWorkNotScope: pressure changes the SHAPE of the
+# work, never its SCOPE, and the load and swap thresholds "must never suppress
+# the safe or semi-safe tiers".
+_HEAVY_LANE_STEPS = ("janitor_worktree_retire", "pressure_apps_deps")
 
 
 def ensure_standard_mac_paths() -> None:
@@ -206,7 +222,11 @@ class VacuumEngine:
     ) -> tuple[RunRecord, list[dict[str, Any]], bool]:
         sample = sample_mac()
         hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
-        rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
+        # Only a sample that really came back from df is worth keeping.  A df
+        # that failed reads as zero free, and writing that here would report a
+        # critical shortage the disk does not have until the next tick lands.
+        if sample.get("disk_sample_ok", True):
+            rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
         record = RunRecord(
             run_id=uuid.uuid4().hex[:12],
             trigger=TriggerKind.WATCH,
@@ -237,6 +257,14 @@ class VacuumEngine:
                         pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full", dry_run=dry_run)
                         record.steps.extend(pressure_record.steps)
                         rw_state["last_clean_at"] = now
+                        if not dry_run:
+                            # The sample above is the disk as it was BEFORE the
+                            # cleanup.  Keeping it makes the status this same
+                            # tick publishes report the shortage the run just
+                            # resolved, so measure the disk again afterwards.
+                            after = sample_mac()
+                            if after.get("disk_sample_ok", True):
+                                rw_state["prev_disk_free_gb"] = after.get("disk_free_gb")
                 record.finish(summary="watch tick")
         except LockHeld as exc:
             record.steps.append(
@@ -646,7 +674,36 @@ class VacuumEngine:
         failed = int(report.get("failed_count") or 0)
         total = int(report.get("actionable_count") or 0)
         freed = int(report.get("applied_bytes") or 0)
-        reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
+        # `applied_bytes` is the size the scan ESTIMATED before each delete,
+        # not proof that the bytes came back.  The cleaner's df-verified
+        # `disk_free_delta_gb` is the measured truth, so prefer it when the
+        # cleaner is new enough to report it.  Reporting the estimate as
+        # "freed" is how a run that deleted nothing still looked like a
+        # success.  (Measured 2026-10-19: 6.48 GB estimated, 0.05 GB of
+        # actual change, because the host spent it as fast as it was freed.)
+        delta_gb = report.get("disk_free_delta_gb")
+        if delta_gb is not None:
+            measured = int(float(delta_gb) * (1024 ** 3))
+            # The delta is the NET change in free space: the host can spend
+            # what the run freed, so it is often negative.  `freed` is summed
+            # into RunRecord.bytes_freed and rendered by lanes.format_size, so
+            # a negative value reaches the panel as "reclaimed -51.2 MB".
+            freed = max(0, measured)
+            # The reason still says what was measured.  A negative number
+            # printed next to "freed" reads as a bug, so the host-spending
+            # case is put in words instead: that is what actually happened.
+            reason = (
+                f"band={band}: removed {applied} of {_plural(total, 'item')}, "
+                f"{lanes.format_size(freed)} freed, "
+            )
+            if measured < 0:
+                reason += f"the host used {lanes.format_size(-measured)} while the run worked"
+            else:
+                reason += f"{lanes.format_size(measured)} measured"
+        else:
+            reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
+        if report.get("scan_truncated"):
+            reason += "; the scan hit its budget share, more may be left"
         if report.get("budget_exhausted"):
             reason += f"; time budget spent, {int(report.get('remaining_count') or 0)} left for the next run"
         if failed:
@@ -965,15 +1022,31 @@ class VacuumEngine:
         return outcome.bytes_freed, outcome.detail, StepStatus.RAN if outcome.actions else StepStatus.SKIPPED
 
     def _janitor_cache_reclaim(self, sample: dict[str, Any], mode: str, dry_run: bool) -> tuple[int, str, StepStatus]:
-        if mode == "hard":
-            return 0, "extreme load; skipped cache reclaim", StepStatus.SKIPPED
+        # The load guard that used to open this method is gone on purpose.  It
+        # skipped the disk reclaim whenever the host was loaded, which is
+        # precisely when the disk needs clearing, so the step never ran on a
+        # host that needed it.  `mode` is still accepted because the dispatcher
+        # passes it, but it no longer decides whether this step happens.
+        #
+        # The cheap band is the safe tier, and the reclaim engine bounds itself
+        # with a time budget and a hard stop, so running it on a loaded host is
+        # bounded work, not an outage.
+        if not sample.get("disk_sample_ok", True):
+            # A df that failed leaves disk_free_gb at zero, and zero free is
+            # below every threshold, so this would run a full cheap-band
+            # reclaim -- deleting app caches and agent state -- on a disk that
+            # is actually healthy.  Skip rather than act on a number nobody
+            # measured.
+            return 0, "disk sample unavailable; skipping cache reclaim", StepStatus.SKIPPED
         free_gib = float(sample.get("disk_free_gb", 999))
         low = float(self.cfg.get("janitor", {}).get("low_free_gib", 80))
         if free_gib >= low:
             return 0, f"free {free_gib:.0f}G above {low:.0f}G threshold", StepStatus.SKIPPED
         if dry_run:
             return 0, "would reclaim caches", StepStatus.SKIPPED
-        # Lean mode skips heavy du probes; still run hoghunter cheap band as cache sweep.
+        # The cheap band is the safe tier.  The semi-safe tier (snapshots,
+        # device support, simulator runtimes) stays behind the engine's own
+        # calm-band gate, so it is not widened here.
         band = "cheap"
         return self._hoghunter_reclaim(band)
 

@@ -73,6 +73,9 @@ struct MaintainView: View {
                     }
                 }
                 if let status = store.status {
+                    if let free = status.disk?.freeText {
+                        gridRow("Disk Space", free)
+                    }
                     gridRow("Last full clean", formatDate(status.lastRunAt?["full"]))
                     gridRow("Next full clean", formatNext(status.nextRunAt["full"]))
                     gridRow("Background job", status.launchdLoaded ? "Loaded" : "Not loaded")
@@ -340,6 +343,8 @@ struct MaintainView: View {
         case "overdue": return "clock.badge.exclamationmark"
         case "failed": return "exclamationmark.triangle.fill"
         case "unloaded": return "pause.circle.fill"
+        case "critical": return "exclamationmark.octagon.fill"
+        case "degraded": return "exclamationmark.triangle.fill"
         default: return "questionmark.circle"
         }
     }
@@ -347,8 +352,8 @@ struct MaintainView: View {
     private var healthColor: Color {
         switch store.status?.health {
         case "healthy": return .green
-        case "overdue", "failed": return .orange
-        case "unloaded": return .red
+        case "overdue", "failed", "degraded": return .orange
+        case "unloaded", "critical": return .red
         default: return .secondary
         }
     }

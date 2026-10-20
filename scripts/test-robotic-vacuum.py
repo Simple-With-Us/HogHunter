@@ -5,8 +5,11 @@ The lane doctor tests live in test-vacuum-lanes.py; load_tests at the bottom pul
 command (python3 scripts/test-robotic-vacuum.py) runs both files."""
 from __future__ import annotations
 
+import argparse
 import atexit
+import contextlib
 import errno
+import io
 import json
 import os
 import re
@@ -15,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -100,6 +104,14 @@ class TestPressure(unittest.TestCase):
         s = {"disk_free_gb": 10, "swap_used_pct": 0, "swap_used_gb": 0, "load1": 0}
         hits = evaluate_hits(s, None, {"disk_free_crit_gb": 15, "disk_free_warn_gb": 25})
         self.assertTrue(any(h["metric"] == "disk_free_gb" for h in hits))
+
+    def test_a_df_that_did_not_answer_is_not_a_full_disk(self):
+        """A df that fails leaves disk_free_gb at zero, and zero free reads as
+        a critical shortage that would put the tick into pressure cleanup."""
+        s = {"disk_sample_ok": False, "disk_free_gb": 0, "swap_used_pct": 0,
+             "swap_used_gb": 0, "load1": 0}
+        hits = evaluate_hits(s, None, {"disk_free_crit_gb": 15, "disk_free_warn_gb": 25})
+        self.assertFalse([h for h in hits if h["metric"].startswith("disk")], hits)
 
     def test_janitor_modes(self):
         self.assertEqual(janitor_pressure_mode({"load1": 300, "swap_used_pct": 50}, {}), "hard")
@@ -442,6 +454,48 @@ class TestHealth(unittest.TestCase):
             self.assertEqual(status["health"], "healthy")
             self.assertFalse(status["launchd_loaded"])
 
+    def _status_with_disk(self, free_gb: float | None) -> dict:
+        """Build a status whose scheduler state reports the given free disk space."""
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data = home / "rv"
+            data.mkdir(parents=True)
+            cfg = load_config(home=home)
+            cfg["data_dir"] = str(data)
+            store = VacuumStore(cfg, home=home)
+            if free_gb is not None:
+                store.merge_scheduler_state({"prev_disk_free_gb": free_gb})
+            with patch("vacuum.alerts.launchd_loaded", return_value=False):
+                return build_status(store, cfg, now=time.time())
+
+    def test_a_critically_low_disk_reports_critical_health(self):
+        """The panel used to say healthy while the disk sat at 100% with 3 GB free.
+
+        Free space below the critical threshold is an emergency the owner has to
+        see, so it outranks the last run's exit code."""
+        status = self._status_with_disk(5.9)
+        self.assertEqual(status["health"], "critical")
+        self.assertEqual(status["disk"]["health"], "critical")
+        self.assertEqual(status["disk"]["free_gb"], 5.9)
+
+    def test_a_low_disk_reports_degraded_health(self):
+        status = self._status_with_disk(20.0)
+        self.assertEqual(status["health"], "degraded")
+        self.assertEqual(status["disk"]["health"], "acute")
+
+    def test_a_roomy_disk_leaves_health_alone(self):
+        status = self._status_with_disk(120.0)
+        self.assertEqual(status["health"], "healthy")
+        self.assertEqual(status["disk"]["health"], "ok")
+        self.assertEqual(status["disk"]["free_gb"], 120.0)
+
+    def test_disk_free_space_is_reported_even_when_nothing_is_known_yet(self):
+        """No sample yet means no disk block value, and the health must not crash on it."""
+        status = self._status_with_disk(None)
+        self.assertEqual(status["health"], "healthy")
+        self.assertIsNone(status["disk"]["free_gb"])
+        self.assertEqual(status["disk"]["health"], "unknown")
+
 
 class TestStatusStepResults(unittest.TestCase):
     """step_last_results holds each step's latest result, not just what the last record ran.  The Mac's Cleaning
@@ -665,6 +719,45 @@ class TestRunOutcome(unittest.TestCase):
             self.assertTrue(cleaned)
             self.assertEqual((record.exit_code, record.outcome), expected, statuses)
 
+    def test_the_watch_tick_reports_the_disk_after_its_own_cleanup(self):
+        """The tick samples the disk before it cleans.  Persisting that made the
+        status published moments later still call the disk critical, for the
+        space the run had just freed, until the next tick five minutes on."""
+        from vacuum.engine import VacuumEngine
+
+        def sample(free):
+            return {"disk_sample_ok": True, "disk_free_gb": free, "load1": 0.0,
+                    "swap_used_pct": 0.0, "swap_used_gb": 0.0}
+
+        def run(self, trigger, pressure=False, band="cheap", dry_run=False):
+            rec = RunRecord("p", trigger, started_at=time.time())
+            rec.finish()
+            return rec
+
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine(Path(td), [])
+            state: dict = {}
+            with patch("vacuum.engine.sample_mac", side_effect=[sample(8.0), sample(60.0)]), patch.object(
+                VacuumEngine, "run", run
+            ):
+                _record, _hits, cleaned = engine.run_watch_tick(state, None)
+        self.assertTrue(cleaned)
+        self.assertEqual(state["prev_disk_free_gb"], 60.0)
+
+    def test_a_failed_df_does_not_overwrite_the_last_known_free_space(self):
+        """Zero free is the df answer when df does not answer, and the panel
+        reads that number as a critical disk."""
+        from vacuum.engine import VacuumEngine
+
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine(Path(td), [])
+            state = {"prev_disk_free_gb": 90.0}
+            with patch("vacuum.engine.sample_mac", return_value={
+                    "disk_sample_ok": False, "disk_free_gb": 0, "load1": 0.0,
+                    "swap_used_pct": 0.0, "swap_used_gb": 0.0}):
+                engine.run_watch_tick(state, 90.0)
+        self.assertEqual(state["prev_disk_free_gb"], 90.0)
+
     def test_the_run_failed_banner_follows_failed_steps_so_a_partial_run_still_speaks(self):
         """The decision, written down: a partial run exits 0 and is not a failed run, but a step that fails
         every time must not go quiet, so the banner (whose text says "failed step(s)") is keyed on the steps.
@@ -749,6 +842,44 @@ class TestHogHunterReclaimStep(_EngineHome):
         self.assertIn("removed 1710 of 1710", reason)
         self.assertNotIn("budget", reason)
 
+    def test_a_run_the_host_spent_further_frees_no_bytes_not_negative_ones(self):
+        """`disk_free_delta_gb` is the NET change in free space, so a host that
+        wrote more than the run deleted reports a negative delta.  `freed` is
+        summed into RunRecord.bytes_freed and rendered by lanes.format_size,
+        which would reach the panel as "reclaimed -51.2 MB"."""
+        out = self.run_step((0, _report(disk_free_delta_gb=-0.05), "", False), band="cheap")[0]
+        freed, reason, status = out
+        self.assertEqual((freed, status), (0, StepStatus.RAN))
+        self.assertNotIn("-", reason.split(": removed")[1])
+        positive = self.run_step((0, _report(disk_free_delta_gb=1.5), "", False), band="cheap")[0]
+        self.assertEqual(positive[0], int(1.5 * 1024 ** 3))
+
+    def test_a_negative_measured_delta_still_says_what_the_host_did(self):
+        """The count of bytes freed is clamped at zero, but the reason still
+        reports what was measured.  A negative number printed next to "freed"
+        reads as a bug, so the host-spending case is put in words: that is
+        what actually happened, and it is not a number of bytes reclaimed."""
+        (freed, reason, status), _call = self.run_step(
+            (0, _report(applied_count=12, applied_bytes=500_000_000,
+                        disk_free_delta_gb=-0.05), "", False))
+        self.assertEqual(freed, 0, "bytes freed cannot be negative")
+        self.assertEqual(status, StepStatus.RAN)
+        self.assertIn("0 B freed", reason)
+        self.assertIn("the host used 51.2 MB", reason)
+        self.assertNotIn("-", reason.split(": removed")[1])
+
+    def test_the_measured_delta_replaces_the_estimate(self):
+        """The estimate is what the scan believed it would delete; the measured
+        delta is what df saw.  The measured one wins, because a delete can
+        free nothing and the estimate cannot know that."""
+        (freed, reason, _status), _call = self.run_step(
+            (0, _report(applied_count=12, applied_bytes=6_000_000_000,
+                        disk_free_delta_gb=0.05), "", False))
+        self.assertEqual(freed, 53_687_091)
+        self.assertIn("51.2 MB freed", reason)
+        self.assertIn("51.2 MB measured", reason)
+        self.assertNotIn("5.7 GB", reason, "the estimate is not the outcome")
+
     def test_a_spent_budget_is_a_good_partial_run_not_a_failure(self):
         out = self.run_step((0, _report(applied_count=600, applied_bytes=1_200_000, budget_exhausted=True, remaining_count=1110), "", False))
         freed, reason, status = out[0]
@@ -794,6 +925,63 @@ class TestHogHunterReclaimStep(_EngineHome):
             freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "normal", dry_run=False)
         self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
         self.assertIn("--budget-sec=600", run.call_args.args[0])
+
+    def test_the_disk_reclaim_step_runs_even_under_extreme_load(self):
+        """The load guard that opened this step is gone.  Skipping the disk reclaim
+        because the host is loaded is a deadlock: the disk pressure that loads the
+        host is exactly what the step exists to clear, so the step never ran on a
+        host that needed it and the disk slid to 100% with every run reporting zero
+        bytes freed.  Owner ruling 2026-10-02: pressure changes the SHAPE of the
+        work, never its SCOPE."""
+        self.fake_cleaner()
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "hard", dry_run=False)
+        self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
+        self.assertIn("--budget-sec=600", run.call_args.args[0])
+
+    def test_the_janitor_reclaim_does_not_act_on_a_disk_sample_that_failed(self):
+        """A df that failed leaves disk_free_gb at zero, and zero free is below
+        every threshold.  Without the disk_sample_ok guard this runs a full
+        cheap-band reclaim -- deleting app caches and agent state -- on a disk
+        that is actually healthy."""
+        self.fake_cleaner()
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            freed, reason, status = self.engine._janitor_cache_reclaim(
+                {"disk_sample_ok": False, "disk_free_gb": 0.0}, "normal", dry_run=False
+            )
+        self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
+        self.assertIn("disk sample unavailable", reason)
+        self.assertEqual(run.call_count, 0, "nothing is deleted on an unmeasured disk")
+
+    def test_a_hard_mode_janitor_run_still_reclaims_the_disk(self):
+        from unittest.mock import patch
+
+        from vacuum.engine import VacuumEngine
+        from vacuum.models import TriggerKind
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = load_config(home=home)
+            cfg["hoghunter_clean"] = str(home / "hoghunter-clean")
+            cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+            cfg.setdefault("janitor", {})["low_free_gib"] = 80
+            for step_id in steps_for_trigger(cfg, "janitor"):
+                cfg.setdefault("steps", {})[step_id] = {"enabled": False}
+            cfg["steps"]["janitor_cache_reclaim"] = {"enabled": True}
+            engine = VacuumEngine(cfg, home=home)
+            with patch(
+                "vacuum.engine.sample_mac",
+                return_value={"disk_free_gb": 4.0, "swap_used_pct": 99.0, "swap_used_gb": 30.0, "load1": 400.0},
+            ), patch("vacuum.engine.janitor_pressure_mode", return_value="hard"), patch.object(
+                sys, "platform", "darwin"
+            ), patch(
+                "vacuum.engine.VacuumEngine._hoghunter_reclaim",
+                return_value=(1234, "band=cheap", StepStatus.RAN),
+            ):
+                record = engine.run(TriggerKind.JANITOR)
+        step = next(s for s in record.steps if s.step_id == "janitor_cache_reclaim")
+        self.assertEqual(step.status, StepStatus.RAN)
+        self.assertEqual(step.bytes_freed, 1234)
 
 
 class TestCleanMyMacStep(_EngineHome):
@@ -1345,6 +1533,184 @@ class TestMaintainSurface(unittest.TestCase):
             status = build_status(store, cfg)
             self.assertIn("maintenance_scripts", status)
             self.assertTrue(any(row.get("id") == "maintain_scheduler" for row in status["maintenance_scripts"]))
+
+
+class TestTickWatchdog(unittest.TestCase):
+    """launchd will not start a second instance of the job while one is running.
+
+    A tick that wedges therefore stops the maintainer for good, and silently:
+    the panel keeps showing the last status it wrote while the disk fills up
+    anyway.  Measured 2026-10-19: a launchd tick sat in PyImport_ImportModule
+    for 17 minutes and wrote nothing, while the same tick run by hand took
+    seven seconds.
+    """
+
+    def test_the_watchdog_exits_the_process_when_the_tick_overruns(self):
+        import maintain
+
+        with patch.object(maintain.os, "_exit", create=True) as exit_mock:
+            with patch.object(maintain.time, "sleep"):
+                maintain._watchdog_exit(0.01)
+        exit_mock.assert_called_once_with(3)
+
+    def test_a_zero_budget_arms_nothing(self):
+        import maintain
+
+        before = threading.active_count()
+        maintain._start_tick_watchdog(0)
+        self.assertEqual(threading.active_count(), before)
+
+    def test_the_watchdog_is_armed_for_a_scheduler_tick(self):
+        import maintain
+
+        with patch.object(maintain, "_start_tick_watchdog") as arm:
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch.object(maintain, "run_scheduler_tick", return_value={}):
+                    with patch.object(maintain, "VacuumStore") as store_cls:
+                        store_cls.open.return_value.cfg = {}
+                        maintain.main(["--tick", "scheduler"])
+        arm.assert_called_once()
+        self.assertGreater(arm.call_args[0][0], 0, "the watchdog needs a budget to fire")
+
+    def test_the_watchdog_budget_outlasts_a_reclaim_step(self):
+        """A watch tick that decides to clean runs hoghunter-clean with the
+        reclaim budget plus its grace.  A watchdog shorter than that kills
+        the tick mid-reclaim, leaving a half-deleted tree and no run record,
+        which is the outcome the watchdog exists to prevent."""
+        import maintain
+        from vacuum import engine
+
+        longest = engine._RECLAIM_BUDGET_SECONDS + engine._RECLAIM_GRACE_SECONDS
+        self.assertGreater(
+            maintain.TICK_WATCHDOG_SEC, longest,
+            "the watchdog must sit above the longest step a tick can legitimately run",
+        )
+
+    def test_the_watchdog_is_armed_before_the_vacuum_imports(self):
+        """The tick that prompted the watchdog sat in PyImport_ImportModule for
+        17 minutes -- during the module-level vacuum imports, before main()
+        exists.  A watchdog armed down in main() cannot see that wedge, and
+        launchd still refuses to start the next tick."""
+        import maintain
+
+        source = (REPO / "scripts" / "maintain.py").read_text()
+        arm_at = source.index("_start_tick_watchdog(_tick_timeout)")
+        first_vacuum_import = source.index("from vacuum.alerts import")
+        self.assertLess(
+            arm_at, first_vacuum_import,
+            "the watchdog has to be armed before the imports that wedged",
+        )
+
+    def test_the_pre_import_arm_reads_the_budget_off_argv(self):
+        """main() cannot arm the watchdog early -- argparse has not run yet --
+        so the pre-import arm reads --tick-timeout straight off argv."""
+        import maintain
+
+        self.assertIsNone(maintain._argv_tick_timeout(["--status"]))
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler"]), maintain.TICK_WATCHDOG_SEC)
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "42"]), 42.0)
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout=42"]), 42.0)
+        # 0 disables the watchdog, and a bad value falls back to the default.
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "0"]), 0.0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            # argparse reports the bad value on the way to raising; the parse
+            # is caught inside, so only main() should ever print it.
+            self.assertEqual(
+                maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "soon"]),
+                maintain.TICK_WATCHDOG_SEC,
+            )
+
+    def test_the_pre_import_arm_agrees_with_main_on_how_to_read_the_flag(self):
+        """The pre-import arm has to read --tick-timeout exactly the way main()
+        does.  A scan of its own takes the first exact spelling and rejects
+        abbreviations, so `--tick scheduler --tick-t 60` gave main() 60s and
+        the watchdog 900s -- and because _watchdog_armed stops main() from
+        arming again, the watchdog could never correct itself mid-run.
+
+        The comparison is against main()'s real parser, built by the same
+        helper main() uses.  A hand-built copy would keep passing while the
+        production parsers drifted apart: the copy declared --tick without
+        choices and three options where main() declares seven, so a change
+        that made --tick-t ambiguous or renamed the flag would break the
+        agreement the code exists to guarantee and the test would stay
+        green."""
+        import maintain
+
+        for argv, expected in (
+            (["--tick", "scheduler", "--tick-t", "60"], 60.0),
+            (["--tick-timeout", "60", "--tick", "scheduler", "--tick-timeout", "900"], 900.0),
+            (["--tick=scheduler", "--tick-timeout=60"], 60.0),
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(maintain._argv_tick_timeout(argv), expected)
+                # Whatever the pre-import arm picks, main() must not disagree.
+                parser = maintain._build_parser()
+                self.assertEqual(parser.parse_args(argv).tick_timeout, expected)
+
+    def test_both_parsers_are_built_from_one_definition(self):
+        """main() and the pre-import arm must not drift apart.  They are
+        separate parser objects -- one is quiet and has no help action, since
+        it runs at import time -- but they have to declare the same options
+        with the same defaults, or the watchdog and the tick it bounds
+        disagree about the budget for the whole run."""
+        import maintain
+
+        main_parser = maintain._build_parser()
+        arm_parser = maintain._build_parser(quiet=True)
+        main_opts = {a.dest: a for a in main_parser._actions}
+        arm_opts = {a.dest: a for a in arm_parser._actions}
+        # The arm has no help action; every other option must match.
+        self.assertEqual(set(arm_opts) - {"help"}, set(main_opts) - {"help"})
+        for dest, action in arm_opts.items():
+            if dest == "help":
+                continue
+            self.assertEqual(action.default, main_opts[dest].default, dest)
+            self.assertEqual(action.type, main_opts[dest].type, dest)
+            self.assertEqual(action.choices, main_opts[dest].choices, dest)
+
+    def test_a_bad_flag_value_prints_nothing_from_the_pre_import_arm(self):
+        """The pre-import arm parses before main() has had a chance to report
+        a mistake.  argparse's default error() writes a usage block and the
+        message to stderr and then exits, so a malformed --tick-timeout
+        produced two usage blocks and two identical errors -- and the first
+        advertised an option set the arm does not have.  The arm must be
+        quiet so main() is the only reporter."""
+        import maintain
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            value = maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "soon"])
+        self.assertEqual(value, maintain.TICK_WATCHDOG_SEC)
+        self.assertEqual(buf.getvalue(), "", "the pre-import arm must not print anything")
+
+    def test_a_dry_run_tick_never_arms_the_watchdog(self):
+        """--dry-run promises one complete JSON document.  A watchdog armed at
+        import time can fire mid-print and exit 3, truncating it, and the
+        dry-run early-returns before main() would have armed anything."""
+        import maintain
+
+        self.assertIsNone(maintain._argv_tick_timeout(["--dry-run", "--tick", "scheduler"]))
+        self.assertEqual(
+            maintain._argv_tick_timeout(["--dry-run", "--tick", "scheduler", "--tick-timeout", "5"]),
+            None,
+            "a dry run must not get a watchdog at all, whatever budget it was given",
+        )
+        # A real tick beside it still arms.
+        self.assertEqual(maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "5"]), 5.0)
+
+    def test_a_second_arm_is_a_no_op(self):
+        """The watchdog is armed once before the imports and once from main().
+        Two threads would both be harmless, but one keeps the exit single."""
+        import maintain
+
+        with patch.object(maintain.threading, "Thread") as thread:
+            maintain._watchdog_armed = False
+            try:
+                maintain._start_tick_watchdog(60)
+                maintain._start_tick_watchdog(60)
+            finally:
+                maintain._watchdog_armed = False
+        self.assertEqual(thread.call_count, 1)
 
 
 def load_tests(loader, tests, pattern):
