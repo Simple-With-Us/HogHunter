@@ -125,18 +125,18 @@ struct HogHunterPanel: View {
                         GeometryReader { stage in
                             VStack(alignment: .leading, spacing: 10) {
                                 capacityCards
-                                if externalDrives.count > 1 {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("External Drives").font(.system(size: 11, weight: .semibold))
-                                        ForEach(externalDrives) { drive in
-                                            HStack {
-                                                Text(drive.name).lineLimit(1)
-                                                Spacer(minLength: 8)
-                                                Text(capacityAmountsText(drive)).lineLimit(1)
+                                if externalDrives.count > 1 || timeMachineDrives.count > 1 {
+                                    ScrollView {
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            if externalDrives.count > 1 {
+                                                driveDetails("External Drives", drives: externalDrives)
                                             }
-                                            .font(.system(size: 10))
+                                            if timeMachineDrives.count > 1 {
+                                                driveDetails("Time Machine Drives", drives: timeMachineDrives)
+                                            }
                                         }
                                     }
+                                    .frame(height: min(100, 24 + CGFloat(externalDrives.count + timeMachineDrives.count) * 16))
                                 }
                                 ScrollView { CodingDirectoriesView(store: directoryUsage) }
                                     .frame(maxWidth: .infinity)
@@ -295,8 +295,8 @@ struct HogHunterPanel: View {
             HStack {
                 Text("Time Machine").fontWeight(.medium)
                 Spacer(minLength: 6)
-                Text(timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText)
-                    .foregroundStyle(timeMachineDrive.map(quickDriveColor) ?? .secondary)
+                Text(quickTimeMachineText)
+                    .foregroundStyle(quickTimeMachineColor)
                     .lineLimit(1)
             }
             Divider()
@@ -352,13 +352,17 @@ struct HogHunterPanel: View {
                          percent: store.diskSpace.map { $0.usedFraction * 100 })
             capacityCard("External", value: externalCapacityText,
                          percent: externalDrives.count == 1 ? externalDrives[0].usedPercent : nil)
-            capacityCard("Time Machine", value: timeMachineDrive.map(capacityText) ?? unrecognizedDriveText,
-                         percent: timeMachineDrive?.usedPercent)
+            capacityCard("Time Machine", value: timeMachineCapacityText,
+                         percent: timeMachineDrives.count == 1 ? timeMachineDrive?.usedPercent : nil)
         }
     }
 
+    private var timeMachineDrives: [MountedDriveUsage] {
+        mountedDrives.rows.filter { $0.name.localizedCaseInsensitiveContains("Time Machine") }
+    }
+
     private var timeMachineDrive: MountedDriveUsage? {
-        mountedDrives.rows.first { $0.name.localizedCaseInsensitiveContains("Time Machine") }
+        timeMachineDrives.first
     }
 
     private var externalDrives: [MountedDriveUsage] {
@@ -373,6 +377,14 @@ struct HogHunterPanel: View {
                 : "\(externalDrives.count) drives · see Storage"
         }
         return externalDrives.first.map(capacityText) ?? unrecognizedDriveText
+    }
+
+    private var timeMachineCapacityText: String {
+        if timeMachineDrives.count > 1 {
+            return selectedTab == .storage ? "\(timeMachineDrives.count) destinations · details below"
+                : "\(timeMachineDrives.count) destinations · see Storage"
+        }
+        return timeMachineDrive.map(capacityText) ?? unrecognizedDriveText
     }
 
     private var unrecognizedDriveText: String {
@@ -394,14 +406,37 @@ struct HogHunterPanel: View {
         return Severity.forDisk(highest / 100).color
     }
 
+    private var quickTimeMachineText: String {
+        if timeMachineDrives.count > 1 {
+            let highest = timeMachineDrives.compactMap(\.usedPercent).max()
+            return highest.map { "\(timeMachineDrives.count) backups · up to \(Int($0.rounded()))% used" }
+                ?? "\(timeMachineDrives.count) backups · see Storage"
+        }
+        return timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText
+    }
+
+    private var quickTimeMachineColor: Color {
+        guard let highest = timeMachineDrives.compactMap(\.usedPercent).max() else { return .secondary }
+        return Severity.forDisk(highest / 100).color
+    }
+
+    private func driveDetails(_ title: String, drives: [MountedDriveUsage]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 11, weight: .semibold))
+            ForEach(drives) { drive in
+                HStack {
+                    Text(drive.name).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(capacityAmountsText(drive)).lineLimit(1)
+                }
+                .font(.system(size: 10))
+            }
+        }
+    }
+
     private func quickDriveText(_ drive: MountedDriveUsage) -> String {
         guard let percent = drive.usedPercent, let available = drive.availableBytes else { return "Unavailable" }
         return "\(Int(percent.rounded()))% used · \(HogFormat.memory(UInt64(available))) free"
-    }
-
-    private func quickDriveColor(_ drive: MountedDriveUsage) -> Color {
-        guard let percent = drive.usedPercent else { return .secondary }
-        return Severity.forDisk(percent / 100).color
     }
 
     private func capacityText(_ drive: MountedDriveUsage) -> String {

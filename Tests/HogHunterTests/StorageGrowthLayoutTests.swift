@@ -127,10 +127,13 @@ final class StorageGrowthLayoutTests: XCTestCase {
                                    totalBytes: 500_000_000_000, availableBytes: 2_500_000_000),
              MountedDriveCandidate(name: "Time Machine", path: "/Volumes/Time Machine", isLocal: true,
                                    isHidden: false, isExternalPhysical: true,
-                                   totalBytes: 500_000_000_000, availableBytes: 75_000_000_000)]
+                                   totalBytes: 500_000_000_000, availableBytes: 75_000_000_000),
+             MountedDriveCandidate(name: "Time Machine Archive", path: "/Volumes/Time Machine Archive", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 5_000_000_000)]
         })
         await drives.refresh()
-        XCTAssertEqual(drives.rows.count, 2)
+        XCTAssertEqual(drives.rows.count, 3)
         let suite = "hh174-dashboard-layout-\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         preferences.set("This Mac", forKey: "dashboardHostScope")
