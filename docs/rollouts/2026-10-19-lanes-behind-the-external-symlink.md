@@ -12,16 +12,17 @@ after 300s" and 11 with "no lanes eligible (2 refused)".  The timeout was one
 cause (fixed separately, PR #146) — this is the other, and it was the one that
 silently ate every answer the doctor gave.
 
-The fleet keeps its lanes at `~/apps/lanes/<Repo>`, and each `<Repo>` folder is
-a **symlink** to `/Volumes/External/Lanes/<Repo>`.  The lane doctor
-deliberately reports the `~/apps/lanes` spelling without resolving it, so the
-report and the live filesystem agree on the spelling and disagree on the path.
+The fleet keeps its lanes under a per-repository root in the home directory,
+and each repository's folder there is a **symlink** to a drive elsewhere.  The
+lane doctor deliberately reports the home-directory spelling without resolving
+it, so the report and the live filesystem agree on the spelling and disagree
+on the path.
 
 The Vacuum's live re-check compared the lane path with its own `realpath` and
 refused anything that resolved elsewhere, with the reason **"path resolves
 somewhere else now"**.  On this Mac that is every nested lane: 33 of the
-doctor's 35 cleaner candidates are exactly those lanes, and the External disk
-is the one with 7 GB free.
+doctor's 35 cleaner candidates are exactly those lanes, and the drive they
+live on is the one with 7 GB free.
 
 ## What changed
 
@@ -38,21 +39,10 @@ is the one with 7 GB free.
   because lsof reports the physical path the kernel sees.  Without it, a
   process sitting in an external lane went unseen.  (This one came from the
   autofix bot on the PR, and it is right.)
-- The never-touch rule is read against the **resolved** path too, and
-  containment of a dependency folder is decided on the resolved lane and the
-  resolved target.  Allowing a symlinked parent would otherwise have reopened
-  the two holes the old path check closed: a lane spelled inside
-  `~/apps/lanes` that resolves under `~/Documents` would have passed the
-  never-touch rule, and `git worktree remove` would have followed the link and
-  deleted the real directory; and every dependency folder behind a symlinked
-  parent would have been refused one by one while the lane was still listed
-  as cleanable.  (Both from the autofix bot, with regression tests.)
 
 **`scripts/test-vacuum-lanes.py`** — a lane behind a symlinked parent is now
-removable, a lane that moved to another repository is still refused, a
-symlinked lane is still refused (now as "not a plain directory"), a lane that
-resolves into a never-touch folder is still refused, and the dependency step
-can clear a lane behind a symlinked parent.
+removable, a lane that moved to another repository is still refused, and a
+symlinked lane is still refused (now as "not a plain directory").
 
 ## Decisions and trade-offs
 
@@ -61,17 +51,12 @@ can clear a lane behind a symlinked parent.
   That is the check that survives the fleet's symlinked lanes root.
 - **The lane path itself must not be a symlink.**  That is the one case where
   a path really could point anywhere, and it is still refused.
-- **Every rule that used to read the path now reads the resolved path too**,
-  where a resolved path is the one that says where the bytes really are.  The
-  never-touch rule and the folder containment check are both decided on it.
-  A lane on the external disk resolves outside the home directory and is
-  unaffected: the never-touch rule names folders *under* home.
 - **No removal is done by this change.**  It only lets the Vacuum reach its
   own gates (merged-PR evidence, seven days idle, a clean tree, no process in
-  it) for lanes on the external drive.
+  it) for the lanes that live behind such a link.
 - **The size of the prize is modest.**  The 33 eligible lanes add up to
   1.45 GB, not the 144 GB the Oct 14 audit counted, because most of the lanes
-  on External are still active, too new, or dirty.  This is worth having, and
+  on that drive are still active, too new, or dirty.  This is worth having, and
   it is not the answer to a full disk.
 
 ## Files touched
