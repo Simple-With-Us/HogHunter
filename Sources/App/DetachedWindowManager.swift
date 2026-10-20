@@ -22,7 +22,7 @@ final class DetachedWindowManager {
             return
         }
 
-        let size = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
+        let size = NSSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
         let win = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -31,7 +31,7 @@ final class DetachedWindowManager {
         )
         win.isReleasedWhenClosed = false
         win.title = "Hog Hunter"
-        win.contentMinSize = NSSize(width: 580, height: 600)
+        win.contentMinSize = NSSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)
 
         let rootView = HogHunterPanel()
             .environmentObject(store)

@@ -4,13 +4,7 @@ import XCTest
 
 @testable import HogHunter
 
-/// The panel's server status.  Owner 2026-10-19: the server readings used to
-/// live inside the Maintain tab, where the card buried the maintenance content
-/// and the readings sat below the fold, so nobody knew they were there.
-///
-/// These tests pin the three things that could quietly break again: the panel
-/// has a Server tab, the strip fits the panel it sits in, and the readings
-/// reach the panel without a view having to be open somewhere else first.
+/// Server status stays available from the quick view and the dashboard host scope.
 @MainActor
 final class PanelServerStatusTests: XCTestCase {
 
@@ -50,38 +44,16 @@ final class PanelServerStatusTests: XCTestCase {
         )
     }
 
-    // MARK: - The tab
+    // MARK: - Navigation
 
-    /// The server readings are on the main window now, so the panel has a tab
-    /// for them.  A tab that only exists in a corner nobody opens is how they
-    /// were lost in the first place.
-    func testThePanelHasAServerTab() {
-        XCTAssertTrue(PanelTab.allCases.contains(.server))
-        XCTAssertEqual(PanelTab.server.rawValue, "Server")
+    func testDashboardHasFiveHomesWithOverviewFirst() {
+        XCTAssertEqual(PanelTab.allCases.map(\.rawValue),
+                       ["Overview", "Activity", "Storage", "Maintenance", "Network"])
     }
 
-    /// The tab picker holds four labels now, so it has to be wide enough for
-    /// them.  A segmented picker that is too narrow drops its last segment off
-    /// the right edge, which is how the Storage tab once lost "Apps".
-    func testTheTabPickerFitsThePanelWidth() {
-        let header = HStack(spacing: 8) {
-            Text("Hog Hunter").font(.system(size: 17, weight: .semibold))
-            Spacer()
-            Picker("Tab", selection: .constant(PanelTab.server)) {
-                Label("Activity", image: "HogProfile").tag(PanelTab.activity)
-                Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
-                Label("Network", systemImage: "network").tag(PanelTab.network)
-                Label("Server", systemImage: "server.rack").tag(PanelTab.server)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 360)
-            Spacer()
-        }
-        .frame(width: HogHunterPanel.contentWidth)
-
-        let host = NSHostingView(rootView: header)
-        XCTAssertLessThanOrEqual(host.fittingSize.width, HogHunterPanel.contentWidth + 1)
+    func testDashboardStartsWiderThanQuickView() {
+        XCTAssertGreaterThan(HogHunterPanel.dashboardWidth, HogHunterPanel.panelWidth)
+        XCTAssertGreaterThan(HogHunterPanel.dashboardHeight, HogHunterPanel.panelHeight)
     }
 
     // MARK: - The strip
@@ -151,7 +123,7 @@ final class PanelServerStatusTests: XCTestCase {
                 .appendingPathComponent("panel-server-\(UUID().uuidString).sqlite"),
             maintain: maintain
         )
-        let wholePanel = bitmap(of: HogHunterPanel().environmentObject(hogStore)
+        let wholePanel = bitmap(of: HogHunterPanel(isQuickView: true).environmentObject(hogStore)
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor)), size: size)
         XCTAssertNotNil(wholePanel)

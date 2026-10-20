@@ -1,10 +1,13 @@
 import AppKit
+import Darwin
 import SwiftUI
 import XCTest
 @testable import HogHunter
 
 @MainActor
 final class StorageGrowthLayoutTests: XCTestCase {
+    private var dashboardStageWidth: CGFloat { HogHunterPanel.dashboardWidth - 154 - 24 - 36 }
+
     func testCompactRowsAndServerContentRenderWithinPanelWidth() async throws {
         let now = Date()
         let snapshot = VPSStatusSnapshot(
@@ -28,7 +31,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(store.databasePercentChange(key: "st_app_db") ?? 0, 8, accuracy: 0.01)
 
-        let width = HogHunterPanel.contentWidth
+        let width = dashboardStageWidth
         let view = ServerStatusView(store: store)
             .frame(width: width, alignment: .topLeading)
             .padding(8)
@@ -86,15 +89,15 @@ final class StorageGrowthLayoutTests: XCTestCase {
         store.fetch(force: true)
         for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertNotNil(store.snapshot, "the full report must have loaded before measuring")
-        let width = HogHunterPanel.contentWidth
+        let width = dashboardStageWidth
         let host = NSHostingView(rootView: ServerStatusView(store: store)
             .frame(width: width, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor)))
         host.appearance = NSAppearance(named: .aqua)
         let natural = host.fittingSize
         XCTAssertLessThanOrEqual(natural.width, width + 1)
-        // 580pt leaves 140pt for the panel's header, tab picker and insets.
-        XCTAssertLessThanOrEqual(natural.height, 580, "complete report needs \(natural.height)pt")
+        XCTAssertLessThanOrEqual(natural.height, 580,
+                                 "full Server report should fit at the default dashboard size; got \(natural.height)pt")
         try render(host, size: CGSize(width: width, height: natural.height), name: "hh174-server-full-report")
     }
 
@@ -108,13 +111,129 @@ final class StorageGrowthLayoutTests: XCTestCase {
                                    totalBytes: 500_000_000_000, availableBytes: 75_000_000_000)]
         })
         await store.refresh()
-        let width = HogHunterPanel.contentWidth * 0.48
+        let width = (dashboardStageWidth - 16) / 3
         let view = MountedDriveUsageView(store: store).frame(width: width)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: view)
         host.appearance = NSAppearance(named: .aqua)
         XCTAssertLessThanOrEqual(host.fittingSize.width, width + 1)
         try render(host, size: CGSize(width: width, height: 170), name: "hh165-external-drives")
+    }
+
+    func testQuickViewAndInitialStorageRenderWithMountedDrives() async throws {
+        let drives = MountedDriveStore(probe: {
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 2_500_000_000),
+             MountedDriveCandidate(name: "Time Machine", path: "/Volumes/Time Machine", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 75_000_000_000)]
+        })
+        await drives.refresh()
+        XCTAssertEqual(drives.rows.count, 2)
+        let suite = "hh174-dashboard-layout-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = populatedStore(preferences)
+        XCTAssertEqual(store.rows.count, 7)
+        XCTAssertEqual(store.cpuMinuteHistory.bars(at: store.pulse.sampledAt).compactMap { $0 }.count, 30)
+
+        let quickSize = CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
+        let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences)
+            .frame(width: quickSize.width, height: quickSize.height))
+        quick.appearance = NSAppearance(named: .aqua)
+        XCTAssertLessThanOrEqual(quick.fittingSize.height, quickSize.height + 1)
+        try render(quick, size: quickSize, name: "hh174-quick-external")
+
+        for (name, size) in [
+            ("minimum", CGSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)),
+            ("default", CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight))
+        ] {
+            let dashboard = NSHostingView(rootView: HogHunterPanel(initialTab: .storage, mountedDrives: drives)
+                .environmentObject(store).defaultAppStorage(preferences)
+                .frame(width: size.width, height: size.height))
+            dashboard.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(dashboard.fittingSize.width, size.width + 1)
+            try render(dashboard, size: size, name: "hh174-storage-\(name)")
+        }
+
+        let overviewSize = CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
+        let overview = NSHostingView(rootView: HogHunterPanel(mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences)
+            .frame(width: overviewSize.width, height: overviewSize.height))
+        overview.appearance = NSAppearance(named: .aqua)
+        XCTAssertLessThanOrEqual(overview.fittingSize.width, overviewSize.width + 1)
+        try render(overview, size: overviewSize, name: "hh174-overview-populated")
+    }
+
+    func testActivityStageRendersAtMinimumAndGrownSizes() throws {
+        let suite = "hh174-activity-layout-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = populatedStore(preferences)
+        XCTAssertEqual(store.rows.count, 7)
+
+        for (name, size) in [
+            ("minimum", CGSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)),
+            ("grown", CGSize(width: 1050, height: 780))
+        ] {
+            let activity = NSHostingView(rootView: HogHunterPanel(initialTab: .activity)
+                .environmentObject(store).defaultAppStorage(preferences)
+                .frame(width: size.width, height: size.height))
+            activity.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(activity.fittingSize.width, size.width + 1)
+            XCTAssertLessThanOrEqual(activity.fittingSize.height, size.height + 1)
+            try render(activity, size: size, name: "hh174-activity-\(name)")
+        }
+    }
+
+    private func populatedStore(_ preferences: UserDefaults) -> HogStore {
+        let store = HogStore(historyURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("hh174-populated-layout-\(UUID().uuidString).sqlite"),
+            defaults: preferences, startImmediately: false)
+        XCTAssertFalse(store.tick(), "the layout test host must never start the real sampler")
+        var pulse = MachinePulse.empty
+        pulse.cpuPercent = 68
+        pulse.visibleCpuPercent = 61
+        pulse.coreCount = 12
+        pulse.memoryUsedBytes = 24_000_000_000
+        pulse.appMemoryBytes = 15_000_000_000
+        pulse.wiredBytes = 5_000_000_000
+        pulse.compressedBytes = 4_000_000_000
+        pulse.totalMemoryBytes = 32_000_000_000
+        pulse.swapUsedBytes = 6_000_000_000
+        pulse.swapTotalBytes = 12_000_000_000
+        pulse.pressure = .warning
+        pulse.thermalState = .serious
+        pulse.batteryPercent = 67
+        pulse.isCharging = false
+        pulse.powerSource = "Battery Power"
+        pulse.sampledAt = Date()
+
+        let processRows: [(String, Double, UInt64)] = [
+            ("Browser", 180, 7_400_000_000),
+            ("Code Editor", 122, 4_800_000_000),
+            ("Design Tool", 71, 3_200_000_000),
+            ("Photo Library", 38, 2_100_000_000),
+            ("Video Call", 24, 1_500_000_000),
+            ("Backup Helper", 15, 900_000_000),
+            ("Terminal", 6, 420_000_000),
+        ]
+        let processes = processRows.enumerated().map { index, row in
+            let pid = pid_t(90_000 + index)
+            return ProcessSample(key: ProcessKey(pid: pid, startTime: UInt64(index + 1)),
+                ppid: 1, uid: getuid(), name: row.0,
+                path: "/fixture/\(index)", cpuPercent: row.1, hasBaseline: true,
+                footprintBytes: row.2, residentBytes: row.2, threadCount: 8,
+                diskReadBytesPerSec: 0, diskWriteBytesPerSec: 0, idleWakeupsPerSec: 0)
+        }
+        store.applyLayoutSnapshotForTest(Snapshot(pulse: pulse, processes: processes, hasBaseline: true),
+            cpuHistory: (0..<30).map { Double(25 + ($0 * 13) % 55) },
+            diskSpace: DiskSpace(freeBytes: 120_000_000_000, totalBytes: 500_000_000_000))
+        return store
     }
 
     private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {

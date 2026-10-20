@@ -95,35 +95,20 @@ final class MaintainLayoutTests: XCTestCase {
         StorageView(runningBundleIds: { [] }, maintainStore: store, embeddedInPanel: embedded, isTabActive: true, initialTab: tab)
     }
 
-    /// The tab as `HogHunterPanel` composes it: pinned to the panel's inner width, clipped, in a `ZStack` under
-    /// the panel's own header, inside the fixed panel frame.
+    private var dashboardStageWidth: CGFloat { HogHunterPanel.dashboardWidth - 154 - 24 - 36 }
+
+    /// The real dashboard with Maintenance selected, including its navigation and host picker.
     private func panelComposition(_ store: MaintainStore) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text("Hog Hunter").font(.system(size: 17, weight: .semibold))
-                Spacer()
-                Picker("Tab", selection: .constant(PanelTab.storage)) {
-                    Text("Activity").tag(PanelTab.activity)
-                    Text("Storage").tag(PanelTab.storage)
-                    Text("Network").tag(PanelTab.network)
-                    Text("Server").tag(PanelTab.server)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 360)
-                Spacer()
-            }
-            .frame(width: HogHunterPanel.contentWidth)
-            ZStack(alignment: .topLeading) {
-                storageView(store, embedded: true)
-                    .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
-                    .clipped()
-            }
-            .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
-        }
-        .padding(HogHunterPanel.inset)
-        .frame(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
-        .background(Color(nsColor: .windowBackgroundColor))
+        let hogStore = HogStore(historyURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("maintain-layout-\(UUID().uuidString).sqlite"), maintain: store)
+        let suite = "hh-maintain-layout-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        addTeardownBlock { preferences.removePersistentDomain(forName: suite) }
+        return HogHunterPanel(initialTab: .maintenance)
+            .environmentObject(hogStore)
+            .defaultAppStorage(preferences)
+            .frame(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
     }
 
     /// Draws the view in an offscreen window the way the screen would, controls included.
@@ -160,11 +145,11 @@ final class MaintainLayoutTests: XCTestCase {
         let store = try sampleStore()
         let offered: CGFloat = 520   // less than the tab's natural height with nine steps and twenty runs
         let controller = NSHostingController(
-            rootView: storageView(store, embedded: true).frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+            rootView: storageView(store, embedded: true).frame(width: dashboardStageWidth, alignment: .leading)
         )
-        let fitted = controller.sizeThatFits(in: CGSize(width: HogHunterPanel.contentWidth, height: offered))
+        let fitted = controller.sizeThatFits(in: CGSize(width: dashboardStageWidth, height: offered))
         XCTAssertLessThanOrEqual(fitted.height, offered + 1, "the Maintain tab wants \(Int(fitted.height)) pt but was offered \(Int(offered)) pt")
-        XCTAssertLessThanOrEqual(fitted.width, HogHunterPanel.contentWidth + 1, "wider than the panel's inner width")
+        XCTAssertLessThanOrEqual(fitted.width, dashboardStageWidth + 1, "wider than the dashboard stage")
     }
 
     /// The same holds in the standalone Storage window, which is a resizable window rather than the panel.
@@ -185,7 +170,7 @@ final class MaintainLayoutTests: XCTestCase {
         let store = try sampleStore()
         for tab in StorageTab.allCases {
             let host = NSHostingView(rootView: storageView(store, embedded: true, tab: tab))
-            XCTAssertLessThanOrEqual(host.fittingSize.width, HogHunterPanel.contentWidth + 1, "\(tab.rawValue) is wider than the panel")
+            XCTAssertLessThanOrEqual(host.fittingSize.width, dashboardStageWidth + 1, "\(tab.rawValue) is wider than the dashboard")
         }
     }
 
@@ -193,13 +178,13 @@ final class MaintainLayoutTests: XCTestCase {
     /// the PNGs (when asked for) are what a person looks at.
     func testRenderThePanelAndTheStandaloneWindow() throws {
         let store = try sampleStore()
-        let panelSize = CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
+        let panelSize = CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
         let panel = bitmap(of: panelComposition(store), size: panelSize)
         XCTAssertEqual(panel?.pixelsWide, Int(panelSize.width * (panel.map { CGFloat($0.pixelsWide) / panelSize.width } ?? 1)))
         try savePNG(panel, named: "maintain-panel")
 
         // The whole tab on one picture, tall enough that nothing scrolls out of sight: every Recent Runs row.
-        let tall = CGSize(width: HogHunterPanel.contentWidth, height: 1_100)
+        let tall = CGSize(width: dashboardStageWidth, height: 1_100)
         let all = bitmap(of: MaintainView(store: store).frame(width: tall.width, height: tall.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor)), size: tall)
         XCTAssertNotNil(all)
