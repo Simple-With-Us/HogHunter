@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 import XCTest
 @testable import HogHunter
@@ -134,9 +135,9 @@ final class StorageGrowthLayoutTests: XCTestCase {
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         preferences.set("This Mac", forKey: "dashboardHostScope")
         defer { preferences.removePersistentDomain(forName: suite) }
-        let store = HogStore(historyURL: FileManager.default.temporaryDirectory
-            .appendingPathComponent("hh174-dashboard-layout-\(UUID().uuidString).sqlite"),
-            defaults: preferences, startImmediately: false)
+        let store = populatedStore(preferences)
+        XCTAssertEqual(store.rows.count, 7)
+        XCTAssertEqual(store.cpuMinuteHistory.bars(at: store.pulse.sampledAt).compactMap { $0 }.count, 30)
 
         let quickSize = CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
         let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
@@ -157,6 +158,14 @@ final class StorageGrowthLayoutTests: XCTestCase {
             XCTAssertLessThanOrEqual(dashboard.fittingSize.width, size.width + 1)
             try render(dashboard, size: size, name: "hh174-storage-\(name)")
         }
+
+        let overviewSize = CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
+        let overview = NSHostingView(rootView: HogHunterPanel(mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences)
+            .frame(width: overviewSize.width, height: overviewSize.height))
+        overview.appearance = NSAppearance(named: .aqua)
+        XCTAssertLessThanOrEqual(overview.fittingSize.width, overviewSize.width + 1)
+        try render(overview, size: overviewSize, name: "hh174-overview-populated")
     }
 
     func testActivityStageRendersAtMinimumAndGrownSizes() throws {
@@ -164,9 +173,8 @@ final class StorageGrowthLayoutTests: XCTestCase {
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         preferences.set("This Mac", forKey: "dashboardHostScope")
         defer { preferences.removePersistentDomain(forName: suite) }
-        let store = HogStore(historyURL: FileManager.default.temporaryDirectory
-            .appendingPathComponent("hh174-activity-layout-\(UUID().uuidString).sqlite"),
-            defaults: preferences, startImmediately: false)
+        let store = populatedStore(preferences)
+        XCTAssertEqual(store.rows.count, 7)
 
         for (name, size) in [
             ("minimum", CGSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)),
@@ -180,6 +188,52 @@ final class StorageGrowthLayoutTests: XCTestCase {
             XCTAssertLessThanOrEqual(activity.fittingSize.height, size.height + 1)
             try render(activity, size: size, name: "hh174-activity-\(name)")
         }
+    }
+
+    private func populatedStore(_ preferences: UserDefaults) -> HogStore {
+        let store = HogStore(historyURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("hh174-populated-layout-\(UUID().uuidString).sqlite"),
+            defaults: preferences, startImmediately: false)
+        XCTAssertFalse(store.tick(), "the layout test host must never start the real sampler")
+        var pulse = MachinePulse.empty
+        pulse.cpuPercent = 68
+        pulse.visibleCpuPercent = 61
+        pulse.coreCount = 12
+        pulse.memoryUsedBytes = 24_000_000_000
+        pulse.appMemoryBytes = 15_000_000_000
+        pulse.wiredBytes = 5_000_000_000
+        pulse.compressedBytes = 4_000_000_000
+        pulse.totalMemoryBytes = 32_000_000_000
+        pulse.swapUsedBytes = 6_000_000_000
+        pulse.swapTotalBytes = 12_000_000_000
+        pulse.pressure = .warning
+        pulse.thermalState = .serious
+        pulse.batteryPercent = 67
+        pulse.isCharging = false
+        pulse.powerSource = "Battery Power"
+        pulse.sampledAt = Date()
+
+        let processRows: [(String, Double, UInt64)] = [
+            ("Browser", 180, 7_400_000_000),
+            ("Code Editor", 122, 4_800_000_000),
+            ("Design Tool", 71, 3_200_000_000),
+            ("Photo Library", 38, 2_100_000_000),
+            ("Video Call", 24, 1_500_000_000),
+            ("Backup Helper", 15, 900_000_000),
+            ("Terminal", 6, 420_000_000),
+        ]
+        let processes = processRows.enumerated().map { index, row in
+            let pid = pid_t(90_000 + index)
+            return ProcessSample(key: ProcessKey(pid: pid, startTime: UInt64(index + 1)),
+                ppid: 1, uid: getuid(), name: row.0,
+                path: "/fixture/\(index)", cpuPercent: row.1, hasBaseline: true,
+                footprintBytes: row.2, residentBytes: row.2, threadCount: 8,
+                diskReadBytesPerSec: 0, diskWriteBytesPerSec: 0, idleWakeupsPerSec: 0)
+        }
+        store.applyLayoutSnapshotForTest(Snapshot(pulse: pulse, processes: processes, hasBaseline: true),
+            cpuHistory: (0..<30).map { Double(25 + ($0 * 13) % 55) },
+            diskSpace: DiskSpace(freeBytes: 120_000_000_000, totalBytes: 500_000_000_000))
+        return store
     }
 
     private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {
