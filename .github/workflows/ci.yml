@@ -79,7 +79,7 @@ jobs:
           "build-ui/Build/Products/Release/HogHunter.app/Contents/MacOS/HogHunter" -HogHunterUISmoke
 
       - name: Capture app screenshots
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 10
         # The supervisor finishes when capture exits and kills its whole process

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic process trees only; no GUI or app capture is launched."""
 from pathlib import Path
+import importlib.util
 import os
 import selectors
 import signal
@@ -9,8 +10,12 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SUPERVISOR = Path(__file__).with_name('bounded-process.py')
+SPEC = importlib.util.spec_from_file_location('bounded_capture', SUPERVISOR)
+CAPTURE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(CAPTURE)
 
 
 class BoundedProcessTests(unittest.TestCase):
@@ -26,6 +31,32 @@ class BoundedProcessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertLess(elapsed, 2)
         self.assertIn('exit status: 7', result.stderr)
+
+    def test_leader_remains_unreaped_until_group_cleanup(self):
+        original_signal = CAPTURE.signal_group
+        observed = []
+
+        def inspect_leader(group, signum):
+            if not observed:
+                event = os.waitid(os.P_PID, group, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                self.assertIsNotNone(event)
+                self.assertEqual(event.si_pid, group)
+                observed.append(group)
+            return original_signal(group, signum)
+
+        with mock.patch.object(CAPTURE, 'signal_group', side_effect=inspect_leader):
+            self.assertEqual(CAPTURE.run([sys.executable, '-c', 'raise SystemExit(7)'], 2, 0), 7)
+        self.assertEqual(len(observed), 1)
+
+    def test_cleanup_timeout_cannot_report_success(self):
+        process = mock.Mock(pid=999999, args=['synthetic'])
+        process.wait.side_effect = subprocess.TimeoutExpired('synthetic', 5)
+        with mock.patch.object(CAPTURE.subprocess, 'Popen', return_value=process), \
+             mock.patch.object(CAPTURE, 'wait_unreaped', return_value=0), \
+             mock.patch.object(CAPTURE, 'signal_group', return_value=False):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                CAPTURE.run(['synthetic'], 1, 0)
+        process.kill.assert_called_once()
 
     def test_timeout_kills_term_resistant_process(self):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)

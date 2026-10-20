@@ -23,8 +23,23 @@ def signal_group(group, signum):
     except OSError as error:
         # EPERM/EINVAL must not abort the cleanup; the caller falls back to the
         # direct child, which we always own.
+        if signum == 0:
+            return True  # Existence/permission is not proof of live members.
         print(f'Could not signal process group {group}: {error}', file=sys.stderr, flush=True)
         return False
+
+
+def wait_unreaped(process, timeout):
+    """Observe exit without releasing the leader PID before group cleanup."""
+    deadline = time.monotonic() + timeout
+    while True:
+        event = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if event is not None and event.si_pid == process.pid:
+            return event.si_status if event.si_code == os.CLD_EXITED else -event.si_status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(min(0.02, remaining))
 
 
 def run(command, timeout, grace=2):
@@ -41,10 +56,10 @@ def run(command, timeout, grace=2):
         # handlers are installed, so a test never signals into the install window.
         print('Supervisor ready.', file=sys.stderr, flush=True)
         try:
-            return process.wait(timeout=timeout)
+            return wait_unreaped(process, timeout)
         except subprocess.TimeoutExpired:
             print('Optional capture exceeded its deadline.', file=sys.stderr, flush=True)
-            return 124
+            raise
     except Interrupted as interruption:
         # Covers the handler-install window too, so a signal there is not a traceback.
         return 128 + interruption.signum
@@ -71,11 +86,9 @@ def run(command, timeout, grace=2):
             try:
                 process.wait(timeout=max(grace, 5))
             except subprocess.TimeoutExpired:
-                print('Capture process did not exit; the runner will reap it.',
+                print('Capture process did not exit after group cleanup.',
                       file=sys.stderr, flush=True)
-            if signal_group(process.pid, 0):
-                print('Capture process group still has live members; they may keep '
-                      'the runner output handles open.', file=sys.stderr, flush=True)
+                raise
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
@@ -90,7 +103,12 @@ def main():
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command or not math.isfinite(args.timeout) or not math.isfinite(args.grace) or args.timeout <= 0 or args.grace < 0:
         parser.error('A command, positive timeout and nonnegative grace are required.')
-    result = run(command, args.timeout, args.grace)
+    if not all(hasattr(os, name) for name in ('waitid', 'WNOWAIT')):
+        parser.error('This supervisor requires waitid with WNOWAIT support.')
+    try:
+        result = run(command, args.timeout, args.grace)
+    except subprocess.TimeoutExpired:
+        result = 124
     print(f'Optional capture exit status: {result}', file=sys.stderr, flush=True)
     return result if result >= 0 else 128 - result
 
