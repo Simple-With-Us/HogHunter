@@ -61,9 +61,9 @@ final class UISmokeTest {
         if let panelWindow {
             // contentView, not the window: the window frame includes the title bar.
             let size = panelWindow.contentView?.frame.size ?? .zero
-            let expected = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
-            let ok = abs(size.width - expected.width) < 1 && abs(size.height - expected.height) < 1
-            record("quick view is its declared size", ok, "got \(size) want \(expected)")
+            let ok = abs(size.width - HogHunterPanel.panelWidth) < 1
+                && size.height > 180 && size.height < HogHunterPanel.panelHeight
+            record("quick view fits its content", ok, "got \(size)")
             checkRenderedContent(panelWindow, name: "quick-view")
         }
 
@@ -162,17 +162,17 @@ final class UISmokeTest {
         let store = HogStore(historyURL: URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("uismoke-panel.sqlite"))
         panelStore = store
-        let size = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
+        let hosting = NSHostingController(
+            rootView: HogHunterPanel(isQuickView: true).environmentObject(store)
+        )
+        let size = hosting.view.fittingSize
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-        window.contentViewController = NSHostingController(
-            rootView: HogHunterPanel(isQuickView: true).environmentObject(store)
-                .frame(width: size.width, height: size.height)
-        )
+        window.contentViewController = hosting
         window.contentMinSize = size
         window.setContentSize(size)
         window.makeKeyAndOrderFront(nil)

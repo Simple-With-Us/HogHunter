@@ -142,12 +142,13 @@ final class StorageGrowthLayoutTests: XCTestCase {
         XCTAssertEqual(store.rows.count, 7)
         XCTAssertEqual(store.cpuMinuteHistory.bars(at: store.pulse.sampledAt).compactMap { $0 }.count, 30)
 
-        let quickSize = CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
         let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
-            .environmentObject(store).defaultAppStorage(preferences)
-            .frame(width: quickSize.width, height: quickSize.height))
+            .environmentObject(store).defaultAppStorage(preferences))
         quick.appearance = NSAppearance(named: .aqua)
-        XCTAssertLessThanOrEqual(quick.fittingSize.height, quickSize.height + 1)
+        let quickSize = quick.fittingSize
+        XCTAssertEqual(quickSize.width, HogHunterPanel.panelWidth, accuracy: 1)
+        XCTAssertGreaterThan(quickSize.height, 200)
+        XCTAssertLessThan(quickSize.height, HogHunterPanel.panelHeight)
         try render(quick, size: quickSize, name: "hh174-quick-external")
 
         for (name, size) in [

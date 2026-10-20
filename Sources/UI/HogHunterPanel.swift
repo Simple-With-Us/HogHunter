@@ -331,7 +331,6 @@ struct HogHunterPanel: View {
                 }
                 .buttonStyle(.plain)
             }
-            Spacer(minLength: 0)
             Button("Open Dashboard") {
                 DetachedWindowManager.shared.openDetachedWindow(store: store)
             }
@@ -340,7 +339,7 @@ struct HogHunterPanel: View {
         }
         .font(.system(size: 11))
         .padding(16)
-        .frame(width: Self.panelWidth, height: Self.panelHeight)
+        .frame(width: Self.panelWidth)
         .background(DockedPanelShape(beakX: beakX, isDocked: true)
             .fill(Color(nsColor: .windowBackgroundColor)))
         .background(MenuBarAnchorFinder { x in beakX = x })
@@ -521,8 +520,9 @@ struct HogHunterPanel: View {
 
     // MARK: - Metrics
 
-    /// The menu-bar quick view has fixed geometry; the dashboard uses its own minimum size.
+    /// The menu-bar quick view has a fixed width and a content-fitting height.
     static let panelWidth: CGFloat = 360
+    /// The maximum expected quick-view height, including an optional server summary.
     static let panelHeight: CGFloat = 410
     static let dashboardWidth: CGFloat = 900
     static let dashboardHeight: CGFloat = 700
