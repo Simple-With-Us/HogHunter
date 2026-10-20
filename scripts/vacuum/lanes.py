@@ -1182,15 +1182,20 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     # survives the fleet's symlinked lanes root: where the lane lives on disk
     # says nothing, which repository it belongs to says everything.
     #
-    # The doctor records that repository as `parent_repo` on every row (see
-    # fleet_lanes.doctor, which sets it for every checkout it reports).  If the
-    # report does not say, the check cannot be made, and a lane whose
-    # repository cannot be confirmed is not one to remove: refuse.
+    # The doctor records that repository as `parent_repo` on every row (the
+    # doctor sets it for every checkout it reports, and the 2026-10-19 report
+    # carried it on 798 of 798 rows).  When it is there, the comparison is
+    # made.  When it is not - an older doctor, whose report the schema does
+    # not yet require it from - the check cannot be made, and refusing every
+    # lane would make retirement a no-op for ordinary lanes too.  So the
+    # fallback is the behaviour this change replaced: a lane whose own
+    # spelling resolves somewhere else cannot be confirmed and is refused.
     expected_repo = co.get("parent_repo")
-    if not isinstance(expected_repo, str) or not expected_repo:
+    if isinstance(expected_repo, str) and expected_repo:
+        if os.path.realpath(repo_root) != os.path.realpath(expected_repo):
+            return "", "it now belongs to a different repository"
+    elif os.path.realpath(path) != os.path.normpath(path):
         return "", "the doctor did not say which repository this lane belongs to"
-    if os.path.realpath(repo_root) != os.path.realpath(expected_repo):
-        return "", "it now belongs to a different repository"
     why = _head_matches_report(path, co, ctx)
     if why:
         return "", why

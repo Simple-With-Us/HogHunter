@@ -924,16 +924,27 @@ class TestRecheck(unittest.TestCase):
 
     def test_a_report_that_does_not_say_which_repository_refuses(self) -> None:
         """Without the parent repository there is nothing to confirm the lane
-        against, so it is not removed: the check fails closed."""
+        against.  A lane whose own spelling resolves elsewhere cannot be
+        confirmed and is refused, the way it was before this change; an
+        ordinary lane stays retirable, so an older report cannot make
+        retirement a no-op for everything."""
         row = self.sb.row(self.lane)
         del row["parent_repo"]
         scan = self.removable([row])
-        self.assertEqual(scan.choices, [])
-        self.assertIn("which repository", refused_reason(scan, self.lane))
-        row = self.sb.row(self.lane, parent_repo="")
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+
+        external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
+        self.addCleanup(shutil.rmtree, str(external), True)
+        link = self.sb.lanes_root / "external"
+        link.symlink_to(external)
+        lane = link / "claude-external"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/external", str(lane))
+        self.sb.push(lane)
+        row = self.sb.row(lane, realpath=str(lane), path=str(lane))
+        del row["parent_repo"]
         scan = self.removable([row])
-        self.assertEqual(scan.choices, [])
-        self.assertIn("which repository", refused_reason(scan, self.lane))
+        self.assertEqual(scan.choices, [], scan.refused)
+        self.assertIn("which repository", refused_reason(scan, lane))
 
     def test_a_symlinked_parent_may_not_redirect_a_lane_into_a_never_touch_folder(self) -> None:
         """Allowing a symlinked parent must not reopen the path the removed
