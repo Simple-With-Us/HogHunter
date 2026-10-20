@@ -289,4 +289,42 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertTrue(message.contains("Scan again"))
     }
 
+    @MainActor
+    func testPolicyChangeDuringMacCleanDefersInvalidationAndCannotRestartClean() async throws {
+        let logs = root.appendingPathComponent("Library/Logs/FixtureLogs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try Data(repeating: 65, count: 4_096).write(to: logs.appendingPathComponent("fixture.log"))
+        CleanerExclusions.update(in: defaults) { exclusions in
+            exclusions.excludedCategories = Set(CleanCategory.allCases
+                .filter { $0 != .logsAndDiagnostics }.map(\.rawValue))
+        }
+        let store = DiskCleanerStore(cleaner: DiskCleaner(homeDirectory: root),
+            historyStore: CleanupHistoryStore(inMemory: true), exclusionsDefaults: defaults,
+            manualScanOnly: true)
+        store.scan()
+        for _ in 0..<100 {
+            if case .scanned = store.state { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .scanned = store.state else { return XCTFail("fixture scan did not finish") }
+        store.selectAll()
+        XCTAssertGreaterThan(store.totalSelectedItemsCount(), 0)
+        store.cleanSelected(createSnapshot: false)
+        XCTAssertTrue(store.isCleaning)
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        store.reloadTempFilePolicy()
+        XCTAssertNotNil(store.report, "policy invalidation must not blank an active clean")
+        XCTAssertTrue(store.isCleaning)
+        // Re-entry cannot cancel and replace the already-running task.
+        store.cleanSelected(createSnapshot: false)
+        XCTAssertTrue(store.isCleaning)
+        for _ in 0..<600 {
+            if !store.isCleaning { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(store.isCleaning, "the fixture clean did not finish")
+        XCTAssertNil(store.report, "policy changes must discard stale results after cleaning")
+        guard case .cleaned = store.state else { return XCTFail("the original clean result must remain visible") }
+    }
+
 }

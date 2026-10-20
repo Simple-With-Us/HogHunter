@@ -143,7 +143,7 @@ struct HogHunterApp: App {
     var body: some Scene {
         MenuBarExtra(isInserted: .constant(Self.shouldInsertMenuBarExtra)) {
             if store.dockedToMenuBar {
-                HogHunterPanel()
+                HogHunterPanel(isQuickView: true)
                     .environmentObject(store)
             } else {
                 DetachedMenuBarPopover(store: store)
@@ -174,7 +174,7 @@ struct HogHunterApp: App {
                 .environmentObject(store)
         }
 
-        // Storage and Network are tabs of the menu bar panel.  These scenes stay
+        // Storage and Network are homes in the dashboard.  These scenes stay
         // for the Window menu's benefit; nothing in the UI points at them.
         Window("Storage", id: "hoghunter.storage") {
             StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, maintainStore: store.maintain)
@@ -231,7 +231,7 @@ struct DetachedMenuBarPopover: View {
                 .foregroundStyle(.secondary)
             Divider()
             HStack(spacing: 8) {
-                Button("Show Window") {
+                Button("Open Dashboard") {
                     DetachedWindowManager.shared.openDetachedWindow(store: store)
                 }
                 .buttonStyle(.borderedProminent)

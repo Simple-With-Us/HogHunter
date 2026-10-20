@@ -519,7 +519,7 @@ final class HogStore: ObservableObject {
     /// already in flight.
     @discardableResult
     func tick() -> Bool {
-        guard !isSampling else { return false }
+        guard ApplicationRunMode.current.allowsLiveProbes, !isSampling else { return false }
         lastTickAt = Date()
         isSampling = true
         let sampler = self.sampler
@@ -590,7 +590,7 @@ final class HogStore: ObservableObject {
         if tickIndex % Self.recordEvery == 0 {
             record(snapshot.processes, groupKeys: groupKeyByProcess, coreCount: snapshot.pulse.coreCount)
         }
-        if tickIndex % Self.diskRefreshEvery == 0 || diskSpace == nil {
+        if ApplicationRunMode.current.allowsLiveProbes && (tickIndex % Self.diskRefreshEvery == 0 || diskSpace == nil) {
             diskSpace = DiskSpace.current()
         }
         if tickIndex % 60 == 0 {
@@ -1345,6 +1345,25 @@ final class HogStore: ObservableObject {
     func setLoadingSettingsForTest(_ value: Bool) { loadingSettings = value }
     func setSampleInFlightForTest(_ value: Bool) { sampleInFlight.value = value }
     func persistForTest() { persist() }
+
+    #if DEBUG
+    /// Populates actual panel bindings from one synthetic sampler result.
+    /// The test host is the only caller; release builds contain no entry point.
+    func applyLayoutSnapshotForTest(_ snapshot: Snapshot, cpuHistory: [Double], diskSpace: DiskSpace) {
+        guard ApplicationRunMode.current == .unitTests else { return }
+        apply(snapshot)
+        self.diskSpace = diskSpace
+        let values = Array(cpuHistory.suffix(CpuMinuteHistory.count))
+        let currentMinute = Int(floor(snapshot.pulse.sampledAt.timeIntervalSince1970 / 60))
+        var history = CpuMinuteHistory()
+        for (index, value) in values.enumerated() {
+            let minute = currentMinute - values.count + index + 1
+            history.record(percent: value, at: Date(timeIntervalSince1970: Double(minute * 60)))
+        }
+        cpuMinuteHistory = history
+        recentCpuPercents = values
+    }
+    #endif
 
     /// Asks for notification permission the moment alerts are switched on, and
     /// never before.  The Settings path goes through `defaultsChanged`.
