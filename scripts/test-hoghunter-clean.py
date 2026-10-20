@@ -590,7 +590,8 @@ def test_the_old_json_keys_are_still_there(hh):
 
 
 def test_apply_delete_cannot_outlive_the_budget(hh):
-    """find -depth -delete had a fixed 600 s timeout, so one big tree could run ten minutes past the budget."""
+    """find -depth -delete had a fixed 600 s timeout, so one big tree could run ten minutes past the budget.
+    The marker probe that guards the tree is bounded the same way."""
     clock = FakeClock()
     work = Path(tempfile.mkdtemp(prefix="hhclean-test-"))
     try:
@@ -600,7 +601,7 @@ def test_apply_delete_cannot_outlive_the_budget(hh):
         seen = []
 
         def fake_run(cmd, **kw):
-            seen.append(kw.get("timeout"))
+            seen.append((cmd, kw.get("timeout")))
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
         with fake_time(hh, clock), mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
@@ -611,9 +612,13 @@ def test_apply_delete_cannot_outlive_the_budget(hh):
             hh.apply_delete(str(victim))
             clock.now += 19.5
             hh.apply_delete(str(victim))
-        assert seen[0] == 600.0, seen
-        assert seen[1] == 20.0, seen
-        assert seen[2] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
+        # The marker probe comes first and the delete second, and both are
+        # cut to what is left of the budget.
+        deletes = [t for cmd, t in seen if "-delete" in cmd]
+        probes = [t for cmd, t in seen if ".janitor-keep" in cmd]
+        assert deletes == [600.0, 20.0, 5.0], seen
+        assert probes == [30.0, 20.0, 5.0], seen
+        assert deletes[-1] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -1195,6 +1200,65 @@ def test_a_snapshot_that_never_answers_falls_back_to_the_per_path_check(hh):
     _reset_open_snapshot(hh)
     with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("lsof", 180)):
         assert hh.open_handles("/x") == 1, "a look that failed is not an empty room"
+
+
+def test_app_caches_leaves_a_kept_cache_alone(hh):
+    """A `.janitor-keep` marker is the operator's hands-off contract, and this
+    rule deletes whole app-cache trees.  Nothing pinned that gate for this
+    rule, so it could be dropped without a single test failing."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "KeptApp"
+        cache.mkdir(parents=True)
+        (cache / ".janitor-keep").write_text("", encoding="utf-8")
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == [], "a kept cache is not a candidate"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_a_cache_with_a_marker_inside_it_alone(hh):
+    """A marker DEEPER in the tree protects the tree as well.  The rule deletes
+    the whole tree, so a marker inside it would be deleted with the data the
+    operator marked hands off, and the policy says a marked path is
+    ask-first."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "MarkedInside"
+        (cache / "inner").mkdir(parents=True)
+        (cache / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == [], "a marked tree is not a candidate"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_delete_refuses_a_tree_with_a_marker_inside_it(hh):
+    """`apply_delete` is the choke point every delete passes through, so the
+    check lands there and covers every rule, not only the new ones."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-del-"))
+    try:
+        tree = root / "tree"
+        (tree / "inner").mkdir(parents=True)
+        (tree / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
+        (tree / "blob.bin").write_bytes(b"x" * 1024)
+        freed, err = hh.apply_delete(str(tree))
+        assert freed == 0, "nothing was deleted"
+        assert "janitor-keep" in err, err
+        assert tree.exists(), "the tree is still there"
+        assert (tree / "inner" / ".janitor-keep").exists(), "the marker is still there"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_app_caches_finds_an_idle_app_cache(hh):

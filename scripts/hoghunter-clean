@@ -419,7 +419,14 @@ def is_forbidden(path: str) -> bool:
 
 
 def has_keep_sentinel(path: str) -> bool:
-    """`.janitor-keep` anywhere in the subtree means hands off."""
+    """True when a `.janitor-keep` marker sits on this path or on any parent.
+
+    A marker on a parent protects the child, so a whole tree of marked
+    paths is left alone.  A marker DEEPER in the tree is a different
+    question, and `holds_keep_sentinel` answers it: the rules that delete
+    whole trees have to ask it, because deleting the tree would destroy a
+    marker the operator put inside it.
+    """
     p = Path(path)
     if (p / KEEP_SENTINEL).exists():
         return True
@@ -428,6 +435,32 @@ def has_keep_sentinel(path: str) -> bool:
         if (parent / KEEP_SENTINEL).exists():
             return True
     return False
+
+
+def holds_keep_sentinel(path: str, timeout: float) -> bool:
+    """True when a `.janitor-keep` marker sits anywhere under this path.
+
+    The policy says any path with a marker is ask-first, and the rules that
+    delete whole trees would otherwise take the marker with them.  A marker
+    inside the tree protects the tree: the operator marked it hands off, so
+    the engine deletes nothing there.
+
+    The walk is bounded by the caller's timeout and FAILS CLOSED: a probe
+    that cannot answer counts as a marker, because a tree nobody can vouch
+    for is never deleted.  `-name` is the cheapest walk there is (no stat
+    per file), so this costs far less than the `touched_since` probe that
+    already runs per candidate.
+    """
+    try:
+        proc = subprocess.run(
+            ["find", path, "-name", KEEP_SENTINEL, "-print", "-quit"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return True
+    if proc.returncode != 0:
+        return True
+    return bool(proc.stdout.strip())
 
 
 # One system-wide lsof pass answers "is this path in use" for every candidate
@@ -779,6 +812,13 @@ def apply_delete(path: str, known_bytes: int | None = None) -> tuple[int, str]:
         return 0, "forbidden path"
     if has_keep_sentinel(path):
         return 0, f"{KEEP_SENTINEL} sentinel present"
+    # A marker inside the tree protects the tree.  Deleting the tree would
+    # take the marker with it, and the policy says a marked path is
+    # ask-first.  This is the choke point every delete passes through, so
+    # the check lands here and covers every rule, not only the new ones.
+    if p.is_dir() and not p.is_symlink():
+        if holds_keep_sentinel(path, op_timeout(30.0)):
+            return 0, f"{KEEP_SENTINEL} sentinel inside the tree"
     if not p.exists():
         return 0, ""
     before = known_bytes if known_bytes is not None else dir_bytes(path, deadline_cap=_DEADLINE)
@@ -1572,6 +1612,11 @@ def rule_app_caches() -> list[Candidate]:
                     s = str(target)
                     if is_forbidden(s) or has_keep_sentinel(s):
                         continue
+                    # A marker INSIDE the tree protects the tree.  This rule
+                    # deletes whole app-cache trees, so a marker the
+                    # operator put inside one would be deleted with it.
+                    if holds_keep_sentinel(s, scan_op_timeout(60.0)):
+                        continue
                     if any(s.endswith("/" + dp) or s == str(HOME / dp)
                            for dp in _DEV_CACHE_PATHS + _APP_CACHE_KEEP):
                         continue
@@ -1713,6 +1758,10 @@ def rule_agent_state() -> list[Candidate]:
                 return cands
             s = str(target)
             if is_forbidden(s) or has_keep_sentinel(s):
+                continue
+            # A marker INSIDE the tree protects the tree, the same as for
+            # the app-cache rule: this rule deletes whole agent trees.
+            if holds_keep_sentinel(s, scan_op_timeout(60.0)):
                 continue
             # A tree that holds a `.project_root` marker is an agent's working
             # copy of a real project, not scratch.  `~/.gemini/tmp` is named
