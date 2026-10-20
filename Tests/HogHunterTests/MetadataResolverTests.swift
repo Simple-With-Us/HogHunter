@@ -263,4 +263,39 @@ final class MetadataResolverTests: XCTestCase {
         XCTAssertFalse(MetadataResolver.isSafeIconSource(URL(fileURLWithPath: "/Volumes/Unavailable/External.app")))
         XCTAssertFalse(MetadataResolver.isSafeIconSource(URL(fileURLWithPath: "/Applications/../Volumes/Unavailable/External.app")))
     }
+
+    @MainActor
+    func testRecycledPidAtTheSameURLDoesNotReuseAnotherBundleIcon() {
+        let originalImage = NSImage(size: NSSize(width: 16, height: 16))
+        let nextImage = NSImage(size: NSSize(width: 16, height: 16))
+        let url = URL(fileURLWithPath: "/Applications/Shared.app")
+        let original = FakeRunningApp(pid: 995, bundleId: "com.example.Original", name: "Original", policy: .regular, url: url, icon: originalImage)
+        let replacement = FakeRunningApp(pid: 995, bundleId: "com.example.Replacement", name: "Replacement", policy: .regular, url: url, icon: nextImage)
+        var active = [original]
+        let resolver = MetadataResolver(runningApplications: { active }, iconSourceAllowed: { _ in true })
+        resolver.refreshRunningApps()
+        active = [replacement]
+        resolver.refreshRunningApps(force: true)
+        XCTAssertTrue(resolver.icon(bundleId: "com.example.Replacement", path: nil) === nextImage)
+        XCTAssertEqual(replacement.iconReads, 1)
+    }
+
+    @MainActor
+    func testBundleMemoKeepsRecentHistoryAndEvictsItsOldestEntry() {
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        let oldest = FakeRunningApp(pid: 996, bundleId: "com.example.Oldest", name: "Oldest", policy: .regular, url: URL(fileURLWithPath: "/Applications/Oldest.app"), icon: image)
+        var active = [oldest]
+        let resolver = MetadataResolver(runningApplications: { active }, iconSourceAllowed: { _ in true })
+        resolver.refreshRunningApps()
+        active = []
+        resolver.refreshRunningApps()
+        XCTAssertTrue(resolver.icon(bundleId: "com.example.Oldest", path: nil) === image)
+        active = (0..<MetadataResolver.maximumRememberedBundles).map {
+            FakeRunningApp(pid: pid_t(2000 + $0), bundleId: "com.example.New\($0)", name: "New \($0)", policy: .regular, url: URL(fileURLWithPath: "/Applications/New\($0).app"), icon: image)
+        }
+        resolver.refreshRunningApps()
+        XCTAssertNil(resolver.icon(bundleId: "com.example.Oldest", path: nil))
+        XCTAssertEqual(resolver.displayName(bundleId: "com.example.Oldest", fallback: "Stored"), "Stored")
+        XCTAssertTrue(resolver.icon(bundleId: "com.example.New0", path: nil) === image)
+    }
 }
