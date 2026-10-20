@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic process trees only; no GUI or app capture is launched."""
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,18 @@ class BoundedProcessTests(unittest.TestCase):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)
         self.assertEqual(result.returncode, 124)
         self.assertLess(elapsed, 2)
+
+    def test_sigterm_reports_128_plus_signal_and_cleans_up(self):
+        # The Actions runner cancels a step by signalling the process group, so
+        # the supervisor must report 128+signum rather than dying on a traceback.
+        process = subprocess.Popen([sys.executable, str(SUPERVISOR), '--timeout', '30', '--grace', '0.1',
+                                    '--', sys.executable, '-c', 'import time; time.sleep(60)'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1)
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM)
+        self.assertIn(f'exit status: {128 + signal.SIGTERM}', stderr)
 
     def test_successful_parent_does_not_leave_orphan_holding_output(self):
         with tempfile.TemporaryDirectory() as directory:

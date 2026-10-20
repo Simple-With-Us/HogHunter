@@ -20,6 +20,11 @@ def signal_group(group, signum):
         return True
     except ProcessLookupError:
         return False
+    except OSError as error:
+        # EPERM/EINVAL must not abort the cleanup; the caller falls back to the
+        # direct child, which we always own.
+        print(f'Could not signal process group {group}: {error}', file=sys.stderr, flush=True)
+        return False
 
 
 def run(command, timeout, grace=2):
@@ -37,8 +42,9 @@ def run(command, timeout, grace=2):
         except subprocess.TimeoutExpired:
             print('Optional capture exceeded its deadline.', file=sys.stderr, flush=True)
             return 124
-        except Interrupted as interruption:
-            return 128 + interruption.signum
+    except Interrupted as interruption:
+        # Covers the handler-install window too, so a signal there is not a traceback.
+        return 128 + interruption.signum
     finally:
         # Cleanup is required even when the parent already exited successfully:
         # a GUI/helper descendant can still hold the runner's output handles.
@@ -52,7 +58,16 @@ def run(command, timeout, grace=2):
                         break
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                 signal_group(process.pid, signal.SIGKILL)
-            process.wait()
+            else:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            try:
+                process.wait(timeout=max(grace, 5))
+            except subprocess.TimeoutExpired:
+                print('Capture process group did not exit; the runner will reap it.',
+                      file=sys.stderr, flush=True)
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
