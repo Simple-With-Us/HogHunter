@@ -985,13 +985,29 @@ def never_touch_reason(path: str, home_real: str) -> str:
 
 def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     """Filesystem facts that do not need git.  Empty string means pass."""
-    if os.path.realpath(path) != path:
-        return "path resolves somewhere else now"
+    # The path itself must be a plain directory: a symlinked lane could point
+    # anywhere.  A symlinked PARENT is normal and must not refuse the lane:
+    # the fleet keeps its lanes under a per-repository root behind a
+    # symlink, and the doctor reports that spelling without
+    # resolving it.  The old check compared the path with its own realpath,
+    # so every lane on the external drive was refused with "path resolves
+    # somewhere else now" and could never be retired.  The lane's identity is
+    # proved by the repository it belongs to instead (see _linked_facts and
+    # the parent-repo check in recheck_for_removal).
     if os.path.islink(path) or not os.path.isdir(path):
         return "path is not a plain directory"
     if not path.startswith(ctx.home_real + os.sep):
         return "outside the home directory"
     why = never_touch_reason(path, ctx.home_real)
+    if why:
+        return why
+    # The spelling above proves nothing about where the lane really lives: a symlinked parent is
+    # allowed now, so a lane root can point at a protected home folder, and the old
+    # realpath check no longer refuses it.  git worktree remove follows the link and deletes the
+    # resolved directory, so the never-touch rule has to be read against the resolved path too.
+    # A lane on the external disk resolves outside home and is unaffected: the rule names folders
+    # under home, and /Volumes is not one of them.
+    why = never_touch_reason(os.path.realpath(path), ctx.home_real)
     if why:
         return why
     git_entry = os.path.join(path, ".git")
@@ -1006,11 +1022,18 @@ def _live_processes(path: str, ctx: LaneContext) -> str:
     cwds, err = ctx.cwd_paths()
     if cwds is None:
         return f"process check failed: {err}"
-    folded = path.casefold()
+    # lsof reports each working directory as the kernel sees it, which is the
+    # physical path.  A lane behind a symlinked parent (the external-disk lanes
+    # root) is spelled with the symlink here, so its resolved path has to be
+    # compared as well or a process sitting in an external lane goes unseen.
+    # The lane itself is never a symlink (_live_basics refuses that), so this
+    # only ever resolves the parent chain.
+    folded = {path.casefold(), os.path.realpath(path).casefold()}
     for cwd in cwds:
         low = cwd.casefold()
-        if low == folded or low.startswith(folded + os.sep):
-            return "a process has it as its working directory"
+        for one in folded:
+            if low == one or low.startswith(one + os.sep):
+                return "a process has it as its working directory"
     busy, reason = path_process_state(ctx.runner, path)
     return reason if busy else ""
 
@@ -1043,6 +1066,33 @@ def _linked_facts(path: str, co: dict, ctx: LaneContext):
     if not os.path.isdir(os.path.join(repo_root, ".git")) or os.path.realpath(os.path.join(repo_root, ".git")) != common:
         return "", "cannot find the main repository to run the removal from"
     return repo_root, ""
+
+
+def _reported_repo(co: dict) -> str:
+    """The repository the doctor recorded for this lane, or "" when it recorded none."""
+    value = co.get("parent_repo")
+    return value if isinstance(value, str) else ""
+
+
+def _repo_matches_report(repo_root: str, co: dict) -> str:
+    """The lane must still belong to the repository the doctor saw.  Returns a refusal, or "" when it does.
+
+    Every step that touches a lane makes this check: retirement removes the lane itself, and clearing
+    regenerable folders deletes inside it.  Both use it, so a lane that has moved to another repository
+    is left alone by either.  The doctor records that repository as `parent_repo` on every row it
+    reports (the 2026-10-19 report carried it on 798 of 798 rows).  When it is not there - an older
+    doctor, whose report the schema does not yet require it from - there is nothing to confirm against
+    and nothing is refused here."""
+    expected_repo = _reported_repo(co)
+    if not expected_repo:
+        return ""
+    # Case-insensitively, like every other path comparison here: the two
+    # spellings are recorded independently (Git's common dir against the
+    # doctor's parent repository) and the filesystem is case-insensitive,
+    # so a case-only difference is the same directory.
+    if os.path.realpath(repo_root).casefold() != os.path.realpath(expected_repo).casefold():
+        return "it now belongs to a different repository"
+    return ""
 
 
 def _head_matches_report(path: str, co: dict, ctx: LaneContext) -> str:
@@ -1161,6 +1211,21 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     repo_root, why = _linked_facts(path, co, ctx)
     if why:
         return "", why
+    # The lane must still belong to the repository the doctor saw.  This is
+    # what the old "path resolves somewhere else" check really meant, and it
+    # survives the fleet's symlinked lanes root: where the lane lives on disk
+    # says nothing, which repository it belongs to says everything.
+    #
+    # Where the report does not name the repository (_repo_matches_report),
+    # refusing every lane would make retirement a no-op for ordinary lanes
+    # too.  So the fallback is the behaviour this change replaced: a lane
+    # whose own spelling resolves somewhere else cannot be confirmed and is
+    # refused.
+    why = _repo_matches_report(repo_root, co)
+    if why:
+        return "", why
+    if not _reported_repo(co) and os.path.realpath(path) != os.path.normpath(path):
+        return "", "the doctor did not say which repository this lane belongs to"
     why = _head_matches_report(path, co, ctx)
     if why:
         return "", why
@@ -1325,6 +1390,11 @@ def evaluate_dependency_lane(path: str, co: dict, ctx: LaneContext) -> tuple:
     repo_root, why = _linked_facts(path, co, ctx)
     if why:
         return None, why
+    # Clearing folders is a delete too, so it makes the same repository check
+    # retirement makes, before anything in the lane is touched.
+    why = _repo_matches_report(repo_root, co)
+    if why:
+        return None, why
     res, err = _git(ctx.runner, path, ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"])
     if res is None:
         return None, f"status: {err}"
@@ -1367,8 +1437,13 @@ def safe_target_path(lane: str, rel: str) -> str:
     full = os.path.join(lane, rel)
     if os.path.islink(full) or not os.path.isdir(full):
         return ""
+    # Containment is decided on the resolved paths, because a lane behind a symlinked parent (the
+    # external-disk lanes root) has a resolved target that never matches its spelling, and spelling
+    # equality would refuse every target in it.  The target must still be a plain folder, and must
+    # still resolve inside the resolved lane, so a link out of the lane is refused as before.
+    real_lane = os.path.realpath(lane)
     real = os.path.realpath(full)
-    if real != os.path.normpath(full) or not real.startswith(lane + os.sep):
+    if not real.startswith(real_lane + os.sep):
         return ""
     return real
 
