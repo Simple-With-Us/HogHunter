@@ -53,7 +53,7 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedNetwork {
-                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: selectedTab == .network)
+                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) }, embeddedInPanel: true, isTabActive: selectedTab == .network)
                         // Both lines are load-bearing.  A tab's own content
                         // decides its ideal width, and a long unwrapped string
                         // anywhere in it (a hostname list, a footer sentence)

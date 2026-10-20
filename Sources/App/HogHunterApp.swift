@@ -184,7 +184,8 @@ struct HogHunterApp: App {
         Window("Network", id: "hoghunter.network") {
             NetworkView(
                 bundleResolver: { pid in store.lookup(pid: pid) },
-                bandwidth: store.bandwidth
+                bandwidth: store.bandwidth,
+                cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) }
             )
             .environmentObject(store)
         }

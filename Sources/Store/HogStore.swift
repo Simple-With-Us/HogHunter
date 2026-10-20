@@ -52,6 +52,11 @@ final class HogStore: ObservableObject {
         resolver.lookup(pid)
     }
 
+    /// Returns an icon already captured by the process sampler, without opening a bundle.
+    func cachedIcon(bundleIdentifier: String?) -> NSImage? {
+        resolver.icon(bundleId: bundleIdentifier, path: nil)
+    }
+
     private var visiblePanelTokens = Set<UUID>()
 
     /// Set by the panel.  Metadata resolution beyond the menu bar's top hog and
