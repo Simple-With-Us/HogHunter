@@ -29,6 +29,7 @@ struct HogHunterPanel: View {
     @State private var driveReadAttempted = false
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage = false
+    @State private var hasVisitedNetwork = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
     private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
@@ -40,6 +41,7 @@ struct HogHunterPanel: View {
         _mountedDrives = ObservedObject(wrappedValue: mountedDrives ?? DashboardMountedDrives.shared)
         _selectedTab = State(initialValue: initialTab)
         _hasVisitedStorage = State(initialValue: initialTab == .storage)
+        _hasVisitedNetwork = State(initialValue: initialTab == .network)
     }
 
     private enum HostScope: String, CaseIterable, Identifiable {
@@ -109,13 +111,8 @@ struct HogHunterPanel: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     } else if selectedTab == .maintenance && hostScope == .mac {
                         MaintainView(store: store.maintain, showHeader: true)
-                    } else if selectedTab == .network && hostScope == .mac {
-                        NetworkView(bundleResolver: { pid in store.lookup(pid: pid) },
-                                    bandwidth: store.bandwidth,
-                                    cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) },
-                                    embeddedInPanel: true,
-                                    isTabActive: true)
-                    } else if selectedTab != .storage || hostScope != .mac {
+                    } else if (selectedTab != .network || hostScope != .mac)
+                                && (selectedTab != .storage || hostScope != .mac) {
                         ScrollView {
                             dashboardPage
                                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -151,6 +148,21 @@ struct HogHunterPanel: View {
                         .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage && hostScope == .mac)
                         .accessibilityHidden(selectedTab != .storage || hostScope != .mac)
+                    }
+                    if hasVisitedNetwork {
+                        // Kept mounted for the same reason as Storage: NetworkView
+                        // owns a NetworkStore that scans with lsof, and rebuilding it
+                        // on every tab switch would drop the snapshot, the sort order,
+                        // and restart the scan.
+                        NetworkView(bundleResolver: { pid in store.lookup(pid: pid) },
+                                    bandwidth: store.bandwidth,
+                                    cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) },
+                                    embeddedInPanel: true,
+                                    isTabActive: selectedTab == .network && hostScope == .mac)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .opacity(selectedTab == .network && hostScope == .mac ? 1 : 0)
+                            .allowsHitTesting(selectedTab == .network && hostScope == .mac)
+                            .accessibilityHidden(selectedTab != .network || hostScope != .mac)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -484,6 +496,7 @@ struct HogHunterPanel: View {
         }
         .onChange(of: selectedTab) { tab in
             if tab == .storage { hasVisitedStorage = true }
+            if tab == .network { hasVisitedNetwork = true }
         }
         .onAppear {
             store.registerPanelVisible(panelInstanceId)
