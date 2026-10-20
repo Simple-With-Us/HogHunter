@@ -85,8 +85,9 @@ class BoundedProcessTests(unittest.TestCase):
                 # shared stdlib time/subprocess modules would install this test's
                 # fake clock and Popen process-wide for anything else running.
                 fake_time = types.SimpleNamespace(monotonic=monotonic, sleep=sleep)
+                popen = mock.Mock(return_value=process)
                 fake_subprocess = types.SimpleNamespace(
-                    Popen=mock.Mock(return_value=process),
+                    Popen=popen,
                     TimeoutExpired=subprocess.TimeoutExpired)
                 with mock.patch.object(CAPTURE, 'subprocess', fake_subprocess), \
                      mock.patch.object(CAPTURE, 'time', fake_time), \
@@ -97,6 +98,9 @@ class BoundedProcessTests(unittest.TestCase):
                     events.attach_mock(process.kill, 'kill')
                     events.attach_mock(process.wait, 'wait')
                     self.assertEqual(CAPTURE.run(['synthetic'], 1, 0.1), 0)
+                # The group cleanup signals os.killpg(process.pid, ...), which is
+                # only a valid pgid while the child leads its own session.
+                popen.assert_called_once_with(['synthetic'], start_new_session=True)
                 # A group that refuses SIGTERM skips the grace block entirely, so
                 # assert each branch exactly: a regression that always waits the
                 # grace window must not stay green behind a <= bound.
