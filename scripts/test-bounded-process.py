@@ -23,13 +23,13 @@ class BoundedProcessTests(unittest.TestCase):
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(SUPERVISOR), '--timeout', str(timeout),
                                  '--grace', '0.1', '--', sys.executable, '-c', source],
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, timeout=5)
         return result, time.monotonic() - started
 
     def test_quick_completion_does_not_wait_for_deadline(self):
         result, elapsed = self.invoke('raise SystemExit(7)', timeout=20)
         self.assertEqual(result.returncode, 7)
-        self.assertLess(elapsed, 10)
+        self.assertLess(elapsed, 2)
         self.assertIn('exit status: 7', result.stderr)
 
     def test_leader_remains_unreaped_until_group_cleanup(self):
@@ -187,7 +187,7 @@ class BoundedProcessTests(unittest.TestCase):
     def test_timeout_kills_term_resistant_process(self):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)
         self.assertEqual(result.returncode, 124)
-        self.assertLess(elapsed, 10)
+        self.assertLess(elapsed, 2)
 
     def test_sigterm_reports_128_plus_signal_and_cleans_up(self):
         # The Actions runner cancels a step by signalling the process group, so
@@ -301,7 +301,7 @@ class BoundedProcessTests(unittest.TestCase):
                       '\nwhile not p.exists(): time.sleep(0.01)\n')
             result, elapsed = self.invoke(parent)
             self.assertEqual(result.returncode, 0)
-            self.assertLess(elapsed, 10)
+            self.assertLess(elapsed, 2)
             pid = int(pidfile.read_text())
             # A killed orphan can briefly remain a zombie awaiting its adopter.
             status = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
