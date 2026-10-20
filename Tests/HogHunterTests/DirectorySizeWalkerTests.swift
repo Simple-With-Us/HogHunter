@@ -63,6 +63,14 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertEqual(result.bytes, try paths.reduce(Int64(0)) { try $0 + allocated($1.path) })
     }
 
+    func testParentCoverageDoesNotHideExplicitMountedDescendant() {
+        let roots: [String: dev_t] = ["/external/parent": 10]
+        XCTAssertTrue(DirectorySizeWalker.isCovered(path: "/external/parent/child", device: 10, roots: roots))
+        XCTAssertFalse(DirectorySizeWalker.isCovered(path: "/external/parent/mounted-child", device: 11, roots: roots),
+                       "A parent walk stays on device 10, so an explicit device 11 root must still be walked")
+        XCTAssertFalse(DirectorySizeWalker.isCovered(path: "/external/parent-other", device: 10, roots: roots))
+    }
+
     func testOverlappingExternalRootPartitionsCountExtraParentDataOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

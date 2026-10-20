@@ -39,7 +39,7 @@ final class DirectorySizeWalker {
     private var frames: [Frame] = []
     private var hardLinks: [dev_t: Set<ino_t>] = [:]
     private var hardLinkCount = 0
-    private var countedRoots = Set<String>()
+    private var countedRoots: [String: dev_t] = [:]
     private var initialized = false
     private let includesLaneLinks: Bool
 
@@ -55,7 +55,6 @@ final class DirectorySizeWalker {
             initialized = true
             // Resolution can touch a slow volume, so it belongs here, never in a view initializer.
             observation.path = URL(fileURLWithPath: observation.path).resolvingSymlinksInPath().standardizedFileURL.path
-            countedRoots.insert(observation.path)
             enter(observation.path, expectedDevice: nil, layoutDepth: includesLaneLinks ? 0 : nil, isRoot: true)
         }
         var processed = 0
@@ -89,16 +88,14 @@ final class DirectorySizeWalker {
                 if kind == S_IFLNK, let depth = frame.layoutDepth, depth < 2 {
                     let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
                     // Only explicit layout links may cross a volume.  Repository symlinks stay leaves.
-                    if target != observation.path, !target.hasPrefix(observation.path + "/"),
-                       !observation.path.hasPrefix(target + "/") {
+                    if target != observation.path, !observation.path.hasPrefix(target + "/") {
                         var targetInfo = stat()
                         if lstat(target, &targetInfo) == 0 {
                             if targetInfo.st_mode & S_IFMT == S_IFDIR,
-                               !countedRoots.contains(where: { target == $0 || target.hasPrefix($0 + "/") }) {
+                               !Self.isCovered(path: target, device: targetInfo.st_dev, roots: countedRoots) {
                                 // Keep earlier child partitions when a broader root appears later.
                                 // Walking that parent skips those boundaries, counting only its extra data.
                                 guard countedRoots.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
-                                countedRoots.insert(target)
                                 enter(target, expectedDevice: nil, layoutDepth: nil, info: targetInfo, isRoot: true)
                             }
                         } else if errno != ENOENT {
@@ -112,13 +109,22 @@ final class DirectorySizeWalker {
         return observation
     }
 
+    /// A same-device parent covers descendants; a nested mounted volume is excluded
+    /// by normal traversal and must still be accepted through its explicit lane link.
+    static func isCovered(path: String, device: dev_t, roots: [String: dev_t]) -> Bool {
+        roots.contains { root, rootDevice in
+            device == rootDevice && (path == root || path.hasPrefix(root + "/"))
+        }
+    }
+
     private func enter(_ path: String, expectedDevice: dev_t?, layoutDepth: Int?, info supplied: stat? = nil,
                        isRoot: Bool = false) {
-        guard isRoot || !countedRoots.contains(path) else { return }
+        guard isRoot || countedRoots[path] == nil else { return }
         var info = supplied ?? stat()
         if supplied == nil, lstat(path, &info) != 0 { fail("Directory is unavailable (\(errno))"); return }
         guard info.st_mode & S_IFMT == S_IFDIR else { fail("Path is not a directory"); return }
         guard expectedDevice == nil || expectedDevice == info.st_dev else { return }
+        if isRoot { countedRoots[path] = info.st_dev }
         let inode = Inode(device: info.st_dev, number: info.st_ino)
         guard !frames.contains(where: { $0.inode == inode }) else { fail("Directory cycle detected"); return }
         guard frames.count < 64 else { fail("Directory depth safety limit reached; last complete size retained"); return }
