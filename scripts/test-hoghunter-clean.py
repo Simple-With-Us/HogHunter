@@ -463,7 +463,7 @@ def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
     """
     tree = ast.parse(ENGINE.read_text())
     helpers = {"probe_timeout", "op_timeout", "scan_op_timeout",
-               "budget_left", "scan_budget_left"}
+               "apply_probe_timeout", "budget_left", "scan_budget_left"}
 
     def mentions_budget(node):
         for n in ast.walk(node):
@@ -866,8 +866,13 @@ def test_apply_delete_cannot_outlive_the_budget(hh):
         deletes = [t for cmd, t in seen if "-delete" in cmd]
         probes = [t for cmd, t in seen if ".janitor-keep" in cmd]
         assert deletes == [600.0, 20.0, 5.0], seen
-        assert probes == [30.0, 20.0, 5.0], seen
+        # The probe walks the SAME tree the delete walks, so it is a second
+        # full walk of it.  It gets at most a tenth of what is left of the
+        # budget, never the whole thing: 30 s of guard per candidate could
+        # eat the delete reserve and free nothing.
+        assert probes == [30.0, 2.0, 1.0], seen
         assert deletes[-1] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
+        assert probes[-1] >= 1.0, "the probe gets a floor, so it can still answer"
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -1531,13 +1536,129 @@ def test_a_marker_inside_a_tree_is_matched_case_insensitively(hh):
     try:
         (root / "inner").mkdir()
         (root / "inner" / ".JANITOR-KEEP").write_text("", encoding="utf-8")
-        assert hh.holds_keep_sentinel(str(root), 30.0) is True
+        verdict = hh.holds_keep_sentinel(str(root), 30.0)
+        assert verdict.found is True, verdict
+        assert verdict.known is True, verdict
         # ...and a tree with no marker of any casing is still unmarked, so the
         # walk did not turn into "always true".
         (root / "inner" / ".JANITOR-KEEP").unlink()
-        assert hh.holds_keep_sentinel(str(root), 30.0) is False
+        verdict = hh.holds_keep_sentinel(str(root), 30.0)
+        assert verdict.found is False, verdict
+        assert verdict.known is True, verdict
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_failed_marker_probe_is_not_a_marker(hh):
+    """A probe that cannot answer is NOT the same as a probe that found a
+    marker, and reading find's EXIT CODE as the answer is how an ordinary
+    unreadable cache directory turned into a permanent "the operator marked
+    this" block that recurred every run and reclaimed nothing.
+
+    Measured on this Mac: 1247 real candidate trees, none exited nonzero, so
+    the false positive is latent rather than active -- but the exit code is
+    not a reliable answer and the report must not claim a marker that was
+    never found.
+    """
+    def verdict_for(rc, out="", err=""):
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], rc, out, err)):
+            return hh.holds_keep_sentinel("/x", 30.0)
+
+    # find exits nonzero when it cannot read a subdirectory, and it still
+    # prints every marker it did find.  The OUTPUT is the answer.
+    v = verdict_for(1, "", "find: /x/inner: Permission denied")
+    assert v.found is False, v
+    assert v.known is True, v
+
+    # A marker printed despite the nonzero exit is a marker.
+    v = verdict_for(1, "/x/inner/.janitor-keep\n", "find: /x/inner: Permission denied")
+    assert v.found is True, v
+    assert v.known is True, v
+
+    # A clean walk with no marker is a clean answer.
+    v = verdict_for(0, "")
+    assert v.found is False and v.known is True, v
+
+    # A walk that failed for a reason OTHER than an unreadable subdirectory
+    # is unknown, not a marker and not a clear answer.
+    v = verdict_for(2, "", "find: illegal option")
+    assert v.found is False, v
+    assert v.known is False, v
+    assert v.reason, v
+
+    # A timeout is unknown too.
+    with mock.patch.object(hh.subprocess, "run",
+                           side_effect=subprocess.TimeoutExpired("find", 30)):
+        v = hh.holds_keep_sentinel("/x", 30.0)
+    assert v.found is False, v
+    assert v.known is False, v
+    assert "timed out" in v.reason, v
+
+
+def test_an_unreadable_subdirectory_is_not_a_marker(hh):
+    """The real thing, not a mock: a tree with an unreadable subdirectory and
+    no marker anywhere.  find exits nonzero and prints nothing, and the
+    verdict has to be "no marker" -- the unreadable parts are unreadable to
+    the delete as well, so a marker inside one of them survives the delete
+    instead of being taken with it."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-perm-"))
+    closed = root / "closed"
+    try:
+        (root / "open").mkdir()
+        (root / "open" / "f.txt").write_text("x")
+        closed.mkdir()
+        (closed / "hidden").write_text("y")
+        os.chmod(closed, 0o000)
+        verdict = hh.holds_keep_sentinel(str(root), 30.0)
+        assert verdict.found is False, "an unreadable subdirectory is not a marker"
+        assert verdict.known is True, verdict
+    finally:
+        try:
+            os.chmod(closed, 0o755)
+        except OSError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_delete_says_the_probe_failed_and_not_that_the_operator_marked_it(hh):
+    """The report has to tell the two apart.  A blocked tree that was never
+    marked must not be counted against the operator's marker."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-fail-"))
+    try:
+        tree = work / "tree"
+        tree.mkdir()
+        (tree / "f").write_text("x")
+        with mock.patch.object(hh, "holds_keep_sentinel",
+                               return_value=hh.MarkerVerdict(False, False, "probe timed out")):
+            freed, err = hh.apply_delete(str(tree))
+        assert freed == 0, freed
+        assert "probe failed" in err, err
+        assert "sentinel" not in err, err
+        assert tree.exists(), "an unprovable tree is never deleted"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_the_apply_phase_does_not_walk_the_tree_again(hh):
+    """The scan already asked whether the tree holds a marker, and the delete
+    walks the tree anyway.  Asking again is a second full walk of the same
+    tree -- measured at up to 5.99 s on one real cache tree -- so the verdict
+    is carried on the candidate."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-carry-"))
+    try:
+        tree = work / "tree"
+        tree.mkdir()
+        (tree / "f").write_text("x")
+        with mock.patch.object(hh, "holds_keep_sentinel",
+                               side_effect=AssertionError("walked the tree twice")) as probe:
+            cand = hh.Candidate(category="app-caches", path=str(tree), bytes=10,
+                                reason="r", keep_verdict=hh.MarkerVerdict(False, True, ""))
+            hh.apply_candidate(cand)
+        assert probe.call_count == 0, "the scan verdict was carried, so no second walk"
+        assert not tree.exists(), "the delete still happened"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def test_the_delete_refuses_a_tree_with_a_marker_inside_it(hh):

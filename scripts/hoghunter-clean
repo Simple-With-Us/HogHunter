@@ -44,7 +44,7 @@ import sys
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, NamedTuple, Sequence
 
 # --------------------------------------------------------------------------
 # Constants and machine facts
@@ -303,6 +303,10 @@ class Candidate:
     detail: str = ""
     applied: bool = False
     error: str = ""
+    # The marker probe the SCAN already ran for this tree, if any.  It is
+    # carried so the apply phase does not walk the same tree a second time
+    # to ask the same question; the delete walks it anyway.
+    keep_verdict: object = field(default=None, compare=False, repr=False)
 
     @property
     def mib(self) -> float:
@@ -310,6 +314,7 @@ class Candidate:
 
     def as_dict(self) -> dict:
         d = asdict(self)
+        d.pop("keep_verdict", None)
         d["mib"] = round(self.mib, 1)
         return d
 
@@ -480,7 +485,22 @@ def has_keep_sentinel(path: str) -> bool:
     return False
 
 
-def holds_keep_sentinel(path: str, timeout: float) -> bool:
+class MarkerVerdict(NamedTuple):
+    """The answer to "is there a `.janitor-keep` marker under this path?".
+
+    Three answers, not two.  A probe that cannot answer is NOT the same as a
+    probe that found a marker, and the report has to say which one happened:
+
+    found   a marker was printed by the walk
+    known   the walk saw everything it needed to answer
+    reason  why it could not answer, when known is False
+    """
+    found: bool
+    known: bool
+    reason: str = ""
+
+
+def holds_keep_sentinel(path: str, timeout: float) -> MarkerVerdict:
     """True when a `.janitor-keep` marker sits anywhere under this path.
 
     The policy says any path with a marker is ask-first, and the rules that
@@ -488,11 +508,9 @@ def holds_keep_sentinel(path: str, timeout: float) -> bool:
     inside the tree protects the tree: the operator marked it hands off, so
     the engine deletes nothing there.
 
-    The walk is bounded by the caller's timeout and FAILS CLOSED: a probe
-    that cannot answer counts as a marker, because a tree nobody can vouch
-    for is never deleted.  `-iname` is the cheapest walk there is (no stat
-    per file), so this costs far less than the `touched_since` probe that
-    already runs per candidate.
+    The walk is bounded by the caller's timeout.  `-iname` is the cheapest
+    walk there is (no stat per file), so this costs far less than the
+    `touched_since` probe that already runs per candidate.
 
     `-iname`, not `-name`: `find -name` is case-sensitive while the sibling
     `has_keep_sentinel` resolves the same marker with `Path.exists()`, which
@@ -500,17 +518,58 @@ def holds_keep_sentinel(path: str, timeout: float) -> bool:
     `-name` a marker the operator spelled `.JANITOR-KEEP` was honored at a
     tree root but invisible inside one, and the walk deleted the tree and the
     marker together.  Both probes must recognize exactly the same markers.
+
+    WHAT COUNTS AS A MARKER.  The OUTPUT of the walk is the answer, not its
+    exit code.  `find` exits nonzero when it cannot read a subdirectory, and
+    it still prints every marker it did find, so a nonzero exit with empty
+    output means "no marker in what I could read", not "marker present".
+    Reading it the other way turned an ordinary unreadable cache directory
+    into a permanent "the operator marked this" block that recurred every
+    run and reclaimed nothing -- the exact failure this work exists to
+    remove.  The unreadable parts are unreadable to the delete as well, so
+    a marker inside one of them survives the delete instead of being taken
+    with it.
+
+    A probe that could not answer at all -- a timeout, or `find` failing to
+    run -- is reported as unknown, and an unknown tree is never deleted.
     """
     try:
         proc = subprocess.run(
             ["find", path, "-iname", KEEP_SENTINEL, "-print", "-quit"],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        return True
-    if proc.returncode != 0:
-        return True
-    return bool(proc.stdout.strip())
+    except subprocess.TimeoutExpired:
+        return MarkerVerdict(False, False, "probe timed out")
+    except (OSError, ValueError) as exc:
+        return MarkerVerdict(False, False, f"probe failed to run: {type(exc).__name__}")
+    if proc.stdout.strip():
+        # A marker was printed.  That is definitive whatever find's exit
+        # code says.
+        return MarkerVerdict(True, True, "")
+    if proc.returncode == 0:
+        return MarkerVerdict(False, True, "")
+    err = (proc.stderr or "").strip()
+    if "Permission denied" in err:
+        # The walk saw everything it could and found no marker in it.
+        return MarkerVerdict(False, True, "")
+    if not err and proc.returncode == 1:
+        # The path itself is gone.  There is nothing to mark and nothing to
+        # delete.
+        return MarkerVerdict(False, True, "")
+    return MarkerVerdict(False, False, f"probe could not read the tree: {err[:120]}")
+
+
+def apply_probe_timeout() -> float:
+    """The timeout for the apply-phase marker probe.
+
+    The probe walks the same tree the delete walks, so it is a second full
+    walk of that tree -- measured at up to 5.99 s on one real cache tree.
+    It must never be able to eat the delete reserve: it gets at most a tenth
+    of what is left of the budget, and at least a second so a probe can
+    still answer.  Without the cap, a handful of heavy candidates could
+    each spend 30 s of the reserve and free nothing.
+    """
+    return max(1.0, min(30.0, budget_left() * 0.1))
 
 
 # One system-wide lsof pass answers "is this path in use" for every candidate
@@ -852,25 +911,42 @@ def dir_bytes(path: str, max_depth: int = 8, deadline_cap: float | None = None) 
 # result is verified against a fresh df by the caller, never the exit code.
 # --------------------------------------------------------------------------
 
-def apply_delete(path: str, known_bytes: int | None = None) -> tuple[int, str]:
+def apply_delete(path: str, known_bytes: int | None = None,
+                 keep_verdict: object = None) -> tuple[int, str]:
     """Delete a file or tree for real.  Returns (bytes_freed, error).
 
     known_bytes is the size the scan already measured; passing it spares a second walk of a big tree.  The
-    delete never outlives the run's budget by more than a few seconds."""
+    delete never outlives the run's budget by more than a few seconds.
+
+    keep_verdict is the marker probe the SCAN already ran for this tree.  It is
+    carried so the apply phase does not walk the same tree a second time to
+    ask the same question -- the delete walks it anyway, and the probe is
+    measured at up to 5.99 s on a real cache tree.  A rule that did not probe
+    at scan time gets the probe here, at the choke point every delete passes
+    through, with a timeout capped to a tenth of what is left of the budget
+    so the guard cannot eat the delete reserve."""
     p = Path(path)
     if is_forbidden(path):
         return 0, "forbidden path"
     if has_keep_sentinel(path):
         return 0, f"{KEEP_SENTINEL} sentinel present"
+    if not p.exists():
+        return 0, ""
     # A marker inside the tree protects the tree.  Deleting the tree would
     # take the marker with it, and the policy says a marked path is
     # ask-first.  This is the choke point every delete passes through, so
     # the check lands here and covers every rule, not only the new ones.
     if p.is_dir() and not p.is_symlink():
-        if holds_keep_sentinel(path, op_timeout(30.0)):
+        verdict = keep_verdict
+        if verdict is None:
+            verdict = holds_keep_sentinel(path, apply_probe_timeout())
+        if verdict.found:
             return 0, f"{KEEP_SENTINEL} sentinel inside the tree"
-    if not p.exists():
-        return 0, ""
+        if not verdict.known:
+            # The probe could not answer.  A tree nobody can vouch for is
+            # never deleted, and the reason says the probe failed rather
+            # than that the operator marked it.
+            return 0, f"{KEEP_SENTINEL} probe failed: {verdict.reason}"
     before = known_bytes if known_bytes is not None else dir_bytes(path, deadline_cap=_DEADLINE)
     try:
         if p.is_dir() and not p.is_symlink():
@@ -1682,7 +1758,8 @@ def rule_app_caches() -> list[Candidate]:
                     # A marker INSIDE the tree protects the tree.  This rule
                     # deletes whole app-cache trees, so a marker the
                     # operator put inside one would be deleted with it.
-                    if holds_keep_sentinel(s, probe_timeout(60.0)):
+                    verdict = holds_keep_sentinel(s, probe_timeout(60.0))
+                    if verdict.found or not verdict.known:
                         continue
                     if newest_file_age_min(s) < IDLE_MIN_OK:
                         continue
@@ -1702,6 +1779,9 @@ def rule_app_caches() -> list[Candidate]:
                     cands.append(Candidate(
                         category="app-caches", path=s, bytes=size,
                         reason=f"{what}, idle, no open handles",
+                        # The scan already asked whether this tree holds a
+                        # marker, so the apply phase does not walk it again.
+                        keep_verdict=verdict,
                     ))
             except OSError as exc:
                 # One unreadable directory must not cost the whole rule.  The
@@ -1825,7 +1905,8 @@ def rule_agent_state() -> list[Candidate]:
                 continue
             # A marker INSIDE the tree protects the tree, the same as for
             # the app-cache rule: this rule deletes whole agent trees.
-            if holds_keep_sentinel(s, probe_timeout(60.0)):
+            verdict = holds_keep_sentinel(s, probe_timeout(60.0))
+            if verdict.found or not verdict.known:
                 continue
             # A tree that holds a `.project_root` marker is an agent's working
             # copy of a real project, not scratch.  `~/.gemini/tmp` is named
@@ -1853,6 +1934,9 @@ def rule_agent_state() -> list[Candidate]:
             cands.append(Candidate(
                 category="agent-state", path=s, bytes=size,
                 reason="agent transient state, idle, no open handles",
+                # The scan already asked whether this tree holds a marker,
+                # so the apply phase does not walk it again.
+                keep_verdict=verdict,
             ))
     # The agent session transcripts are Jay's history, not cache.  Report them.
     for name in _AGENT_HOMES:
@@ -2066,7 +2150,8 @@ def apply_candidate(c: Candidate) -> None:
         return
     try:
         if c.op == "delete":
-            freed, err = apply_delete(c.path, known_bytes=c.bytes)
+            freed, err = apply_delete(c.path, known_bytes=c.bytes,
+                                      keep_verdict=c.keep_verdict)
         elif c.op == "truncate":
             keep = _KEEP_MIB_RE.search(c.detail or "")
             freed, err = apply_truncate(c.path, keep_mib=int(keep.group(1)) if keep else 16)
