@@ -60,8 +60,18 @@ final class DiskCleanerStore: ObservableObject {
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {
         let updated = CleanerExclusions.load(from: exclusionsDefaults)
-        if updated != exclusions && manualScanOnly { discardResults() }
+        // A clean in flight is already running against the items the report
+        // held, so dropping it here would blank the page mid-clean.
+        if updated != exclusions && manualScanOnly && !isCleaning { discardResults() }
         exclusions = updated
+    }
+
+    /// Takes the stored exclusions without invalidating the results on
+    /// screen.  `cleanSelected` uses this: it has already committed to the
+    /// items it captured, so the fresh exclusions go to `clean`, which
+    /// re-filters, and the report stays up for the cleanup history.
+    private func loadExclusionsKeepingResults() {
+        exclusions = CleanerExclusions.load(from: exclusionsDefaults)
     }
 
     func toggleCategoryExclusion(_ category: CleanCategory) {
@@ -346,7 +356,8 @@ final class DiskCleanerStore: ObservableObject {
         // The scan that produced these items may be older than an edit made
         // from the phone or Settings.  `clean` re-filters against whatever it
         // is handed, so hand it the stored value, not the launch-time copy.
-        reloadExclusions()
+        // The results stay: this clean is already running against them.
+        loadExclusionsKeepingResults()
         let activeExclusions = exclusions
         let totalItems = max(1, itemsToClean.count)
         state = .cleaning(progress: 0, currentItem: "Preparing…")

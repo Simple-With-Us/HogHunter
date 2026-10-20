@@ -11,7 +11,7 @@ import XCTest
 // out of sight) and the bottom (the last Recent Runs row).  Nothing here launches the real script: the store
 // reads files in a temporary folder and takes a launcher that fails the test if it is called.
 //
-// Set `TEST_RUNNER_HOGHUNTER_RENDER_DIR` to a folder when running `xcodebuild test` to also write PNGs of the
+// Set `HOGHUNTER_RENDER_DIR` to a folder when running `xcodebuild test` to also write PNGs of the
 // tab as the panel and the Storage window show it.  With it unset the tests write nothing.
 
 @MainActor
