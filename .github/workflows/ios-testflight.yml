@@ -339,7 +339,9 @@ jobs:
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.
       - name: Sync standing TestFlight testers
-        if: success() && steps.gate.outputs.should_ship == '1'
+        # Export-only runs archive without touching remote state: no group or
+        # tester mutations either (Sentry review on #184).
+        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
         continue-on-error: true
         env:
           ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
