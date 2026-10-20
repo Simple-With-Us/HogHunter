@@ -12,6 +12,7 @@ The Vacuum can now retire a lane that sits behind a symlinked parent (HH-166):
 - A process sitting in such a lane went unseen, because the working-directory check compared the path as spelled with the physical paths the system reports.
 - The never-touch rule and the folder containment check are now read on the resolved path, so a symlinked parent cannot redirect a lane into a folder that is never touched, and a dependency folder behind such a link can still be cleared.
 - A report that does not name the lane's repository leaves an ordinary lane retirable and refuses only a lane whose identity cannot be confirmed, so an older report cannot make retirement a no-op for everything.
+- Clearing regenerable folders deletes inside a lane, so it now makes the same repository check that retirement makes: a lane that has moved to another repository is left alone by either.
 
 None of these removes anything by itself: the Vacuum still decides what is eligible, and it keeps a day of grace on a fresh update rollback.
 
