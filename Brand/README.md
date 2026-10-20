@@ -161,7 +161,11 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 
 Keep `-background none` on those renders, or the rounded corners of the tile come out white instead of transparent.
 
-`icotool -c` stores every entry as a BMP/DIB whose transparency is a 1-bit AND mask, the same limitation the `magick` command above has, so the 16, 24 and 32 px corners are transparent but hard-edged rather than antialiased.  `icotool`'s `-r, --raw=FILENAME` option stores the named input file as a raw PNG (Vista) entry instead, so name the small PNGs with it when the target reader accepts PNG-backed entries.
+`icotool -c` decodes every input into a native BMP/DIB entry whose transparency is a 1-bit AND mask, the same limitation the `magick` command above has, so the small entries' rounded corners come out hard-edged rather than antialiased.  `icotool`'s `-r, --raw=FILENAME` adds that file as a PNG-compressed (Vista) entry instead and stores its PNG bytes verbatim.  Each `--raw` is an input in its own right, not a modifier on a later argument, so the small entries are named with `--raw` and the rest stay positional, and because the options are read before the positional inputs those small entries land at the front of the file and the set stays in ascending size order:
+
+```bash
+icotool -c -o HogHunter.ico --raw=icon16.png --raw=icon24.png --raw=icon32.png icon48.png icon64.png icon128.png icon256.png
+```
 
 Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
