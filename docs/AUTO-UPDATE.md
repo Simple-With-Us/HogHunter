@@ -28,6 +28,28 @@ The iOS companion ships on the same trigger: `.github/workflows/ios-testflight.y
 | `.github/workflows/mac-release.yml` | The release job.  Also builds and verifies (never publishes) on PRs that touch the bundle. |
 | `.github/actions/infisical-secrets`, `scripts/infisical-fetch.mjs` | Reads the signing certificate from Fleet-OPS "Fleet Secrets" (prod, `/mac-certs`) and the Sparkle private key from the HogHunter Infisical project (prod), with same-named repository secrets as the fallback. |
 
+## Failures and Retries
+
+`xcrun stapler staple` fetches Apple's ticket over the network, and it is
+flaky on CI runners: on 2026-10-19 the release for build 158 died with
+`NSURLErrorDomain -1005 "The network connection was lost"` against
+`api.apple-cloudkit.com` and then `The staple and validate action failed!
+Error 68`, even though **both notarizations had already been Accepted**.  The
+run for the next merge was cancelled behind it, so the published feed stopped
+at build 154 while main carried on, and an installed copy that could
+self-update had nothing new to take.
+
+Stapling is idempotent: the ticket was already issued, so the fetch can simply
+be tried again.  `scripts/mac-release-build.sh` therefore staples through
+`staple_with_retry` (five attempts, 30 seconds apart) for both the app and the
+disk image, the same helper ContactLogo uses for the same flake.
+
+A release that is still missing after a merge is worth re-running by hand:
+
+```bash
+gh workflow run mac-release.yml --ref main
+```
+
 ## Info.plist Keys
 
 `scripts/mac-release-build.sh` writes these into every staged bundle (local `xcodebuild` builds carry none of them, so a dev build never greets the owner with Sparkle's launch alert):
