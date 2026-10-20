@@ -44,6 +44,10 @@ struct TempFileSafetyPolicy: Equatable, Sendable {
         // Invalid user edits cannot lower an existing stricter safety choice.
         guard isValid(hours) else { return load(from: defaults) }
         let policy = Self(hours: hours)
+        // Re-saving the stored hours is not an edit: bumping the revision would
+        // void an unchanged policy's scan report, selections, and phone report.
+        let current = load(from: defaults)
+        guard policy != current else { return current }
         defaults.set(policy.minimumUntouchedHours, forKey: defaultsKey)
         revisionLock.lock()
         revision &+= 1

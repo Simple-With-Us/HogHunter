@@ -94,6 +94,17 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         }
     }
 
+    func testReSavingTheSameHoursIsNotAPolicyChange() {
+        let start = TempFileSafetyPolicy.currentRevision
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        let afterRealEdit = TempFileSafetyPolicy.currentRevision
+        XCTAssertGreaterThan(afterRealEdit, start, "a real edit must bump the revision")
+
+        XCTAssertEqual(TempFileSafetyPolicy.save(hours: 168, to: defaults).minimumUntouchedHours, 168)
+        XCTAssertEqual(TempFileSafetyPolicy.currentRevision, afterRealEdit,
+                       "a no-op save must not void an unchanged policy's report and selections")
+    }
+
     func testNestedActivityIncludingCopiedAndAccessedFilesBlocksContainer() throws {
         let nested = try file("container/deep/data.bin")
         let engine = cleaner()
