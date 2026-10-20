@@ -38,7 +38,9 @@ struct StorageView: View {
     /// clicking the segmented control.
     init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
-        _cleanerStore = StateObject(wrappedValue: DiskCleanerStore(rescanAfterExclusionChange: autoScanCleaner))
+        // The same mode the cleaner view honours on appear: with it off, a tier
+        // or exclusion change must not start a walk either.
+        _cleanerStore = StateObject(wrappedValue: DiskCleanerStore(manualScanOnly: !autoScanCleaner))
         _selectedTab = State(initialValue: initialTab)
         self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel

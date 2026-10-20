@@ -12,7 +12,7 @@ final class ManualCleanerOptionsTests: XCTestCase {
             exclusions.excludedCategories = Set(CleanCategory.allCases.map(\.rawValue))
         }
         let store = DiskCleanerStore(historyStore: CleanupHistoryStore(inMemory: true),
-                                     exclusionsDefaults: defaults, rescanAfterExclusionChange: false)
+                                     exclusionsDefaults: defaults, manualScanOnly: true)
 
         store.scan()
         for _ in 0..<100 {

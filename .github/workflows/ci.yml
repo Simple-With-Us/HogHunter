@@ -100,6 +100,7 @@ jobs:
         run: python3 scripts/bounded-process.py --timeout 480 --grace 2 -- bash scripts/capture-app-screenshots.sh
 
       - name: Upload screenshots artifact
+        timeout-minutes: 3
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v7

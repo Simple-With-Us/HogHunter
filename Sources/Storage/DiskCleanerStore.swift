@@ -40,6 +40,9 @@ final class DiskCleanerStore: ObservableObject {
     /// Dashboard option edits require an explicit Scan.  The standalone
     /// Storage window keeps its existing automatic rescan behavior.
     private let rescanAfterExclusionChange: Bool
+    /// The dashboard's Storage tab requires an explicit Scan, so changing a
+    /// tier or an exclusion updates the stored options without starting a walk.
+    private let manualScanOnly: Bool
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
@@ -57,13 +60,13 @@ final class DiskCleanerStore: ObservableObject {
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {
         let updated = CleanerExclusions.load(from: exclusionsDefaults)
-        if updated != exclusions && !rescanAfterExclusionChange { invalidateScan() }
+        if updated != exclusions && manualScanOnly { discardResults() }
         exclusions = updated
     }
 
     func toggleCategoryExclusion(_ category: CleanCategory) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.toggleCategory(category) }
-        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
+        rescanAfterOptionChange()
     }
 
     func addExcludedPath(_ path: String) {
@@ -72,12 +75,30 @@ final class DiskCleanerStore: ObservableObject {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { current in
             if !current.excludedPaths.contains(normalized) { current.excludedPaths.append(normalized) }
         }
-        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
+        rescanAfterOptionChange()
     }
 
     func removeExcludedPath(_ path: String) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.removePath(path) }
-        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
+        rescanAfterOptionChange()
+    }
+
+    /// An exclusion edit invalidates the results on screen.  Manual-scan mode
+    /// drops them and waits for Scan; otherwise a scan follows the edit.
+    private func rescanAfterOptionChange() {
+        if manualScanOnly { discardResults() }
+        else if rescanAfterExclusionChange { scan() }
+    }
+
+    /// Drops results that no longer describe the stored options, so nothing is
+    /// shown or cleaned under a tier or an exclusion set the scan never saw.
+    private func discardResults() {
+        cancelScan()
+        report = nil
+        selectedItemIds.removeAll()
+        expandedCategoryIds.removeAll()
+        showConfirmation = false
+        if !isCleaning { state = .idle }
     }
 
     let cleaner: DiskCleaner
@@ -94,11 +115,13 @@ final class DiskCleanerStore: ObservableObject {
     init(cleaner: DiskCleaner = DiskCleaner(),
          historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
          exclusionsDefaults: UserDefaults = CleanerExclusions.sharedDefaults,
-         rescanAfterExclusionChange: Bool = true) {
+         rescanAfterExclusionChange: Bool = true,
+         manualScanOnly: Bool = false) {
         self.cleaner = cleaner
         self.historyStore = historyStore
         self.exclusionsDefaults = exclusionsDefaults
         self.rescanAfterExclusionChange = rescanAfterExclusionChange
+        self.manualScanOnly = manualScanOnly
         self.exclusions = CleanerExclusions.load(from: exclusionsDefaults)
         self.lastCleanup = historyStore.latestRecord()
     }
@@ -111,21 +134,12 @@ final class DiskCleanerStore: ObservableObject {
     // MARK: - Scan
 
     /// Switches the active cleaning tier and initiates a scan for that tier.
+    /// In manual-scan mode the tier is recorded and the stale results dropped,
+    /// so the walk only ever starts from the Scan button.
     func setTier(_ tier: CleanTier) {
         guard tier != selectedTier else { return }
         selectedTier = tier
-        if rescanAfterExclusionChange { scan() } else { invalidateScan() }
-    }
-
-    /// An option edit makes the previous report stale.  Keep the selected
-    /// tier and exclusions, but require a new explicit Scan before Reclaim.
-    private func invalidateScan() {
-        cancelScan()
-        report = nil
-        selectedItemIds.removeAll()
-        expandedCategoryIds.removeAll()
-        showConfirmation = false
-        if !isCleaning { state = .idle }
+        if manualScanOnly { discardResults() } else { scan() }
     }
 
     /// Cancels any in-flight clutter scan.
