@@ -73,7 +73,7 @@ final class UISmokeTest {
         openSettingsAndWait()
         let afterOpen = realWindows.filter { $0 !== panelWindow }
         record("Settings opens from the panel", afterOpen.contains { isSettingsWindow($0) },
-               "titled windows: \(afterOpen.map { "\($0.title ?? "<untitled>")" })")
+               "titled windows: \(afterOpen.map(\.title))")
 
         let before = realWindows.count
         openSettingsAndWait()
@@ -94,9 +94,15 @@ final class UISmokeTest {
                 let initial = dashboard.contentView?.frame.size ?? .zero
                 let declared = NSSize(width: HogHunterPanel.dashboardWidth,
                                       height: HogHunterPanel.dashboardHeight)
+                // A headless runner can have less usable screen height than
+                // the requested window.  AppKit clamps to that visible area.
+                let titlebarHeight = dashboard.frame.height - initial.height
+                let visibleContentHeight = (dashboard.screen?.visibleFrame.height ?? declared.height + titlebarHeight)
+                    - titlebarHeight
+                let initialHeight = min(declared.height, visibleContentHeight)
                 record("dashboard opens at its declared size",
-                       abs(initial.width - declared.width) < 1 && abs(initial.height - declared.height) < 1,
-                       "got \(initial) want \(declared)")
+                       abs(initial.width - declared.width) < 1 && abs(initial.height - initialHeight) < 1,
+                       "got \(initial) requested \(declared), visible height cap \(visibleContentHeight)")
                 checkRenderedContent(dashboard, name: "dashboard-default")
                 dashboard.setContentSize(NSSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580))
                 wait(0.2)
@@ -107,8 +113,11 @@ final class UISmokeTest {
                 dashboard.setContentSize(NSSize(width: 1050, height: 780))
                 wait(0.2)
                 let grown = dashboard.contentView?.frame.size ?? .zero
-                record("dashboard content resizes", grown.width >= 1049 && grown.height >= 779,
-                       "got \(grown)")
+                let grownHeight = min(780, visibleContentHeight)
+                record("dashboard content resizes",
+                       grown.width >= 1049 && abs(grown.height - grownHeight) < 1
+                           && grown.height > minimum.height,
+                       "got \(grown) requested 1050×780, visible height cap \(visibleContentHeight)")
                 checkRenderedContent(dashboard, name: "dashboard-grown")
             } else {
                 record("dashboard opens at its declared size", false, "no dashboard window")
@@ -145,7 +154,7 @@ final class UISmokeTest {
 
     private func isSettingsWindow(_ window: NSWindow) -> Bool {
         if AppActivationManager.shared.window(for: .settings) === window { return true }
-        let title = window.title ?? ""
+        let title = window.title
         return title.contains("Settings") || title.contains("Hog Hunter Settings")
     }
 
@@ -225,8 +234,8 @@ final class UISmokeTest {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         var colors = Set<String>()
         var rightEdgeColors = Set<String>()
-        for y in stride(from: 0, to: bitmap.pixelsHigh, by: max(1, bitmap.pixelsHigh / 12)) {
-            for x in stride(from: 0, to: bitmap.pixelsWide, by: max(1, bitmap.pixelsWide / 16)) {
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: max(1, bitmap.pixelsHigh / 90)) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: max(1, bitmap.pixelsWide / 90)) {
                 if let color = bitmap.colorAt(x: x, y: y) {
                     colors.insert(color.description)
                 }

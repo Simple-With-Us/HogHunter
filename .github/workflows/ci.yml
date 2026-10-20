@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 30
     env:
       HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
+      TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
     steps:
       - name: Checkout
         uses: actions/checkout@v7

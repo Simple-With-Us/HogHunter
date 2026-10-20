@@ -487,7 +487,7 @@ struct HogHunterPanel: View {
 
     /// The menu-bar quick view has fixed geometry; the dashboard uses its own minimum size.
     static let panelWidth: CGFloat = 360
-    static let panelHeight: CGFloat = 480
+    static let panelHeight: CGFloat = 410
     static let dashboardWidth: CGFloat = 900
     static let dashboardHeight: CGFloat = 700
     static let dashboardMinimumWidth: CGFloat = 860
