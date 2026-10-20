@@ -23,6 +23,7 @@ final class DirectorySizeWalker {
     private struct LinkedRoot {
         let path: String
         let inode: Inode
+        let kind: mode_t
     }
     private final class Frame {
         let path: String
@@ -111,22 +112,25 @@ final class DirectorySizeWalker {
                         fail("Linked directory cannot be resolved (\(errno))")
                         continue
                     }
+                    var targetInfo = stat()
+                    guard lstat(target, &targetInfo) == 0 else {
+                        fail("Linked directory is unavailable (\(errno))")
+                        continue
+                    }
+                    // Track aliases even when their target is already covered or is an ancestor.
+                    // Retargeting one later must invalidate the aggregate before it is published.
+                    guard followedLinks.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
+                    followedLinks[path] = LinkedRoot(path: target,
+                        inode: Inode(device: targetInfo.st_dev, number: targetInfo.st_ino),
+                        kind: targetInfo.st_mode & S_IFMT)
                     // Only explicit layout links may cross a volume.  Repository symlinks stay leaves.
-                    if target != observation.path, !observation.path.hasPrefix(target + "/") {
-                        var targetInfo = stat()
-                        if lstat(target, &targetInfo) == 0 {
-                            if targetInfo.st_mode & S_IFMT == S_IFDIR {
-                                guard followedLinks.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
-                                followedLinks[path] = LinkedRoot(path: target, inode: Inode(device: targetInfo.st_dev, number: targetInfo.st_ino))
-                                guard !Self.isCovered(path: target, device: targetInfo.st_dev, roots: countedRoots) else { continue }
-                                // Keep earlier child partitions when a broader root appears later.
-                                // Walking that parent skips those boundaries, counting only its extra data.
-                                guard countedRoots.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
-                                enter(target, expectedDevice: nil, layoutDepth: nil, info: targetInfo, isRoot: true)
-                            }
-                        } else {
-                            fail("Linked directory is unavailable (\(errno))")
-                        }
+                    if targetInfo.st_mode & S_IFMT == S_IFDIR,
+                       target != observation.path, !observation.path.hasPrefix(target + "/") {
+                        guard !Self.isCovered(path: target, device: targetInfo.st_dev, roots: countedRoots) else { continue }
+                        // Keep earlier child partitions when a broader root appears later.
+                        // Walking that parent skips those boundaries, counting only its extra data.
+                        guard countedRoots.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
+                        enter(target, expectedDevice: nil, layoutDepth: nil, info: targetInfo, isRoot: true)
                     }
                 }
             }
@@ -140,7 +144,7 @@ final class DirectorySizeWalker {
                 processed += 1
                 var info = stat()
                 guard Self.canonicalPath(link) == expected.path, lstat(expected.path, &info) == 0,
-                      info.st_mode & S_IFMT == S_IFDIR,
+                      info.st_mode & S_IFMT == expected.kind,
                       info.st_dev == expected.inode.device, info.st_ino == expected.inode.number else {
                     fail("Linked lane target changed or became unavailable while measuring")
                     return observation

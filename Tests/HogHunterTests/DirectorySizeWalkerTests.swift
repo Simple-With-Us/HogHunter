@@ -165,6 +165,35 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertFalse(result.isComplete)
     }
 
+    func testCoveredLayoutAliasesAreStillValidatedBeforeCompletion() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lanes = root.appendingPathComponent("lanes")
+        let external = root.appendingPathComponent("external")
+        let file = root.appendingPathComponent("file")
+        try FileManager.default.createDirectory(at: lanes, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        try Data(repeating: 9, count: 8192).write(to: external.appendingPathComponent("data"))
+        try Data([1]).write(to: file)
+        let link = lanes.appendingPathComponent("alias")
+        for target in [lanes, root, file] {
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+            let walker = DirectorySizeWalker(path: lanes.path, startedAt: Date())
+            let first = walker.advance(maxEntries: 1, maxDuration: 1)
+            XCTAssertNil(first.failure)
+            XCTAssertFalse(first.isComplete)
+            try FileManager.default.removeItem(at: link)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: external)
+            var result = first
+            for _ in 0..<100 where result.failure == nil && !result.isComplete {
+                result = walker.advance(maxEntries: 1, maxDuration: 1)
+            }
+            XCTAssertNotNil(result.failure, target.path)
+            XCTAssertFalse(result.isComplete)
+            try FileManager.default.removeItem(at: link)
+        }
+    }
+
     func testMissingExternalLaneTargetDoesNotPublishSmallerAggregate() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
