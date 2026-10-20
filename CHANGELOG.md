@@ -2,13 +2,15 @@
 
 ## Unreleased
 
-Three reasons worktree retirement never removed anything (HH-166, HH-168):
+One failed PR lookup no longer throws away the whole doctor report (HH-168):
 
-- A lane that lives behind a symlinked parent was refused.  The fleet keeps `~/apps/lanes/<Repo>` on the external disk behind a symlink, and the doctor reports that spelling on purpose, but the Vacuum compared the path with its own realpath and refused anything that resolved elsewhere: "path resolves somewhere else now".  On this Mac that was every nested lane, 33 of the doctor's 35 cleaner candidates.  The path itself must still be a plain directory, and the lane must still belong to the repository the doctor recorded; where it lives on disk no longer decides.
-- lsof reports the physical path the kernel sees, so a process sitting in a lane behind a symlinked parent went unseen.  The process check compares the resolved path as well.
-- One failed PR lookup (a retired repository) threw away the whole doctor report, so no lane anywhere could be retired.  The overall gh status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused.
+- The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.
+- A local build that is not cut from the main branch keeps the update feed off on purpose, so a developer build never gets replaced by the production release under the developer.  The owner's copy has to be a signed main build for it to update itself.
 
-None of these removes anything by itself: the Vacuum still decides what is eligible, and it keeps a day of grace on a fresh update rollback.
+Mac self-update stopped moving (HH-172):
+
+- The release for build 158 died at the stapling step with `NSURLErrorDomain -1005` against Apple's CloudKit ticket-delivery endpoint, even though both notarizations were already Accepted, and the run behind it was cancelled too.  The published feed sat at 1.0.154 while main carried on, so an installed copy that could self-update had nothing new to take.  `scripts/mac-release-build.sh` now staples through a retry (five attempts, 30 seconds apart) for the app and the disk image, the same helper ContactLogo uses for the same flake.
+- A local `scripts/install.sh` build that is not cut from `main` keeps Sparkle off on purpose, so a lane build never gets replaced by the production release under the developer.  The owner's copy has to be a signed `main` build for it to update itself.
 
 Server status on the main window (HH-163):
 

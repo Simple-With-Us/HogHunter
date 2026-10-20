@@ -18,6 +18,7 @@ final class HogStore: ObservableObject {
     @Published private(set) var pulse = MachinePulse.empty
     @Published private(set) var rows: [HogRow] = []
     @Published private(set) var recentCpuPercents: [Double] = []
+    @Published private(set) var cpuMinuteHistory = CpuMinuteHistory()
     @Published private(set) var hasBaseline = false
     @Published private(set) var isStale = false
     @Published private(set) var launchesAtLogin = false
@@ -504,6 +505,10 @@ final class HogStore: ObservableObject {
         pulse = snapshot.pulse
         hasBaseline = snapshot.hasBaseline
         isStale = false
+
+        if snapshot.hasBaseline {
+            cpuMinuteHistory.record(percent: snapshot.pulse.cpuPercent, at: snapshot.pulse.sampledAt)
+        }
 
         recentCpuPercents.append(snapshot.pulse.cpuPercent)
         if recentCpuPercents.count > 30 {

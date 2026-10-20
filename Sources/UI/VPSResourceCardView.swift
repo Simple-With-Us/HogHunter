@@ -142,6 +142,9 @@ struct VPSResourceCardView: View {
             if let dirs = snapshot.largestDirs, !dirs.isEmpty {
                 largestDirsView(dirs)
             }
+            if let tools = snapshot.toolStatuses, !tools.isEmpty {
+                toolsView(tools)
+            }
         }
     }
 
@@ -237,55 +240,59 @@ struct VPSResourceCardView: View {
     private func appDbsRow(_ dbs: [String: Int64]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("App Databases")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                if let st = dbs["st_app_db"] {
-                    dbPill("Socratic.Trade", bytes: st)
-                }
-                if let ct = dbs["ct_db"] {
-                    dbPill("Congress.Trade", bytes: ct)
-                }
-                if let um = dbs["um_db"] {
-                    dbPill("Usage Monitor", bytes: um)
+                .font(.system(size: 11, weight: .semibold))
+            ForEach([("st_app_db", "Socratic Trade"), ("ct_db", "Congress Trade"), ("um_db", "Usage Monitor")], id: \.0) { key, name in
+                if let bytes = dbs[key] {
+                    SizeUsageRow(name: name, bytes: bytes, percentChange: store.databasePercentChange(key: key))
                 }
             }
         }
-    }
-
-    private func dbPill(_ name: String, bytes: Int64) -> some View {
-        HStack(spacing: 4) {
-            Text(name)
-                .font(.system(size: 10))
-                .foregroundStyle(.primary)
-            Text(HogFormat.memory(UInt64(bytes)))
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Color.accentColor)
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.05)))
     }
 
     private func largestDirsView(_ dirs: [VPSDirectory]) -> some View {
-        DisclosureGroup("Largest Server Directories") {
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(dirs) { dir in
-                    HStack {
-                        Text(dir.path)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Directories")
+                .font(.system(size: 11, weight: .semibold))
+            ForEach(dirs) { dir in
+                SizeUsageRow(name: dir.path, bytes: dir.bytes,
+                             percentChange: store.directoryPercentChange(path: dir.path))
+            }
+        }
+    }
+
+    private func toolsView(_ tools: [VPSToolStatus]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Tools")
+                .font(.system(size: 11, weight: .semibold))
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 5) {
+                ForEach(tools) { tool in
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(toolColor(tool.state))
+                            .frame(width: 6, height: 6)
+                        Text(tool.name)
                             .lineLimit(1)
-                        Spacer()
-                        Text(HogFormat.memory(UInt64(dir.bytes)))
-                            .font(.system(size: 10).monospacedDigit())
-                            .foregroundStyle(.primary)
+                        if tool.state == .running, tool.count > 1 {
+                            Text("\(tool.count)")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
                     }
+                    .font(.system(size: 10))
+                    .help("\(tool.name): \(tool.state.rawValue)")
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(tool.name), \(tool.state.rawValue)")
                 }
             }
-            .padding(.top, 4)
         }
-        .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(.secondary)
+    }
+
+    private func toolColor(_ state: VPSToolStatus.State) -> Color {
+        switch state {
+        case .running: return .green
+        case .stopped: return .secondary
+        case .absent: return .secondary.opacity(0.4)
+        case .unknown: return .orange
+        }
     }
 }

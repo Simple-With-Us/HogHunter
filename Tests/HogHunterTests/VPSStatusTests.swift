@@ -173,8 +173,9 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertNil(store.snapshot)
 
         store.fetch(force: true)
-        // Give async Task a chance to complete
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Wait for publication after the background history import finishes.
+        for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertFalse(store.isLoading, "The stub fetch did not finish")
 
         XCTAssertEqual(counter.value, 1)
         XCTAssertEqual(store.snapshot?.host, "fleet-hetzner-nbg1")
@@ -183,7 +184,8 @@ final class VPSStatusTests: XCTestCase {
 
         // Test failure path
         store.setHost("fail.host")
-        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertFalse(store.isLoading, "The failure fetch did not finish")
 
         XCTAssertEqual(counter.value, 2)
         XCTAssertNil(store.snapshot)
