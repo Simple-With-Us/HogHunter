@@ -32,6 +32,7 @@ struct DiskCleanerView: View {
             store.refreshLastCleanup()
         }
         .onChange(of: isTabActive) { active in
+            if active { store.reloadExclusions() }
             if autoScanOnAppear, active, case .idle = store.state {
                 store.scan()
             }

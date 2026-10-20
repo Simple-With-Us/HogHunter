@@ -42,5 +42,19 @@ final class ManualCleanerOptionsTests: XCTestCase {
         XCTAssertEqual(store.state, .idle)
         XCTAssertNil(store.report, "editing exclusions requires a fresh explicit Scan")
         XCTAssertEqual(store.exclusions.excludedPaths, ["/fixture/keep"])
+
+        store.scan()
+        for _ in 0..<100 {
+            if case .scanned = store.state { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .scanned = store.state else {
+            return XCTFail("the third explicit fixture scan did not finish")
+        }
+        CleanerExclusions.update(in: defaults) { $0.excludedPaths.append("/fixture/from-phone") }
+        store.reloadExclusions()
+        XCTAssertEqual(store.state, .idle)
+        XCTAssertNil(store.report, "reactivating after an external edit must drop stale results")
+        XCTAssertEqual(store.exclusions.excludedPaths, ["/fixture/keep", "/fixture/from-phone"])
     }
 }
