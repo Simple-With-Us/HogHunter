@@ -1259,9 +1259,12 @@ def test_agent_state_does_not_call_a_big_active_tree_idle(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "open_handles", return_value=0), \
              mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
-             mock.patch.object(hh, "touched_since", return_value=True), \
+             mock.patch.object(hh, "touched_since", return_value=True) as touched, \
              mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
             assert hh.rule_agent_state() == [], "a tree with a recent write is not idle"
+            # The window is the gate: a wider one would delete a tree the
+            # agent wrote to in the last 90 minutes.
+            touched.assert_called_once_with(str(logs), hh.IDLE_MIN_OK / (24 * 60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
