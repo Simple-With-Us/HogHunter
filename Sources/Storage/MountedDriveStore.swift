@@ -112,7 +112,10 @@ final class MountedDriveStore: ObservableObject {
         defer { isRefreshing = false }
         let probe = self.probe
         let candidates = await Task.detached(priority: .utility) { probe() }.value
-        guard !Task.isCancelled else { return }
+        // The store is shared and outlives any single caller, so a completed probe is
+        // published even when this caller's task was cancelled.  Discarding it here left
+        // the other surface (quick view vs dashboard) showing "Not identified" until its
+        // next tick.
         var seen = Set<String>()
         rows = candidates.compactMap(\.usage).filter { seen.insert($0.path).inserted }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
