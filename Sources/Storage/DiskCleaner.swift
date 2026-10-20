@@ -67,7 +67,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .apfsSnapshots:
             return "Local Time Machine backup snapshots pinning deleted disk blocks on APFS containers."
         case .tempFiles:
-            return TempFileSafetyPolicy.load().categoryDescription
+            return "Temporary files in /tmp meeting the configured untouched time.  Preserves Git checkouts, source projects, staging, locks, and links."
         case .staleBackups:
             return "Tool-made backups older than 7 days (Cursor database backups).  Live files are never listed."
         }

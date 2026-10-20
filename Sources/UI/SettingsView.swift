@@ -295,29 +295,39 @@ private struct CleanerSettingsTab: View {
     @EnvironmentObject private var store: HogStore
     @State private var exclusions: CleanerExclusions = CleanerExclusions.load()
     @State private var tempPolicy = TempFileSafetyPolicy.load()
+    @State private var tempHoursDraft = Int(TempFileSafetyPolicy.defaultHours)
+
+    private func applyTempHours() {
+        guard TempFileSafetyPolicy.isValid(Double(tempHoursDraft)) else { return }
+        tempPolicy = TempFileSafetyPolicy.save(hours: Double(tempHoursDraft))
+    }
 
     var body: some View {
         Form {
             Section("Temp File Safety") {
-                Stepper(value: Binding(
-                    get: { Int(tempPolicy.minimumUntouchedHours) },
-                    set: { tempPolicy = TempFileSafetyPolicy.save(hours: Double($0)) }
-                ), in: 1...8_760) {
-                    HStack {
-                        Text("Minimum Untouched Time")
-                        TextField("Hours", value: Binding(
-                            get: { Int(tempPolicy.minimumUntouchedHours) },
-                            set: { tempPolicy = TempFileSafetyPolicy.save(hours: Double($0)) }
-                        ), format: .number.grouping(.never))
-                            .frame(width: 60)
-                        Text("Hours")
+                HStack {
+                    Stepper(value: $tempHoursDraft, in: 1...8_760) {
+                        HStack {
+                            Text("Minimum Untouched Time")
+                            TextField("Hours", value: $tempHoursDraft, format: .number.grouping(.never))
+                                .frame(width: 60)
+                                .onSubmit { applyTempHours() }
+                            Text("Hours")
+                        }
                     }
+                    Button("Apply") { applyTempHours() }
+                        .disabled(!TempFileSafetyPolicy.isValid(Double(tempHoursDraft))
+                            || Double(tempHoursDraft) == tempPolicy.minimumUntouchedHours)
                 }
+                Text("Current minimum: \(tempPolicy.hoursLabel) untouched hours.\u{00A0} Choose 1 to 8,760 whole hours, then Apply or press Return.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
                 HStack {
                     Text("Presets:")
                     ForEach([24, 72, 168, 720], id: \.self) { hours in
                         Button("\(hours) Hours") {
-                            tempPolicy = TempFileSafetyPolicy.save(hours: Double(hours))
+                            tempHoursDraft = hours
+                            applyTempHours()
                         }
                         .controlSize(.small)
                     }
@@ -356,7 +366,7 @@ private struct CleanerSettingsTab: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(category.title)
                                     .font(.system(size: 12, weight: .medium))
-                                Text(category.description)
+                                Text(category == .tempFiles ? tempPolicy.categoryDescription : category.description)
                                     .font(.system(size: 10))
                                     .foregroundStyle(.secondary)
                             }
@@ -419,6 +429,7 @@ private struct CleanerSettingsTab: View {
         .onAppear {
             exclusions = CleanerExclusions.load()
             tempPolicy = TempFileSafetyPolicy.load()
+            tempHoursDraft = Int(tempPolicy.minimumUntouchedHours)
         }
     }
 }
