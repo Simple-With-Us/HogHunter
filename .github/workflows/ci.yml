@@ -43,6 +43,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # macOS exposes waitid/WNOWAIT in Python 3.13 and newer.  Keep the
+      # supervisor and capture dependencies on the same explicit interpreter.
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Test Capture Supervisor on macOS
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
+
       - name: Install dependencies
         run: |
           brew install xcodegen

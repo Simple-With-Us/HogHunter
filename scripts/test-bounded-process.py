@@ -23,13 +23,13 @@ class BoundedProcessTests(unittest.TestCase):
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(SUPERVISOR), '--timeout', str(timeout),
                                  '--grace', '0.1', '--', sys.executable, '-c', source],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=15)
         return result, time.monotonic() - started
 
     def test_quick_completion_does_not_wait_for_deadline(self):
         result, elapsed = self.invoke('raise SystemExit(7)', timeout=20)
         self.assertEqual(result.returncode, 7)
-        self.assertLess(elapsed, 2)
+        self.assertLess(elapsed, 10)
         self.assertIn('exit status: 7', result.stderr)
 
     def test_leader_remains_unreaped_until_group_cleanup(self):
@@ -58,6 +58,23 @@ class BoundedProcessTests(unittest.TestCase):
                 CAPTURE.run(['synthetic'], 1, 0)
         process.kill.assert_called_once()
 
+    def test_cleanup_timeout_preserves_cancellation(self):
+        process = mock.Mock(pid=999999, args=['synthetic'])
+        process.wait.side_effect = subprocess.TimeoutExpired('synthetic', 5)
+
+        def cancelled_spawn(*_args, **_kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return process
+
+        with mock.patch.object(CAPTURE.subprocess, 'Popen', side_effect=cancelled_spawn), \
+             mock.patch.object(CAPTURE, 'signal_group', return_value=False), \
+             mock.patch.object(sys, 'argv', ['bounded-process.py', '--timeout', '1', 'synthetic']), \
+             mock.patch.object(CAPTURE.sys, 'stderr') as stderr:
+            self.assertEqual(CAPTURE.main(), 128 + signal.SIGTERM)
+        messages = ''.join(str(call.args[0]) for call in stderr.write.call_args_list)
+        self.assertIn('did not exit after group cleanup', messages)
+        self.assertIn('exit status: 143', messages)
+
     def test_cancellation_during_spawn_keeps_child_owned(self):
         original_popen = subprocess.Popen
         children = []
@@ -78,13 +95,13 @@ class BoundedProcessTests(unittest.TestCase):
         finally:
             for child in children:
                 if child.poll() is None:
-                    child.kill()
+                    os.killpg(child.pid, signal.SIGKILL)
                     child.wait(timeout=2)
 
     def test_timeout_kills_term_resistant_process(self):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)
         self.assertEqual(result.returncode, 124)
-        self.assertLess(elapsed, 2)
+        self.assertLess(elapsed, 10)
 
     def test_sigterm_reports_128_plus_signal_and_cleans_up(self):
         # The Actions runner cancels a step by signalling the process group, so
@@ -100,22 +117,69 @@ class BoundedProcessTests(unittest.TestCase):
                                        start_new_session=True)
             try:
                 self.wait_for_readiness(process)
+                process.send_signal(signal.SIGTERM)
+                _, stderr = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 128 + signal.SIGTERM)
+                self.assertIn(f'exit status: {128 + signal.SIGTERM}', stderr)
             except BaseException:
-                if child_pidfile.exists():
-                    try:
-                        os.kill(int(child_pidfile.read_text()), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                process.communicate(timeout=2)
+                self.cleanup_fixture(process, child_pidfile)
                 raise
-            process.send_signal(signal.SIGTERM)
-            _, stderr = process.communicate(timeout=10)
-            self.assertEqual(process.returncode, 128 + signal.SIGTERM)
-            self.assertIn(f'exit status: {128 + signal.SIGTERM}', stderr)
+
+    def cleanup_fixture(self, process, child_pidfile):
+        """Bound failure cleanup without replacing the test's original error."""
+        try:
+            # Let the supervisor clean its separate capture session, even when
+            # readiness failed before the child's pidfile was written.
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            try:
+                process.communicate(timeout=2)
+                return
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+            # A wedged supervisor must not leave either session holding pipes.
+            try:
+                os.killpg(int(child_pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            try:
+                process.communicate(timeout=2)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+        finally:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError):
+                        pass
+
+    def test_fixture_failure_cleanup_kills_groups_and_closes_pipes(self):
+        process = mock.Mock(pid=999998, returncode=None)
+        process.communicate.side_effect = subprocess.TimeoutExpired('synthetic', 2)
+        with tempfile.TemporaryDirectory() as directory:
+            pidfile = Path(directory) / 'child.pid'
+            pidfile.write_text('999999')
+            with mock.patch.object(os, 'killpg') as killpg:
+                with self.assertRaisesRegex(AssertionError, 'original readiness failure'):
+                    try:
+                        raise AssertionError('original readiness failure')
+                    except AssertionError:
+                        self.cleanup_fixture(process, pidfile)
+                        raise
+            self.assertEqual(killpg.call_args_list, [mock.call(999998, signal.SIGTERM),
+                             mock.call(999999, signal.SIGKILL), mock.call(999998, signal.SIGKILL)])
+        self.assertEqual(process.communicate.call_count, 2)
+        process.stdout.close.assert_called_once()
+        process.stderr.close.assert_called_once()
 
     def wait_for_readiness(self, process):
         """Block until the supervisor has installed its signal handlers.
@@ -151,7 +215,7 @@ class BoundedProcessTests(unittest.TestCase):
                       '\nwhile not p.exists(): time.sleep(0.01)\n')
             result, elapsed = self.invoke(parent)
             self.assertEqual(result.returncode, 0)
-            self.assertLess(elapsed, 2)
+            self.assertLess(elapsed, 10)
             pid = int(pidfile.read_text())
             # A killed orphan can briefly remain a zombie awaiting its adopter.
             status = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)

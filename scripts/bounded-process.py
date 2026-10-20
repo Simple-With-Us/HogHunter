@@ -48,6 +48,7 @@ def run(command, timeout, grace=2):
     process = None
     previous = {}
     requested_signal = None
+    result = None
 
     def interrupted(signum, _frame):
         # Never raise inside Popen: it may already own a child not yet returned.
@@ -62,13 +63,13 @@ def run(command, timeout, grace=2):
         # handlers are installed, so a test never signals into the install window.
         print('Supervisor ready.', file=sys.stderr, flush=True)
         try:
-            return wait_unreaped(process, timeout, lambda: requested_signal)
+            result = wait_unreaped(process, timeout, lambda: requested_signal)
         except subprocess.TimeoutExpired:
             print('Optional capture exceeded its deadline.', file=sys.stderr, flush=True)
             raise
     except Interrupted as interruption:
         # Covers the handler-install window too, so a signal there is not a traceback.
-        return 128 + interruption.signum
+        result = 128 + interruption.signum
     finally:
         # Cleanup is required even when the parent already exited successfully:
         # a GUI/helper descendant can still hold the runner's output handles.
@@ -95,10 +96,16 @@ def run(command, timeout, grace=2):
                 except subprocess.TimeoutExpired:
                     print('Capture process did not exit after group cleanup.',
                           file=sys.stderr, flush=True)
-                    raise
+                    # A cleanup failure must remain nonzero without relabelling
+                    # a cancellation as an elapsed capture deadline.
+                    if requested_signal is not None:
+                        result = 128 + requested_signal
+                    else:
+                        raise
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
+    return result
 
 
 def main():
@@ -111,7 +118,7 @@ def main():
     if not command or not math.isfinite(args.timeout) or not math.isfinite(args.grace) or args.timeout <= 0 or args.grace < 0:
         parser.error('A command, positive timeout and nonnegative grace are required.')
     if not all(hasattr(os, name) for name in ('waitid', 'WNOWAIT')):
-        parser.error('This supervisor requires waitid with WNOWAIT support.')
+        parser.error('This supervisor requires waitid with WNOWAIT support (Python 3.13+ on macOS).')
     try:
         result = run(command, args.timeout, args.grace)
     except subprocess.TimeoutExpired:
