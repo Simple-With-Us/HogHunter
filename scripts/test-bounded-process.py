@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -71,19 +72,29 @@ class BoundedProcessTests(unittest.TestCase):
                     elapsed += duration
 
                 events = mock.Mock()
-                with mock.patch.object(CAPTURE.subprocess, 'Popen', return_value=process), \
+                # Bind the fakes to the supervisor's own globals: patching the
+                # shared stdlib time/subprocess modules would install this test's
+                # fake clock and Popen process-wide for anything else running.
+                fake_time = types.SimpleNamespace(monotonic=lambda: elapsed, sleep=sleep)
+                fake_subprocess = types.SimpleNamespace(
+                    Popen=mock.Mock(return_value=process),
+                    TimeoutExpired=subprocess.TimeoutExpired)
+                with mock.patch.object(CAPTURE, 'subprocess', fake_subprocess), \
+                     mock.patch.object(CAPTURE, 'time', fake_time), \
                      mock.patch.object(CAPTURE, 'wait_unreaped', return_value=0), \
                      mock.patch.object(CAPTURE, 'signal_group',
-                                       return_value=group_accepts_term) as group_signal, \
-                     mock.patch.object(CAPTURE.time, 'monotonic', side_effect=lambda: elapsed), \
-                     mock.patch.object(CAPTURE.time, 'sleep', side_effect=sleep):
+                                       return_value=group_accepts_term) as group_signal:
                     events.attach_mock(group_signal, 'group_signal')
                     events.attach_mock(process.kill, 'kill')
                     events.attach_mock(process.wait, 'wait')
                     self.assertEqual(CAPTURE.run(['synthetic'], 1, 0.1), 0)
-                self.assertLessEqual(elapsed, 0.1)
+                # A group that refuses SIGTERM skips the grace block entirely, so
+                # assert each branch exactly: a regression that always waits the
+                # grace window must not stay green behind a <= bound.
                 if group_accepts_term:
                     self.assertAlmostEqual(elapsed, 0.1)
+                else:
+                    self.assertEqual(elapsed, 0.0)
                 self.assertEqual(events.mock_calls[0], mock.call.group_signal(999999, signal.SIGTERM))
                 self.assertEqual(events.mock_calls[-3:], [
                     mock.call.group_signal(999999, signal.SIGKILL),
