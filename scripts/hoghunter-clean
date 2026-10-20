@@ -467,7 +467,8 @@ def _load_open_snapshot() -> set[str] | None:
     if _OPEN_SNAPSHOT is not None and time.monotonic() - _OPEN_SNAPSHOT_AT < _OPEN_SNAPSHOT_MAX_AGE_SEC:
         return _OPEN_SNAPSHOT
     try:
-        p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True, timeout=180)
+        p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True,
+                           timeout=op_timeout(180))
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"system-wide lsof did not answer ({type(exc).__name__}); using per-path checks")
         return None
@@ -586,9 +587,13 @@ def touched_since(path: str, days: float) -> bool:
     nothing, with no error anywhere to say why.  Minutes parse on both.
     """
     try:
+        # A full find walk can take minutes on a big tree, and it is called
+        # once per candidate, so it is clamped to what is left of the budget
+        # like every other subprocess here.  A timeout fails closed to
+        # "touched" below, so a clamp never turns into a delete.
         proc = subprocess.run(
             ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=min(120.0, max(1.0, budget_left())),
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return True
@@ -1480,6 +1485,7 @@ def rule_app_caches() -> list[Candidate]:
     delete.  Everything under ~/Library/Caches is rebuildable by its app.
     """
     cands: list[Candidate] = []
+    global _SCAN_BUDGET_EXHAUSTED
     roots: list[tuple[Path, str]] = [
         (HOME / "Library/Caches", "application cache"),
         (HOME / "Library/Application Support", "application support cache"),
@@ -1518,6 +1524,14 @@ def rule_app_caches() -> list[Candidate]:
                         targets += [(d, label) for d in lib.iterdir()
                                     if d.is_dir() and d.name.lower() in support_names]
                 for target, what in targets:
+                    # Each candidate pays for two uncapped probes (a capped
+                    # walk and a full find), so the loop has to stop at the
+                    # scan's own deadline.  Without this the scan overruns its
+                    # 60% share inside one rule and the deletes get nothing:
+                    # the scan_truncated livelock with zero bytes freed.
+                    if scan_budget_left() <= 0:
+                        _SCAN_BUDGET_EXHAUSTED = True
+                        break
                     if not target.is_dir() or target.is_symlink():
                         continue
                     s = str(target)

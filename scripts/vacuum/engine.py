@@ -684,7 +684,11 @@ class VacuumEngine:
         delta_gb = report.get("disk_free_delta_gb")
         if delta_gb is not None:
             measured = int(float(delta_gb) * (1024 ** 3))
-            freed = measured
+            # The delta is the NET change in free space: the host can spend
+            # what the run freed, so it is often negative.  `freed` is summed
+            # into RunRecord.bytes_freed and rendered by lanes.format_size, so
+            # a negative value reaches the panel as "reclaimed -51.2 MB".
+            freed = max(0, measured)
         reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
         if report.get("scan_truncated"):
             reason += "; the scan hit its budget share, more may be left"

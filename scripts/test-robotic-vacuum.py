@@ -842,6 +842,18 @@ class TestHogHunterReclaimStep(_EngineHome):
         self.assertIn("removed 1710 of 1710", reason)
         self.assertNotIn("budget", reason)
 
+    def test_a_run_the_host_spent_further_frees_no_bytes_not_negative_ones(self):
+        """`disk_free_delta_gb` is the NET change in free space, so a host that
+        wrote more than the run deleted reports a negative delta.  `freed` is
+        summed into RunRecord.bytes_freed and rendered by lanes.format_size,
+        which would reach the panel as "reclaimed -51.2 MB"."""
+        out = self.run_step((0, _report(disk_free_delta_gb=-0.05), "", False), band="cheap")[0]
+        freed, reason, status = out
+        self.assertEqual((freed, status), (0, StepStatus.RAN))
+        self.assertNotIn("-", reason.split(": removed")[1])
+        positive = self.run_step((0, _report(disk_free_delta_gb=1.5), "", False), band="cheap")[0]
+        self.assertEqual(positive[0], int(1.5 * 1024 ** 3))
+
     def test_a_spent_budget_is_a_good_partial_run_not_a_failure(self):
         out = self.run_step((0, _report(applied_count=600, applied_bytes=1_200_000, budget_exhausted=True, remaining_count=1110), "", False))
         freed, reason, status = out[0]

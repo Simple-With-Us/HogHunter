@@ -583,6 +583,34 @@ def test_every_apply_time_command_is_cut_to_the_budget(hh):
         assert seen == [("brew", 5.0)], "never under the 5 s floor"
 
 
+def test_the_open_handles_probes_are_cut_to_the_budget(hh):
+    """The system-wide lsof (180 s) and the uncapped find (120 s) were the
+    last two probes whose timeouts ignored the budget, so a candidate could
+    block for three minutes while the run's hard stop closed on it."""
+    clock = FakeClock()
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append((cmd[0].rsplit("/", 1)[-1], kw.get("timeout")))
+        # -F pfn field output: the system-wide pass lists a name, the
+        # per-path pass lists pids.
+        return completed(0, "p1\nn/x/blob.bin\n") if cmd[0].endswith("lsof") else completed(0, "")
+
+    with fake_time(hh, clock), \
+            mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+        hh.set_budget(0)
+        hh.open_handles("/x")
+        hh.touched_since("/x", 7)
+        assert seen == [("lsof", 180.0), ("find", 120.0)], seen
+        seen.clear()
+        hh.set_budget(40)
+        clock.now += 10
+        _reset_open_snapshot(hh)   # the first pass memoized its answer
+        hh.open_handles("/x")
+        hh.touched_since("/x", 7)
+        assert [t for _n, t in seen] == [30.0, 30.0], seen
+
+
 def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh):
     """Two heavy items and three markers, budget 100, the first heavy costs 80 s.  The second heavy needs 30 s
     to start and has 20, so it waits for the next run; the markers are quick and still go."""
@@ -1102,6 +1130,39 @@ def test_app_caches_finds_an_idle_app_cache(hh):
         assert found[0].category == "app-caches"
         assert found[0].tier == "safe"
         assert found[0].op == "delete"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_stops_at_its_own_deadline(hh):
+    """Every candidate pays for two uncapped probes, so the rule's candidate
+    loop has to consult the scan deadline itself.  Otherwise one rule overruns
+    the 60% scan share inside the rule and the deletes get nothing."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    clock = FakeClock()
+    try:
+        root = home / "Library" / "Caches"
+        root.mkdir(parents=True)
+        for name in ("One", "Two", "Three"):
+            (root / name).mkdir()
+        probes = []
+
+        def probing_age(_path, *a, **k):
+            probes.append(_path)
+            clock.now += 3.0     # three candidates x 3 s past a 6 s scan share
+            return 10 ** 9
+
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", probing_age), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            with fake_time(hh, clock):
+                hh.set_budget(10.0)
+                found = hh.rule_app_caches()
+                exhausted = hh._SCAN_BUDGET_EXHAUSTED
+        assert len(probes) < 3, f"the loop kept probing past its deadline: {probes}"
+        assert exhausted is True, "a truncated scan has to say so"
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
