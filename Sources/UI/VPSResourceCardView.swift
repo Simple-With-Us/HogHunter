@@ -270,8 +270,13 @@ struct VPSResourceCardView: View {
                         Circle()
                             .fill(toolColor(tool.state))
                             .frame(width: 6, height: 6)
-                        Text(tool.name)
-                            .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(tool.name)
+                                .lineLimit(1)
+                            Text(toolStatusLabel(tool.state))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
                         if tool.state == .running, tool.count > 1 {
                             Text("\(tool.count)")
                                 .foregroundStyle(.secondary)
@@ -279,11 +284,20 @@ struct VPSResourceCardView: View {
                         }
                     }
                     .font(.system(size: 10))
-                    .help("\(tool.name): \(tool.state.rawValue)")
+                    .help("\(tool.name): \(toolStatusLabel(tool.state))")
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(tool.name), \(tool.state.rawValue)")
+                    .accessibilityLabel("\(tool.name), \(toolStatusLabel(tool.state))")
                 }
             }
+        }
+    }
+
+    private func toolStatusLabel(_ state: VPSToolStatus.State) -> String {
+        switch state {
+        case .running: return "running"
+        case .stopped: return "not running"
+        case .absent: return "not found"
+        case .unknown: return "unknown"
         }
     }
 
