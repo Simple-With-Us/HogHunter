@@ -24,7 +24,7 @@ struct HogHunterPanel: View {
     @State private var hasVisitedServer: Bool = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
-    @StateObject private var directoryUsage = DirectoryUsageStore()
+    private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -71,11 +71,8 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedServer {
-                    ScrollView {
-                        ServerStatusView(store: store.maintain.vpsStore)
-                    }
-                        .frame(width: Self.contentWidth, alignment: .leading)
-                        .clipped()
+                    ServerStatusView(store: store.maintain.vpsStore)
+                        .frame(width: Self.contentWidth, alignment: .topLeading)
                         .opacity(selectedTab == .server ? 1 : 0)
                         .allowsHitTesting(selectedTab == .server)
                         .accessibilityHidden(selectedTab != .server)
@@ -102,10 +99,11 @@ struct HogHunterPanel: View {
         )
         .background(MenuBarAnchorFinder { x in beakX = x })
         .preferredColorScheme(store.appearance.colorScheme)
-        .task {
+        .task(id: selectedTab) {
+            guard selectedTab == .activity else { return }
             while !Task.isCancelled {
                 await directoryUsage.refreshIfNeeded()
-                try? await Task.sleep(for: .seconds(900))
+                try? await Task.sleep(for: .seconds(directoryUsage.nextRefreshDelay))
             }
         }
         .onChange(of: selectedTab) { newTab in

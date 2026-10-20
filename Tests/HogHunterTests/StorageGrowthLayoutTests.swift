@@ -48,6 +48,56 @@ final class StorageGrowthLayoutTests: XCTestCase {
         try render(row, size: CGSize(width: 320, height: 110), name: "hh165-size-rows")
     }
 
+    /// Measure the complete report at its natural height.  A fixed-height
+    /// wrapper or clipping here would let an overflowing last row pass.
+    func testFullServerReportFitsWithoutScrollingAtDefaultPanelSize() async throws {
+        let now = Date()
+        let paths = ["/var/lib/docker", "/var/lib/docker/volumes", "/data", "/data/backups",
+                     "/root/Code", "/root/apps/lanes", "/root/.claude", "/root/.codex",
+                     "/root/.config/muse", "/root/.minimax", "/root/.minimax-code",
+                     "/root/.npm", "/root/.cache"]
+        let toolNames = ["Claude Code", "Codex", "Muse", "MiniMax Code", "Fleet CLI", "Fleet Listener",
+                         "Fleet Recall", "Shellular", "Docker", "Caddy", "PostgreSQL", "Redis"]
+        let states: [VPSToolStatus.State] = [.running, .stopped, .absent, .unknown]
+        let snapshot = VPSStatusSnapshot(
+            generatedAt: ISO8601DateFormatter().string(from: now), host: "fleet-hetzner-nbg1",
+            devices: ["root": VPSDevice(mount: "/", freeBytes: 74_097_487_872, note: "301GB disk: OS"),
+                      "tmp": VPSDevice(mount: "/tmp", freeBytes: 16_201_887_744, note: "16GB RAM tmpfs"),
+                      "shm": VPSDevice(mount: "/dev/shm", freeBytes: 16_424_865_792, note: "16GB RAM tmpfs")],
+            appDbs: ["st_app_db": 19_904_122_112, "ct_db": 4_736_902_136, "um_db": 3_457_937_592],
+            cpu: VPSCPU(pct: 24.8, load1: 3.07, cores: 16),
+            memory: VPSMemory(totalBytes: 32_853_925_888, usedBytes: 9_095_159_808, availableBytes: 23_758_766_080),
+            swap: VPSSwap(totalBytes: 18_253_602_816, usedBytes: 9_132_191_744, freeBytes: 9_121_411_072),
+            largestDirs: paths.enumerated().map {
+                VPSDirectory(path: $0.element, bytes: Int64(78_000_000_000 / ($0.offset + 1)))
+            },
+            toolStatuses: toolNames.enumerated().map {
+                VPSToolStatus(id: $0.element, name: $0.element, state: states[$0.offset % states.count], count: 3)
+            },
+            databaseSamples: [VPSSizeSample(path: "st_app_db", bytes: 18_000_000_000,
+                                           sampledAt: now.addingTimeInterval(-86_400).timeIntervalSince1970)],
+            directorySamples: paths.map {
+                VPSSizeSample(path: $0, bytes: 100_000_000_000,
+                              sampledAt: now.addingTimeInterval(-86_400).timeIntervalSince1970)
+            }
+        )
+        let store = VPSStatusStore(initialHost: "fixture", fetcher: { _ in snapshot },
+                                   history: SizeGrowthHistory(fileURL: nil, now: { now }))
+        store.fetch(force: true)
+        for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertNotNil(store.snapshot, "the full report must have loaded before measuring")
+        let width = HogHunterPanel.contentWidth
+        let host = NSHostingView(rootView: ServerStatusView(store: store)
+            .frame(width: width, alignment: .topLeading)
+            .background(Color(nsColor: .windowBackgroundColor)))
+        host.appearance = NSAppearance(named: .aqua)
+        let natural = host.fittingSize
+        XCTAssertLessThanOrEqual(natural.width, width + 1)
+        // 580pt leaves 140pt for the panel's header, tab picker and insets.
+        XCTAssertLessThanOrEqual(natural.height, 580, "complete report needs \(natural.height)pt")
+        try render(host, size: CGSize(width: width, height: natural.height), name: "hh174-server-full-report")
+    }
+
     func testExternalAndBackupDrivesFitCompactStorageWidth() async throws {
         let store = MountedDriveStore(probe: {
             [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
