@@ -9,10 +9,7 @@ import Foundation
 /// invisible until it bites:
 ///
 /// 1. **Another copy is actually running.**  Without the guard a second launch
-///    starts a second app, and because macOS grants Full Disk Access per
-///    binary *and* pid, two copies probe protected paths independently and the
-///    owner gets the same permission prompt twice.  Denying one leaves the
-///    other asking forever, which is what was observed.
+    ///    starts a second app, and the copies probe protected paths independently.
 ///
 /// 2. **This is not a deliberate harness launch.**  CI launches the app with
 ///    `-HogHunterScreenshot` or `-HogHunterUISmoke`, and it does so on machines

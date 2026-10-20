@@ -52,6 +52,11 @@ final class HogStore: ObservableObject {
         resolver.lookup(pid)
     }
 
+    /// Returns an icon already captured by the process sampler, without opening a bundle.
+    func cachedIcon(bundleIdentifier: String?) -> NSImage? {
+        resolver.icon(bundleId: bundleIdentifier, path: nil)
+    }
+
     private var visiblePanelTokens = Set<UUID>()
 
     /// Set by the panel.  Metadata resolution beyond the menu bar's top hog and
@@ -336,6 +341,9 @@ final class HogStore: ObservableObject {
     private var appliedInfisicalProjectId: String?
     private var migratedSettingsReady = false
 
+    /// App-lived cursors survive panel recreation; one idle task shares the view's executor.
+    lazy var directoryUsage = DirectoryUsageStore()
+    private var directoryIdleTask: Task<Void, Never>?
     private var timer: Timer?
     private var pressureSource: DispatchSourceMemoryPressure?
     private var isSampling = false
@@ -403,10 +411,11 @@ final class HogStore: ObservableObject {
             object: infisical
         )
         applyInfisicalOverrides()
-        if startImmediately { start() }
+        if startImmediately && ApplicationRunMode.current.allowsLiveProbes { start() }
     }
 
     deinit {
+        directoryIdleTask?.cancel()
         timer?.invalidate()
         pressureSource?.cancel()
         companionServer.stop()
@@ -415,8 +424,21 @@ final class HogStore: ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
-        guard !started else { return }
+        guard !started, ApplicationRunMode.current.allowsLiveProbes else { return }
         started = true
+        directoryUsage.setMeasurementEnabled(true)
+        directoryIdleTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                var delay: TimeInterval = 15
+                if let self {
+                    if !self.panelVisible {
+                        await self.directoryUsage.refreshWhenIdle()
+                        delay = max(15, self.directoryUsage.nextRefreshDelay)
+                    }
+                } else { return }
+                try? await Task.sleep(for: .seconds(delay))
+            }
+        }
         refreshLoginItem()
         // Opening, migrating and first-pruning the database is up to half a
         // second of work on an upgrade, so it happens on the sampling queue.
@@ -434,6 +456,9 @@ final class HogStore: ObservableObject {
     }
 
     func stop() {
+        directoryIdleTask?.cancel()
+        directoryIdleTask = nil
+        directoryUsage.setMeasurementEnabled(false)
         timer?.invalidate()
         timer = nil
         pressureSource?.cancel()

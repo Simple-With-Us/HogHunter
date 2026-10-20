@@ -12,15 +12,18 @@ struct NetworkView: View {
 
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
+    private let cachedIconProvider: (String?) -> NSImage?
 
     init(
         bundleResolver: @escaping (pid_t) -> (bundleId: String?, name: String),
         bandwidth: BandwidthStore,
+        cachedIconProvider: @escaping (String?) -> NSImage? = { _ in nil },
         embeddedInPanel: Bool = false,
         isTabActive: Bool = true
     ) {
         _store = StateObject(wrappedValue: NetworkStore(bundleResolver: bundleResolver))
         _bandwidth = ObservedObject(wrappedValue: bandwidth)
+        self.cachedIconProvider = cachedIconProvider
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
     }
@@ -228,7 +231,7 @@ struct NetworkView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(sortedUsages) { usage in
-                            NetworkRowView(usage: usage)
+                            NetworkRowView(usage: usage, icon: cachedIconProvider(usage.bundleId))
                         }
                     }
                     .padding(.vertical, 2)
@@ -343,6 +346,7 @@ struct BandwidthCard: View {
 
 struct NetworkRowView: View {
     let usage: NetworkUsage
+    var icon: NSImage? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -386,19 +390,16 @@ struct NetworkRowView: View {
         .accessibilityLabel("\(usage.name), \(usage.establishedSockets) established of \(usage.openSockets) open connections across \(usage.remoteHostCount) hosts")
     }
 
+    @ViewBuilder
     private var iconView: some View {
-        Group {
-            if let bundleId = usage.bundleId,
-               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId),
-               let icon = NSWorkspace.shared.icon(forFile: url.path) as NSImage? {
-                Image(nsImage: icon)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.secondary)
-            }
+        if let icon {
+            Image(nsImage: icon)
+                .resizable()
+                .scaledToFit()
+        } else {
+            Image(systemName: "app.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(.secondary)
         }
     }
 }

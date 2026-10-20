@@ -90,6 +90,10 @@ targets:
         # Empty unless `xcodebuild SENTRY_DSN=...` or the environment supplies it.
         SENTRY_DSN: ""
       configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos.development
+          INFOPLIST_KEY_CFBundleName: "Hog Hunter Dev"
+          INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter Dev"
         Release:
           ENABLE_HARDENED_RUNTIME: YES
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
@@ -110,6 +114,9 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos.tests
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos.development.tests
 
   HogHunterIOS:
     type: application

@@ -11,17 +11,13 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     /// One app, one menu bar item, one set of timers.
     ///
     /// Without this a second launch starts a second Hog Hunter.  That is not
-    /// cosmetic: macOS grants Full Disk Access per binary *and* pid, so two
-    /// copies probe protected paths independently and the owner gets the same
-    /// permission prompt twice, with denying one leaving the other asking.
+    /// cosmetic: two copies probe protected paths independently and can
+    /// request access separately.
     ///
     /// Checked in `willFinishLaunching`, before any window or timer exists, so
     /// the loser never gets far enough to own anything.
     func applicationWillFinishLaunching(_ notification: Notification) {
-        let isRunningTests = NSClassFromString("XCTestCase") != nil
-            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
-            || ProcessInfo.processInfo.arguments.contains("-XCTest")
+        let isRunningTests = ApplicationRunMode.current == .unitTests
         let handOver = SingleInstance.shouldHandOver(
             argumentStrings: ProcessInfo.processInfo.arguments,
             isRunningTests: isRunningTests,
@@ -44,20 +40,24 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
         exit(0)
     }
 
+    /// History writes are queued off the main actor, and termination does not wait for utility
+    /// queues.  Without this drain the newest size observations are lost on an immediate quit.
+    func applicationWillTerminate(_ notification: Notification) {
+        SizeGrowthHistory.shared.flushPersistence()
+    }
+
     private func screenshotLog(_ message: String) {
         // FileHandle.standardError.write is unbuffered - each line hits the log immediately.
         FileHandle.standardError.write(Data(("[HogHunterScreenshot] " + message + "\n").utf8))
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let isRunningTests = NSClassFromString("XCTestCase") != nil
-            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-        guard !isRunningTests else { return }
+        guard ApplicationRunMode.current != .unitTests else { return }
 
         // Sparkle self-update starts first: a build whose Info.plist carries
         // the feed updates itself hourly in the background.  A build without
         // the feed is a silent no-op (see AutoUpdateAvailability).
-        AppUpdater.shared.start()
+        if ApplicationRunMode.current.allowsLiveProbes { AppUpdater.shared.start() }
         // Headless UI smoke test.  Runs before anything else touches the app so
         // it is not racing the sampler, the bandwidth timer, or the screenshot
         // hook.  See UISmokeTest for why this exists.
@@ -113,13 +113,11 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct HogHunterApp: App {
     static var isRunningUnderTest: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || NSClassFromString("XCTestCase") != nil
+        ApplicationRunMode.current == .unitTests
     }
 
     static var isHarnessLaunch: Bool {
-        ProcessInfo.processInfo.arguments.contains(HarnessArgument.uiSmoke)
-            || ProcessInfo.processInfo.arguments.contains(HarnessArgument.screenshot)
+        ApplicationRunMode.current == .uiHarness
     }
 
     static var shouldInsertMenuBarExtra: Bool {
@@ -127,11 +125,11 @@ struct HogHunterApp: App {
     }
 
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
-    @StateObject private var store = HogStore(startImmediately: !HogHunterApp.isRunningUnderTest)
+    @StateObject private var store = HogStore(startImmediately: ApplicationRunMode.current.allowsLiveProbes)
     @ObservedObject private var updater = AppUpdater.shared
 
     init() {
-        guard !Self.isRunningUnderTest else { return }
+        guard ApplicationRunMode.current.allowsLiveProbes else { return }
         // Sentry first, so early-launch crashes are captured.  A build
         // without a baked-in DSN is a silent no-op.  See SentryTelemetry.
         SentryTelemetry.start()
@@ -186,7 +184,8 @@ struct HogHunterApp: App {
         Window("Network", id: "hoghunter.network") {
             NetworkView(
                 bundleResolver: { pid in store.lookup(pid: pid) },
-                bandwidth: store.bandwidth
+                bandwidth: store.bandwidth,
+                cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) }
             )
             .environmentObject(store)
         }

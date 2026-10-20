@@ -24,7 +24,7 @@ struct HogHunterPanel: View {
     @State private var hasVisitedServer: Bool = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
-    @StateObject private var directoryUsage = DirectoryUsageStore()
+    private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -53,7 +53,7 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedNetwork {
-                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: selectedTab == .network)
+                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) }, embeddedInPanel: true, isTabActive: selectedTab == .network)
                         // Both lines are load-bearing.  A tab's own content
                         // decides its ideal width, and a long unwrapped string
                         // anywhere in it (a hostname list, a footer sentence)
@@ -71,11 +71,8 @@ struct HogHunterPanel: View {
                 }
 
                 if hasVisitedServer {
-                    ScrollView {
-                        ServerStatusView(store: store.maintain.vpsStore)
-                    }
-                        .frame(width: Self.contentWidth, alignment: .leading)
-                        .clipped()
+                    ServerStatusView(store: store.maintain.vpsStore)
+                        .frame(width: Self.contentWidth, alignment: .topLeading)
                         .opacity(selectedTab == .server ? 1 : 0)
                         .allowsHitTesting(selectedTab == .server)
                         .accessibilityHidden(selectedTab != .server)
@@ -102,10 +99,11 @@ struct HogHunterPanel: View {
         )
         .background(MenuBarAnchorFinder { x in beakX = x })
         .preferredColorScheme(store.appearance.colorScheme)
-        .task {
+        .task(id: selectedTab) {
+            guard selectedTab == .activity else { return }
             while !Task.isCancelled {
                 await directoryUsage.refreshIfNeeded()
-                try? await Task.sleep(for: .seconds(900))
+                try? await Task.sleep(for: .seconds(directoryUsage.nextRefreshDelay))
             }
         }
         .onChange(of: selectedTab) { newTab in

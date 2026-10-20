@@ -164,7 +164,7 @@ final class VPSStatusStore: ObservableObject {
 
     nonisolated static func sshFetcher() -> Fetcher {
         { host in
-            guard !MaintainStore.isRunningUnderTest else {
+            guard ApplicationRunMode.current.allowsLiveProbes else {
                 throw NSError(domain: "VPSStatusStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "SSH fetcher does not run from unit tests."])
             }
             let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
