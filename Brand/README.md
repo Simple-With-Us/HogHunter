@@ -12,9 +12,9 @@ These files are the **standalone emblem**: the artwork the owner uses for their 
 | `HogHunter-Logo-Rotated.svg` | The same emblem rotated 9.5 degrees counter-clockwise. |
 | `HogHunter-Icon-Rotated.svg` | The emblem on a pre-cropped rounded tile (240 px corner radius at 1024, transparent corners), rotated, scaled and shifted to match the owner's `.icns`.  Display only. |
 | `HogHunter-Logo-Small-16.svg` | The emblem zoomed to the snout, upright, for a 16 px mark. |
-| `HogHunter-Logo-Small-32.svg` | The emblem zoomed to the face, upright, for a 32 px mark. |
+| `HogHunter-Logo-Small-32.svg` | The emblem zoomed to the snout and the tusk, upright, for a 32 px mark. |
 | `HogHunter-Icon-Small-16.svg` | The same 16 px snout crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
-| `HogHunter-Icon-Small-32.svg` | The same 32 px face crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
+| `HogHunter-Icon-Small-32.svg` | The same 32 px snout-and-tusk crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `preview-small-icons.png` | The small variants at their true pixel size, against the owner's shipped 16 px and 32 px icons. |
 
 `HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon: the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
@@ -43,16 +43,16 @@ In SVG, a positive `rotate()` is clockwise, so the counter-clockwise rotation is
 
 ## Small sizes
 
-At 16 px and 32 px the whole head does not survive.  Scaled down, the snout, the tusks and the eye all collapse into one brown mass, and the mark stops reading as a boar.  The small variants zoom into the part of the head that still reads.
+At 16 px and 32 px the whole head does not survive.  Scaled down, the snout, the tusks and the eye all collapse into one brown mass, and the mark stops reading as a boar.  The small variants zoom into the part of the head that still reads.  At 16 px only the snout survives, and at 32 px the snout plus the big tusk does: the tusk is the cue that says boar rather than pig, and it needs the extra pixels that only 32 px and up can spend.
 
 | File | Crop | What survives |
 |---|---|---|
 | `HogHunter-Logo-Small-16.svg` | the snout | the oval snout, both nostrils, and the cream crescent along its right edge |
-| `HogHunter-Logo-Small-32.svg` | the face | the snout, the tusks, the eye and the brow |
+| `HogHunter-Logo-Small-32.svg` | the snout and the tusk | the oval snout, both nostrils, the cream crescent, and the big tusk beside it |
 | `HogHunter-Icon-Small-16.svg` | the snout, rotated | the same, with the owner's rotation, scale and shift applied, on the rounded tile |
-| `HogHunter-Icon-Small-32.svg` | the face, rotated | the same, with the owner's rotation, scale and shift applied, on the rounded tile |
+| `HogHunter-Icon-Small-32.svg` | the snout and the tusk, rotated | the same, with the owner's rotation, scale and shift applied, on the rounded tile |
 
-`preview-small-icons.png` shows the owner's shipped 16 px and 32 px icons next to the new variants at their true pixel size, and the same files at full size below.
+`preview-small-icons.png` shows the owner's shipped 16 px and 32 px icons next to the new variants at their true pixel size, and the same files at full size below.  The 32 px row also shows the earlier face crop, so the change is visible side by side rather than only in the words.
 
 These are **crop windows over the unchanged artwork**, not new drawings.  Every small file carries the same traced paths as `HogHunter-Logo.svg`; the crop is a `translate()` on a wrapper group, so nothing is re-traced and the files still hold up if they are scaled up again.
 
@@ -61,15 +61,15 @@ The crop windows in the owner's 1024 space:
 | Variant | Window |
 |---|---|
 | Logo small 16 | `10, 470, 230, 230` |
-| Logo small 32 | `55, 350, 460, 460` |
+| Logo small 32 | `60, 480, 315, 315` |
 | Icon small 16 | `-1.559, 553.563, 230, 230` (tile space) |
-| Icon small 32 | `47.69, 405.773, 460, 460` (tile space) |
+| Icon small 32 | `60.463, 549.267, 315, 315` (tile space) |
 
 The Icon windows are in **tile space**, the space the owner's `.icns` uses, so the emblem keeps its rotation and its scale inside the crop.  Every small file has a `viewBox` that starts at `0 0` and expresses the crop as a `translate()`, so no file has an offset viewBox.
 
 The Icon variants also carry the owner's rounded tile, clipped to the crop, so a set built from them has one silhouette at every size.  The owner's own iconset entries have transparent rounded corners from 16 px upward, and a square crop would break that; the Logo variants stay flat on cream, like `HogHunter-Logo.svg`.
 
-Each crop is designed for the size it is used at.  The snout crop is a 230 unit window, so at 16 px it still holds its nostril slits and its cream crescent, and it holds at 24 px too, because more pixels fall on each feature.  The face crop is a 460 unit window, so at 24 px it is below its own design size and the tusks and the eye merge back into the mass.  Choose the crop by rendering it at the size it will be used at and looking at those pixels, not by which crop looks best large.
+Each crop is designed for the size it is used at.  The snout crop is a 230 unit window, so at 16 px it still holds its nostril slits and its cream crescent, and it holds at 24 px too, because more pixels fall on each feature.  The 32 px crop is a 315 unit window that adds the big tusk beside the snout, and the tusk is the one cue that says boar rather than pig, but it costs the window a third of the snout's size, so it does not fit below 32 px.  Choose the crop by rendering it at the size it will be used at and looking at those pixels, not by which crop looks best large.
 
 ### Verifying a small size
 
@@ -94,7 +94,7 @@ HTML
   --user-data-dir="$tmpdir/chrome-profile" "file://$tmpdir/icon16.html"
 ```
 
-Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of a tusk also reads cleanly at 16 px, as a distinct cream curve, but it reads as a shape rather than as the animal, and a tight crop of the eye comes out as a plain slash.  The snout is the candidate that still reads as a hog, and the same method is how the snout and the face were chosen.
+Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of a tusk also reads cleanly at 16 px, as a distinct cream curve, but it reads as a shape rather than as the animal, and a tight crop of the eye comes out as a plain slash.  The snout is the candidate that still reads as a hog, and the same method is how the snout and the snout-and-tusk crops were chosen.
 
 ## Rebuilding a standalone .icns
 
@@ -144,11 +144,11 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 The Windows `.ico` needs the same treatment as the `.icns`.  The single-source `magick` command above always produces the scaled-down full emblem, which is the exact defect the small variants exist to fix, so build the small entries from the zoomed files instead:
 
 ```bash
-# 16 px and 24 px from the 16 px snout crop; 32 px from the 32 px face crop.
-# 24 px is below the face crop's design size, and there the snout crop wins:
+# 16 px and 24 px from the 16 px snout crop; 32 px from the 32 px snout-and-tusk crop.
+# 24 px is below the 32 px crop's design size, and there the snout crop wins:
 # rendered at true 24 px the snout keeps its nostril slits and its cream
-# crescent, while the face crop falls back into the brown mass the small
-# variants exist to prevent.  The larger entries come from the full emblem:
+# crescent, while the wider crop loses the snout's detail to the tusk.
+# The larger entries come from the full emblem:
 magick -background none Brand/HogHunter-Icon-Small-16.svg -resize 16x16 icon16.png
 magick -background none Brand/HogHunter-Icon-Small-16.svg -resize 24x24 icon24.png
 magick -background none Brand/HogHunter-Icon-Small-32.svg -resize 32x32 icon32.png
@@ -161,13 +161,17 @@ icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.p
 
 Keep `-background none` on those renders, or the rounded corners of the tile come out white instead of transparent.
 
-`icotool -c` keeps variable transparency in the alpha channel.  When a source PNG carries more than two distinct alpha values, which these renders do because the rounded tile is antialiased, it writes the entry as a 32-bit DIB and the soft edge of the tile survives in that alpha channel.  The 1-bit AND mask only carries transparency for an image whose alpha is binary, so it is not the reason the tile edge would be lost here.  Passing `-r, --raw=FILENAME` embeds that file's PNG payload verbatim instead, and each `--raw` is an input in its own right, not a modifier on a later argument, so the small entries are named with `--raw` and the rest stay positional:
+`icotool -c` keeps variable transparency in the alpha channel.  When a source PNG carries more than two distinct alpha values, which these renders do because the rounded tile is antialiased, it writes the entry as a 32-bit DIB and the soft edge of the tile survives in that alpha channel.  The 1-bit AND mask only carries transparency for an image whose alpha is binary, so it is not the reason the tile edge would be lost here.
+
+That is why the plain command above is the one to use: every entry is a DIB, and every Windows version reads a DIB.
+
+Passing `-r, --raw=FILENAME` embeds that file's PNG payload verbatim instead.  It is a size and compatibility choice, not a transparency fix, and it has two limits.  Windows decodes a PNG-compressed ICO entry only at 256x256, so a PNG-backed entry below 256 px is ignored or shows as a broken image in Explorer, and the 16, 24 and 32 px entries would be lost.  And `icotool` parses options before positional arguments, so a `--raw` entry lands first in the icon directory and the 256 px entry comes ahead of the smaller ones.
+
+`icotool` itself accepts a raw PNG of any size; the 256x256 limit is on the Windows side of the format, not in the tool.  So the raw form is only worth reaching for on the 256 px entry, and only when that reader is known to want it:
 
 ```bash
-icotool -c -o HogHunter.ico --raw=icon16.png --raw=icon24.png --raw=icon32.png icon48.png icon64.png icon128.png icon256.png
+icotool -c -o HogHunter.ico --raw=icon256.png icon16.png icon24.png icon32.png icon48.png icon64.png icon128.png
 ```
-
-That form is optional, and it is a size and compatibility choice rather than a transparency fix: a PNG-backed entry below 256 px is a Vista-era format that Windows XP and earlier cannot read, while the 32-bit DIB above is read everywhere.  Leave the entries as DIB unless the target reader is known to accept PNG-backed entries.
 
 Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
