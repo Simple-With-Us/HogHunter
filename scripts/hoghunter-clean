@@ -172,6 +172,15 @@ _DEADLINE: float | None = None
 _SCAN_DEADLINE: float | None = None
 _SCAN_BUDGET_EXHAUSTED = False
 
+# True while the SCAN is running.  The rules that predate the budget split
+# start their own subprocesses (a find walk, a pgrep, tmutil, brew) and used a
+# FIXED timeout for each.  `scan()` only checks the deadline between rules, so
+# a rule that started with its share nearly spent could still run a 90 s walk
+# and eat the reserve the deletes need -- which is the livelock the split
+# exists to stop.  The flag lets every one of those probes take its timeout
+# from the clock of the phase it is actually running in.
+_SCAN_PHASE = False
+
 
 def set_budget(seconds: float) -> None:
     """Start the clock.  Zero or less clears any budget."""
@@ -242,6 +251,40 @@ def scan_op_timeout(default: float) -> float:
         # fails closed to "touched", which is the safe answer.
         return 1.0
     return min(float(default), max(1.0, left))
+
+
+def probe_timeout(default: float) -> float:
+    """The timeout for one probe, cut to the clock of the phase it runs in.
+
+    A probe started by a scan rule is bounded by the SCAN share, so the scan
+    cannot spend the reserve the deletes need.  The same probe started after
+    the scan -- the apply phase, or a band re-read between chunks -- is
+    bounded by the whole budget instead.
+
+    Every subprocess a rule starts takes its timeout from here.  The rules
+    that predate the budget split used a fixed 90 s, 60 s or 15 s, which is
+    longer than the 60% share on its own: one rule starting with its share
+    nearly spent could overrun the whole budget.
+    """
+    if _SCAN_PHASE:
+        return scan_op_timeout(default)
+    return op_timeout(default)
+
+
+def rule_deadline() -> float:
+    """The wall clock a rule's own loop may not pass.
+
+    A rule gets RULE_BUDGET_SEC of its own, but never more than what is left
+    of the phase it runs in.  During the scan that is the scan share, which is
+    the smaller of the two budgets, so the whole-budget bound still holds on
+    top of it.  A rule that starts with its share nearly spent must not then
+    walk for another 90 s and eat the reserve the deletes need.
+    """
+    left = scan_budget_left() if _SCAN_PHASE else budget_left()
+    budget = float(RULE_BUDGET_SEC)
+    if left < budget:
+        budget = left
+    return time.time() + budget
 
 
 # --------------------------------------------------------------------------
@@ -536,7 +579,7 @@ def _load_open_snapshot() -> set[str] | None:
         return _OPEN_SNAPSHOT
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True,
-                           timeout=scan_op_timeout(180.0))
+                           timeout=probe_timeout(180.0))
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"system-wide lsof did not answer ({type(exc).__name__}); using per-path checks")
         return None
@@ -627,7 +670,7 @@ def open_handles(path: str) -> int:
         return beneath + exact
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "p", "--", str(path)],
-                           capture_output=True, text=True, timeout=scan_op_timeout(25.0))
+                           capture_output=True, text=True, timeout=probe_timeout(25.0))
     except (subprocess.TimeoutExpired, OSError):
         log(f"lsof could not look at {path!r}; treating it as open")
         return 1
@@ -661,7 +704,7 @@ def touched_since(path: str, days: float) -> bool:
         # "touched" below, so a clamp never turns into a delete.
         proc = subprocess.run(
             ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
-            capture_output=True, text=True, timeout=scan_op_timeout(120.0),
+            capture_output=True, text=True, timeout=probe_timeout(120.0),
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return True
@@ -719,8 +762,7 @@ def proc_count(pattern: str) -> int:
     """
     try:
         p = subprocess.run(["/usr/bin/pgrep", "-f", pattern],
-                           capture_output=True, text=True,
-                           timeout=scan_op_timeout(15))
+                           capture_output=True, text=True, timeout=probe_timeout(15))
     except (subprocess.TimeoutExpired, OSError):
         log(f"pgrep {pattern!r} failed; treating it as busy")
         return PROBE_FAILED
@@ -779,7 +821,7 @@ def dir_bytes(path: str, max_depth: int = 8, deadline_cap: float | None = None) 
                 if cap is not None and time.monotonic() >= cap:
                     _SCAN_BUDGET_EXHAUSTED = True
                 break
-            du = _run(["/usr/bin/du", "-sk", str(cur)], timeout=min(30.0, remaining))
+            du = _run(["/usr/bin/du", "-sk", str(cur)], timeout=min(probe_timeout(30.0), remaining))
             try:
                 total += int(du.split()[0]) * 1024
             except (IndexError, ValueError):
@@ -968,8 +1010,7 @@ def rule_snapshots() -> list[Candidate]:
     Keep the newest; prune the rest.  This is semi-safe: it is gated behind
     the full band.
     """
-    out = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"],
-               timeout=scan_op_timeout(60))
+    out = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=probe_timeout(60))
     names = []
     for line in out.splitlines():
         line = line.strip()
@@ -1001,7 +1042,7 @@ def rule_temp_scratch() -> list[Candidate]:
 
     Gate: nothing holds the directory AND nothing was written to it for 3h.
     """
-    tmpdir = _run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], timeout=10).strip()
+    tmpdir = _run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], timeout=probe_timeout(10)).strip()
     if not tmpdir:
         return []
     root = Path(tmpdir.rstrip("/"))
@@ -1010,8 +1051,11 @@ def rule_temp_scratch() -> list[Candidate]:
     # Per-rule wall clock.  Under load 500+ a full TMPDIR walk can run for
     # minutes, and a scan that takes longer than the pressure it is
     # responding to is worse than no scan at all.  If the budget runs out we
-    # return what we found rather than blocking the caller.
-    deadline = time.time() + RULE_BUDGET_SEC
+    # return what we found rather than blocking the caller.  The clock is the
+    # rule's own budget AND what is left of the phase it runs in, so a rule
+    # that starts with the scan share nearly spent cannot walk for another
+    # 90 s and eat the reserve the deletes need.
+    deadline = rule_deadline()
     cands: list[Candidate] = []
     seen: set[str] = set()
 
@@ -1021,7 +1065,7 @@ def rule_temp_scratch() -> list[Candidate]:
     try:
         ssr_dirs = find_paths(
             [str(root), "-maxdepth", "3", "-type", "d", "-name", "ssr"],
-            scan_op_timeout(RULE_BUDGET_SEC),
+            probe_timeout(RULE_BUDGET_SEC),
         )
     except (OSError, subprocess.SubprocessError):
         ssr_dirs = []
@@ -1066,7 +1110,7 @@ def rule_temp_scratch() -> list[Candidate]:
     try:
         for f in find_paths(
             [str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
-            scan_op_timeout(60),
+            probe_timeout(60),
         ):
             if not f.strip() or f in seen:
                 continue
@@ -1328,7 +1372,10 @@ def rule_unbounded_logs() -> list[Candidate]:
     cands: list[Candidate] = []
     roots = log_scan_roots()
     keep_mib = 16
-    deadline = time.time() + RULE_BUDGET_SEC
+    # The rule's own budget AND what is left of the phase it runs in, so a
+    # rule that starts with the scan share nearly spent cannot walk for
+    # another 90 s and eat the reserve the deletes need.
+    deadline = rule_deadline()
     for root in roots:
         if not root.is_dir():
             continue
@@ -1340,7 +1387,7 @@ def rule_unbounded_logs() -> list[Candidate]:
                 [str(root), "-maxdepth", "3", "-type", "f",
                  "(", "-name", "*.log", "-o", "-name", "*.jsonl", "-o", "-name", "*.out",
                  "-o", "-name", "*.err", ")", "-size", "+64M"],
-                scan_op_timeout(RULE_BUDGET_SEC),
+                probe_timeout(RULE_BUDGET_SEC),
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -1387,7 +1434,7 @@ def rule_sqlite_wals() -> list[Candidate]:
             files = find_paths(
                 [str(root), "-maxdepth", "3", "-type", "f",
                  "-name", "*.db-wal", "-size", "+32M"],
-                scan_op_timeout(60),
+                probe_timeout(60),
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -1414,8 +1461,7 @@ def rule_brew() -> list[Candidate]:
         return []
     if proc_count("brew") or proc_count("node-gyp"):
         return []
-    out = _run(["/opt/homebrew/bin/brew", "cleanup", "--dry-run"],
-               timeout=scan_op_timeout(90))
+    out = _run(["/opt/homebrew/bin/brew", "cleanup", "--dry-run"], timeout=probe_timeout(90))
     if not out:
         return []
     lines = [ln for ln in out.splitlines() if ln.strip() and "would remove" not in ln.lower()]
@@ -1636,7 +1682,7 @@ def rule_app_caches() -> list[Candidate]:
                     # A marker INSIDE the tree protects the tree.  This rule
                     # deletes whole app-cache trees, so a marker the
                     # operator put inside one would be deleted with it.
-                    if holds_keep_sentinel(s, scan_op_timeout(60.0)):
+                    if holds_keep_sentinel(s, probe_timeout(60.0)):
                         continue
                     if newest_file_age_min(s) < IDLE_MIN_OK:
                         continue
@@ -1779,7 +1825,7 @@ def rule_agent_state() -> list[Candidate]:
                 continue
             # A marker INSIDE the tree protects the tree, the same as for
             # the app-cache rule: this rule deletes whole agent trees.
-            if holds_keep_sentinel(s, scan_op_timeout(60.0)):
+            if holds_keep_sentinel(s, probe_timeout(60.0)):
                 continue
             # A tree that holds a `.project_root` marker is an agent's working
             # copy of a real project, not scratch.  `~/.gemini/tmp` is named
@@ -1867,7 +1913,7 @@ def _read_cpu_pressures() -> tuple[float, float]:
     NOT be read as thrash, so the caller treats a missing idle as "unknown"
     rather than "0% idle" -- see the guard in is_thrashing's caller.
     """
-    out = _run(["/usr/bin/top", "-l", "1", "-n", "0"], timeout=15)
+    out = _run(["/usr/bin/top", "-l", "1", "-n", "0"], timeout=probe_timeout(15))
     idle = -1.0
     for line in out.splitlines():
         m = re.search(r"CPU usage:.*?([\d.]+)%\s*idle", line)
@@ -1876,7 +1922,7 @@ def _read_cpu_pressures() -> tuple[float, float]:
             break
 
     kernel = 0.0
-    pout = _run(["/bin/ps", "-A", "-o", "pcpu=,comm="], timeout=15)
+    pout = _run(["/bin/ps", "-A", "-o", "pcpu=,comm="], timeout=probe_timeout(15))
     for line in pout.splitlines():
         parts = line.split(None, 1)
         if len(parts) == 2 and parts[1].strip() == "kernel_task":
@@ -1893,7 +1939,7 @@ def _read_cpu_pressures() -> tuple[float, float]:
 def read_band() -> Band:
     free_gb = 0.0
     used_pct = 0.0
-    out = _run(["/bin/df", "-k", "/System/Volumes/Data"], timeout=15)
+    out = _run(["/bin/df", "-k", "/System/Volumes/Data"], timeout=probe_timeout(15))
     lines = out.splitlines()
     if len(lines) >= 2:
         parts = lines[1].split()
@@ -1903,7 +1949,7 @@ def read_band() -> Band:
         except (IndexError, ValueError):
             pass
     swap_pct = 0.0
-    sout = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], timeout=10)
+    sout = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], timeout=probe_timeout(10))
     # `vm.swapusage` prints "total = ...M  used = ...M  free = ...M  (encrypted)".
     # total comes FIRST, so an order-sensitive regex silently reads 0 and the
     # swap gate never fires -- which would let the engine run the full tier
@@ -1961,44 +2007,54 @@ def read_band() -> Band:
 # --------------------------------------------------------------------------
 
 def scan(cats: Sequence[str] | None) -> list[Candidate]:
-    global _SCAN_BUDGET_EXHAUSTED
+    global _SCAN_BUDGET_EXHAUSTED, _SCAN_PHASE
     _SCAN_BUDGET_EXHAUSTED = False
     out: list[Candidate] = []
     seen: set[tuple[str, str]] = set()
     seen_inodes: set[tuple[int, int, str]] = set()
-    for name, (fn, _desc) in RULES.items():
-        if cats and name not in cats:
-            continue
-        if scan_budget_left() <= 0:
-            if _SCAN_DEADLINE is not None:
-                _SCAN_BUDGET_EXHAUSTED = True
-            break
-        try:
-            found = fn()
-        except Exception as exc:  # a broken rule must not kill the scan
-            log(f"rule {name} failed: {type(exc).__name__}: {exc}")
-            found = []
-        for c in found:
-            # Two rules can name the same path.  Delete it once.  The identity
-            # is the inode, not the spelling: this volume is case-insensitive,
-            # so "Cache" and "cache" are one directory and counting it twice
-            # inflated the total and would have deleted it twice.
-            key = (c.path, c.op)
-            if key in seen:
+    # The rules are about to run.  Every subprocess they start takes its
+    # timeout from the clock of the phase it runs in, so the SCAN's probes are
+    # bounded by the scan share and the reserve the deletes need is intact
+    # when the apply phase starts.
+    _SCAN_PHASE = True
+    try:
+        for name, (fn, _desc) in RULES.items():
+            if cats and name not in cats:
                 continue
+            if scan_budget_left() <= 0:
+                if _SCAN_DEADLINE is not None:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                break
             try:
-                st = os.stat(c.path)
-                ino = (st.st_dev, st.st_ino, c.op)
-                if ino in seen_inodes:
+                found = fn()
+            except Exception as exc:  # a broken rule must not kill the scan
+                log(f"rule {name} failed: {type(exc).__name__}: {exc}")
+                found = []
+            for c in found:
+                # Two rules can name the same path.  Delete it once.  The identity
+                # is the inode, not the spelling: this volume is case-insensitive,
+                # so "Cache" and "cache" are one directory and counting it twice
+                # inflated the total and would have deleted it twice.
+                key = (c.path, c.op)
+                if key in seen:
                     continue
-                seen_inodes.add(ino)
-            except OSError:
-                pass
-            seen.add(key)
-            out.append(c)
-        if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
-            _SCAN_BUDGET_EXHAUSTED = True
-            break
+                try:
+                    st = os.stat(c.path)
+                    ino = (st.st_dev, st.st_ino, c.op)
+                    if ino in seen_inodes:
+                        continue
+                    seen_inodes.add(ino)
+                except OSError:
+                    pass
+                seen.add(key)
+                out.append(c)
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                break
+    finally:
+        # The scan is over.  Everything after this point -- the apply phase,
+        # the band re-read between chunks -- is bounded by the whole budget.
+        _SCAN_PHASE = False
     return out
 
 

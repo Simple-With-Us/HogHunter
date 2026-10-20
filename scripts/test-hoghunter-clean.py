@@ -9,6 +9,7 @@ Run:  python3 scripts/test-hoghunter-clean.py
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -276,6 +277,7 @@ def test_the_lsof_snapshot_is_bounded_by_the_scan_share(hh):
     whole scan share."""
     _reset_open_snapshot(hh)
     hh.set_budget(600)
+    hh._SCAN_PHASE = True          # a probe takes the clock of its phase
     try:
         hh._SCAN_DEADLINE = time.monotonic() - 1.0
         with mock.patch.object(hh.subprocess, "run",
@@ -284,6 +286,7 @@ def test_the_lsof_snapshot_is_bounded_by_the_scan_share(hh):
         assert run.call_args.kwargs["timeout"] == 1.0, "the timeout must follow the scan share"
     finally:
         hh.set_budget(0)
+        hh._SCAN_PHASE = False
         _reset_open_snapshot(hh)
 
 
@@ -291,6 +294,7 @@ def test_the_find_probe_is_bounded_by_the_scan_share(hh):
     """The find walk in touched_since used a fixed 120s timeout and runs once
     per candidate, so it could spend the whole scan share."""
     hh.set_budget(600)
+    hh._SCAN_PHASE = True          # a probe takes the clock of its phase
     try:
         hh._SCAN_DEADLINE = time.monotonic() - 1.0
         with mock.patch.object(hh.subprocess, "run",
@@ -299,6 +303,7 @@ def test_the_find_probe_is_bounded_by_the_scan_share(hh):
         assert run.call_args.kwargs["timeout"] == 1.0
     finally:
         hh.set_budget(0)
+        hh._SCAN_PHASE = False
 
 
 def test_the_candidate_loops_stop_when_the_scan_share_is_spent(hh):
@@ -325,6 +330,250 @@ def test_the_candidate_loops_stop_when_the_scan_share_is_spent(hh):
             hh.set_budget(0)
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_probe_timeout_follows_the_phase_it_runs_in(hh):
+    """Round 5: the rules that predate the budget split started their own
+    subprocesses with a FIXED timeout (90 s, 60 s, 15 s).  `scan()` only
+    checks the deadline BETWEEN rules, so a rule that started with its share
+    nearly spent could still run a 90 s walk and eat the reserve the deletes
+    need -- the exact livelock the budget split exists to break.
+
+    Every probe now takes its timeout from the clock of the phase it runs in:
+    the scan share during the scan, the whole budget after it.
+    """
+    hh.set_budget(600)
+    try:
+        # The scan share is nearly spent.
+        hh._SCAN_DEADLINE = time.monotonic() + 0.5
+        hh._SCAN_PHASE = True
+        try:
+            assert hh.probe_timeout(90.0) <= 1.0, hh.probe_timeout(90.0)
+            assert hh.probe_timeout(60.0) <= 1.0, hh.probe_timeout(60.0)
+            assert hh.probe_timeout(15.0) <= 1.0, hh.probe_timeout(15.0)
+            # A generous share still gets the usual limits.
+            hh._SCAN_DEADLINE = time.monotonic() + 300
+            assert hh.probe_timeout(90.0) == 90.0, hh.probe_timeout(90.0)
+        finally:
+            hh._SCAN_PHASE = False
+        # Outside the scan the WHOLE budget applies, not the scan share.
+        assert hh.probe_timeout(90.0) == 90.0, hh.probe_timeout(90.0)
+        # With the whole budget nearly spent the probe is cut to what is left.
+        hh._DEADLINE = time.monotonic() + 0.5
+        assert hh.probe_timeout(90.0) <= 5.0, hh.probe_timeout(90.0)
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
+
+
+def test_the_rule_deadline_follows_the_phase_it_runs_in(hh):
+    """A rule's own wall clock must not outlive the phase it runs in.  A rule
+    that starts with the scan share nearly spent cannot then walk for another
+    90 s and eat the reserve the deletes need -- that is the round-5 bug in
+    its loop form."""
+    hh.set_budget(600)
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() + 20
+        hh._SCAN_PHASE = True
+        try:
+            # 20 s of scan share left, so the rule's deadline is 20 s away --
+            # not its own 90 s.
+            left = hh.rule_deadline() - time.time()
+            assert left <= 20.0, left
+            assert left < hh.RULE_BUDGET_SEC, left
+        finally:
+            hh._SCAN_PHASE = False
+        # Outside the scan the whole budget applies, so the rule may use its
+        # own budget.
+        assert hh.rule_deadline() - time.time() > 20.0
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
+
+
+def test_the_scan_phase_flag_is_set_while_the_rules_run_and_cleared_after(hh):
+    """The phase flag must be a MODULE global.  A flag assigned inside a
+    function without `global` is a local: the report never learns the truth.
+    (Lesson: contrib/MM/2026-10-20/fbab9520.)
+
+    Assert it from OUTSIDE the function, where a local assignment would be
+    invisible, and assert it is cleared even when a rule raises.
+    """
+    seen = {}
+
+    def probe_rule():
+        seen["phase"] = hh._SCAN_PHASE
+        return []
+
+    def boom_rule():
+        raise RuntimeError("boom")
+
+    original = hh.RULES
+    try:
+        hh.RULES = {"probe": (probe_rule, "a test rule")}
+        hh.scan(["probe"])
+        assert seen["phase"] is True, "the rules run in the scan phase"
+        assert hh._SCAN_PHASE is False, "the flag is cleared after the scan"
+        hh.RULES = {"probe": (boom_rule, "a test rule")}
+        hh.scan(["probe"])
+        assert hh._SCAN_PHASE is False, "a broken rule must not leave the scan flag set"
+    finally:
+        hh.RULES = original
+        hh._SCAN_PHASE = False
+
+
+def test_no_scan_rule_probe_outlives_the_scan_share(hh):
+    """Round 5, end to end: run the REAL scan with the scan share nearly
+    spent and check every subprocess it starts.  A rule that keeps a fixed
+    90 s or 60 s timeout shows up here as a timeout far above the share --
+    and that rule would have eaten the reserve the deletes need.
+    """
+    recorded = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    original_rules = hh.RULES
+    try:
+        hh.set_budget(600)
+        try:
+            hh._SCAN_DEADLINE = time.monotonic() + 0.5
+            with mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+                hh.scan(None)
+        finally:
+            hh.set_budget(0)
+        assert recorded, "the scan started no probe at all, so this guard proves nothing"
+        unbounded = [t for t in recorded if t is None]
+        assert not unbounded, f"a subprocess ran with no timeout at all: {unbounded}"
+        too_long = [t for t in recorded if t > 1.0]
+        assert not too_long, f"probes outlived the scan share: {too_long}"
+    finally:
+        hh.RULES = original_rules
+
+
+def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
+    """Round 5, structural half: a subprocess timeout must come from one of
+    the budget clocks, or be a bare literal no longer than
+    MIN_HEAVY_START_SEC.  A fixed 90 s or 60 s timeout is longer than the
+    scan share on its own, so one rule could spend the whole budget.
+
+    This walks the source, so the next fixed timeout fails here instead of
+    waiting for the next review round to find it.
+    """
+    tree = ast.parse(ENGINE.read_text())
+    helpers = {"probe_timeout", "op_timeout", "scan_op_timeout",
+               "budget_left", "scan_budget_left"}
+
+    def mentions_budget(node):
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                    and n.func.id in helpers:
+                return True
+        return False
+
+    # Functions that take the timeout as a parameter: the CALLER owns the
+    # clock, so those call sites are checked separately.
+    param_owners = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for a in list(node.args.args) + list(node.args.kwonlyargs):
+                if a.arg == "timeout":
+                    param_owners.add(node.name)
+
+    def timeout_arg(call):
+        for kw in call.keywords:
+            if kw.arg == "timeout":
+                return kw.value
+        return None
+
+    problems = []
+
+    class V(ast.NodeVisitor):
+        def __init__(self):
+            self.timeout_param = None
+            self.derived = set()
+
+        def visit_FunctionDef(self, node):
+            prev_param, prev_derived = self.timeout_param, self.derived
+            self.timeout_param = None
+            self.derived = set()
+            for a in list(node.args.args) + list(node.args.kwonlyargs):
+                if a.arg == "timeout":
+                    self.timeout_param = a.arg
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign) and mentions_budget(sub.value):
+                    for t in sub.targets:
+                        if isinstance(t, ast.Name):
+                            self.derived.add(t.id)
+            self.generic_visit(node)
+            self.timeout_param, self.derived = prev_param, prev_derived
+
+        def visit_Call(self, node):
+            fname = None
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "run" \
+                    and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id == "subprocess":
+                fname = "subprocess.run"
+            elif isinstance(node.func, ast.Name) and node.func.id == "_run":
+                fname = "_run"
+            if fname:
+                arg = timeout_arg(node)
+                if fname == "_run" and arg is None and node.args:
+                    arg = node.args[-1]
+                if arg is None:
+                    problems.append((fname, node.lineno, "no timeout"))
+                elif isinstance(arg, ast.Name) and self.timeout_param \
+                        and arg.id == self.timeout_param:
+                    # The enclosing function owns it; its call sites are checked.
+                    pass
+                elif mentions_budget(arg):
+                    pass
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)):
+                    if arg.value > hh.MIN_HEAVY_START_SEC:
+                        problems.append((fname, node.lineno, ast.unparse(arg)))
+                elif isinstance(arg, ast.Name) and arg.id in self.derived:
+                    pass
+                else:
+                    problems.append((fname, node.lineno, ast.unparse(arg)))
+            # A call to a function that takes a timeout parameter must pass a
+            # budget clock, or that function is unbounded by construction.
+            if isinstance(node.func, ast.Name) and node.func.id in param_owners:
+                arg = timeout_arg(node)
+                if arg is None and node.args:
+                    arg = node.args[-1]
+                if arg is None:
+                    problems.append((node.func.id, node.lineno, "no timeout argument"))
+                elif not mentions_budget(arg):
+                    problems.append((node.func.id, node.lineno, ast.unparse(arg)))
+            self.generic_visit(node)
+
+    V().visit(tree)
+    assert not problems, problems
+
+    # Every use of RULE_BUDGET_SEC must be a default handed to a timeout helper
+    # (which clamps it to the phase clock), or live in one of the two places
+    # that build a deadline the phase clock caps on top of.  A rule that builds
+    # its own deadline from the raw constant can walk for 90 s even with 20 s
+    # of the scan share left -- the round-5 bug in its loop form.
+    allowed_rule_budget = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in {"probe_timeout", "op_timeout", "scan_op_timeout"}:
+            for a in list(node.args) + [k.value for k in node.keywords]:
+                for n in ast.walk(a):
+                    if isinstance(n, ast.Name) and n.id == "RULE_BUDGET_SEC":
+                        allowed_rule_budget.add(id(n))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in ("rule_deadline", "dir_bytes"):
+            for n in ast.walk(node):
+                if isinstance(n, ast.Name) and n.id == "RULE_BUDGET_SEC":
+                    allowed_rule_budget.add(id(n))
+    loose = [n.lineno for n in ast.walk(tree)
+             if isinstance(n, ast.Name) and n.id == "RULE_BUDGET_SEC"
+             and isinstance(n.ctx, ast.Load)
+             and id(n) not in allowed_rule_budget]
+    assert not loose, f"RULE_BUDGET_SEC used outside a clamped deadline: lines {loose}"
 
 
 def test_the_report_carries_the_measured_free_space_not_just_the_estimate(hh):
@@ -686,20 +935,24 @@ def test_the_open_handles_probes_are_cut_to_the_budget(hh):
     with fake_time(hh, clock), \
             mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
         hh.set_budget(0)
-        hh.open_handles("/x")
-        hh.touched_since("/x", 7)
-        assert seen == [("lsof", 180.0), ("find", 120.0)], seen
-        seen.clear()
-        hh.set_budget(40)
-        clock.now += 10
-        _reset_open_snapshot(hh)   # the first pass memoized its answer
-        hh.open_handles("/x")
-        hh.touched_since("/x", 7)
-        # 40 s of budget is a 24 s scan share; 10 s of it is already gone,
-        # so 14 s is left for the scan and a probe gets no more than that.
-        assert [t for _n, t in seen] == [14.0, 14.0], seen
-        for _name, timeout in seen:
-            assert timeout <= hh.scan_budget_left(), "a probe may not outlive the scan share"
+        hh._SCAN_PHASE = True       # a probe takes the clock of its phase
+        try:
+            hh.open_handles("/x")
+            hh.touched_since("/x", 7)
+            assert seen == [("lsof", 180.0), ("find", 120.0)], seen
+            seen.clear()
+            hh.set_budget(40)
+            clock.now += 10
+            _reset_open_snapshot(hh)   # the first pass memoized its answer
+            hh.open_handles("/x")
+            hh.touched_since("/x", 7)
+            # 40 s of budget is a 24 s scan share; 10 s of it is already gone,
+            # so 14 s is left for the scan and a probe gets no more than that.
+            assert [t for _n, t in seen] == [14.0, 14.0], seen
+            for _name, timeout in seen:
+                assert timeout <= hh.scan_budget_left(), "a probe may not outlive the scan share"
+        finally:
+            hh._SCAN_PHASE = False
 
 
 def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh):
@@ -737,6 +990,7 @@ def test_the_pgrep_probe_is_bounded_by_the_scan_share(hh):
     pgrep hang could spend the share the deletes need -- the livelock the budget
     split exists to stop."""
     hh.set_budget(600)
+    hh._SCAN_PHASE = True          # a probe takes the clock of its phase
     try:
         hh._SCAN_DEADLINE = time.monotonic() - 1.0
         with mock.patch.object(hh.subprocess, "run",
@@ -751,6 +1005,7 @@ def test_the_pgrep_probe_is_bounded_by_the_scan_share(hh):
         assert run.call_args.kwargs["timeout"] == 15.0
     finally:
         hh.set_budget(0)
+        hh._SCAN_PHASE = False
 
 
 def test_proc_count_fails_closed(hh):
