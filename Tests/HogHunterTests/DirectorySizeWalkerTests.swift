@@ -139,6 +139,46 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertFalse(result.isComplete)
     }
 
+    func testRetargetedExternalLaneLinkRejectsCompletedAggregate() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lanes = root.appendingPathComponent("lanes")
+        let old = root.appendingPathComponent("old")
+        let target = root.appendingPathComponent("new")
+        for url in [lanes, old, target] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+        try Data(repeating: 1, count: 4096).write(to: old.appendingPathComponent("data"))
+        let link = lanes.appendingPathComponent("external")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: old)
+        let walker = DirectorySizeWalker(path: lanes.path, startedAt: Date())
+        XCTAssertFalse(walker.advance(maxEntries: 1, maxDuration: 1).isComplete)
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        var result = walker.observation
+        for _ in 0..<30 {
+            result = walker.advance(maxEntries: 1, maxDuration: 1)
+            if result.failure != nil || result.finishedAt != nil { break }
+        }
+        XCTAssertNotNil(result.failure)
+        XCTAssertNil(result.finishedAt)
+        XCTAssertFalse(result.isComplete)
+    }
+
+    func testMissingExternalLaneTargetDoesNotPublishSmallerAggregate() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lanes = root.appendingPathComponent("lanes")
+        try FileManager.default.createDirectory(at: lanes, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: lanes.appendingPathComponent("external"),
+                                                 withDestinationURL: root.appendingPathComponent("unavailable"))
+        let result = DirectorySizeWalker(path: lanes.path, startedAt: Date()).advance(maxDuration: 1)
+        XCTAssertTrue(result.hasResolvedRoot)
+        XCTAssertNotNil(result.failure)
+        XCTAssertNil(result.finishedAt)
+        XCTAssertFalse(result.isComplete)
+    }
+
     func testOverlappingExternalRootPartitionsCountExtraParentDataOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

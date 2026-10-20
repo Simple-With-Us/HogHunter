@@ -12,12 +12,17 @@ final class DirectorySizeWalker {
         var startedAt: Date
         var finishedAt: Date?
         var failure: String?
+        var hasResolvedRoot = false
         var isComplete: Bool { finishedAt != nil && failure == nil }
     }
 
     private struct Inode: Hashable {
         let device: dev_t
         let number: ino_t
+    }
+    private struct LinkedRoot {
+        let path: String
+        let inode: Inode
     }
     private final class Frame {
         let path: String
@@ -40,6 +45,10 @@ final class DirectorySizeWalker {
     private var hardLinks: [dev_t: Set<ino_t>] = [:]
     private var hardLinkCount = 0
     private var countedRoots: [String: dev_t] = [:]
+    private var followedLinks: [String: LinkedRoot] = [:]
+    private var linkChecks: [(String, LinkedRoot)]?
+    private var nextLinkCheck = 0
+    private var baseIdentity: Inode?
     private var initialized = false
     private let includesLaneLinks: Bool
     /// Retained because `observation.path` becomes the physical root after the first slice.
@@ -63,6 +72,8 @@ final class DirectorySizeWalker {
             }
             observation.path = physicalPath
             enter(observation.path, expectedDevice: nil, layoutDepth: includesLaneLinks ? 0 : nil, isRoot: true)
+            observation.hasResolvedRoot = observation.failure == nil
+            baseIdentity = frames.first?.inode
         }
         if let frame = frames.last, !validate(frame) { return observation }
         var processed = 0
@@ -97,21 +108,23 @@ final class DirectorySizeWalker {
                 add(info)
                 if kind == S_IFLNK, let depth = frame.layoutDepth, depth < 2 {
                     guard let target = Self.canonicalPath(path) else {
-                        if errno != ENOENT { fail("Linked directory cannot be resolved (\(errno))") }
+                        fail("Linked directory cannot be resolved (\(errno))")
                         continue
                     }
                     // Only explicit layout links may cross a volume.  Repository symlinks stay leaves.
                     if target != observation.path, !observation.path.hasPrefix(target + "/") {
                         var targetInfo = stat()
                         if lstat(target, &targetInfo) == 0 {
-                            if targetInfo.st_mode & S_IFMT == S_IFDIR,
-                               !Self.isCovered(path: target, device: targetInfo.st_dev, roots: countedRoots) {
+                            if targetInfo.st_mode & S_IFMT == S_IFDIR {
+                                guard followedLinks.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
+                                followedLinks[path] = LinkedRoot(path: target, inode: Inode(device: targetInfo.st_dev, number: targetInfo.st_ino))
+                                guard !Self.isCovered(path: target, device: targetInfo.st_dev, roots: countedRoots) else { continue }
                                 // Keep earlier child partitions when a broader root appears later.
                                 // Walking that parent skips those boundaries, counting only its extra data.
                                 guard countedRoots.count < 4096 else { fail("Linked-root safety limit reached; last complete size retained"); continue }
                                 enter(target, expectedDevice: nil, layoutDepth: nil, info: targetInfo, isRoot: true)
                             }
-                        } else if errno != ENOENT {
+                        } else {
                             fail("Linked directory is unavailable (\(errno))")
                         }
                     }
@@ -119,10 +132,30 @@ final class DirectorySizeWalker {
             }
         }
         if observation.failure == nil, frames.isEmpty {
+            // Final link checks share the slice budget and resume across calls, even for many aliases.
+            if linkChecks == nil { linkChecks = Array(followedLinks) }
+            while let checks = linkChecks, nextLinkCheck < checks.count,
+                  processed < maxEntries, ProcessInfo.processInfo.systemUptime < deadline {
+                let (link, expected) = checks[nextLinkCheck]
+                processed += 1
+                var info = stat()
+                guard Self.canonicalPath(link) == expected.path, lstat(expected.path, &info) == 0,
+                      info.st_mode & S_IFMT == S_IFDIR,
+                      info.st_dev == expected.inode.device, info.st_ino == expected.inode.number else {
+                    fail("Linked lane target changed or became unavailable while measuring")
+                    return observation
+                }
+                nextLinkCheck += 1
+            }
+            guard nextLinkCheck == linkChecks?.count, processed < maxEntries,
+                  ProcessInfo.processInfo.systemUptime < deadline else { return observation }
             // A logical symlink can be retargeted while a long walk runs.  The open frames still
             // validate, but the total belongs to the old target, so it must not be published under
             // the alias the row is displayed by.  Re-resolving here keeps the syscall off the caller.
-            guard Self.canonicalPath(logicalPath) == observation.path else {
+            var rootInfo = stat()
+            guard Self.canonicalPath(logicalPath) == observation.path,
+                  lstat(observation.path, &rootInfo) == 0,
+                  baseIdentity == Inode(device: rootInfo.st_dev, number: rootInfo.st_ino) else {
                 fail("Symlink target changed while measuring")
                 return observation
             }
