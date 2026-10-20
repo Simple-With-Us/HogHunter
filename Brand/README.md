@@ -72,11 +72,13 @@ The Icon windows are in **tile space**, the space the owner's `.icns` uses, so t
 Render at the true pixel size and inspect the real device pixels.  Do not zoom the vector and judge that instead: a zoomed render is a fresh rasterization, and it hides exactly the detail being judged.
 
 ```bash
-# 1. A page that shows the file at exactly 16 device pixels:
-cat > /tmp/icon16.html <<'HTML'
+# 1. A page that shows the file at exactly 16 device pixels.
+#    The src is an absolute file:// URL, so the page can live in /tmp.
+BRAND="$(pwd)/Brand"
+cat > /tmp/icon16.html <<HTML
 <html><head><style>html,body{margin:0;padding:0;background:#fff;overflow:hidden}
 img{position:absolute;top:0;left:0;width:16px;height:16px}</style></head>
-<body><img src="HogHunter-Logo-Small-16.svg"></body></html>
+<body><img src="file://$BRAND/HogHunter-Logo-Small-16.svg"></body></html>
 HTML
 # 2. Screenshot it at 16x16 with no device scaling:
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=old \
