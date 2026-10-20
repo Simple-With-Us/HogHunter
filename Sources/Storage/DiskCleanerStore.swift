@@ -334,8 +334,18 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Executes cleaning on all selected items with APFS snapshot preservation.
     func cleanSelected(createSnapshot: Bool = true) {
+        // A policy edit since the scan voids its temp rows.  Note the mismatch
+        // before the reload discards the report, so a clean that cannot run
+        // says why instead of silently emptying the panel.
+        let policyChanged = TempFileSafetyPolicy.load(from: exclusionsDefaults) != tempFilePolicy
+            || TempFileSafetyPolicy.currentRevision != tempPolicyRevision
         reloadTempFilePolicy()
-        guard let report else { return }
+        guard let report else {
+            if policyChanged && !isCleaning {
+                state = .failed("Temp file safety policy changed.  Scan again to clean with the new setting.")
+            }
+            return
+        }
         let itemsToClean = report.categories.flatMap { $0.items }.filter { selectedItemIds.contains($0.id) }
         guard !itemsToClean.isEmpty else { return }
 

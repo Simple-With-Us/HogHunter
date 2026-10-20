@@ -259,4 +259,24 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertEqual(store.state, .idle)
     }
 
+    @MainActor
+    func testCleanDroppedByAPolicyChangeAsksForAScanInsteadOfReturningSilently() {
+        let store = DiskCleanerStore(cleaner: cleaner(), historyStore: CleanupHistoryStore(inMemory: true),
+            exclusionsDefaults: defaults, rescanAfterExclusionChange: false)
+        // The phone edits the policy after the scan; the notification reaches
+        // the store on the main loop, so this turn still sees the old report.
+        TempFileSafetyPolicy.save(hours: 168, to: defaults)
+        store.showConfirmation = true
+        store.selectedItemIds = ["stale-selection"]
+
+        store.cleanSelected(createSnapshot: false)
+
+        XCTAssertNil(store.report)
+        XCTAssertTrue(store.selectedItemIds.isEmpty)
+        guard case .failed(let message) = store.state else {
+            return XCTFail("a clean voided by a policy change must report why, not return silently")
+        }
+        XCTAssertTrue(message.contains("Scan again"))
+    }
+
 }
