@@ -19,12 +19,17 @@ struct DiskCleanerView: View {
                 extremeDisclaimerBanner
             }
             heroHeader
+            Text("Temp files appear after at least \(store.tempFilePolicy.hoursLabel) untouched hours · Settings > Cleaner")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             contentBody
             bottomBar
         }
         .onAppear {
             // An iPhone can edit the exclusions while this view is closed.
             store.reloadExclusions()
+            store.reloadTempFilePolicy()
             if isTabActive, case .idle = store.state {
                 store.scan()
             }
@@ -445,7 +450,7 @@ private struct CategoryCardView: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
-                    Text(catReport.category.description)
+                    Text(catReport.category == .tempFiles ? store.tempFilePolicy.categoryDescription : catReport.category.description)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -672,7 +677,7 @@ private struct CleanerExclusionsSheet: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(category.title)
                                         .font(.system(size: 12, weight: .medium))
-                                    Text(category.description)
+                                    Text(category == .tempFiles ? store.tempFilePolicy.categoryDescription : category.description)
                                         .font(.system(size: 10))
                                         .foregroundStyle(.secondary)
                                 }

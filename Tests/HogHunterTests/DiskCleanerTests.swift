@@ -661,6 +661,14 @@ final class DiskCleanerTests: XCTestCase {
 
     // MARK: - Temp Files Category (/tmp)
 
+    /// Model old creation/change/access dates without depending on the owner's
+    /// filesystem clock or pretending a newly created fixture is truly old.
+    private static func tempFixtureMetadata(_ url: URL) throws -> TempEntryMetadata {
+        var info = try TempEntryMetadata.read(url)
+        info.latestActivity = info.modified
+        return info
+    }
+
     func testTempFilesCategoryMetadata() {
         let cat = CleanCategory.tempFiles
         XCTAssertEqual(cat.id, "tempFiles")
@@ -684,7 +692,7 @@ final class DiskCleanerTests: XCTestCase {
             let url = root.appendingPathComponent(name)
             try! "payload".write(to: url, atomically: true, encoding: .utf8)
             if stale {
-                let old = Date().addingTimeInterval(-2 * 24 * 3600)
+                let old = Date().addingTimeInterval(-4 * 24 * 3600)
                 try! fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
             }
         }
@@ -693,8 +701,8 @@ final class DiskCleanerTests: XCTestCase {
             try! fm.createDirectory(at: url, withIntermediateDirectories: true)
             let inner = url.appendingPathComponent("inner.bin")
             try! "payload".write(to: inner, atomically: true, encoding: .utf8)
-            let old = Date().addingTimeInterval(-2 * 24 * 3600)
-            // A genuinely dead directory has dead contents.  `nestedStale:
+            let old = Date().addingTimeInterval(-4 * 24 * 3600)
+            // A age-eligible directory has dead contents.  `nestedStale:
             // false` models the live case the top-level mtime misses: a
             // directory whose own mtime has gone cold while a file inside it
             // is still being written.
@@ -707,7 +715,7 @@ final class DiskCleanerTests: XCTestCase {
             return url
         }
 
-        // Provably dead: stale regular file and stale directory.
+        // Age-eligible: stale regular file and stale directory.
         write("dead-stale.txt", stale: true)
         _ = mkdir("dead-dir", stale: true)
         // Live: a cold directory mtime over still-written contents.
@@ -738,7 +746,7 @@ final class DiskCleanerTests: XCTestCase {
         try! fm.createSymbolicLink(at: root.appendingPathComponent("link-to-dead"),
                                   withDestinationURL: root.appendingPathComponent("dead-stale.txt"))
 
-        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { worktreeSet })
+        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { worktreeSet }, tempMetadataProvider: Self.tempFixtureMetadata)
         return (cleaner, root)
     }
 
@@ -832,7 +840,7 @@ final class DiskCleanerTests: XCTestCase {
         let fm = FileManager.default
         let root = tempDirectory.appendingPathComponent("nestedgit_\(UUID().uuidString)", isDirectory: true)
         try! fm.createDirectory(at: root, withIntermediateDirectories: true)
-        let old = Date().addingTimeInterval(-2 * 24 * 3600)
+        let old = Date().addingTimeInterval(-4 * 24 * 3600)
 
         func staleDir(_ name: String, under: URL? = nil) -> URL {
             let parent = under ?? root
@@ -859,7 +867,7 @@ final class DiskCleanerTests: XCTestCase {
         try! fm.setAttributes([.modificationDate: old], ofItemAtPath: wrap.path)
 
         let worktrees: Set<String> = [(lane.path as NSString).standardizingPath]
-        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { worktrees })
+        let cleaner = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { worktrees }, tempMetadataProvider: Self.tempFixtureMetadata)
         let titles = Set(cleaner.scanTempFiles().map(\.title))
         XCTAssertTrue(titles.contains("dead-dir"), "a dead directory with no nested git must still be listed")
         XCTAssertFalse(titles.contains("container"), "directory holding a nested git checkout must not be listed")
