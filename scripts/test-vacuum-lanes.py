@@ -220,6 +220,10 @@ class Sandbox:
             "kind": "LINKED-WORKTREE",
             "location_class": "LANE_NESTED",
             "owner_repo": REPO_SLUG,
+            # The doctor records the parent repository of every checkout it
+            # reports (fleet_lanes.doctor sets it for each one), and the
+            # Vacuum's re-check compares the live repository against it.
+            "parent_repo": str(self.main),
             "tool_cache": False,
             "branch": over["branch"] if "branch" in over else self.branch(path),
             "head_sha": self.head(path),
@@ -917,6 +921,19 @@ class TestRecheck(unittest.TestCase):
         scan = self.removable([row])
         self.assertEqual(scan.choices, [])
         self.assertIn("different repository", refused_reason(scan, self.lane))
+
+    def test_a_report_that_does_not_say_which_repository_refuses(self) -> None:
+        """Without the parent repository there is nothing to confirm the lane
+        against, so it is not removed: the check fails closed."""
+        row = self.sb.row(self.lane)
+        del row["parent_repo"]
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [])
+        self.assertIn("which repository", refused_reason(scan, self.lane))
+        row = self.sb.row(self.lane, parent_repo="")
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [])
+        self.assertIn("which repository", refused_reason(scan, self.lane))
 
     def test_a_symlinked_parent_may_not_redirect_a_lane_into_a_never_touch_folder(self) -> None:
         """Allowing a symlinked parent must not reopen the path the removed

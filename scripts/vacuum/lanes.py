@@ -1180,12 +1180,17 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     # The lane must still belong to the repository the doctor saw.  This is
     # what the old "path resolves somewhere else" check really meant, and it
     # survives the fleet's symlinked lanes root: where the lane lives on disk
-    # (~/apps/lanes/<Repo> on the external drive) says nothing, which
-    # repository it belongs to says everything.
+    # says nothing, which repository it belongs to says everything.
+    #
+    # The doctor records that repository as `parent_repo` on every row (see
+    # fleet_lanes.doctor, which sets it for every checkout it reports).  If the
+    # report does not say, the check cannot be made, and a lane whose
+    # repository cannot be confirmed is not one to remove: refuse.
     expected_repo = co.get("parent_repo")
-    if isinstance(expected_repo, str) and expected_repo:
-        if os.path.realpath(repo_root) != os.path.realpath(expected_repo):
-            return "", "it now belongs to a different repository"
+    if not isinstance(expected_repo, str) or not expected_repo:
+        return "", "the doctor did not say which repository this lane belongs to"
+    if os.path.realpath(repo_root) != os.path.realpath(expected_repo):
+        return "", "it now belongs to a different repository"
     why = _head_matches_report(path, co, ctx)
     if why:
         return "", why
