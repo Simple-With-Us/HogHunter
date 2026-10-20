@@ -548,6 +548,7 @@ struct HogHunterPanel: View {
 
     /// What the panel is showing, for screen readers.
     private var panelAccessibilityLabel: String {
+        if isQuickView { return "Hog Hunter — this Mac quick view" }
         if hostScope == .server {
             switch selectedTab {
             case .overview: return "Hog Hunter — server overview"
