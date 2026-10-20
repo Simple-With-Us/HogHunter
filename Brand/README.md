@@ -56,12 +56,29 @@ iconutil -c icns iconset.iconset -o HogHunter.icns
 
 ## Rebuilding a Windows .ico
 
-A Windows `.ico` is a different container, and `iconutil` cannot write one.  It carries its own size set (16, 24, 32, 48, 64, 128, 256) and none of the `iconutil` naming convention, so build it in one step with a tool that writes ICO:
+A Windows `.ico` is a different container, and `iconutil` cannot write one.  It carries its own size set (16, 24, 32, 48, 64, 128, 256) and none of the `iconutil` naming convention, so build it in one step with a tool that writes ICO.
+
+On macOS use ImageMagick 7's `magick`, never a bare `convert`: `/usr/bin/convert` is the legacy HFS filesystem converter, so a bare `convert` resolves by PATH order and can silently run the wrong tool.  Check which binary is in front first.
 
 ```bash
-convert -define icon:auto-resize=16,24,32,48,64,128,256 Brand/HogHunter-Icon-Rotated.svg HogHunter.ico
+# 1. Confirm which binary is ImageMagick:
+command -v magick
+# 2. Write the ICO, keeping the alpha on the rounded tile:
+magick -background none -type TrueColorAlpha \
+  -define icon:auto-resize=16,24,32,48,64,128,256 \
+  Brand/HogHunter-Icon-Rotated.svg HogHunter.ico
+# 3. Check each entry's payload type and alpha depth:
+magick identify -verbose HogHunter.ico
 ```
 
-`icotool -c` does the same from a set of rendered PNGs.  Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
+`-background none` and `-type TrueColorAlpha` are load bearing.  Without them the ICO coder writes every entry below 256 px as a BMP/DIB whose transparency is only a 1-bit AND mask, which discards the antialiased edge of the rounded tile and leaves hard corners.  Add `-compress zip` if the target reader accepts PNG-backed entries.
+
+`icotool -c` does the same from a set of rendered PNGs, and it needs the output path and every input, or it writes ICO bytes to stdout.
+
+```bash
+icotool -c -o HogHunter.ico icon16.png icon24.png icon32.png icon48.png icon64.png icon128.png icon256.png
+```
+
+Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
 Render the SVG with a rasterizer that keeps transparency.  Note that `qlmanage -t` renders SVG but flattens transparency onto white, so it is fine for checking the emblem and not for the icon tile.
