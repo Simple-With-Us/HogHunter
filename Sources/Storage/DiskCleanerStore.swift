@@ -60,6 +60,8 @@ final class DiskCleanerStore: ObservableObject {
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {
         let updated = CleanerExclusions.load(from: exclusionsDefaults)
+        // A clean in flight is already running against the items the report
+        // held, so dropping it here would blank the page mid-clean.
         if updated != exclusions && manualScanOnly && !isCleaning { discardResults() }
         exclusions = updated
     }
