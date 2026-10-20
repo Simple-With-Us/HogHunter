@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="230.0" height="230.0" viewBox="0 0 230.0 230.0">
 <title>Hog Hunter boar emblem, 16 px crop of the head, rotated</title>
+<defs><clipPath id="tile"><rect x="0" y="0" width="230.0" height="230.0" rx="53.9062" ry="53.9062"/></clipPath></defs>
+<g clip-path="url(#tile)">
 <rect width="230.0" height="230.0" fill="#FAF2E7"/>
 <g transform="translate(1.559,-553.563)">
-<path d="M240 0 L784.0 0 A240 240 0 0 1 1024.0 240 L1024.0 784.0 A240 240 0 0 1 784.0 1024.0 L240 1024.0 A240 240 0 0 1 0 784.0 L0 240 A240 240 0 0 1 240 0 Z" fill="#FAF2E7"/>
 <g transform="translate(-11.8,14.4) translate(512.0,512.0) scale(1.0463) rotate(-9.5) translate(-512.0,-512.0)">
 <g transform="translate(0,1024) scale(0.1,-0.1)"><path fill="#6F390B" fill-rule="evenodd" d="M7530 8957 c-41 -19 -140 -73 -220 -121 -183 -110 -306 -170 -490
 -236 -309 -111 -517 -235 -733 -439 -134 -127 -263 -318 -304 -452 -19 -64
@@ -91,6 +92,7 @@ l-45 -25 25 29 c65 75 330 328 366 350 80 48 164 50 334 9z m-1499 -418 c-71
 -20 96 -20 104 0 32 28 0 79 -89z m-399 -61 c23 -73 48 -151 56 -173 20 -59
 18 -98 -8 -122 -31 -28 -61 -36 -91 -22 -45 20 -48 44 -37 242 6 100 13 188
 15 195 11 31 26 2 65 -120z"/></g>
+</g>
 </g>
 </g>
 </svg>
