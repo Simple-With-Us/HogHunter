@@ -265,10 +265,13 @@ def main():
     # Prevent applying measurements to a snapshot published during the scan.
     output = supplement(original, args.home)
     output['database_samples'] = database_samples(original, args.history)
-    output['directory_samples'] = directory_samples(output, args.history)
+    # Check freshness *before* `directory_samples`: that helper persists the
+    # directory-history cache, so ordering it last would commit measurements
+    # derived from a snapshot this run has just decided to discard.
     current = json.loads(args.snapshot.read_text())
     if current != original:
         raise SystemExit('Snapshot changed during collection; leaving it untouched.')
+    output['directory_samples'] = directory_samples(output, args.history)
     atomic_write(args.snapshot, output)
 
 

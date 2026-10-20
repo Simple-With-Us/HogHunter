@@ -103,9 +103,19 @@ struct HogHunterPanel: View {
         .background(MenuBarAnchorFinder { x in beakX = x })
         .preferredColorScheme(store.appearance.colorScheme)
         .task {
+            // `SizeGrowthHistory.percentChange` needs a baseline exactly 24 h back
+            // inside a 16-minute window, so it is the *spacing between samples*
+            // that has to stay near 900 s.  Sleeping a flat 900 s after the scan
+            // added the whole scan duration to the interval; once a slow scan
+            // pushed the spacing past the window no integer sample index could
+            // satisfy the filter and the 24 h badge never appeared at all.
+            // Sleep the remainder of the period instead, with a second of slack so
+            // the store's own 900 s throttle in `refreshIfNeeded` always passes.
             while !Task.isCancelled {
+                let started = Date()
                 await directoryUsage.refreshIfNeeded()
-                try? await Task.sleep(for: .seconds(900))
+                let elapsed = Date().timeIntervalSince(started)
+                try? await Task.sleep(for: .seconds(max(30, 901 - elapsed)))
             }
         }
         .onChange(of: selectedTab) { newTab in
