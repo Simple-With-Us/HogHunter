@@ -387,19 +387,9 @@ struct NetworkRowView: View {
     }
 
     private var iconView: some View {
-        Group {
-            if let bundleId = usage.bundleId,
-               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId),
-               let icon = NSWorkspace.shared.icon(forFile: url.path) as NSImage? {
-                Image(nsImage: icon)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.secondary)
-            }
-        }
+        Image(systemName: "app.fill")
+            .font(.system(size: 16))
+            .foregroundStyle(.secondary)
     }
 }
 

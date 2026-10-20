@@ -4,7 +4,7 @@ import XCTest
 @testable import HogHunter
 
 /// A stand-in for `NSRunningApplication` that counts how often the resolver
-/// reads its properties.  Those four reads are the expensive part of a refresh
+/// reads its properties.  Those reads are the expensive part of a refresh
 /// -- measured at 40-50 ms for ~250 running apps -- so the point of these tests
 /// is that they happen once per pid, not once per tick.
 private final class FakeRunningApp: RunningApplicationInfo {
@@ -13,20 +13,24 @@ private final class FakeRunningApp: RunningApplicationInfo {
     private let storedName: String?
     private let storedPolicy: NSApplication.ActivationPolicy
     private let storedURL: URL?
+    private let storedIcon: NSImage?
     private(set) var propertyReads = 0
+    private(set) var iconReads = 0
 
     init(
         pid: pid_t,
         bundleId: String?,
         name: String?,
         policy: NSApplication.ActivationPolicy,
-        url: URL?
+        url: URL?,
+        icon: NSImage? = nil
     ) {
         self.processIdentifier = pid
         self.storedBundleId = bundleId
         self.storedName = name
         self.storedPolicy = policy
         self.storedURL = url
+        self.storedIcon = icon
     }
 
     var bundleIdentifier: String? {
@@ -47,6 +51,11 @@ private final class FakeRunningApp: RunningApplicationInfo {
     var bundleURL: URL? {
         propertyReads += 1
         return storedURL
+    }
+
+    var icon: NSImage? {
+        iconReads += 1
+        return storedIcon
     }
 }
 
@@ -88,12 +97,14 @@ final class MetadataResolverTests: XCTestCase {
         let resolver = MetadataResolver(runningApplications: { [editor] })
 
         resolver.refreshRunningApps()
-        XCTAssertEqual(editor.propertyReads, 4, "one read of each property on first sight")
+        XCTAssertEqual(editor.propertyReads, 4, "one read of each metadata property on first sight")
+        XCTAssertEqual(editor.iconReads, 1, "one icon read for a local running app")
         XCTAssertTrue(resolver.isRegularApp(501))
         XCTAssertEqual(resolver.bundleId(501), "com.example.Editor")
 
         for _ in 0..<20 { resolver.refreshRunningApps() }
         XCTAssertEqual(editor.propertyReads, 4, "a pid already in the table must not be read again")
+        XCTAssertEqual(editor.iconReads, 1, "a cached running app must not reload its icon")
         XCTAssertTrue(resolver.isRegularApp(501), "the memoized entry still answers")
         XCTAssertEqual(resolver.bundleId(501), "com.example.Editor")
     }
@@ -109,6 +120,7 @@ final class MetadataResolverTests: XCTestCase {
         XCTAssertEqual(launching.propertyReads, 4)
         resolver.refreshRunningApps()
         XCTAssertEqual(launching.propertyReads, 8, "an unsettled entry is re-read next tick")
+        XCTAssertEqual(launching.iconReads, 0, "an app without a safe bundle URL has no automatic icon read")
     }
 
     @MainActor
@@ -169,5 +181,45 @@ final class MetadataResolverTests: XCTestCase {
             "Editor",
             "a provisional entry must not be served from the cache once the app has settled"
         )
+    }
+
+    @MainActor
+    func testExternalApplicationAndProcessPathsNeverRequestIcons() {
+        let external = FakeRunningApp(
+            pid: 842,
+            bundleId: "com.example.External",
+            name: "External",
+            policy: .regular,
+            url: URL(fileURLWithPath: "/Volumes/External/External.app"),
+            icon: NSImage(size: NSSize(width: 16, height: 16))
+        )
+        let resolver = MetadataResolver(runningApplications: { [external] })
+        resolver.refreshRunningApps()
+
+        let key = ProcessKey(pid: 842, startTime: 5)
+        let metadata = resolver.resolve([key], samples: [key: sample(pid: 842, start: 5, name: "External")])
+        XCTAssertNil(metadata[key]?.icon)
+        XCTAssertEqual(external.iconReads, 0)
+        XCTAssertNil(resolver.icon(bundleId: "com.example.Missing", path: "/Volumes/External/tool"))
+        XCTAssertEqual(resolver.displayName(bundleId: "com.example.Missing", fallback: "Stored"), "Stored")
+    }
+
+    @MainActor
+    func testLocalRunningAppIconAndNameAreReusedForHistory() {
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        let local = FakeRunningApp(
+            pid: 843,
+            bundleId: "com.example.Local",
+            name: "Local App",
+            policy: .regular,
+            url: URL(fileURLWithPath: "/Applications/Local.app"),
+            icon: image
+        )
+        let resolver = MetadataResolver(runningApplications: { [local] })
+        resolver.refreshRunningApps()
+
+        XCTAssertTrue(resolver.icon(bundleId: "com.example.Local", path: nil) === image)
+        XCTAssertEqual(resolver.displayName(bundleId: "com.example.Local", fallback: "Stored"), "Local App")
+        XCTAssertEqual(local.iconReads, 1)
     }
 }
