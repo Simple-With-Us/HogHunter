@@ -1185,6 +1185,26 @@ def test_agent_state_reports_sessions_instead_of_deleting_them(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_agent_state_does_not_call_a_big_active_tree_idle(hh):
+    """newest_file_age_min stops after 4000 entries, so an agent tree bigger
+    than that can hide a recent write past the cap and read as idle.  The
+    uncapped touched_since probe answers on the first recent file, so a tree
+    the agent is still writing to is left alone."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        logs = home / ".claude" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "a.log").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=True), \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            assert hh.rule_agent_state() == [], "a tree with a recent write is not idle"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_agent_state_leaves_a_project_working_tree_alone(hh):
     """`~/.gemini/tmp` is named like scratch but holds a `.project_root`
     marker per project the agent has opened -- a working copy of Jay's real

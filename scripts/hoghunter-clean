@@ -1659,7 +1659,17 @@ def rule_agent_state() -> list[Candidate]:
                 continue
             if not claim(target):
                 continue
-            if newest_file_age_min(s) < IDLE_MIN_OK or open_handles(s):
+            if newest_file_age_min(s) < IDLE_MIN_OK:
+                continue
+            # newest_file_age_min stops after 4000 entries, so a big agent
+            # tree can hide a recent write past the cap and read as idle.
+            # touched_since answers on the FIRST recent file, and a failed
+            # look reads as touched: an unprovable tree is never called idle.
+            # Without this the rule can delete ~/.claude/logs or ~/.codex/tmp
+            # while the agent is still writing to it.
+            if touched_since(s, IDLE_MIN_OK / (24 * 60)):
+                continue
+            if open_handles(s):
                 continue
             size = dir_bytes(s)
             if size < 8 * 1024 * 1024:
