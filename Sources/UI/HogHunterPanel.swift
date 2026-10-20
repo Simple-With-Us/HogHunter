@@ -435,14 +435,11 @@ struct HogHunterPanel: View {
             }
         }
         .task {
-            if isQuickView {
-                await mountedDrives.refresh(force: true)
-                driveReadAttempted = true
-                return
-            }
+            var firstRefresh = true
             while !Task.isCancelled {
-                await mountedDrives.refresh()
+                await mountedDrives.refresh(force: isQuickView && firstRefresh)
                 driveReadAttempted = true
+                firstRefresh = false
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { break }
             }
