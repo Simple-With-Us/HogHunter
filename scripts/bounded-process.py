@@ -37,6 +37,9 @@ def run(command, timeout, grace=2):
     try:
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous[signum] = signal.signal(signum, interrupted)
+        # Readiness marker for the cancellation test: it is emitted only once both
+        # handlers are installed, so a test never signals into the install window.
+        print('Supervisor ready.', file=sys.stderr, flush=True)
         try:
             return process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -57,17 +60,22 @@ def run(command, timeout, grace=2):
                     if not signal_group(process.pid, 0):
                         break
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-                signal_group(process.pid, signal.SIGKILL)
-            else:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
+            # Escalate the whole group even when the graceful signal was refused:
+            # killpg reports EPERM for members it may not signal while still
+            # signalling the rest, so a False return is not proof the group is gone.
+            signal_group(process.pid, signal.SIGKILL)
+            try:
+                process.kill()
+            except OSError:
+                pass
             try:
                 process.wait(timeout=max(grace, 5))
             except subprocess.TimeoutExpired:
-                print('Capture process group did not exit; the runner will reap it.',
+                print('Capture process did not exit; the runner will reap it.',
                       file=sys.stderr, flush=True)
+            if signal_group(process.pid, 0):
+                print('Capture process group still has live members; they may keep '
+                      'the runner output handles open.', file=sys.stderr, flush=True)
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)

@@ -36,11 +36,25 @@ class BoundedProcessTests(unittest.TestCase):
         process = subprocess.Popen([sys.executable, str(SUPERVISOR), '--timeout', '30', '--grace', '0.1',
                                     '--', sys.executable, '-c', 'import time; time.sleep(60)'],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        time.sleep(1)
+        self.wait_for_readiness(process)
         process.send_signal(signal.SIGTERM)
         _, stderr = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 128 + signal.SIGTERM)
         self.assertIn(f'exit status: {128 + signal.SIGTERM}', stderr)
+
+    def wait_for_readiness(self, process):
+        """Block until the supervisor has installed its signal handlers.
+
+        A fixed sleep cannot prove that: under scheduling delay the SIGTERM would
+        arrive mid-install, take the default action, and crash the supervisor.
+        """
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if 'Supervisor ready.' in process.stderr.readline():
+                return
+            if process.poll() is not None:
+                self.fail(f'supervisor exited {process.returncode} before becoming ready')
+        self.fail('supervisor never reported readiness')
 
     def test_successful_parent_does_not_leave_orphan_holding_output(self):
         with tempfile.TemporaryDirectory() as directory:
