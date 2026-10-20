@@ -91,6 +91,25 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertEqual(result.bytes, try allocated(target.path))
     }
 
+    func testRenamingOpenedRootInvalidatesIncompleteWalk() throws {
+        let root = try fixture()
+        let moved = root.appendingPathExtension("moved")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: moved)
+        }
+        for index in 0..<3 {
+            try Data(repeating: 1, count: 4096).write(to: root.appendingPathComponent(String(index)))
+        }
+        let walker = DirectorySizeWalker(path: root.path, startedAt: Date())
+        XCTAssertFalse(walker.advance(maxEntries: 1, maxDuration: 1).isComplete)
+        try FileManager.default.moveItem(at: root, to: moved)
+        let result = walker.advance(maxDuration: 1)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertNotNil(result.failure)
+        XCTAssertNil(result.finishedAt, "A renamed open root must not enter complete history")
+    }
+
     func testOverlappingExternalRootPartitionsCountExtraParentDataOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -128,16 +147,17 @@ final class DirectorySizeWalkerTests: XCTestCase {
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
         let now = Date()
+        let logicalAlias = link.path + "/./"
         let history = SizeGrowthHistory(fileURL: nil)
         history.record(host: "mac-local", metric: "directory", path: link.path, bytes: 123,
                        sampledAt: now.addingTimeInterval(-60), sourcePath: old.path)
-        let store = DirectoryUsageStore(history: history, candidates: [("Lanes", link.path)], pressure: { .normal })
+        let store = DirectoryUsageStore(history: history, candidates: [("Lanes", logicalAlias)], pressure: { .normal })
         XCTAssertEqual(store.rows.first?.bytes, 123)
         XCTAssertEqual(store.rows.first?.path, old.path)
         await store.refreshIfNeeded()
         XCTAssertEqual(store.rows.first?.path, DirectorySizeWalker.canonicalPath(target.path))
         XCTAssertEqual(store.rows.first?.bytes, try allocated(target.path))
-        let reopened = DirectoryUsageStore(history: history, candidates: [("Lanes", link.path)], pressure: { .normal })
+        let reopened = DirectoryUsageStore(history: history, candidates: [("Lanes", logicalAlias)], pressure: { .normal })
         XCTAssertEqual(reopened.rows.first?.bytes, try allocated(target.path))
         XCTAssertEqual(reopened.rows.first?.path, DirectorySizeWalker.canonicalPath(target.path))
     }

@@ -208,7 +208,8 @@ final class DirectoryUsageStore: ObservableObject {
             // Also cache the logical alias, so reopening can show a last good value before a slow
             // symlink/volume resolves.  Comparisons still use the canonical source identity.
             if result.path != rows[index].displayPath {
-                history.record(host: host, metric: "directory", path: rows[index].displayPath,
+                let alias = URL(fileURLWithPath: rows[index].displayPath).standardizedFileURL.path
+                history.record(host: host, metric: "directory", path: alias,
                                bytes: result.bytes, sampledAt: result.startedAt, sourcePath: result.path)
             }
             rows[index].isUnavailable = now().timeIntervalSince(result.startedAt) > 3600

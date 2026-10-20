@@ -47,7 +47,7 @@ struct SizeUsageRow: View {
         }
         .font(.system(size: fontSize))
         .foregroundStyle(unavailable ? .secondary : .primary)
-        .help(unavailable ? "The latest size could not be measured; any shown size is an earlier reading."
+        .help(unavailable ? "A current size is unavailable; any shown size is an earlier complete reading."
               : percentChange == nil ? "A full day of comparable size history is not available yet." : name)
         .accessibilityElement(children: .combine)
     }
@@ -95,12 +95,17 @@ struct CodingDirectoriesView: View {
         return lines.joined(separator: "\n")
     }
 
-    private func timestamp(_ date: Date) -> String {
+    private static let stampFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeZone = TimeZone(identifier: "America/Chicago")
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "MMM d, h:mma"
-        return formatter.string(from: date).replacingOccurrences(of: "AM", with: "am").replacingOccurrences(of: "PM", with: "pm")
+        return formatter
+    }()
+
+    private func timestamp(_ date: Date) -> String {
+        Self.stampFormatter.string(from: date)
+            .replacingOccurrences(of: "AM", with: "am").replacingOccurrences(of: "PM", with: "pm")
     }
 
     private func displayPath(_ path: String) -> String {

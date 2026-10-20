@@ -61,12 +61,14 @@ final class DirectorySizeWalker {
             observation.path = physicalPath
             enter(observation.path, expectedDevice: nil, layoutDepth: includesLaneLinks ? 0 : nil, isRoot: true)
         }
+        if let frame = frames.last, !validate(frame) { return observation }
         var processed = 0
         while observation.failure == nil, let frame = frames.last,
               processed < maxEntries, ProcessInfo.processInfo.systemUptime < deadline {
             errno = 0
             guard let entry = readdir(frame.stream) else {
                 let error = errno
+                guard validate(frame) else { continue }
                 frames.removeLast()
                 if error != 0 { fail("Could not read every directory entry (\(error))") }
                 continue
@@ -82,6 +84,7 @@ final class DirectorySizeWalker {
             guard lstat(path, &info) == 0 else {
                 // A disappearing entry is a normal concurrent mutation, never a permission bypass.
                 if errno != ENOENT { fail("Could not read metadata (\(errno))") }
+                else { _ = validate(frame) }
                 continue
             }
             let kind = info.st_mode & S_IFMT
@@ -133,6 +136,18 @@ final class DirectorySizeWalker {
         roots.contains { root, rootDevice in
             device == rootDevice && (path == root || path.hasPrefix(root + "/"))
         }
+    }
+
+    /// An open stream can outlive a rename while its absolute child paths disappear.
+    /// Never publish those skipped children as a complete, smaller observation.
+    private func validate(_ frame: Frame) -> Bool {
+        var info = stat()
+        guard lstat(frame.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+              info.st_dev == frame.inode.device, info.st_ino == frame.inode.number else {
+            fail("Directory moved or changed while measuring; last complete size retained")
+            return false
+        }
+        return true
     }
 
     private func enter(_ path: String, expectedDevice: dev_t?, layoutDepth: Int?, info supplied: stat? = nil,
