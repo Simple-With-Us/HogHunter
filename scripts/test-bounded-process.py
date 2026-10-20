@@ -66,16 +66,25 @@ class BoundedProcessTests(unittest.TestCase):
             with self.subTest(group_accepts_term=group_accepts_term):
                 process = mock.Mock(pid=999999, args=['synthetic'])
                 elapsed = 0.0
+                clock_reads = 0
+
+                def monotonic():
+                    nonlocal clock_reads
+                    clock_reads += 1
+                    self.assertLessEqual(clock_reads, 20, 'Grace loop exceeded the fake clock budget')
+                    return elapsed
 
                 def sleep(duration):
                     nonlocal elapsed
+                    self.assertGreater(duration, 0, 'Grace sleep must advance the fake clock')
                     elapsed += duration
+                    self.assertLessEqual(elapsed, 0.2, 'Grace sleep exceeded the fixture budget')
 
                 events = mock.Mock()
                 # Bind the fakes to the supervisor's own globals: patching the
                 # shared stdlib time/subprocess modules would install this test's
                 # fake clock and Popen process-wide for anything else running.
-                fake_time = types.SimpleNamespace(monotonic=lambda: elapsed, sleep=sleep)
+                fake_time = types.SimpleNamespace(monotonic=monotonic, sleep=sleep)
                 fake_subprocess = types.SimpleNamespace(
                     Popen=mock.Mock(return_value=process),
                     TimeoutExpired=subprocess.TimeoutExpired)
