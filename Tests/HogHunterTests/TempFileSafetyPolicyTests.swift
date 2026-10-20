@@ -309,6 +309,16 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         guard case .scanned = store.state else { return XCTFail("fixture scan did not finish") }
         store.selectAll()
         XCTAssertGreaterThan(store.totalSelectedItemsCount(), 0)
+        let runIds = CompanionLocked(Set<UUID>())
+        let observer = NotificationCenter.default.addObserver(forName: .diskCleanerProgressChanged,
+            object: nil, queue: nil) { notification in
+            guard let update = notification.object as? DiskCleanerProgressUpdate,
+                  update.progress.isCleaning else { return }
+            var ids = runIds.value
+            ids.insert(update.runId)
+            runIds.value = ids
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
         store.cleanSelected(createSnapshot: false)
         XCTAssertTrue(store.isCleaning)
         TempFileSafetyPolicy.save(hours: 168, to: defaults)
@@ -318,6 +328,7 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         // Re-entry cannot cancel and replace the already-running task.
         store.cleanSelected(createSnapshot: false)
         XCTAssertTrue(store.isCleaning)
+        XCTAssertEqual(runIds.value.count, 1, "only the original cleanup run may start")
         for _ in 0..<600 {
             if !store.isCleaning { break }
             try await Task.sleep(for: .milliseconds(10))
