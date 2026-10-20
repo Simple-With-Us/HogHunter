@@ -54,7 +54,11 @@ final class DirectorySizeWalker {
         if !initialized {
             initialized = true
             // Resolution can touch a slow volume, so it belongs here, never in a view initializer.
-            observation.path = URL(fileURLWithPath: observation.path).resolvingSymlinksInPath().standardizedFileURL.path
+            guard let physicalPath = Self.canonicalPath(observation.path) else {
+                fail("Directory cannot be resolved (\(errno))")
+                return observation
+            }
+            observation.path = physicalPath
             enter(observation.path, expectedDevice: nil, layoutDepth: includesLaneLinks ? 0 : nil, isRoot: true)
         }
         var processed = 0
@@ -86,7 +90,10 @@ final class DirectorySizeWalker {
             } else {
                 add(info)
                 if kind == S_IFLNK, let depth = frame.layoutDepth, depth < 2 {
-                    let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+                    guard let target = Self.canonicalPath(path) else {
+                        if errno != ENOENT { fail("Linked directory cannot be resolved (\(errno))") }
+                        continue
+                    }
                     // Only explicit layout links may cross a volume.  Repository symlinks stay leaves.
                     if target != observation.path, !observation.path.hasPrefix(target + "/") {
                         var targetInfo = stat()
@@ -107,6 +114,17 @@ final class DirectorySizeWalker {
         }
         if observation.failure == nil, frames.isEmpty { observation.finishedAt = Date() }
         return observation
+    }
+
+    /// Foundation may shorten /private/tmp back to the /tmp symlink after resolution.
+    /// Keep the POSIX physical path so the root passes lstat and O_NOFOLLOW checks.
+    static func canonicalPath(_ path: String) -> String? {
+        path.withCString { source in
+            guard let resolved = Darwin.realpath(source, nil) else { return nil }
+            defer { free(resolved) }
+            guard let result = String(validatingUTF8: resolved) else { errno = EILSEQ; return nil }
+            return result
+        }
     }
 
     /// A same-device parent covers descendants; a nested mounted volume is excluded

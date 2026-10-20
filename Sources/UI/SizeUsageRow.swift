@@ -11,6 +11,13 @@ struct SizeUsageRow: View {
 
     private let gap = "\u{00A0} "
 
+    private var deltaColor: Color {
+        guard !unavailable, let percentChange, percentChange.isFinite else { return .secondary }
+        if percentChange > 0 { return .red }
+        if percentChange < 0 { return .green }
+        return .secondary
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text(name + gap)
@@ -21,11 +28,12 @@ struct SizeUsageRow: View {
                 .monospacedDigit()
                 .fixedSize()
             (
-                Text(gap + "(" + (unavailable ? "—" : SizeGrowthFormat.delta(percentChange) ?? "—") + "⁄")
-                + Text("24h").font(.system(size: max(7, fontSize - 4)))
-                + Text(")")
+                Text(gap)
+                + Text(unavailable ? "—" : SizeGrowthFormat.delta(percentChange) ?? "—")
+                    .foregroundColor(deltaColor)
+                + Text("∕").foregroundColor(.black)
+                + Text("d").font(.system(size: max(7, fontSize - 4))).foregroundColor(.black)
             )
-            .foregroundStyle(.secondary)
             .monospacedDigit()
             .fixedSize()
             if let detail {

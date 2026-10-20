@@ -71,6 +71,26 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertFalse(DirectorySizeWalker.isCovered(path: "/external/parent-other", device: 10, roots: roots))
     }
 
+    func testCanonicalRootIsPhysicalAndRootAliasesCanBeMeasured() throws {
+        // Inspect only root metadata on the real Mac; never traverse its temporary files.
+        let physical = try XCTUnwrap(DirectorySizeWalker.canonicalPath("/private/tmp"))
+        XCTAssertEqual(DirectorySizeWalker.canonicalPath("/tmp"), physical)
+        var info = stat()
+        XCTAssertEqual(lstat(physical, &info), 0)
+        XCTAssertEqual(info.st_mode & S_IFMT, S_IFDIR)
+
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
+        let result = DirectorySizeWalker(path: alias.path, startedAt: Date()).advance(maxDuration: 1)
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.path, DirectorySizeWalker.canonicalPath(target.path))
+        XCTAssertEqual(result.bytes, try allocated(target.path))
+    }
+
     func testOverlappingExternalRootPartitionsCountExtraParentDataOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -115,11 +135,11 @@ final class DirectorySizeWalkerTests: XCTestCase {
         XCTAssertEqual(store.rows.first?.bytes, 123)
         XCTAssertEqual(store.rows.first?.path, old.path)
         await store.refreshIfNeeded()
-        XCTAssertEqual(store.rows.first?.path, target.path)
+        XCTAssertEqual(store.rows.first?.path, DirectorySizeWalker.canonicalPath(target.path))
         XCTAssertEqual(store.rows.first?.bytes, try allocated(target.path))
         let reopened = DirectoryUsageStore(history: history, candidates: [("Lanes", link.path)], pressure: { .normal })
         XCTAssertEqual(reopened.rows.first?.bytes, try allocated(target.path))
-        XCTAssertEqual(reopened.rows.first?.path, target.path)
+        XCTAssertEqual(reopened.rows.first?.path, DirectorySizeWalker.canonicalPath(target.path))
     }
 
     func testRepositorySymlinksRemainLeavesAndMissingRootsFailHonestly() throws {
