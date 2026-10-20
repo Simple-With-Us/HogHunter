@@ -172,6 +172,11 @@ final class SizeGrowthHistory: @unchecked Sendable {
 }
 
 enum SizeGrowthFormat {
+    static func appreciableDelta(_ percent: Double?) -> String? {
+        guard let percent, percent.isFinite, abs(percent) >= 0.1 else { return nil }
+        return delta(percent)
+    }
+
     static func delta(_ percent: Double?) -> String? {
         guard let percent, percent.isFinite else { return nil }
         let magnitude = abs(percent)

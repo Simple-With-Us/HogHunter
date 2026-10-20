@@ -126,6 +126,18 @@ final class SizeGrowthTests: XCTestCase {
         XCTAssertNil(SizeGrowthFormat.delta(nil))
     }
 
+    func testAppreciableDeltaOmitsUnavailableAndNegligibleValues() {
+        XCTAssertEqual(SizeGrowthFormat.appreciableDelta(8), "↑8%")
+        XCTAssertEqual(SizeGrowthFormat.appreciableDelta(-8), "↓-8%")
+        XCTAssertEqual(SizeGrowthFormat.appreciableDelta(0.1), "↑0.1%")
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(nil))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(Double.nan))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(Double.infinity))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(0.099))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(-0.099))
+        XCTAssertEqual(SizeGrowthFormat.delta(0.02), "~0%")
+    }
+
     @MainActor
     func testFailedDirectoryReadPreservesSizeAndMarksUnavailable() async {
         let now = Date(timeIntervalSince1970: 2_000_000)

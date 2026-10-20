@@ -236,8 +236,13 @@ struct VPSResourceCardView: View {
 
     private func appDbsRow(_ dbs: [String: Int64]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("App Databases")
-                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 0) {
+                Text("App Databases")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\u{00A0} (daily change)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             ForEach([("st_app_db", "Socratic Trade"), ("ct_db", "Congress Trade"), ("um_db", "Usage Monitor")], id: \.0) { key, name in
                 if let bytes = dbs[key] {
                     SizeUsageRow(name: name, bytes: bytes, percentChange: store.databasePercentChange(key: key))
@@ -248,8 +253,13 @@ struct VPSResourceCardView: View {
 
     private func largestDirsView(_ dirs: [VPSDirectory]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Directories")
-                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 0) {
+                Text("Directories")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\u{00A0} (daily change)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             ForEach(dirs) { dir in
                 SizeUsageRow(name: dir.path, bytes: dir.bytes,
                              percentChange: store.directoryPercentChange(path: dir.path))

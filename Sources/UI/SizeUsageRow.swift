@@ -11,8 +11,13 @@ struct SizeUsageRow: View {
 
     private let gap = "\u{00A0} "
 
+    private var appreciableDelta: String? {
+        guard !unavailable else { return nil }
+        return SizeGrowthFormat.appreciableDelta(percentChange)
+    }
+
     private var deltaColor: Color {
-        guard !unavailable, let percentChange, percentChange.isFinite else { return .secondary }
+        guard let percentChange, percentChange.isFinite else { return .secondary }
         if percentChange > 0 { return .red }
         if percentChange < 0 { return .green }
         return .secondary
@@ -27,15 +32,12 @@ struct SizeUsageRow: View {
                 .fontWeight(.semibold)
                 .monospacedDigit()
                 .fixedSize()
-            (
-                Text(gap)
-                + Text(unavailable ? "—" : SizeGrowthFormat.delta(percentChange) ?? "—")
+            if let appreciableDelta {
+                Text(gap + "(" + appreciableDelta + ")")
                     .foregroundColor(deltaColor)
-                + Text("∕").foregroundColor(.black)
-                + Text("d").font(.system(size: max(7, fontSize - 4))).foregroundColor(.black)
-            )
-            .monospacedDigit()
-            .fixedSize()
+                    .monospacedDigit()
+                    .fixedSize()
+            }
             if let detail {
                 Text(gap + detail)
                     .font(.system(size: max(8, fontSize - 1)))
