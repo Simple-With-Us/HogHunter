@@ -49,6 +49,7 @@ def run(command, timeout, grace=2):
     previous = {}
     requested_signal = None
     result = None
+    timeout_failure = None
 
     def interrupted(signum, _frame):
         # Never raise inside Popen: it may already own a child not yet returned.
@@ -64,17 +65,18 @@ def run(command, timeout, grace=2):
         print('Supervisor ready.', file=sys.stderr, flush=True)
         try:
             result = wait_unreaped(process, timeout, lambda: requested_signal)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
             print('Optional capture exceeded its deadline.', file=sys.stderr, flush=True)
-            raise
+            # Defer propagation until cleanup has recorded any later cancellation.
+            timeout_failure = error
     except Interrupted as interruption:
         # Covers the handler-install window too, so a signal there is not a traceback.
         result = 128 + interruption.signum
     finally:
         # Cleanup is required even when the parent already exited successfully:
         # a GUI/helper descendant can still hold the runner's output handles.
-        for signum in previous:
-            signal.signal(signum, signal.SIG_IGN)
+        # Keep the non-raising handlers active through grace and reaping: a
+        # cancellation here must still replace a successful or timed-out result.
         try:
             if process is not None:
                 if signal_group(process.pid, signal.SIGTERM):
@@ -93,18 +95,19 @@ def run(command, timeout, grace=2):
                     pass
                 try:
                     process.wait(timeout=max(grace, 5))
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as error:
                     print('Capture process did not exit after group cleanup.',
                           file=sys.stderr, flush=True)
-                    # A cleanup failure must remain nonzero without relabelling
-                    # a cancellation as an elapsed capture deadline.
-                    if requested_signal is not None:
-                        result = 128 + requested_signal
-                    else:
-                        raise
+                    timeout_failure = timeout_failure or error
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
+    if requested_signal is not None:
+        print(f'Optional capture cancelled by signal {requested_signal}.',
+              file=sys.stderr, flush=True)
+        return 128 + requested_signal
+    if timeout_failure is not None:
+        raise timeout_failure
     return result
 
 

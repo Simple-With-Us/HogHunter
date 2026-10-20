@@ -98,6 +98,61 @@ class BoundedProcessTests(unittest.TestCase):
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait(timeout=2)
 
+    def test_cancellation_after_observation_or_during_grace_is_retained(self):
+        for arrival in ('after observation', 'during grace'):
+            with self.subTest(arrival=arrival):
+                process = mock.Mock(pid=999999, args=['synthetic'])
+                previous = {signum: signal.getsignal(signum)
+                            for signum in (signal.SIGTERM, signal.SIGINT)}
+
+                def cancel():
+                    handler = signal.getsignal(signal.SIGTERM)
+                    self.assertTrue(callable(handler), 'cleanup must keep recording cancellation')
+                    handler(signal.SIGTERM, None)
+
+                def observe(*_args):
+                    if arrival == 'after observation':
+                        cancel()
+                    return 0
+
+                def cleanup_signal(_group, signum):
+                    if signum == 0 and arrival == 'during grace':
+                        cancel()
+                    return signum == signal.SIGTERM
+
+                with mock.patch.object(CAPTURE.subprocess, 'Popen', return_value=process), \
+                     mock.patch.object(CAPTURE, 'wait_unreaped', side_effect=observe), \
+                     mock.patch.object(CAPTURE, 'signal_group', side_effect=cleanup_signal) as cleanup:
+                    self.assertEqual(CAPTURE.run(['synthetic'], 1, 1), 143)
+                self.assertIn(mock.call(process.pid, signal.SIGKILL), cleanup.call_args_list)
+                process.wait.assert_called_once_with(timeout=5)
+                for signum, handler in previous.items():
+                    self.assertEqual(signal.getsignal(signum), handler)
+
+    def test_deadline_then_cancellation_during_failed_cleanup_reports_cancellation(self):
+        process = mock.Mock(pid=999999, args=['synthetic'])
+        process.wait.side_effect = subprocess.TimeoutExpired('synthetic', 5)
+
+        def cleanup_signal(_group, signum):
+            if signum == signal.SIGTERM:
+                handler = signal.getsignal(signal.SIGTERM)
+                self.assertTrue(callable(handler))
+                handler(signal.SIGTERM, None)
+            return False
+
+        with mock.patch.object(CAPTURE.subprocess, 'Popen', return_value=process), \
+             mock.patch.object(CAPTURE, 'wait_unreaped',
+                               side_effect=subprocess.TimeoutExpired('synthetic', 1)), \
+             mock.patch.object(CAPTURE, 'signal_group', side_effect=cleanup_signal), \
+             mock.patch.object(sys, 'argv', ['bounded-process.py', '--timeout', '1', 'synthetic']), \
+             mock.patch.object(CAPTURE.sys, 'stderr') as stderr:
+            self.assertEqual(CAPTURE.main(), 143)
+        messages = ''.join(str(call.args[0]) for call in stderr.write.call_args_list)
+        self.assertIn('exceeded its deadline', messages)
+        self.assertIn('did not exit after group cleanup', messages)
+        self.assertIn('cancelled by signal 15', messages)
+        self.assertIn('exit status: 143', messages)
+
     def test_timeout_kills_term_resistant_process(self):
         result, elapsed = self.invoke('import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)', timeout=0.2)
         self.assertEqual(result.returncode, 124)
