@@ -447,13 +447,20 @@ def holds_keep_sentinel(path: str, timeout: float) -> bool:
 
     The walk is bounded by the caller's timeout and FAILS CLOSED: a probe
     that cannot answer counts as a marker, because a tree nobody can vouch
-    for is never deleted.  `-name` is the cheapest walk there is (no stat
+    for is never deleted.  `-iname` is the cheapest walk there is (no stat
     per file), so this costs far less than the `touched_since` probe that
     already runs per candidate.
+
+    `-iname`, not `-name`: `find -name` is case-sensitive while the sibling
+    `has_keep_sentinel` resolves the same marker with `Path.exists()`, which
+    is case-insensitive on the default case-insensitive APFS volume.  With
+    `-name` a marker the operator spelled `.JANITOR-KEEP` was honored at a
+    tree root but invisible inside one, and the walk deleted the tree and the
+    marker together.  Both probes must recognize exactly the same markers.
     """
     try:
         proc = subprocess.run(
-            ["find", path, "-name", KEEP_SENTINEL, "-print", "-quit"],
+            ["find", path, "-iname", KEEP_SENTINEL, "-print", "-quit"],
             capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -1612,13 +1619,21 @@ def rule_app_caches() -> list[Candidate]:
                     s = str(target)
                     if is_forbidden(s) or has_keep_sentinel(s):
                         continue
+                    # The cheap policy filter comes FIRST: a tree kept by
+                    # policy must not pay for a full-tree `find` walk to find
+                    # out it was never a candidate.  Several entries in
+                    # _DEV_CACHE_PATHS are gigabyte trees (org.swift.swiftpm
+                    # alone measured 3.6 GB), and the marker walk traverses
+                    # the whole tree when the marker is absent -- the common
+                    # case -- so probing first spent the scan share on trees
+                    # this line then threw away.
+                    if any(s.endswith("/" + dp) or s == str(HOME / dp)
+                           for dp in _DEV_CACHE_PATHS + _APP_CACHE_KEEP):
+                        continue
                     # A marker INSIDE the tree protects the tree.  This rule
                     # deletes whole app-cache trees, so a marker the
                     # operator put inside one would be deleted with it.
                     if holds_keep_sentinel(s, scan_op_timeout(60.0)):
-                        continue
-                    if any(s.endswith("/" + dp) or s == str(HOME / dp)
-                           for dp in _DEV_CACHE_PATHS + _APP_CACHE_KEEP):
                         continue
                     if newest_file_age_min(s) < IDLE_MIN_OK:
                         continue
