@@ -4,11 +4,9 @@ import SwiftUI
 @MainActor
 struct MountedDriveUsageView: View {
     @StateObject private var store: MountedDriveStore
-    private let isActive: Bool
 
-    init(store: MountedDriveStore? = nil, isActive: Bool = true) {
+    init(store: MountedDriveStore? = nil) {
         _store = StateObject(wrappedValue: store ?? MountedDriveStore())
-        self.isActive = isActive
     }
 
     var body: some View {
@@ -37,8 +35,7 @@ struct MountedDriveUsageView: View {
                 .help(drive.path)
             }
         }
-        .task(id: isActive) {
-            guard isActive else { return }
+        .task {
             while !Task.isCancelled {
                 await store.refresh()
                 do { try await Task.sleep(nanoseconds: 60_000_000_000) }

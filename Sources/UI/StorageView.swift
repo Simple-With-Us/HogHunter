@@ -31,17 +31,19 @@ struct StorageView: View {
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
     private let includesMaintenance: Bool
+    private let autoScanCleaner: Bool
 
     /// `initialTab` is the mode the view opens on.  The app always takes the
     /// default; a layout test opens the Maintain mode directly instead of
     /// clicking the segmented control.
-    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true) {
+    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
         _selectedTab = State(initialValue: initialTab)
         self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
         self.includesMaintenance = includesMaintenance
+        self.autoScanCleaner = autoScanCleaner
     }
 
     var body: some View {
@@ -55,7 +57,8 @@ struct StorageView: View {
                 list
                 footer
             case .diskCleaner:
-                DiskCleanerView(store: cleanerStore, isTabActive: isTabActive)
+                DiskCleanerView(store: cleanerStore, isTabActive: isTabActive,
+                                autoScanOnAppear: autoScanCleaner)
             case .maintain:
                 MaintainView(store: maintainStore)
             }

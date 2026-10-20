@@ -2,6 +2,11 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
+@MainActor
+private enum DashboardMountedDrives {
+    static let shared = MountedDriveStore()
+}
+
 enum PanelTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case activity = "Activity"
@@ -19,8 +24,9 @@ struct HogHunterPanel: View {
     /// the gear button did nothing; this is the supported path.
     @Environment(\.openSettings) private var openSettings
     @State private var selectedTab: PanelTab = .overview
-    @State private var hostScope: HostScope = .mac
-    @StateObject private var mountedDrives = MountedDriveStore()
+    @AppStorage("dashboardHostScope") private var hostScopeRawValue = HostScope.mac.rawValue
+    @ObservedObject private var mountedDrives: MountedDriveStore
+    @State private var driveReadAttempted = false
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
@@ -28,15 +34,23 @@ struct HogHunterPanel: View {
     private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
     let isQuickView: Bool
 
-    init(isQuickView: Bool = false, initialTab: PanelTab = .overview) {
+    init(isQuickView: Bool = false, initialTab: PanelTab = .overview,
+         mountedDrives: MountedDriveStore? = nil) {
         self.isQuickView = isQuickView
+        _mountedDrives = ObservedObject(wrappedValue: mountedDrives ?? DashboardMountedDrives.shared)
         _selectedTab = State(initialValue: initialTab)
+        _hasVisitedStorage = State(initialValue: initialTab == .storage)
     }
 
     private enum HostScope: String, CaseIterable, Identifiable {
         case mac = "This Mac"
         case server = "Server"
         var id: String { rawValue }
+    }
+
+    private var hostScope: HostScope {
+        get { HostScope(rawValue: hostScopeRawValue) ?? .mac }
+        nonmutating set { hostScopeRawValue = newValue.rawValue }
     }
 
     private var dashboard: some View {
@@ -76,7 +90,10 @@ struct HogHunterPanel: View {
                             .foregroundStyle(.orange)
                     }
                     Spacer(minLength: 8)
-                    Picker("Host", selection: $hostScope) {
+                    Picker("Host", selection: Binding(
+                        get: { hostScope },
+                        set: { hostScope = $0 }
+                    )) {
                         ForEach(HostScope.allCases) { scope in
                             Text(scope.rawValue).tag(scope)
                         }
@@ -105,20 +122,26 @@ struct HogHunterPanel: View {
                     if hasVisitedStorage {
                         VStack(alignment: .leading, spacing: 10) {
                             capacityCards
-                            HStack(alignment: .top, spacing: 10) {
-                                ScrollView {
-                                    MountedDriveUsageView(store: mountedDrives,
-                                                          isActive: selectedTab == .storage && hostScope == .mac)
+                            if externalDrives.count > 1 {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("External Drives").font(.system(size: 11, weight: .semibold))
+                                    ForEach(externalDrives) { drive in
+                                        HStack {
+                                            Text(drive.name).lineLimit(1)
+                                            Spacer(minLength: 8)
+                                            Text(capacityAmountsText(drive)).lineLimit(1)
+                                        }
+                                        .font(.system(size: 10))
+                                    }
                                 }
-                                .frame(maxWidth: .infinity)
-                                ScrollView { CodingDirectoriesView(store: directoryUsage) }
-                                    .frame(maxWidth: .infinity)
                             }
-                            .frame(height: 150)
+                            ScrollView { CodingDirectoriesView(store: directoryUsage) }
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 150)
                             StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
                                         maintainStore: store.maintain, embeddedInPanel: true,
                                         isTabActive: selectedTab == .storage && hostScope == .mac,
-                                        includesMaintenance: false)
+                                        includesMaintenance: false, autoScanCleaner: false)
                                 .frame(maxHeight: .infinity)
                         }
                         .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
@@ -184,10 +207,10 @@ struct HogHunterPanel: View {
                       severity: Severity.forPressure(store.pulse.pressure),
                       accessibilityDetail: store.memoryCaption)
                     .frame(width: 170)
-                pillRow(memoryPills + thermalPills)
                 Spacer(minLength: 0)
             }
             .frame(height: 75)
+            pillRow(memoryPills + thermalPills)
             captions
             controls
             list.frame(maxHeight: .infinity)
@@ -258,6 +281,20 @@ struct HogHunterPanel: View {
                 Spacer()
                 Text(store.diskSpaceCaption)
             }
+            HStack {
+                Text("External").fontWeight(.medium)
+                Spacer(minLength: 6)
+                Text(quickExternalText)
+                    .foregroundStyle(quickExternalColor)
+                    .lineLimit(1)
+            }
+            HStack {
+                Text("Time Machine").fontWeight(.medium)
+                Spacer(minLength: 6)
+                Text(timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText)
+                    .foregroundStyle(timeMachineDrive.map(quickDriveColor) ?? .secondary)
+                    .lineLimit(1)
+            }
             Divider()
             ForEach(Array(store.rows.prefix(3))) { row in
                 HStack {
@@ -269,6 +306,7 @@ struct HogHunterPanel: View {
             }
             if !store.maintain.vpsStore.configuredHost.isEmpty {
                 Button {
+                    hostScope = .server
                     DetachedWindowManager.shared.openDetachedWindow(store: store)
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
@@ -310,7 +348,7 @@ struct HogHunterPanel: View {
                          percent: store.diskSpace.map { $0.usedFraction * 100 })
             capacityCard("External", value: externalCapacityText,
                          percent: externalDrives.count == 1 ? externalDrives[0].usedPercent : nil)
-            capacityCard("Time Machine", value: timeMachineDrive.map(capacityText) ?? "Not identified",
+            capacityCard("Time Machine", value: timeMachineDrive.map(capacityText) ?? unrecognizedDriveText,
                          percent: timeMachineDrive?.usedPercent)
         }
     }
@@ -324,13 +362,49 @@ struct HogHunterPanel: View {
     }
 
     private var externalCapacityText: String {
-        if externalDrives.count > 1 { return "\(externalDrives.count) drives · see Storage" }
-        return externalDrives.first.map(capacityText) ?? "Not identified"
+        if externalDrives.count > 1 {
+            return selectedTab == .storage ? "\(externalDrives.count) drives · details below"
+                : "\(externalDrives.count) drives · see Storage"
+        }
+        return externalDrives.first.map(capacityText) ?? unrecognizedDriveText
+    }
+
+    private var unrecognizedDriveText: String {
+        (!driveReadAttempted || mountedDrives.isRefreshing) && mountedDrives.rows.isEmpty
+            ? "Reading…" : "Not identified"
+    }
+
+    private var quickExternalText: String {
+        if externalDrives.count > 1 {
+            let highest = externalDrives.compactMap(\.usedPercent).max()
+            return highest.map { "\(externalDrives.count) drives · up to \(Int($0.rounded()))% used" }
+                ?? "\(externalDrives.count) drives · see Storage"
+        }
+        return externalDrives.first.map(quickDriveText) ?? unrecognizedDriveText
+    }
+
+    private var quickExternalColor: Color {
+        guard let highest = externalDrives.compactMap(\.usedPercent).max() else { return .secondary }
+        return Severity.forDisk(highest / 100).color
+    }
+
+    private func quickDriveText(_ drive: MountedDriveUsage) -> String {
+        guard let percent = drive.usedPercent, let available = drive.availableBytes else { return "Unavailable" }
+        return "\(Int(percent.rounded()))% used · \(HogFormat.memory(UInt64(available))) free"
+    }
+
+    private func quickDriveColor(_ drive: MountedDriveUsage) -> Color {
+        guard let percent = drive.usedPercent else { return .secondary }
+        return Severity.forDisk(percent / 100).color
     }
 
     private func capacityText(_ drive: MountedDriveUsage) -> String {
+        "\(drive.name) · \(capacityAmountsText(drive))"
+    }
+
+    private func capacityAmountsText(_ drive: MountedDriveUsage) -> String {
         guard let available = drive.availableBytes, let total = drive.totalBytes else { return "Unavailable" }
-        return "\(drive.name) · \(HogFormat.memory(UInt64(available))) free of \(HogFormat.memory(UInt64(total)))"
+        return "\(HogFormat.memory(UInt64(available))) free of \(HogFormat.memory(UInt64(total)))"
     }
 
     private func capacityCard(_ title: String, value: String, percent: Double?) -> some View {
@@ -359,9 +433,14 @@ struct HogHunterPanel: View {
             }
         }
         .task {
-            guard !isQuickView else { return }
+            if isQuickView {
+                await mountedDrives.refresh(force: true)
+                driveReadAttempted = true
+                return
+            }
             while !Task.isCancelled {
                 await mountedDrives.refresh()
+                driveReadAttempted = true
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { break }
             }
@@ -406,7 +485,7 @@ struct HogHunterPanel: View {
 
     /// The menu-bar quick view has fixed geometry; the dashboard uses its own minimum size.
     static let panelWidth: CGFloat = 360
-    static let panelHeight: CGFloat = 410
+    static let panelHeight: CGFloat = 480
     static let dashboardWidth: CGFloat = 900
     static let dashboardHeight: CGFloat = 700
     static let dashboardMinimumWidth: CGFloat = 860

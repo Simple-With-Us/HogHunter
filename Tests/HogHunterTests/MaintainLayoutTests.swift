@@ -101,8 +101,13 @@ final class MaintainLayoutTests: XCTestCase {
     private func panelComposition(_ store: MaintainStore) -> some View {
         let hogStore = HogStore(historyURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("maintain-layout-\(UUID().uuidString).sqlite"), maintain: store)
+        let suite = "hh-maintain-layout-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        addTeardownBlock { preferences.removePersistentDomain(forName: suite) }
         return HogHunterPanel(initialTab: .maintenance)
             .environmentObject(hogStore)
+            .defaultAppStorage(preferences)
             .frame(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
     }
 

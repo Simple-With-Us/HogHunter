@@ -7,6 +7,7 @@ import SwiftUI
 struct DiskCleanerView: View {
     @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
+    var autoScanOnAppear: Bool = true
     var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
 
@@ -25,13 +26,13 @@ struct DiskCleanerView: View {
         .onAppear {
             // An iPhone can edit the exclusions while this view is closed.
             store.reloadExclusions()
-            if isTabActive, case .idle = store.state {
+            if autoScanOnAppear, isTabActive, case .idle = store.state {
                 store.scan()
             }
             store.refreshLastCleanup()
         }
         .onChange(of: isTabActive) { active in
-            if active, case .idle = store.state {
+            if autoScanOnAppear, active, case .idle = store.state {
                 store.scan()
             }
             store.refreshLastCleanup()
@@ -379,7 +380,7 @@ struct DiskCleanerView: View {
             Button {
                 store.scan()
             } label: {
-                Label("Rescan", systemImage: "arrow.clockwise")
+                Label(store.state == .idle ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
                     .font(.system(size: 11))
             }
             .controlSize(.small)

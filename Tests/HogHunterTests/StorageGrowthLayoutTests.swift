@@ -95,6 +95,8 @@ final class StorageGrowthLayoutTests: XCTestCase {
         host.appearance = NSAppearance(named: .aqua)
         let natural = host.fittingSize
         XCTAssertLessThanOrEqual(natural.width, width + 1)
+        XCTAssertLessThanOrEqual(natural.height, 580,
+                                 "full Server report should fit at the default dashboard size; got \(natural.height)pt")
         try render(host, size: CGSize(width: width, height: natural.height), name: "hh174-server-full-report")
     }
 
@@ -115,6 +117,46 @@ final class StorageGrowthLayoutTests: XCTestCase {
         host.appearance = NSAppearance(named: .aqua)
         XCTAssertLessThanOrEqual(host.fittingSize.width, width + 1)
         try render(host, size: CGSize(width: width, height: 170), name: "hh165-external-drives")
+    }
+
+    func testQuickViewAndInitialStorageRenderWithMountedDrives() async throws {
+        let drives = MountedDriveStore(probe: {
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 2_500_000_000),
+             MountedDriveCandidate(name: "Time Machine", path: "/Volumes/Time Machine", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 75_000_000_000)]
+        })
+        await drives.refresh()
+        XCTAssertEqual(drives.rows.count, 2)
+        let suite = "hh174-dashboard-layout-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = HogStore(historyURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("hh174-dashboard-layout-\(UUID().uuidString).sqlite"),
+            defaults: preferences, startImmediately: false)
+
+        let quickSize = CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
+        let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences)
+            .frame(width: quickSize.width, height: quickSize.height))
+        quick.appearance = NSAppearance(named: .aqua)
+        XCTAssertLessThanOrEqual(quick.fittingSize.height, quickSize.height + 1)
+        try render(quick, size: quickSize, name: "hh174-quick-external")
+
+        for (name, size) in [
+            ("minimum", CGSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)),
+            ("default", CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight))
+        ] {
+            let dashboard = NSHostingView(rootView: HogHunterPanel(initialTab: .storage, mountedDrives: drives)
+                .environmentObject(store).defaultAppStorage(preferences)
+                .frame(width: size.width, height: size.height))
+            dashboard.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(dashboard.fittingSize.width, size.width + 1)
+            try render(dashboard, size: size, name: "hh174-storage-\(name)")
+        }
     }
 
     private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {
