@@ -32,6 +32,9 @@ struct DiskCleanerView: View {
             store.refreshLastCleanup()
         }
         .onChange(of: isTabActive) { active in
+            // The dashboard keeps this view mounted while another page is up, so
+            // an exclusion edited from the phone or Settings arrives on return
+            // rather than through onAppear.
             if active { store.reloadExclusions() }
             if autoScanOnAppear, active, case .idle = store.state {
                 store.scan()
