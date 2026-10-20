@@ -9,6 +9,7 @@ Run:  python3 scripts/test-hoghunter-clean.py
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from unittest import mock
@@ -183,7 +185,7 @@ def test_dir_bytes_uses_du_once_without_counting_its_descendants(hh):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_dir_bytes_cuts_du_timeout_to_remaining_run_budget(hh):
+def test_dir_bytes_cuts_du_timeout_to_remaining_scan_budget(hh):
     root = Path(tempfile.mkdtemp(prefix="hhclean-dir-budget-"))
     try:
         (root / "child").mkdir()
@@ -200,11 +202,418 @@ def test_dir_bytes_cuts_du_timeout_to_remaining_run_budget(hh):
             with mock.patch.object(hh, "_run", side_effect=fake_run):
                 size = hh.dir_bytes(str(root), max_depth=0)
             assert size == 4096
+            # The du timeout is cut to the SCAN's share of the budget, not the whole run: the
+            # deletes need the rest.
             assert len(seen) == 1 and 0 < seen[0] <= 2.0, seen
-            assert hh.budget_left() == 0
+            assert seen[0] < 2.0, (
+                f"the du timeout must be cut to the scan share "
+                f"({2.0 * hh.SCAN_BUDGET_FRACTION:.1f}s), not the whole run budget")
             assert hh._SCAN_BUDGET_EXHAUSTED is True
+            # And the run budget still has time in it, which is the whole point of the split.
+            assert hh.budget_left() > 0, hh.budget_left()
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_scan_cannot_spend_the_budget_the_deletes_need(hh):
+    """A slow scan used to eat the whole budget: the apply phase then started with nothing, deleted
+    nothing, and the next run rescanned the same tree and ate the budget again -- a livelock, not
+    progress.  Measured 2026-10-19: a 900 s budget, 1 of 23 applied, zero bytes freed.  The scan now
+    gets a fixed share, so the deletes always get the rest."""
+    clock = FakeClock()
+    called = []
+
+    def slow_rule():
+        called.append("slow")
+        clock.now += 8.0      # past the scan's 6 s share, short of the 10 s run budget
+        return []
+
+    def later_rule():
+        called.append("later")
+        return []
+
+    original_rules = hh.RULES
+    hh.RULES = {"slow": (slow_rule, ""), "later": (later_rule, "")}
+    try:
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = hh.main(["--scan", "--json", "--budget-sec=10"])
+        report = json.loads(out.getvalue())
+        assert code == 0
+        assert called == ["slow"], called
+        assert report["scan_truncated"] is True
+        assert report["budget_exhausted"] is True
+        # The scan stopped at its share and the run budget still has time for the deletes.
+        assert hh.budget_left() > 0, hh.budget_left()
+    finally:
+        hh.RULES = original_rules
+
+
+def test_the_scan_probes_are_bounded_by_the_scan_share(hh):
+    """Every probe a scan rule starts has to be bounded by the scan's share of
+    the budget.  The lsof pass and the find walk run once per candidate, and
+    a host that is too loaded to answer answers none of them, so a fixed
+    timeout lets repeated hangs eat the share the deletes need."""
+    hh.set_budget(600)
+    try:
+        # A scan with a generous share gets its usual limits.
+        assert hh.scan_op_timeout(180.0) == 180.0
+        assert hh.scan_op_timeout(25.0) == 25.0
+        # A scan with almost nothing left must not start a long command.
+        hh._SCAN_DEADLINE = time.monotonic() + 0.5
+        assert hh.scan_op_timeout(180.0) <= 1.0
+        # A scan that has spent its share answers in the minimum.
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        assert hh.scan_op_timeout(180.0) == 1.0
+    finally:
+        hh.set_budget(0)
+
+
+def test_the_lsof_snapshot_is_bounded_by_the_scan_share(hh):
+    """The system-wide lsof pass used a fixed 180s timeout.  It runs once per
+    candidate while the snapshot is young, so repeated hangs could spend the
+    whole scan share."""
+    _reset_open_snapshot(hh)
+    hh.set_budget(600)
+    hh._SCAN_PHASE = True          # a probe takes the clock of its phase
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        with mock.patch.object(hh.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("lsof", 1)) as run:
+            assert hh.open_handles("/Users/jay/work") == 1, "a failed look is not an empty room"
+        assert run.call_args.kwargs["timeout"] == 1.0, "the timeout must follow the scan share"
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
+        _reset_open_snapshot(hh)
+
+
+def test_the_find_probe_is_bounded_by_the_scan_share(hh):
+    """The find walk in touched_since used a fixed 120s timeout and runs once
+    per candidate, so it could spend the whole scan share."""
+    hh.set_budget(600)
+    hh._SCAN_PHASE = True          # a probe takes the clock of its phase
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        with mock.patch.object(hh.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("find", 1)) as run:
+            assert hh.touched_since("/Users/jay/work", 0.0625) is True, "a failed look reads as touched"
+        assert run.call_args.kwargs["timeout"] == 1.0
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
+
+
+def test_the_candidate_loops_stop_when_the_scan_share_is_spent(hh):
+    """The rules walk whole trees per candidate.  Without a deadline check the
+    loop can spend the scan share and leave the deletes with nothing -- the
+    livelock the budget split exists to stop."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "SomeApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        hh.set_budget(600)
+        try:
+            hh._SCAN_DEADLINE = time.monotonic() - 1.0
+            with mock.patch.object(hh, "HOME", home), \
+                 mock.patch.object(hh, "open_handles", return_value=0), \
+                 mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+                 mock.patch.object(hh, "touched_since", return_value=False), \
+                 mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+                assert hh.rule_app_caches() == [], "the scan is over, so no candidate is chosen"
+                assert hh.rule_agent_state() == []
+            assert hh._SCAN_BUDGET_EXHAUSTED is True, "the run has to say the scan hit its share"
+        finally:
+            hh.set_budget(0)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_probe_timeout_follows_the_phase_it_runs_in(hh):
+    """Round 5: the rules that predate the budget split started their own
+    subprocesses with a FIXED timeout (90 s, 60 s, 15 s).  `scan()` only
+    checks the deadline BETWEEN rules, so a rule that started with its share
+    nearly spent could still run a 90 s walk and eat the reserve the deletes
+    need -- the exact livelock the budget split exists to break.
+
+    Every probe now takes its timeout from the clock of the phase it runs in:
+    the scan share during the scan, the whole budget after it.
+    """
+    hh.set_budget(600)
+    try:
+        # The scan share is nearly spent.
+        hh._SCAN_DEADLINE = time.monotonic() + 0.5
+        hh._SCAN_PHASE = True
+        try:
+            assert hh.probe_timeout(90.0) <= 1.0, hh.probe_timeout(90.0)
+            assert hh.probe_timeout(60.0) <= 1.0, hh.probe_timeout(60.0)
+            assert hh.probe_timeout(15.0) <= 1.0, hh.probe_timeout(15.0)
+            # A generous share still gets the usual limits.
+            hh._SCAN_DEADLINE = time.monotonic() + 300
+            assert hh.probe_timeout(90.0) == 90.0, hh.probe_timeout(90.0)
+        finally:
+            hh._SCAN_PHASE = False
+        # Outside the scan the WHOLE budget applies, not the scan share.
+        assert hh.probe_timeout(90.0) == 90.0, hh.probe_timeout(90.0)
+        # With the whole budget nearly spent the probe is cut to what is left.
+        hh._DEADLINE = time.monotonic() + 0.5
+        assert hh.probe_timeout(90.0) <= 5.0, hh.probe_timeout(90.0)
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
+
+
+def test_the_rule_deadline_follows_the_phase_it_runs_in(hh):
+    """A rule's own wall clock must not outlive the phase it runs in.  A rule
+    that starts with the scan share nearly spent cannot then walk for another
+    90 s and eat the reserve the deletes need -- that is the round-5 bug in
+    its loop form."""
+    hh.set_budget(600)
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() + 20
+        hh._SCAN_PHASE = True
+        try:
+            # 20 s of scan share left, so the rule's deadline is 20 s away --
+            # not its own 90 s.
+            left = hh.rule_deadline() - time.time()
+            assert left <= 20.0, left
+            assert left < hh.RULE_BUDGET_SEC, left
+        finally:
+            hh._SCAN_PHASE = False
+        # Outside the scan the whole budget applies, so the rule may use its
+        # own budget.
+        assert hh.rule_deadline() - time.time() > 20.0
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
+
+
+def test_the_scan_phase_flag_is_set_while_the_rules_run_and_cleared_after(hh):
+    """The phase flag must be a MODULE global.  A flag assigned inside a
+    function without `global` is a local: the report never learns the truth.
+    (Lesson: contrib/MM/2026-10-20/fbab9520.)
+
+    Assert it from OUTSIDE the function, where a local assignment would be
+    invisible, and assert it is cleared even when a rule raises.
+    """
+    seen = {}
+
+    def probe_rule():
+        seen["phase"] = hh._SCAN_PHASE
+        return []
+
+    def boom_rule():
+        raise RuntimeError("boom")
+
+    original = hh.RULES
+    try:
+        hh.RULES = {"probe": (probe_rule, "a test rule")}
+        hh.scan(["probe"])
+        assert seen["phase"] is True, "the rules run in the scan phase"
+        assert hh._SCAN_PHASE is False, "the flag is cleared after the scan"
+        hh.RULES = {"probe": (boom_rule, "a test rule")}
+        hh.scan(["probe"])
+        assert hh._SCAN_PHASE is False, "a broken rule must not leave the scan flag set"
+    finally:
+        hh.RULES = original
+        hh._SCAN_PHASE = False
+
+
+def test_no_scan_rule_probe_outlives_the_scan_share(hh):
+    """Round 5, end to end: run the REAL scan with the scan share nearly
+    spent and check every subprocess it starts.  A rule that keeps a fixed
+    90 s or 60 s timeout shows up here as a timeout far above the share --
+    and that rule would have eaten the reserve the deletes need.
+    """
+    recorded = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    original_rules = hh.RULES
+    try:
+        hh.set_budget(600)
+        try:
+            hh._SCAN_DEADLINE = time.monotonic() + 0.5
+            with mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+                hh.scan(None)
+        finally:
+            hh.set_budget(0)
+        assert recorded, "the scan started no probe at all, so this guard proves nothing"
+        unbounded = [t for t in recorded if t is None]
+        assert not unbounded, f"a subprocess ran with no timeout at all: {unbounded}"
+        too_long = [t for t in recorded if t > 1.0]
+        assert not too_long, f"probes outlived the scan share: {too_long}"
+    finally:
+        hh.RULES = original_rules
+
+
+def test_no_subprocess_timeout_bypasses_the_budget_clocks(hh):
+    """Round 5, structural half: a subprocess timeout must come from one of
+    the budget clocks, or be a bare literal no longer than
+    MIN_HEAVY_START_SEC.  A fixed 90 s or 60 s timeout is longer than the
+    scan share on its own, so one rule could spend the whole budget.
+
+    This walks the source, so the next fixed timeout fails here instead of
+    waiting for the next review round to find it.
+    """
+    tree = ast.parse(ENGINE.read_text())
+    helpers = {"probe_timeout", "op_timeout", "scan_op_timeout",
+               "apply_probe_timeout", "budget_left", "scan_budget_left"}
+
+    def mentions_budget(node):
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                    and n.func.id in helpers:
+                return True
+        return False
+
+    # Functions that take the timeout as a parameter: the CALLER owns the
+    # clock, so those call sites are checked separately.
+    param_owners = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for a in list(node.args.args) + list(node.args.kwonlyargs):
+                if a.arg == "timeout":
+                    param_owners.add(node.name)
+
+    def timeout_arg(call):
+        for kw in call.keywords:
+            if kw.arg == "timeout":
+                return kw.value
+        return None
+
+    problems = []
+
+    class V(ast.NodeVisitor):
+        def __init__(self):
+            self.timeout_param = None
+            self.derived = set()
+
+        def visit_FunctionDef(self, node):
+            prev_param, prev_derived = self.timeout_param, self.derived
+            self.timeout_param = None
+            self.derived = set()
+            for a in list(node.args.args) + list(node.args.kwonlyargs):
+                if a.arg == "timeout":
+                    self.timeout_param = a.arg
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign) and mentions_budget(sub.value):
+                    for t in sub.targets:
+                        if isinstance(t, ast.Name):
+                            self.derived.add(t.id)
+            self.generic_visit(node)
+            self.timeout_param, self.derived = prev_param, prev_derived
+
+        def visit_Call(self, node):
+            fname = None
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "run" \
+                    and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id == "subprocess":
+                fname = "subprocess.run"
+            elif isinstance(node.func, ast.Name) and node.func.id == "_run":
+                fname = "_run"
+            if fname:
+                arg = timeout_arg(node)
+                if fname == "_run" and arg is None and node.args:
+                    arg = node.args[-1]
+                if arg is None:
+                    problems.append((fname, node.lineno, "no timeout"))
+                elif isinstance(arg, ast.Name) and self.timeout_param \
+                        and arg.id == self.timeout_param:
+                    # The enclosing function owns it; its call sites are checked.
+                    pass
+                elif mentions_budget(arg):
+                    pass
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)):
+                    if arg.value > hh.MIN_HEAVY_START_SEC:
+                        problems.append((fname, node.lineno, ast.unparse(arg)))
+                elif isinstance(arg, ast.Name) and arg.id in self.derived:
+                    pass
+                else:
+                    problems.append((fname, node.lineno, ast.unparse(arg)))
+            # A call to a function that takes a timeout parameter must pass a
+            # budget clock, or that function is unbounded by construction.
+            if isinstance(node.func, ast.Name) and node.func.id in param_owners:
+                arg = timeout_arg(node)
+                if arg is None and node.args:
+                    arg = node.args[-1]
+                if arg is None:
+                    problems.append((node.func.id, node.lineno, "no timeout argument"))
+                elif not mentions_budget(arg):
+                    problems.append((node.func.id, node.lineno, ast.unparse(arg)))
+            self.generic_visit(node)
+
+    V().visit(tree)
+    assert not problems, problems
+
+    # Every use of RULE_BUDGET_SEC must be a default handed to a timeout helper
+    # (which clamps it to the phase clock), or live in one of the two places
+    # that build a deadline the phase clock caps on top of.  A rule that builds
+    # its own deadline from the raw constant can walk for 90 s even with 20 s
+    # of the scan share left -- the round-5 bug in its loop form.
+    allowed_rule_budget = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in {"probe_timeout", "op_timeout", "scan_op_timeout"}:
+            for a in list(node.args) + [k.value for k in node.keywords]:
+                for n in ast.walk(a):
+                    if isinstance(n, ast.Name) and n.id == "RULE_BUDGET_SEC":
+                        allowed_rule_budget.add(id(n))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in ("rule_deadline", "dir_bytes"):
+            for n in ast.walk(node):
+                if isinstance(n, ast.Name) and n.id == "RULE_BUDGET_SEC":
+                    allowed_rule_budget.add(id(n))
+    loose = [n.lineno for n in ast.walk(tree)
+             if isinstance(n, ast.Name) and n.id == "RULE_BUDGET_SEC"
+             and isinstance(n.ctx, ast.Load)
+             and id(n) not in allowed_rule_budget]
+    assert not loose, f"RULE_BUDGET_SEC used outside a clamped deadline: lines {loose}"
+
+
+def test_the_report_carries_the_measured_free_space_not_just_the_estimate(hh):
+    """`applied_bytes` is the size the scan ESTIMATED before each delete; it is not proof that the
+    bytes came back.  A delete can free nothing (the file is open elsewhere) and the host can spend
+    what was freed in the same minute, so the report carries df's measured change next to the
+    estimate.  (Measured 2026-10-19: 6.48 GB estimated, 0.05 GB of actual change.)"""
+    clock = FakeClock()
+    cands = [marker(hh, i) for i in range(2)]
+    out, err = io.StringIO(), io.StringIO()
+    with fake_time(hh, clock), \
+            mock.patch.object(hh, "scan", return_value=cands), \
+            mock.patch.object(hh, "read_band", side_effect=[
+                hh.Band(disk_free_gb=10.0, disk_used_pct=90, swap_used_pct=0, load1=0, cheap_only=False),
+                hh.Band(disk_free_gb=11.5, disk_used_pct=88, swap_used_pct=0, load1=0, cheap_only=False),
+            ]), \
+            mock.patch.object(hh, "apply_candidate", side_effect=lambda c: setattr(c, "applied", True)), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = hh.main(["--clean", "--json", "--budget-sec=60"])
+    report = json.loads(out.getvalue())
+    assert code == 0
+    assert report["disk_free_gb_before"] == 10.0
+    assert report["disk_free_gb_after"] == 11.5
+    assert report["disk_free_delta_gb"] == 1.5
+    # The estimate is still there, and it is still the estimate.
+    assert report["applied_bytes"] == 2 * 2048
+
+
+def test_the_measured_free_space_is_absent_when_the_run_could_not_measure(hh):
+    """A run that spends its budget cannot take the final reading.  That is not "freed nothing", so
+    the field is absent rather than zero."""
+    clock = FakeClock()
+    cands = [heavy(hh, i) for i in range(3)]
+    band = calm_band(hh, chunk_size=1, pause=0.0)
+    # The second heavy item overshoots the deadline, so the run ends with no time left to measure.
+    code, report, _err = run_main(hh, ["--clean", "--json", "--budget-sec=100"], cands, band, clock, apply_cost=60.0)
+    assert code == 0
+    assert report["budget_exhausted"] is True
+    assert report["disk_free_delta_gb"] is None
+    assert report["disk_free_gb_after"] is None
 
 
 def test_dir_bytes_keeps_du_timeout_at_30_seconds_without_run_budget(hh):
@@ -430,7 +839,8 @@ def test_the_old_json_keys_are_still_there(hh):
 
 
 def test_apply_delete_cannot_outlive_the_budget(hh):
-    """find -depth -delete had a fixed 600 s timeout, so one big tree could run ten minutes past the budget."""
+    """find -depth -delete had a fixed 600 s timeout, so one big tree could run ten minutes past the budget.
+    The marker probe that guards the tree is bounded the same way."""
     clock = FakeClock()
     work = Path(tempfile.mkdtemp(prefix="hhclean-test-"))
     try:
@@ -440,7 +850,7 @@ def test_apply_delete_cannot_outlive_the_budget(hh):
         seen = []
 
         def fake_run(cmd, **kw):
-            seen.append(kw.get("timeout"))
+            seen.append((cmd, kw.get("timeout")))
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
         with fake_time(hh, clock), mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
@@ -451,9 +861,18 @@ def test_apply_delete_cannot_outlive_the_budget(hh):
             hh.apply_delete(str(victim))
             clock.now += 19.5
             hh.apply_delete(str(victim))
-        assert seen[0] == 600.0, seen
-        assert seen[1] == 20.0, seen
-        assert seen[2] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
+        # The marker probe comes first and the delete second, and both are
+        # cut to what is left of the budget.
+        deletes = [t for cmd, t in seen if "-delete" in cmd]
+        probes = [t for cmd, t in seen if ".janitor-keep" in cmd]
+        assert deletes == [600.0, 20.0, 5.0], seen
+        # The probe walks the SAME tree the delete walks, so it is a second
+        # full walk of it.  It gets at most a tenth of what is left of the
+        # budget, never the whole thing: 30 s of guard per candidate could
+        # eat the delete reserve and free nothing.
+        assert probes == [30.0, 2.0, 1.0], seen
+        assert deletes[-1] == 5.0, "a floor, so a nearly spent budget still gives find a moment"
+        assert probes[-1] >= 1.0, "the probe gets a floor, so it can still answer"
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -501,6 +920,46 @@ def test_every_apply_time_command_is_cut_to_the_budget(hh):
         assert seen == [("brew", 5.0)], "never under the 5 s floor"
 
 
+def test_the_open_handles_probes_are_cut_to_the_budget(hh):
+    """The system-wide lsof (180 s) and the uncapped find (120 s) were the
+    last two probes whose timeouts ignored the budget, so a candidate could
+    block for three minutes while the run's hard stop closed on it.
+
+    The bound is the SCAN share, not the whole budget.  One candidate's
+    three probes add up to more than the scan share, so a probe that may
+    use the whole budget lets the scan eat the time the deletes need."""
+    clock = FakeClock()
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append((cmd[0].rsplit("/", 1)[-1], kw.get("timeout")))
+        # -F pfn field output: the system-wide pass lists a name, the
+        # per-path pass lists pids.
+        return completed(0, "p1\nn/x/blob.bin\n") if cmd[0].endswith("lsof") else completed(0, "")
+
+    with fake_time(hh, clock), \
+            mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+        hh.set_budget(0)
+        hh._SCAN_PHASE = True       # a probe takes the clock of its phase
+        try:
+            hh.open_handles("/x")
+            hh.touched_since("/x", 7)
+            assert seen == [("lsof", 180.0), ("find", 120.0)], seen
+            seen.clear()
+            hh.set_budget(40)
+            clock.now += 10
+            _reset_open_snapshot(hh)   # the first pass memoized its answer
+            hh.open_handles("/x")
+            hh.touched_since("/x", 7)
+            # 40 s of budget is a 24 s scan share; 10 s of it is already gone,
+            # so 14 s is left for the scan and a probe gets no more than that.
+            assert [t for _n, t in seen] == [14.0, 14.0], seen
+            for _name, timeout in seen:
+                assert timeout <= hh.scan_budget_left(), "a probe may not outlive the scan share"
+        finally:
+            hh._SCAN_PHASE = False
+
+
 def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh):
     """Two heavy items and three markers, budget 100, the first heavy costs 80 s.  The second heavy needs 30 s
     to start and has 20, so it waits for the next run; the markers are quick and still go."""
@@ -528,6 +987,30 @@ def test_truncate_keep_size_is_read_once_from_the_detail(hh):
 
 def completed(code, out=""):
     return subprocess.CompletedProcess([], code, out, "")
+
+
+def test_the_pgrep_probe_is_bounded_by_the_scan_share(hh):
+    """`proc_count` passed a fixed 15s timeout, and it runs several times per
+    rule (builds, dev caches, brew) from the scan, so a loaded host that makes
+    pgrep hang could spend the share the deletes need -- the livelock the budget
+    split exists to stop."""
+    hh.set_budget(600)
+    hh._SCAN_PHASE = True          # a probe takes the clock of its phase
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=completed(1)) as run:
+            assert hh.proc_count("xcodebuild") == 0
+        assert run.call_args.kwargs["timeout"] == 1.0, "the timeout must follow the scan share"
+        # A scan with its share intact still gets the usual limit.
+        hh._SCAN_DEADLINE = time.monotonic() + 300.0
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=completed(1)) as run:
+            hh.proc_count("xcodebuild")
+        assert run.call_args.kwargs["timeout"] == 15.0
+    finally:
+        hh.set_budget(0)
+        hh._SCAN_PHASE = False
 
 
 def test_proc_count_fails_closed(hh):
@@ -570,6 +1053,7 @@ def test_a_failed_pgrep_stops_the_dev_cache_rule(hh):
 
 
 def test_open_handles_fails_closed(hh):
+    _reset_open_snapshot(hh)
     with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("lsof", 25)):
         assert hh.open_handles("/x") == 1
     with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no lsof")):
@@ -797,6 +1281,25 @@ def test_touched_since_catches_a_recent_file_past_the_walk_cap(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_touched_since_asks_find_for_a_parseable_cutoff(hh):
+    """The idle gate runs `find -newermt`, and find rejects a fractional unit.
+
+    IDLE_MIN_OK is 90 minutes, which reaches this call as 0.0625 days.  Both
+    GNU and BSD find refuse "-0.0625 days", exit non-zero, and this fails
+    closed to "touched" -- so every app cache reads as busy and the rule frees
+    nothing while looking perfectly healthy.  Every other app-caches test mocks
+    touched_since out, so nothing else here would notice.  Assert the argv.
+    """
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "")) as run:
+        hh.touched_since("/tmp", 90 / (24 * 60))
+    stamp = run.call_args[0][0][5]
+    assert stamp == "-90 minutes", f"find cannot parse {stamp!r}; it fails closed to 'touched'"
+    # The whole-day call site has to keep working the same way.
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "")) as run:
+        hh.touched_since("/tmp", 7)
+    assert run.call_args[0][0][5] == "-10080 minutes"
+
+
 def test_idle_build_output_survives_a_blind_capped_walk(hh):
     """Even when the capped walk swears a tree is idle, the uncapped find probe
     still refuses a tree holding a recent file."""
@@ -815,12 +1318,573 @@ def test_idle_build_output_survives_a_blind_capped_walk(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _reset_open_snapshot(hh):
+    """The engine memoizes one snapshot for a while; a test has to start over."""
+    hh._OPEN_SNAPSHOT = None
+    hh._OPEN_SNAPSHOT_AT = 0.0
+    hh._OPEN_INDEX = None
+
+
+def test_one_lsof_snapshot_answers_every_candidate(hh):
+    """The old shape asked lsof about each path separately, and lsof times out
+    under load.  With hundreds of candidates that is hours of blocked scanning,
+    and a scan that never reaches a decision deletes nothing: the safe tier
+    found 41.9 MB across 915 items and freed nothing else.
+
+    One snapshot turns the per-path cost into a single bounded one.
+    """
+    _reset_open_snapshot(hh)
+    listing = "p1\nfcwd\nn/tmp\nf3\nn/Users/jay/Library/Caches/Foo/blob.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)) as run:
+        assert hh.open_handles("/Users/jay/Library/Caches/Foo") == 1
+        assert hh.open_handles("/Users/jay/Library/Caches/Bar") == 0
+        assert hh.open_handles("/Users/jay/Library/Caches") == 1
+    assert run.call_count == 1, "the snapshot must be taken once, not once per path"
+
+
+def test_the_open_handle_lookup_does_not_walk_every_path(hh):
+    """The answer came from scanning the whole open-path set for every
+    candidate, which is O(candidates x paths).  On a busy Mac that is millions
+    of string comparisons, and the scan that costs that much never reaches a
+    delete.  The index answers from a count per ancestor directory."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nf3\nn/Users/jay/Library/Caches/Foo/blob.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+        assert hh.open_handles("/Users/jay/Library/Caches/Foo") == 1
+        assert hh.open_handles("/Users/jay/Library/Caches") == 1
+        assert hh.open_handles("/Users/jay/Library") == 1
+        assert hh.open_handles("/Users/jay/Library/Caches/Bar") == 0
+    assert hh._OPEN_INDEX is not None, "the index must be built with the snapshot"
+    # Every ancestor of the open path is in the index.
+    assert hh._OPEN_INDEX["/Users/jay/Library/Caches/Foo"] == 1
+    assert hh._OPEN_INDEX["/Users/jay/Library/Caches"] == 1
+    assert hh._OPEN_INDEX["/Users/jay/Library"] == 1
+    assert "/Users/jay/Library/Caches/Bar" not in hh._OPEN_INDEX
+
+
+def test_the_index_answers_the_same_way_the_old_scan_did(hh):
+    """A path that is itself open, a path under it, and a path that merely
+    shares a prefix all have to answer the same as the old prefix scan."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nf3\nn/Users/jay/work/thing.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+        # The exact path is open.
+        assert hh.open_handles("/Users/jay/work/thing.bin") == 1
+        # Its parent holds it.
+        assert hh.open_handles("/Users/jay/work") == 1
+        # A sibling that only shares a prefix is not under it.
+        assert hh.open_handles("/Users/jay/workspace") == 0
+        assert hh.open_handles("/Users/jay/work/other") == 0
+
+
+def test_the_snapshot_resolves_a_relative_name_against_the_working_directory(hh):
+    """lsof prints a relative name for a file opened relative to a cwd.  An
+    unresolved name would silently hide an open handle."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nfcwd\nn/Users/jay/work\nf3\nn./thing.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+        # Both the cwd itself and the resolved ./thing.bin live under
+        # /Users/jay/work, so a candidate for that directory counts 2.  A
+        # snapshot that dropped the relative name would count only the cwd.
+        assert hh.open_handles("/Users/jay/work") == 2
+        assert hh.open_handles("/Users/jay/other") == 0
+
+
+def test_a_snapshot_that_exited_badly_is_not_cached(hh):
+    """lsof can print part of its listing and still fail.  Caching a partial
+    set reads every file it failed to mention as closed, and the "no open
+    handles" gate would pass on a directory a live process is holding."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nf3\nn/Users/jay/work/thing.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1, listing)) as run:
+        assert hh.open_handles("/Users/jay/work") == 1
+    assert hh._OPEN_SNAPSHOT is None, "a partial listing must not be cached"
+    assert run.call_count == 2, "one rejected snapshot attempt plus one per-path check"
+
+
+def test_the_snapshot_is_retaken_once_it_goes_stale(hh):
+    """A scan runs for the whole time budget, and the per-path lsof this
+    snapshot replaced answered each candidate as it went.  A listing kept for
+    the whole process answers for a candidate examined minutes later, so a
+    file opened in between reads as absent."""
+    _reset_open_snapshot(hh)
+    hh._OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
+    first = "p1\nf3\nn/Users/jay/work/first.bin\n"
+    second = "p1\nf3\nn/Users/jay/work/second.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, first)):
+        assert hh.open_handles("/Users/jay/work/second.bin") == 0
+    with mock.patch.object(hh.time, "monotonic", return_value=hh.time.monotonic() + 600.0), \
+         mock.patch.object(hh.subprocess, "run", return_value=completed(0, second)):
+        assert hh.open_handles("/Users/jay/work/first.bin") == 0
+        assert hh.open_handles("/Users/jay/work/second.bin") == 1
+
+
+def test_the_snapshot_age_is_stamped_after_the_listing_lands(hh):
+    """The max-age clock used to start before the lsof pass, so a listing that
+    took longer than the max age to produce arrived already stale and the next
+    candidate paid for another system-wide lsof.  Stamped before the pass, a
+    70s listing would be discarded the moment it finished."""
+    _reset_open_snapshot(hh)
+    hh._OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
+    first = "p1\nf3\nn/Users/jay/work/first.bin\n"
+    second = "p1\nf3\nn/Users/jay/work/second.bin\n"
+    clock = hh.time.monotonic()
+
+    def listing_takes_70s(*_a, **_kw):
+        # The lsof pass itself consumes more than the whole max age.
+        nonlocal clock
+        clock += 70.0
+        return completed(0, first)
+
+    with mock.patch.object(hh.subprocess, "run", side_effect=listing_takes_70s):
+        with mock.patch.object(hh.time, "monotonic", side_effect=lambda: clock):
+            assert hh.open_handles("/Users/jay/work/second.bin") == 0
+
+    # The listing is fresh the moment it lands, so the next candidate is
+    # answered from it instead of paying for another system-wide lsof.
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, second)) as run:
+        with mock.patch.object(hh.time, "monotonic", side_effect=lambda: clock):
+            assert hh.open_handles("/Users/jay/work/first.bin") == 1
+            assert hh.open_handles("/Users/jay/work/second.bin") == 0
+    assert run.call_count == 0, "a listing that just landed must not be re-taken"
+
+
+def test_the_snapshot_matches_a_candidate_spelled_through_a_symlink(hh):
+    """lsof answers with resolved vnode paths, so a handle under the per-user
+    TMPDIR arrives as /private/var/... while `getconf DARWIN_USER_TEMP_DIR`
+    hands the rule the /var/... spelling.  Matched as plain strings, every open
+    handle in TMPDIR reads as absent and an in-use scratch dir gets deleted."""
+    _reset_open_snapshot(hh)
+    real = Path(tempfile.mkdtemp(prefix="hhclean-real-"))
+    holder = Path(tempfile.mkdtemp(prefix="hhclean-link-"))
+    link = holder / "var"
+    try:
+        link.symlink_to(real)
+        listing = f"p1\nf3\nn{real}/ssr-abc/thing.bin\n"
+        with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+            assert hh.open_handles(str(link / "ssr-abc")) == 1
+            assert hh.open_handles(str(link / "other")) == 0
+    finally:
+        shutil.rmtree(real, ignore_errors=True)
+        shutil.rmtree(holder, ignore_errors=True)
+
+
+def test_an_untrustworthy_snapshot_falls_back_to_the_per_path_check(hh):
+    """lsof answered but found nothing at all, which on a live Mac is not
+    believable.  Treat it as untrustworthy rather than as 'nothing open'."""
+    _reset_open_snapshot(hh)
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1, "")) as run:
+        assert hh.open_handles("/x") == 0
+    assert run.call_count == 2, "one snapshot attempt plus one per-path check"
+
+
+def test_a_snapshot_that_never_answers_falls_back_to_the_per_path_check(hh):
+    _reset_open_snapshot(hh)
+    with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("lsof", 180)):
+        assert hh.open_handles("/x") == 1, "a look that failed is not an empty room"
+
+
+def test_app_caches_leaves_a_kept_cache_alone(hh):
+    """A `.janitor-keep` marker is the operator's hands-off contract, and this
+    rule deletes whole app-cache trees.  Nothing pinned that gate for this
+    rule, so it could be dropped without a single test failing."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "KeptApp"
+        cache.mkdir(parents=True)
+        (cache / ".janitor-keep").write_text("", encoding="utf-8")
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == [], "a kept cache is not a candidate"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_a_cache_with_a_marker_inside_it_alone(hh):
+    """A marker DEEPER in the tree protects the tree as well.  The rule deletes
+    the whole tree, so a marker inside it would be deleted with the data the
+    operator marked hands off, and the policy says a marked path is
+    ask-first."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "MarkedInside"
+        (cache / "inner").mkdir(parents=True)
+        (cache / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == [], "a marked tree is not a candidate"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_marker_inside_a_tree_is_matched_case_insensitively(hh):
+    """`find -iname` is the only thing that makes `.JANITOR-KEEP` inside a tree
+    protect it.  The sibling `has_keep_sentinel` resolves the same marker with
+    `Path.exists()`, which is case-insensitive on the default APFS volume, so
+    with `-name` a differently cased marker was honored at a tree root and
+    invisible inside one, and the walk deleted the tree and the marker
+    together.  Both probes must recognize exactly the same markers."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-case-"))
+    try:
+        (root / "inner").mkdir()
+        (root / "inner" / ".JANITOR-KEEP").write_text("", encoding="utf-8")
+        verdict = hh.holds_keep_sentinel(str(root), 30.0)
+        assert verdict.found is True, verdict
+        assert verdict.known is True, verdict
+        # ...and a tree with no marker of any casing is still unmarked, so the
+        # walk did not turn into "always true".
+        (root / "inner" / ".JANITOR-KEEP").unlink()
+        verdict = hh.holds_keep_sentinel(str(root), 30.0)
+        assert verdict.found is False, verdict
+        assert verdict.known is True, verdict
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_failed_marker_probe_is_not_a_marker(hh):
+    """A probe that cannot answer is NOT the same as a probe that found a
+    marker, and reading find's EXIT CODE as the answer is how an ordinary
+    unreadable cache directory turned into a permanent "the operator marked
+    this" block that recurred every run and reclaimed nothing.
+
+    Measured on this Mac: 1247 real candidate trees, none exited nonzero, so
+    the false positive is latent rather than active -- but the exit code is
+    not a reliable answer and the report must not claim a marker that was
+    never found.
+    """
+    def verdict_for(rc, out="", err=""):
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], rc, out, err)):
+            return hh.holds_keep_sentinel("/x", 30.0)
+
+    # find exits nonzero when it cannot read a subdirectory, and it still
+    # prints every marker it did find.  The OUTPUT is the answer.
+    v = verdict_for(1, "", "find: /x/inner: Permission denied")
+    assert v.found is False, v
+    assert v.known is True, v
+
+    # A marker printed despite the nonzero exit is a marker.
+    v = verdict_for(1, "/x/inner/.janitor-keep\n", "find: /x/inner: Permission denied")
+    assert v.found is True, v
+    assert v.known is True, v
+
+    # A clean walk with no marker is a clean answer.
+    v = verdict_for(0, "")
+    assert v.found is False and v.known is True, v
+
+    # A walk that failed for a reason OTHER than an unreadable subdirectory
+    # is unknown, not a marker and not a clear answer.
+    v = verdict_for(2, "", "find: illegal option")
+    assert v.found is False, v
+    assert v.known is False, v
+    assert v.reason, v
+
+    # A timeout is unknown too.
+    with mock.patch.object(hh.subprocess, "run",
+                           side_effect=subprocess.TimeoutExpired("find", 30)):
+        v = hh.holds_keep_sentinel("/x", 30.0)
+    assert v.found is False, v
+    assert v.known is False, v
+    assert "timed out" in v.reason, v
+
+
+def test_an_unreadable_subdirectory_is_not_a_marker(hh):
+    """The real thing, not a mock: a tree with an unreadable subdirectory and
+    no marker anywhere.  find exits nonzero and prints nothing, and the
+    verdict has to be "no marker" -- the unreadable parts are unreadable to
+    the delete as well, so a marker inside one of them survives the delete
+    instead of being taken with it."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-perm-"))
+    closed = root / "closed"
+    try:
+        (root / "open").mkdir()
+        (root / "open" / "f.txt").write_text("x")
+        closed.mkdir()
+        (closed / "hidden").write_text("y")
+        os.chmod(closed, 0o000)
+        verdict = hh.holds_keep_sentinel(str(root), 30.0)
+        assert verdict.found is False, "an unreadable subdirectory is not a marker"
+        assert verdict.known is True, verdict
+    finally:
+        try:
+            os.chmod(closed, 0o755)
+        except OSError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_delete_says_the_probe_failed_and_not_that_the_operator_marked_it(hh):
+    """The report has to tell the two apart.  A blocked tree that was never
+    marked must not be counted against the operator's marker."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-fail-"))
+    try:
+        tree = work / "tree"
+        tree.mkdir()
+        (tree / "f").write_text("x")
+        with mock.patch.object(hh, "holds_keep_sentinel",
+                               return_value=hh.MarkerVerdict(False, False, "probe timed out")):
+            freed, err = hh.apply_delete(str(tree))
+        assert freed == 0, freed
+        assert "probe failed" in err, err
+        assert "sentinel" not in err, err
+        assert tree.exists(), "an unprovable tree is never deleted"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_the_apply_phase_does_not_walk_the_tree_again(hh):
+    """The scan already asked whether the tree holds a marker, and the delete
+    walks the tree anyway.  Asking again is a second full walk of the same
+    tree -- measured at up to 5.99 s on one real cache tree -- so the verdict
+    is carried on the candidate."""
+    work = Path(tempfile.mkdtemp(prefix="hhclean-carry-"))
+    try:
+        tree = work / "tree"
+        tree.mkdir()
+        (tree / "f").write_text("x")
+        with mock.patch.object(hh, "holds_keep_sentinel",
+                               side_effect=AssertionError("walked the tree twice")) as probe:
+            cand = hh.Candidate(category="app-caches", path=str(tree), bytes=10,
+                                reason="r", keep_verdict=hh.MarkerVerdict(False, True, ""))
+            hh.apply_candidate(cand)
+        assert probe.call_count == 0, "the scan verdict was carried, so no second walk"
+        assert not tree.exists(), "the delete still happened"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_the_delete_refuses_a_tree_with_a_marker_inside_it(hh):
+    """`apply_delete` is the choke point every delete passes through, so the
+    check lands there and covers every rule, not only the new ones."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-del-"))
+    try:
+        tree = root / "tree"
+        (tree / "inner").mkdir(parents=True)
+        (tree / "inner" / ".janitor-keep").write_text("", encoding="utf-8")
+        (tree / "blob.bin").write_bytes(b"x" * 1024)
+        freed, err = hh.apply_delete(str(tree))
+        assert freed == 0, "nothing was deleted"
+        assert "janitor-keep" in err, err
+        assert tree.exists(), "the tree is still there"
+        assert (tree / "inner" / ".janitor-keep").exists(), "the marker is still there"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_app_caches_finds_an_idle_app_cache(hh):
+    """The measured hog on this Mac was ~/Library/Caches/org.swift.swiftpm at
+    3.6 GB.  The old rule set named a few toolchain caches and nothing else,
+    so a host whose space went into app caches got nothing back."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "SomeApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False) as touched, \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            found = hh.rule_app_caches()
+        assert [c.path for c in found] == [str(cache)]
+        assert found[0].category == "app-caches"
+        assert found[0].tier == "safe"
+        assert found[0].op == "delete"
+        # The window is the gate: a wider one would delete a cache the app
+        # wrote to in the last 90 minutes.
+        touched.assert_called_once_with(str(cache), hh.IDLE_MIN_OK / (24 * 60))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_stops_at_its_own_deadline(hh):
+    """Every candidate pays for two uncapped probes, so the rule's candidate
+    loop has to consult the scan deadline itself.  Otherwise one rule overruns
+    the 60% scan share inside the rule and the deletes get nothing."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    clock = FakeClock()
+    try:
+        root = home / "Library" / "Caches"
+        root.mkdir(parents=True)
+        for name in ("One", "Two", "Three"):
+            (root / name).mkdir()
+        probes = []
+
+        def probing_age(_path, *a, **k):
+            probes.append(_path)
+            clock.now += 3.0     # three candidates x 3 s past a 6 s scan share
+            return 10 ** 9
+
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", probing_age), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            with fake_time(hh, clock):
+                hh.set_budget(10.0)
+                found = hh.rule_app_caches()
+                exhausted = hh._SCAN_BUDGET_EXHAUSTED
+        assert len(probes) < 3, f"the loop kept probing past its deadline: {probes}"
+        assert exhausted is True, "a truncated scan has to say so"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_a_busy_cache_alone(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "BusyApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=1), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_the_botfleet_update_generations_alone(hh):
+    """The ask-first inventory reports BotFleet's update generations and never
+    deletes them.  This rule works on whole directories, so without a skip it
+    would purge a pending update before BotFleet ever applied it."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        gens = home / "Library" / "Caches" / "BotFleet" / "updates" / "gen-2"
+        gens.mkdir(parents=True)
+        (gens / "app.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_does_not_call_a_big_active_cache_idle(hh):
+    """newest_file_age_min stops after 4000 entries, so an application cache
+    tree bigger than that (Chrome, Slack, Electron are all past it) can hide a
+    recent write past the cap and read as idle.  The uncapped touched_since
+    probe answers on the first recent file, so the tree is left alone."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "BigApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=True) as touched, \
+             mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+            assert hh.rule_app_caches() == [], "a cache with a recent write is not idle"
+            # The window is the gate, and this is the destructive path: a
+            # wider one would delete a cache the app wrote to recently.
+            touched.assert_called_once_with(str(cache), hh.IDLE_MIN_OK / (24 * 60))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_agent_state_reports_sessions_instead_of_deleting_them(hh):
+    """The transient parts rebuild; the sessions are Jay's history."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        logs = home / ".claude" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "a.log").write_text("x", encoding="utf-8")
+        sessions = home / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "s.jsonl").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            found = hh.rule_agent_state()
+        by_path = {c.path: c for c in found}
+        assert by_path[str(logs)].tier == "safe", "transient state is safe to clear"
+        assert by_path[str(sessions)].tier == "ask-first", "session history is not cache"
+        assert by_path[str(sessions)].op == "report"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_agent_state_does_not_call_a_big_active_tree_idle(hh):
+    """newest_file_age_min stops after 4000 entries, so an agent tree bigger
+    than that can hide a recent write past the cap and read as idle.  The
+    uncapped touched_since probe answers on the first recent file, so a tree
+    the agent is still writing to is left alone."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        logs = home / ".claude" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "a.log").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=True) as touched, \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            assert hh.rule_agent_state() == [], "a tree with a recent write is not idle"
+            # The window is the gate: a wider one would delete a tree the
+            # agent wrote to in the last 90 minutes.
+            touched.assert_called_once_with(str(logs), hh.IDLE_MIN_OK / (24 * 60))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_agent_state_leaves_a_project_working_tree_alone(hh):
+    """`~/.gemini/tmp` is named like scratch but holds a `.project_root`
+    marker per project the agent has opened -- a working copy of Jay's real
+    code, with chat history beside it.  The name is not enough to call it
+    transient."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        tmp = home / ".gemini" / "tmp"
+        proj = tmp / "code"
+        proj.mkdir(parents=True)
+        (proj / ".project_root").write_text("/Users/jay/Code\n", encoding="utf-8")
+        (proj / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            found = hh.rule_agent_state()
+        assert [c.path for c in found] == [], "a project working tree is not transient state"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_path_two_rules_name_is_only_claimed_once(hh):
+    """dev-caches and app-caches can both name the same directory.  It has to
+    be deleted once, not twice."""
+    cand = hh.Candidate(category="dev-caches", path="/x/Cache", bytes=10, reason="r")
+    with mock.patch.dict(hh.RULES, {"dev-caches": (lambda: [cand], "a"),
+                                    "app-caches": (lambda: [cand], "b")}):
+        found = hh.scan(["dev-caches", "app-caches"])
+    assert len(found) == 1
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
     for t in tests:
         try:
+            # The engine keeps one lsof snapshot per process.  Reset it so a
+            # test never inherits an earlier test's answer.
+            _reset_open_snapshot(hh)
             t(hh)
             print(f"  ok   {t.__name__}")
         except AssertionError as e:

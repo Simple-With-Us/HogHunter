@@ -111,7 +111,9 @@ struct HogHunterPanel: View {
                         MaintainView(store: store.maintain, showHeader: true)
                     } else if selectedTab == .network && hostScope == .mac {
                         NetworkView(bundleResolver: { pid in store.lookup(pid: pid) },
-                                    bandwidth: store.bandwidth, embeddedInPanel: true,
+                                    bandwidth: store.bandwidth,
+                                    cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) },
+                                    embeddedInPanel: true,
                                     isTabActive: true)
                     } else if selectedTab != .storage || hostScope != .mac {
                         ScrollView {

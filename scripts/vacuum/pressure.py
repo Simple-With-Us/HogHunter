@@ -21,6 +21,7 @@ def sample_mac() -> dict[str, Any]:
     if sys.platform != "darwin":
         return {
             "at": int(time.time()),
+            "disk_sample_ok": True,
             "disk_free_gb": 100.0,
             "disk_used_pct": 50.0,
             "swap_total_gb": 0.0,
@@ -33,6 +34,11 @@ def sample_mac() -> dict[str, Any]:
 
     df = _run(["/bin/df", "-k", "/System/Volumes/Data"]) or _run(["/bin/df", "-k", "/"])
     disk_free_gb = disk_used_pct = 0.0
+    # A df that failed or timed out leaves the free-space number at zero, and
+    # zero free reads as a full disk: it would announce a critical shortage
+    # that does not exist and put the tick into pressure cleanup.  Say whether
+    # the answer is real so the callers can carry the last known one instead.
+    disk_ok = False
     for line in df.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 5:
@@ -43,6 +49,7 @@ def sample_mac() -> dict[str, Any]:
                 disk_used_pct = float(cap)
             except ValueError:
                 disk_used_pct = 0.0
+            disk_ok = True
             break
 
     vm = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"])
@@ -61,6 +68,7 @@ def sample_mac() -> dict[str, Any]:
 
     return {
         "at": int(time.time()),
+        "disk_sample_ok": disk_ok,
         "disk_free_gb": round(disk_free_gb, 2),
         "disk_used_pct": round(disk_used_pct, 1),
         "swap_total_gb": round(swap_total_gb, 2),
@@ -82,15 +90,16 @@ def evaluate_hits(sample: dict[str, Any], prev_free: Optional[float], rw_cfg: di
     swap_gb_thr = float(rw_cfg.get("swap_used_gb", 32))
     load_thr = float(rw_cfg.get("load1_threshold", 65))
 
-    if free <= crit:
-        hits.append({"metric": "disk_free_gb", "severity": "critical", "threshold": crit, "value": free})
-    elif free <= warn:
-        hits.append({"metric": "disk_free_gb", "severity": "warn", "threshold": warn, "value": free})
+    if sample.get("disk_sample_ok", True):
+        if free <= crit:
+            hits.append({"metric": "disk_free_gb", "severity": "critical", "threshold": crit, "value": free})
+        elif free <= warn:
+            hits.append({"metric": "disk_free_gb", "severity": "warn", "threshold": warn, "value": free})
 
-    if prev_free is not None:
-        drop = prev_free - free
-        if drop >= drop_thr:
-            hits.append({"metric": "disk_drop_gb", "severity": "warn", "threshold": drop_thr, "value": round(drop, 2)})
+        if prev_free is not None:
+            drop = prev_free - free
+            if drop >= drop_thr:
+                hits.append({"metric": "disk_drop_gb", "severity": "warn", "threshold": drop_thr, "value": round(drop, 2)})
 
     swap_pct = float(sample.get("swap_used_pct", 0))
     swap_used_gb = float(sample.get("swap_used_gb", 0))

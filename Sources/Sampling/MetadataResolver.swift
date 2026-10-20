@@ -93,14 +93,19 @@ final class MetadataResolver {
             // A forced refresh re-reads the mutable properties, but a running
             // app's icon is stable: reuse the one already fetched so the main
             // actor does not re-request it for every local app on every forced
-            // refresh.  Only a genuinely new pid pays the read.
-            let memoizedIcon = runningApps[pid].flatMap { $0.bundleURL == bundleURL ? $0.icon : nil }
+            // refresh.  Only a genuinely new pid pays the read.  The memo is
+            // keyed on the bundle URL rather than on the icon itself, so an app
+            // whose icon legitimately reads as nil is memoized too instead of
+            // being re-requested on every forced refresh.
+            let memoized = runningApps[pid].flatMap { known in
+                known.bundleURL == bundleURL ? known : nil
+            }
             table[pid] = AppInfo(
                 bundleId: app.bundleIdentifier,
                 localizedName: app.localizedName,
                 activationPolicy: app.activationPolicy,
                 bundleURL: bundleURL,
-                icon: memoizedIcon ?? (iconSourceAllowed(bundleURL) ? app.icon : nil)
+                icon: memoized?.icon ?? (memoized == nil && iconSourceAllowed(bundleURL) ? app.icon : nil)
             )
         }
         runningApps = table

@@ -219,7 +219,7 @@ final class CleanRegimenRunner: ObservableObject {
         if rules.isEmpty {
             return ([], "No cleaning rules are enabled.")
         }
-        let pending = scanned.filter { rules.contains(ruleName(for: $0)) }
+        let pending = scanned.filter { !ruleNames(for: $0).isDisjoint(with: rules) }
         if pending.isEmpty {
             let reason = scanned.isEmpty
                 ? "Nothing reclaimable was found."
@@ -231,29 +231,52 @@ final class CleanRegimenRunner: ObservableObject {
 
     /// Map a scanned item back to the engine's rule vocabulary so the
     /// regimen's `enabledRules` is meaningful.
-    nonisolated static func ruleName(for item: CleanItem) -> String {
+    ///
+    /// A category can answer to more than one name.  `userCaches` is the tree
+    /// the `app-caches` rule sweeps, but regimens persisted before that rule
+    /// existed carry `dev-caches`, and both must keep selecting it.
+    nonisolated static func ruleNames(for item: CleanItem) -> Set<String> {
         switch item.category {
-        case .userCaches: return "dev-caches"
-        case .logsAndDiagnostics: return "logs"
-        case .developer: return "xcode-artifacts"
-        case .trash: return "temp-scratch"
+        case .userCaches: return ["dev-caches", "app-caches"]
+        case .logsAndDiagnostics: return ["logs"]
+        case .developer: return ["xcode-artifacts"]
+        case .trash: return ["temp-scratch"]
         case .tempFiles:
             // Own rule: Trash's temp-scratch toggle must not include or
             // exclude /tmp items, which stay unselected by default.
-            return "tmp-files"
+            return ["tmp-files"]
         case .apfsSnapshots:
             // Own rule: an unattended regimen must not thin snapshots just
             // because the user opted into log cleanup.
-            return "snapshots"
-        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
-            return "xcode-artifacts"
+            return ["snapshots"]
+        case .aiArtifacts: return ["agent-state", "xcode-artifacts"]
+        case .orphanedData, .localAIModels, .largeAndOldFiles:
+            return ["xcode-artifacts"]
         case .staleBackups:
             // No engine rule owns tool-made backups: a regimen must never take
             // them unattended, and "ask-first" is not schedulable, so items in
             // this category stay a Standard one-click choice only.
-            return "ask-first"
+            return ["ask-first"]
         }
     }
+
+    /// The canonical rule name for an item.  A category may answer to more than
+    /// one name in `ruleNames(for:)`; this is the one it is named by, with
+    /// legacy aliases dropped so the answer stays stable.
+    nonisolated static func ruleName(for item: CleanItem) -> String {
+        let names = ruleNames(for: item)
+        for canonical in canonicalRuleNames where names.contains(canonical) {
+            return canonical
+        }
+        return ""
+    }
+
+    /// Checked in order by `ruleName(for:)`, so a category with an alias names
+    /// itself by the specific rule and keeps the older name as the alias.
+    private static let canonicalRuleNames = [
+        "agent-state", "app-caches", "tmp-files", "temp-scratch", "snapshots",
+        "logs", "xcode-artifacts", "ask-first",
+    ]
 
     /// True when a real build is in flight.  A lone `xcodebuild` hours old
     /// with zero compiler children is stalled, not building, so the compiler

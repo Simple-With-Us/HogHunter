@@ -39,6 +39,37 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertNil(matched.skipReason)
     }
 
+    func testAppCachesAndAgentStateRulesSelectItems() {
+        func item(category: CleanCategory, title: String) -> CleanItem {
+            CleanItem(
+                category: category,
+                title: title,
+                subtitle: title,
+                url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-\(title)"),
+                bytes: 10,
+                fileCount: 1,
+                lastModified: nil,
+                isSelected: true,
+                detail: nil
+            )
+        }
+        let cache = item(category: .userCaches, title: "cache")
+        let agent = item(category: .aiArtifacts, title: "agent")
+
+        // Both rules are in defaultRules and schedulableRules, so the selector
+        // has to be able to produce them.  A rule nothing maps to is a dead
+        // toggle: enabling it selects nothing.
+        let appCaches = CleanRegimenRunner.pendingItems(from: [cache, agent], rules: ["app-caches"])
+        XCTAssertEqual(appCaches.items.map(\.title), ["cache"])
+        let agentState = CleanRegimenRunner.pendingItems(from: [cache, agent], rules: ["agent-state"])
+        XCTAssertEqual(agentState.items.map(\.title), ["agent"])
+
+        // A regimen persisted before the app-caches rule existed carries
+        // dev-caches, and must keep selecting the same items.
+        let legacy = CleanRegimenRunner.pendingItems(from: [cache, agent], rules: ["dev-caches"])
+        XCTAssertEqual(legacy.items.map(\.title), ["cache"])
+    }
+
     func testTempFilesRuleIsDecoupledFromTrash() {
         func item(category: CleanCategory, title: String) -> CleanItem {
             CleanItem(

@@ -124,6 +124,27 @@ final class MetadataResolverTests: XCTestCase {
     }
 
     @MainActor
+    func testAnIconlessAppIsNotLookedUpAgainOnAForcedRefresh() {
+        // A running app can legitimately have no icon.  That nil is a completed
+        // lookup, not a missing memo, so a forced refresh must not re-request it.
+        let iconless = FakeRunningApp(
+            pid: 601,
+            bundleId: "com.example.Iconless",
+            name: "Iconless",
+            policy: .regular,
+            url: URL(fileURLWithPath: "/Applications/Iconless.app"),
+            icon: nil
+        )
+        let resolver = MetadataResolver(runningApplications: { [iconless] }, iconSourceAllowed: { _ in true })
+
+        resolver.refreshRunningApps()
+        XCTAssertEqual(iconless.iconReads, 1, "one icon read for a local running app without an icon")
+
+        for _ in 0..<20 { resolver.refreshRunningApps(force: true) }
+        XCTAssertEqual(iconless.iconReads, 1, "a forced refresh must not re-request a known nil icon")
+    }
+
+    @MainActor
     func testPidsThatHaveGoneLeaveTheTable() {
         let editor = app(pid: 501)
         var running: [RunningApplicationInfo] = [editor]
