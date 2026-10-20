@@ -362,7 +362,9 @@ struct HogHunterPanel: View {
     }
 
     private var externalDrives: [MountedDriveUsage] {
-        mountedDrives.rows.filter { $0.id != timeMachineDrive?.id }
+        // Every mounted Time Machine destination belongs in the Time Machine card, not
+        // the External one, so match on the name rather than the single selected id.
+        mountedDrives.rows.filter { !$0.name.localizedCaseInsensitiveContains("Time Machine") }
     }
 
     private var externalCapacityText: String {
