@@ -61,6 +61,9 @@ final class MetadataResolver {
     private var cache: [ProcessKey: Metadata] = [:]
     private var iconByBundle: [String: NSImage] = [:]
     private var nameByBundle: [String: String] = [:]
+    private var lastSeenGeneration: [String: UInt64] = [:]
+    private var generation: UInt64 = 0
+    static let maximumRememberedBundles = 512
     private let enumerate: () -> [RunningApplicationInfo]
     private let iconSourceAllowed: (URL?) -> Bool
 
@@ -90,6 +93,7 @@ final class MetadataResolver {
                 continue
             }
             let bundleURL = app.bundleURL
+            let bundleId = app.bundleIdentifier
             // A forced refresh re-reads the mutable properties, but a running
             // app's icon is stable: reuse the one already fetched so the main
             // actor does not re-request it for every local app on every forced
@@ -98,10 +102,10 @@ final class MetadataResolver {
             // whose icon legitimately reads as nil is memoized too instead of
             // being re-requested on every forced refresh.
             let memoized = runningApps[pid].flatMap { known in
-                known.bundleURL == bundleURL ? known : nil
+                known.bundleURL == bundleURL && known.bundleId == bundleId ? known : nil
             }
             table[pid] = AppInfo(
-                bundleId: app.bundleIdentifier,
+                bundleId: bundleId,
                 localizedName: app.localizedName,
                 activationPolicy: app.activationPolicy,
                 bundleURL: bundleURL,
@@ -109,13 +113,24 @@ final class MetadataResolver {
             )
         }
         runningApps = table
-        // The bundle-keyed maps are a session-long memo: an app that quits
-        // keeps its icon and name for the history rows that still reference it.
-        // Only overwrite, never clear.
+        // Recently seen apps retain icons and names for history after quitting.
+        // Bound this memo so a long-running sampler cannot retain images forever.
+        generation &+= 1
         for info in table.values {
             guard let bundleId = info.bundleId else { continue }
             if let icon = info.icon { iconByBundle[bundleId] = icon }
             if let name = info.localizedName { nameByBundle[bundleId] = name }
+            lastSeenGeneration[bundleId] = generation
+        }
+        if lastSeenGeneration.count > Self.maximumRememberedBundles {
+            let oldest = lastSeenGeneration.sorted {
+                $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value
+            }.prefix(lastSeenGeneration.count - Self.maximumRememberedBundles)
+            for (bundleId, _) in oldest {
+                iconByBundle.removeValue(forKey: bundleId)
+                nameByBundle.removeValue(forKey: bundleId)
+                lastSeenGeneration.removeValue(forKey: bundleId)
+            }
         }
         return table
     }
@@ -204,7 +219,7 @@ final class MetadataResolver {
         return out
     }
 
-    /// Icons are available only for safe, currently running application bundles.
+    /// Icons are available only from the bounded memo of safe running applications.
     /// `path` remains in the API for callers with process samples, but is never read.
     func icon(bundleId: String?, path _: String?) -> NSImage? {
         guard let bundleId else { return nil }
