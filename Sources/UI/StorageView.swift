@@ -18,7 +18,7 @@ enum StorageTab: String, CaseIterable, Identifiable {
 /// panel's cadence.
 struct StorageView: View {
     @StateObject private var store: StorageStore
-    @StateObject private var cleanerStore = DiskCleanerStore()
+    @StateObject private var cleanerStore: DiskCleanerStore
     /// Owned by `HogStore`, which the iPhone route also uses, so the Mac and
     /// the phone cannot start a second run over each other.
     @ObservedObject private var maintainStore: MaintainStore
@@ -38,6 +38,9 @@ struct StorageView: View {
     /// clicking the segmented control.
     init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+        // The same mode the cleaner view honours on appear: with it off, a tier
+        // or exclusion change must not start a walk either.
+        _cleanerStore = StateObject(wrappedValue: DiskCleanerStore(manualScanOnly: !autoScanCleaner))
         _selectedTab = State(initialValue: initialTab)
         self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel

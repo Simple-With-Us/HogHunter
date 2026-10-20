@@ -40,6 +40,9 @@ final class DiskCleanerStore: ObservableObject {
     /// A scan follows every exclusion edit.  Tests turn that off so they do
     /// not walk the real disk.
     private let rescanAfterExclusionChange: Bool
+    /// The dashboard's Storage tab requires an explicit Scan, so changing a
+    /// tier or an exclusion updates the stored options without starting a walk.
+    private let manualScanOnly: Bool
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
@@ -61,7 +64,7 @@ final class DiskCleanerStore: ObservableObject {
 
     func toggleCategoryExclusion(_ category: CleanCategory) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.toggleCategory(category) }
-        if rescanAfterExclusionChange { scan() }
+        rescanAfterOptionChange()
     }
 
     func addExcludedPath(_ path: String) {
@@ -70,12 +73,28 @@ final class DiskCleanerStore: ObservableObject {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { current in
             if !current.excludedPaths.contains(normalized) { current.excludedPaths.append(normalized) }
         }
-        if rescanAfterExclusionChange { scan() }
+        rescanAfterOptionChange()
     }
 
     func removeExcludedPath(_ path: String) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.removePath(path) }
-        if rescanAfterExclusionChange { scan() }
+        rescanAfterOptionChange()
+    }
+
+    /// An exclusion edit invalidates the results on screen.  Manual-scan mode
+    /// drops them and waits for Scan; otherwise a scan follows the edit.
+    private func rescanAfterOptionChange() {
+        if manualScanOnly { discardResults() }
+        else if rescanAfterExclusionChange { scan() }
+    }
+
+    /// Drops results that no longer describe the stored options, so nothing is
+    /// shown or cleaned under a tier or an exclusion set the scan never saw.
+    private func discardResults() {
+        cancelScan()
+        report = nil
+        selectedItemIds = []
+        state = .idle
     }
 
     let cleaner: DiskCleaner
@@ -92,11 +111,13 @@ final class DiskCleanerStore: ObservableObject {
     init(cleaner: DiskCleaner = DiskCleaner(),
          historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
          exclusionsDefaults: UserDefaults = CleanerExclusions.sharedDefaults,
-         rescanAfterExclusionChange: Bool = true) {
+         rescanAfterExclusionChange: Bool = true,
+         manualScanOnly: Bool = false) {
         self.cleaner = cleaner
         self.historyStore = historyStore
         self.exclusionsDefaults = exclusionsDefaults
         self.rescanAfterExclusionChange = rescanAfterExclusionChange
+        self.manualScanOnly = manualScanOnly
         self.exclusions = CleanerExclusions.load(from: exclusionsDefaults)
         self.lastCleanup = historyStore.latestRecord()
     }
@@ -109,10 +130,12 @@ final class DiskCleanerStore: ObservableObject {
     // MARK: - Scan
 
     /// Switches the active cleaning tier and initiates a scan for that tier.
+    /// In manual-scan mode the tier is recorded and the stale results dropped,
+    /// so the walk only ever starts from the Scan button.
     func setTier(_ tier: CleanTier) {
         guard tier != selectedTier else { return }
         selectedTier = tier
-        scan()
+        if manualScanOnly { discardResults() } else { scan() }
     }
 
     /// Cancels any in-flight clutter scan.
