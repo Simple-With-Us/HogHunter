@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from unittest import mock
@@ -247,6 +248,83 @@ def test_the_scan_cannot_spend_the_budget_the_deletes_need(hh):
         assert hh.budget_left() > 0, hh.budget_left()
     finally:
         hh.RULES = original_rules
+
+
+def test_the_scan_probes_are_bounded_by_the_scan_share(hh):
+    """Every probe a scan rule starts has to be bounded by the scan's share of
+    the budget.  The lsof pass and the find walk run once per candidate, and
+    a host that is too loaded to answer answers none of them, so a fixed
+    timeout lets repeated hangs eat the share the deletes need."""
+    hh.set_budget(600)
+    try:
+        # A scan with a generous share gets its usual limits.
+        assert hh.scan_op_timeout(180.0) == 180.0
+        assert hh.scan_op_timeout(25.0) == 25.0
+        # A scan with almost nothing left must not start a long command.
+        hh._SCAN_DEADLINE = time.monotonic() + 0.5
+        assert hh.scan_op_timeout(180.0) <= 1.0
+        # A scan that has spent its share answers in the minimum.
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        assert hh.scan_op_timeout(180.0) == 1.0
+    finally:
+        hh.set_budget(0)
+
+
+def test_the_lsof_snapshot_is_bounded_by_the_scan_share(hh):
+    """The system-wide lsof pass used a fixed 180s timeout.  It runs once per
+    candidate while the snapshot is young, so repeated hangs could spend the
+    whole scan share."""
+    _reset_open_snapshot(hh)
+    hh.set_budget(600)
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        with mock.patch.object(hh.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("lsof", 1)) as run:
+            assert hh.open_handles("/Users/jay/work") == 1, "a failed look is not an empty room"
+        assert run.call_args.kwargs["timeout"] == 1.0, "the timeout must follow the scan share"
+    finally:
+        hh.set_budget(0)
+        _reset_open_snapshot(hh)
+
+
+def test_the_find_probe_is_bounded_by_the_scan_share(hh):
+    """The find walk in touched_since used a fixed 120s timeout and runs once
+    per candidate, so it could spend the whole scan share."""
+    hh.set_budget(600)
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        with mock.patch.object(hh.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("find", 1)) as run:
+            assert hh.touched_since("/Users/jay/work", 0.0625) is True, "a failed look reads as touched"
+        assert run.call_args.kwargs["timeout"] == 1.0
+    finally:
+        hh.set_budget(0)
+
+
+def test_the_candidate_loops_stop_when_the_scan_share_is_spent(hh):
+    """The rules walk whole trees per candidate.  Without a deadline check the
+    loop can spend the scan share and leave the deletes with nothing -- the
+    livelock the budget split exists to stop."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library" / "Caches" / "SomeApp"
+        cache.mkdir(parents=True)
+        (cache / "blob.bin").write_bytes(b"x" * 1024)
+        hh.set_budget(600)
+        try:
+            hh._SCAN_DEADLINE = time.monotonic() - 1.0
+            with mock.patch.object(hh, "HOME", home), \
+                 mock.patch.object(hh, "open_handles", return_value=0), \
+                 mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+                 mock.patch.object(hh, "touched_since", return_value=False), \
+                 mock.patch.object(hh, "dir_bytes", return_value=64 * 1024 * 1024):
+                assert hh.rule_app_caches() == [], "the scan is over, so no candidate is chosen"
+                assert hh.rule_agent_state() == []
+            assert hh._SCAN_BUDGET_EXHAUSTED is True, "the run has to say the scan hit its share"
+        finally:
+            hh.set_budget(0)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_the_report_carries_the_measured_free_space_not_just_the_estimate(hh):
@@ -586,7 +664,11 @@ def test_every_apply_time_command_is_cut_to_the_budget(hh):
 def test_the_open_handles_probes_are_cut_to_the_budget(hh):
     """The system-wide lsof (180 s) and the uncapped find (120 s) were the
     last two probes whose timeouts ignored the budget, so a candidate could
-    block for three minutes while the run's hard stop closed on it."""
+    block for three minutes while the run's hard stop closed on it.
+
+    The bound is the SCAN share, not the whole budget.  One candidate's
+    three probes add up to more than the scan share, so a probe that may
+    use the whole budget lets the scan eat the time the deletes need."""
     clock = FakeClock()
     seen = []
 
@@ -608,7 +690,11 @@ def test_the_open_handles_probes_are_cut_to_the_budget(hh):
         _reset_open_snapshot(hh)   # the first pass memoized its answer
         hh.open_handles("/x")
         hh.touched_since("/x", 7)
-        assert [t for _n, t in seen] == [30.0, 30.0], seen
+        # 40 s of budget is a 24 s scan share; 10 s of it is already gone,
+        # so 14 s is left for the scan and a probe gets no more than that.
+        assert [t for _n, t in seen] == [14.0, 14.0], seen
+        for _name, timeout in seen:
+            assert timeout <= hh.scan_budget_left(), "a probe may not outlive the scan share"
 
 
 def test_a_heavy_item_is_not_started_with_too_little_time_but_a_light_one_is(hh):

@@ -854,6 +854,32 @@ class TestHogHunterReclaimStep(_EngineHome):
         positive = self.run_step((0, _report(disk_free_delta_gb=1.5), "", False), band="cheap")[0]
         self.assertEqual(positive[0], int(1.5 * 1024 ** 3))
 
+    def test_a_negative_measured_delta_still_says_what_the_host_did(self):
+        """The count of bytes freed is clamped at zero, but the reason still
+        reports what was measured.  A negative number printed next to "freed"
+        reads as a bug, so the host-spending case is put in words: that is
+        what actually happened, and it is not a number of bytes reclaimed."""
+        (freed, reason, status), _call = self.run_step(
+            (0, _report(applied_count=12, applied_bytes=500_000_000,
+                        disk_free_delta_gb=-0.05), "", False))
+        self.assertEqual(freed, 0, "bytes freed cannot be negative")
+        self.assertEqual(status, StepStatus.RAN)
+        self.assertIn("0 B freed", reason)
+        self.assertIn("the host used 51.2 MB", reason)
+        self.assertNotIn("-", reason.split(": removed")[1])
+
+    def test_the_measured_delta_replaces_the_estimate(self):
+        """The estimate is what the scan believed it would delete; the measured
+        delta is what df saw.  The measured one wins, because a delete can
+        free nothing and the estimate cannot know that."""
+        (freed, reason, _status), _call = self.run_step(
+            (0, _report(applied_count=12, applied_bytes=6_000_000_000,
+                        disk_free_delta_gb=0.05), "", False))
+        self.assertEqual(freed, 53_687_091)
+        self.assertIn("51.2 MB freed", reason)
+        self.assertIn("51.2 MB measured", reason)
+        self.assertNotIn("5.7 GB", reason, "the estimate is not the outcome")
+
     def test_a_spent_budget_is_a_good_partial_run_not_a_failure(self):
         out = self.run_step((0, _report(applied_count=600, applied_bytes=1_200_000, budget_exhausted=True, remaining_count=1110), "", False))
         freed, reason, status = out[0]

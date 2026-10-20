@@ -216,6 +216,34 @@ def op_timeout(default: float) -> float:
     return min(float(default), max(5.0, budget_left()))
 
 
+def scan_op_timeout(default: float) -> float:
+    """The timeout for one scan-time command, cut to what is left of the SCAN share.
+
+    The scan gets a fixed share of the budget so the deletes always get
+    room.  A probe that ignores that share can spend it, and the run then
+    applies nothing -- the livelock this budget split exists to stop.  Every
+    subprocess a scan rule starts takes its timeout from here.
+
+    The scan share is always the smaller of the two budgets, so this is also
+    within the whole budget.  Clamping to the whole budget instead is NOT
+    enough: one candidate's probes (a capped walk, a find walk, an lsof
+    snapshot) can add up to more than the scan share, and the apply phase
+    would then find the budget already spent when it starts.
+
+    A scan with no deadline (a bare rule call in a test) gets the full
+    default, and so does a scan whose share is still generous.
+    """
+    if _SCAN_DEADLINE is None:
+        return float(default)
+    left = scan_budget_left()
+    if left <= 0:
+        # Nothing left to spend.  The shortest timeout that still lets the
+        # command answer is 1s; a probe that cannot answer in that time
+        # fails closed to "touched", which is the safe answer.
+        return 1.0
+    return min(float(default), max(1.0, left))
+
+
 # --------------------------------------------------------------------------
 # Result types
 # --------------------------------------------------------------------------
@@ -468,7 +496,7 @@ def _load_open_snapshot() -> set[str] | None:
         return _OPEN_SNAPSHOT
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "pfn"], capture_output=True, text=True,
-                           timeout=op_timeout(180))
+                           timeout=scan_op_timeout(180.0))
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"system-wide lsof did not answer ({type(exc).__name__}); using per-path checks")
         return None
@@ -559,7 +587,7 @@ def open_handles(path: str) -> int:
         return beneath + exact
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "p", "--", str(path)],
-                           capture_output=True, text=True, timeout=25)
+                           capture_output=True, text=True, timeout=scan_op_timeout(25.0))
     except (subprocess.TimeoutExpired, OSError):
         log(f"lsof could not look at {path!r}; treating it as open")
         return 1
@@ -588,12 +616,12 @@ def touched_since(path: str, days: float) -> bool:
     """
     try:
         # A full find walk can take minutes on a big tree, and it is called
-        # once per candidate, so it is clamped to what is left of the budget
-        # like every other subprocess here.  A timeout fails closed to
+        # once per candidate, so it is clamped to what is left of the SCAN
+        # share like every other scan probe here.  A timeout fails closed to
         # "touched" below, so a clamp never turns into a delete.
         proc = subprocess.run(
             ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
-            capture_output=True, text=True, timeout=min(120.0, max(1.0, budget_left())),
+            capture_output=True, text=True, timeout=scan_op_timeout(120.0),
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return True
@@ -1484,8 +1512,13 @@ def rule_app_caches() -> list[Candidate]:
     handles, no keep sentinel, not forbidden, and big enough to be worth the
     delete.  Everything under ~/Library/Caches is rebuildable by its app.
     """
-    cands: list[Candidate] = []
     global _SCAN_BUDGET_EXHAUSTED
+    cands: list[Candidate] = []
+    # The scan share may already be spent when this rule is called (a
+    # previous rule used it all).  Say so and stop before the tree walk.
+    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+        _SCAN_BUDGET_EXHAUSTED = True
+        return cands
     roots: list[tuple[Path, str]] = [
         (HOME / "Library/Caches", "application cache"),
         (HOME / "Library/Application Support", "application support cache"),
@@ -1524,14 +1557,16 @@ def rule_app_caches() -> list[Candidate]:
                         targets += [(d, label) for d in lib.iterdir()
                                     if d.is_dir() and d.name.lower() in support_names]
                 for target, what in targets:
-                    # Each candidate pays for two uncapped probes (a capped
-                    # walk and a full find), so the loop has to stop at the
-                    # scan's own deadline.  Without this the scan overruns its
-                    # 60% share inside one rule and the deletes get nothing:
-                    # the scan_truncated livelock with zero bytes freed.
-                    if scan_budget_left() <= 0:
+                    # Each candidate pays for three probes (a capped walk, a
+                    # find walk and an lsof look), so the loop has to stop at
+                    # the scan's own deadline.  Without this the scan overruns
+                    # its 60% share inside one rule and the deletes get
+                    # nothing: the scan_truncated livelock with zero bytes
+                    # freed.  `return`, not `break`: the outer loop over the
+                    # cache roots would otherwise keep walking them.
+                    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
                         _SCAN_BUDGET_EXHAUSTED = True
-                        break
+                        return cands
                     if not target.is_dir() or target.is_symlink():
                         continue
                     s = str(target)
@@ -1642,8 +1677,14 @@ def rule_agent_state() -> list[Candidate]:
     transcripts beside them do not, so the sessions are reported rather than
     deleted and only the transient parts are removed.
     """
+    global _SCAN_BUDGET_EXHAUSTED
     cands: list[Candidate] = []
     seen: set[tuple[int, int]] = set()
+    # The scan share may already be spent when this rule is called.  Say so
+    # and stop before walking the agent homes.
+    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+        _SCAN_BUDGET_EXHAUSTED = True
+        return cands
 
     def claim(path: Path) -> bool:
         """True when this path is not already claimed under another spelling."""
@@ -1662,6 +1703,14 @@ def rule_agent_state() -> list[Candidate]:
         if not root.is_dir():
             continue
         for target in _agent_transient_dirs(root):
+            # Each candidate pays for three probes (a capped walk, a find walk
+            # and an lsof look), so the loop has to stop at the scan's own
+            # deadline, exactly as the app-cache rule does.  Without this the
+            # scan overruns its 60% share inside one rule and the deletes get
+            # nothing.
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
             s = str(target)
             if is_forbidden(s) or has_keep_sentinel(s):
                 continue

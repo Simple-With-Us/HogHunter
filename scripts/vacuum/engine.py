@@ -689,7 +689,19 @@ class VacuumEngine:
             # into RunRecord.bytes_freed and rendered by lanes.format_size, so
             # a negative value reaches the panel as "reclaimed -51.2 MB".
             freed = max(0, measured)
-        reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
+            # The reason still says what was measured.  A negative number
+            # printed next to "freed" reads as a bug, so the host-spending
+            # case is put in words instead: that is what actually happened.
+            reason = (
+                f"band={band}: removed {applied} of {_plural(total, 'item')}, "
+                f"{lanes.format_size(freed)} freed, "
+            )
+            if measured < 0:
+                reason += f"the host used {lanes.format_size(-measured)} while the run worked"
+            else:
+                reason += f"{lanes.format_size(measured)} measured"
+        else:
+            reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
         if report.get("scan_truncated"):
             reason += "; the scan hit its budget share, more may be left"
         if report.get("budget_exhausted"):
