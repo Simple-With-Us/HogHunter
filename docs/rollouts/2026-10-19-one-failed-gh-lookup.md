@@ -16,8 +16,8 @@ The doctor's overall `gh` status says whether **every** repository's PR lookup
 came back.  One of them did not: `Simple-With-Us/fleetlink-legacy`, a retired
 repository.  The Vacuum then refused the entire report, so not one lane on the
 machine could be retired, including the ones whose own repository had looked
-up fine — and including the lanes on the external drive that were refused for
-a different reason too (HH-166).
+up fine — and including the lanes that were refused for a different reason too
+(HH-166).
 
 ## What changed
 

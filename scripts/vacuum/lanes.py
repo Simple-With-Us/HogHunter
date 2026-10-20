@@ -544,6 +544,10 @@ class LaneScan:
     refused: list = field(default_factory=list)
     generated_at: str = ""
     doctor_seconds: float = 0.0
+    # The doctor's overall PR lookup status, kept so the plan can show it.
+    # It is not a gate (a candidate is judged on its own repository), but a
+    # reader has to be able to see that the report was partial.
+    lookup_status: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -551,6 +555,7 @@ class LaneScan:
             "reason": self.reason,
             "report_generated_at": self.generated_at,
             "doctor_seconds": round(self.doctor_seconds, 1),
+            "lookup_status": self.lookup_status,
             "choices": [c.as_dict() for c in self.choices],
             "refused": list(self.refused),
         }
@@ -1200,15 +1205,26 @@ def assert_no_force(argv: list) -> None:
 # --------------------------------------------------------------------------- selectors
 
 
-def _evidence(co: dict, notes: list) -> list:
+def _evidence(co: dict, notes: list, report: Optional[LaneReport] = None) -> list:
+    """Why this lane may go, in the order a reader wants it.  The PR lookup line
+    says what the lookup for THIS lane's repository answered, not a flat "gh
+    ok": a report whose overall lookup was partial still carries the lanes
+    whose own repository answered, and the line has to say so truthfully."""
     pr = f"PR {co.get('pr_state')}" + (f" #{co.get('pr_number')}" if co.get("pr_number") else "")
+    repo = co.get("owner_repo")
+    status = None
+    if report is not None and isinstance(repo, str) and repo:
+        repos = report.data.get("gh_repos")
+        if isinstance(repos, dict):
+            status = repos.get(repo)
+    lookup = f"gh {status}" if isinstance(status, str) and status else "gh ok"
     return [
         pr,
         f"safety {co.get('safety')}",
         f"age {co.get('lane_age_days')}d",
         f"idle {co.get('idle_days')}d",
         *notes,
-        "gh ok",
+        lookup,
     ]
 
 
@@ -1226,7 +1242,8 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
     """Lanes the doctor lists AND that pass the Vacuum's re-check.  Fails closed with an empty choices list."""
     if not report.ok:
         return LaneScan(False, report.reason, doctor_seconds=report.seconds)
-    scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds)
+    scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds,
+                    lookup_status=report.gh_reason if not report.gh_ok else "ok")
     # The doctor's overall gh status is NOT a gate here.  It says whether every
     # repository's PR lookup came back, and one failed lookup (a retired repo,
     # a network blip) used to throw away the whole report, so a single bad
@@ -1272,7 +1289,7 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
                 owner_repo=str(co.get("owner_repo") or ""),
                 location_class=str(co.get("location_class") or ""),
                 size_bytes=dir_size_bytes(item, ctx.runner),
-                reasons=_evidence(co, notes),
+                reasons=_evidence(co, notes, report),
                 command=removal_argv(repo_root, item),
                 checkout=co,
             )
