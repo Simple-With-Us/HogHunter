@@ -1068,6 +1068,33 @@ def _linked_facts(path: str, co: dict, ctx: LaneContext):
     return repo_root, ""
 
 
+def _reported_repo(co: dict) -> str:
+    """The repository the doctor recorded for this lane, or "" when it recorded none."""
+    value = co.get("parent_repo")
+    return value if isinstance(value, str) else ""
+
+
+def _repo_matches_report(repo_root: str, co: dict) -> str:
+    """The lane must still belong to the repository the doctor saw.  Returns a refusal, or "" when it does.
+
+    Every step that touches a lane makes this check: retirement removes the lane itself, and clearing
+    regenerable folders deletes inside it.  Both use it, so a lane that has moved to another repository
+    is left alone by either.  The doctor records that repository as `parent_repo` on every row it
+    reports (the 2026-10-19 report carried it on 798 of 798 rows).  When it is not there - an older
+    doctor, whose report the schema does not yet require it from - there is nothing to confirm against
+    and nothing is refused here."""
+    expected_repo = _reported_repo(co)
+    if not expected_repo:
+        return ""
+    # Case-insensitively, like every other path comparison here: the two
+    # spellings are recorded independently (Git's common dir against the
+    # doctor's parent repository) and the filesystem is case-insensitive,
+    # so a case-only difference is the same directory.
+    if os.path.realpath(repo_root).casefold() != os.path.realpath(expected_repo).casefold():
+        return "it now belongs to a different repository"
+    return ""
+
+
 def _head_matches_report(path: str, co: dict, ctx: LaneContext) -> str:
     lines, why = _git_lines(ctx, path, ["rev-parse", "HEAD"], "rev-parse HEAD")
     if lines is None or len(lines) != 1:
@@ -1189,23 +1216,15 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     # survives the fleet's symlinked lanes root: where the lane lives on disk
     # says nothing, which repository it belongs to says everything.
     #
-    # The doctor records that repository as `parent_repo` on every row (the
-    # doctor sets it for every checkout it reports, and the 2026-10-19 report
-    # carried it on 798 of 798 rows).  When it is there, the comparison is
-    # made.  When it is not - an older doctor, whose report the schema does
-    # not yet require it from - the check cannot be made, and refusing every
-    # lane would make retirement a no-op for ordinary lanes too.  So the
-    # fallback is the behaviour this change replaced: a lane whose own
-    # spelling resolves somewhere else cannot be confirmed and is refused.
-    expected_repo = co.get("parent_repo")
-    if isinstance(expected_repo, str) and expected_repo:
-        # Case-insensitively, like every other path comparison here: the two
-        # spellings are recorded independently (Git's common dir against the
-        # doctor's parent repository) and the filesystem is case-insensitive,
-        # so a case-only difference is the same directory.
-        if os.path.realpath(repo_root).casefold() != os.path.realpath(expected_repo).casefold():
-            return "", "it now belongs to a different repository"
-    elif os.path.realpath(path) != os.path.normpath(path):
+    # Where the report does not name the repository (_repo_matches_report),
+    # refusing every lane would make retirement a no-op for ordinary lanes
+    # too.  So the fallback is the behaviour this change replaced: a lane
+    # whose own spelling resolves somewhere else cannot be confirmed and is
+    # refused.
+    why = _repo_matches_report(repo_root, co)
+    if why:
+        return "", why
+    if not _reported_repo(co) and os.path.realpath(path) != os.path.normpath(path):
         return "", "the doctor did not say which repository this lane belongs to"
     why = _head_matches_report(path, co, ctx)
     if why:
@@ -1369,6 +1388,11 @@ def evaluate_dependency_lane(path: str, co: dict, ctx: LaneContext) -> tuple:
     if why:
         return None, why
     repo_root, why = _linked_facts(path, co, ctx)
+    if why:
+        return None, why
+    # Clearing folders is a delete too, so it makes the same repository check
+    # retirement makes, before anything in the lane is touched.
+    why = _repo_matches_report(repo_root, co)
     if why:
         return None, why
     res, err = _git(ctx.runner, path, ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"])

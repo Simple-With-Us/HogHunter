@@ -1984,6 +1984,12 @@ class TestEngineDependencies(unittest.TestCase):
         self.assertFalse((lane / "node_modules").exists())
         self.assertGreater(freed, 0)
 
+    def test_a_lane_that_now_belongs_to_another_repository_is_not_cleared(self) -> None:
+        """Clearing regenerable folders deletes inside the lane, so it makes the same repository
+        check retirement makes: a lane whose live common dir names another repository is left alone."""
+        engine = self.engine([self.row(parent_repo=str(self.sb.root / "some-other-repo"))])
+        self.assert_untouched(engine, "different repository")
+
     def assert_untouched(self, engine, needle: str = "") -> None:
         _freed, reason, status = engine._pressure_apps_deps(dry_run=False)
         self.assertEqual(status, StepStatus.SKIPPED, reason)
