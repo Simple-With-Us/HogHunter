@@ -24,12 +24,16 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
     }
 
+    /// FileManager enumeration can return an alias of the fixture URL.
+    /// Canonicalize both writes and reads, including injected failure hooks.
+    private static func key(_ url: URL) -> String { DiskCleaner.resolvedPath(url.path) }
+
     @discardableResult
     private func file(_ name: String, hours: Double = 96) throws -> URL {
         let url = root.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(repeating: 1, count: 4_096).write(to: url)
-        activity[url.path] = clock.addingTimeInterval(-hours * 3_600)
+        activity[Self.key(url)] = clock.addingTimeInterval(-hours * 3_600)
         return url
     }
 
@@ -39,13 +43,16 @@ final class TempFileSafetyPolicyTests: XCTestCase {
             tempPolicyProvider: { TempFileSafetyPolicy.load(from: self.defaults) },
             tempMetadataProvider: { url in
                 self.metadataObserver?(url)
-                if self.failedMetadataPaths.contains(url.path) { throw CocoaError(.fileReadNoPermission) }
+                if self.failedMetadataPaths.contains(Self.key(url)) { throw CocoaError(.fileReadNoPermission) }
                 var info = try TempEntryMetadata.read(url)
-                info.latestActivity = self.activity[url.path] ?? self.clock.addingTimeInterval(-96 * 3_600)
+                if info.isRegularFile {
+                    XCTAssertNotNil(self.activity[Self.key(url)], "Missing fixture metadata for \(url.path)")
+                }
+                info.latestActivity = self.activity[Self.key(url)] ?? self.clock.addingTimeInterval(-96 * 3_600)
                 return info
             }, tempNow: { self.clock }, tempEntryCap: cap, tempUptime: uptime,
             tempEnumerationProvider: { url, options, handler in
-                if url.path == deniedEnumerationPath {
+                if Self.key(url) == deniedEnumerationPath {
                     _ = handler?(url, CocoaError(.fileReadNoPermission))
                     return nil
                 }
@@ -93,7 +100,7 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         XCTAssertEqual(engine.scanTempFiles().count, 1)
         // The injected activity represents mtime, creation, ctime, or file
         // access, whichever is newest; old parent mtime cannot override it.
-        activity[nested.path] = clock
+        activity[Self.key(nested)] = clock
         XCTAssertTrue(engine.scanTempFiles().isEmpty)
         XCTAssertFalse(engine.isSafeToDelete(url: root.appendingPathComponent("container"), category: .tempFiles))
     }
@@ -130,14 +137,14 @@ final class TempFileSafetyPolicyTests: XCTestCase {
     func testMetadataFailureAndEntryCapFailClosed() throws {
         let nested = try file("container/deep/data.bin")
         XCTAssertTrue(cleaner(cap: 2).scanTempFiles().isEmpty)
-        failedMetadataPaths.insert(nested.path)
+        failedMetadataPaths.insert(Self.key(nested))
         XCTAssertTrue(cleaner().scanTempFiles().isEmpty)
         XCTAssertFalse(cleaner().isSafeToDelete(url: root.appendingPathComponent("container"), category: .tempFiles))
     }
 
     func testDirectoryListingFailureFailsClosed() throws {
         let nested = try file("container/deep/data.bin")
-        let denied = nested.deletingLastPathComponent().deletingLastPathComponent().path
+        let denied = Self.key(nested.deletingLastPathComponent().deletingLastPathComponent())
         XCTAssertTrue(cleaner(deniedEnumerationPath: denied).scanTempFiles().isEmpty)
     }
 
@@ -152,15 +159,16 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         let candidate = root.appendingPathComponent("container")
         var reads = 0
         metadataObserver = { url in
-            if url == candidate {
+            if Self.key(url) == Self.key(candidate) {
                 reads += 1
                 if reads == 2 {
                     try! Data([1]).write(to: candidate.appendingPathComponent(".git"))
-                    self.activity[candidate.path] = self.clock
+                    self.activity[Self.key(candidate)] = self.clock
                 }
             }
         }
         XCTAssertTrue(cleaner().scanTempFiles().isEmpty)
+        XCTAssertEqual(reads, 2, "the candidate must be checked initially and after its descendants")
     }
 
     func testMarkerAddedWhileChildrenAreReverifiedIsCaughtByParentLastCheck() throws {
@@ -168,22 +176,23 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         let candidate = root.appendingPathComponent("container")
         var reads = 0
         metadataObserver = { entry in
-            if entry == nested {
+            if Self.key(entry) == Self.key(nested) {
                 reads += 1
                 if reads == 2 {
                     try! Data([1]).write(to: candidate.appendingPathComponent(".git"))
-                    self.activity[candidate.path] = self.clock
+                    self.activity[Self.key(candidate)] = self.clock
                 }
             }
         }
         XCTAssertTrue(cleaner().scanTempFiles().isEmpty)
+        XCTAssertEqual(reads, 2, "the child mutation must occur during final verification")
     }
 
     func testInodeReplacementDuringWalkRejectsCandidate() throws {
         let url = try file("data.bin")
         var reads = 0
         metadataObserver = { entry in
-            if entry == url {
+            if Self.key(entry) == Self.key(url) {
                 reads += 1
                 if reads == 2 {
                     // Atomic replacement retains the path but changes identity.
@@ -192,6 +201,7 @@ final class TempFileSafetyPolicyTests: XCTestCase {
             }
         }
         XCTAssertTrue(cleaner().scanTempFiles().isEmpty)
+        XCTAssertEqual(reads, 2, "the replacement must occur during final verification")
     }
 
     func testCancelledTraversalReturnsNoSuggestions() async throws {
@@ -214,10 +224,10 @@ final class TempFileSafetyPolicyTests: XCTestCase {
         let policyResult = await engine.clean(items: items, createSnapshot: false, exclusions: CleanerExclusions())
         XCTAssertEqual(policyResult.itemsRemoved, 0)
         TempFileSafetyPolicy.save(hours: 72, to: defaults)
-        activity[nested.path] = clock
+        activity[Self.key(nested)] = clock
         let writeResult = await engine.clean(items: items, createSnapshot: false, exclusions: CleanerExclusions())
         XCTAssertEqual(writeResult.itemsRemoved, 0)
-        activity[nested.path] = clock.addingTimeInterval(-96 * 3_600)
+        activity[Self.key(nested)] = clock.addingTimeInterval(-96 * 3_600)
         try file("container/deep/.git")
         let gitResult = await engine.clean(items: items, createSnapshot: false, exclusions: CleanerExclusions())
         XCTAssertEqual(gitResult.itemsRemoved, 0)
