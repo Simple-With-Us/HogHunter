@@ -921,6 +921,7 @@ def _reset_open_snapshot(hh):
     """The engine memoizes one snapshot for a while; a test has to start over."""
     hh._OPEN_SNAPSHOT = None
     hh._OPEN_SNAPSHOT_AT = 0.0
+    hh._OPEN_INDEX = None
 
 
 def test_one_lsof_snapshot_answers_every_candidate(hh):
@@ -938,6 +939,41 @@ def test_one_lsof_snapshot_answers_every_candidate(hh):
         assert hh.open_handles("/Users/jay/Library/Caches/Bar") == 0
         assert hh.open_handles("/Users/jay/Library/Caches") == 1
     assert run.call_count == 1, "the snapshot must be taken once, not once per path"
+
+
+def test_the_open_handle_lookup_does_not_walk_every_path(hh):
+    """The answer came from scanning the whole open-path set for every
+    candidate, which is O(candidates x paths).  On a busy Mac that is millions
+    of string comparisons, and the scan that costs that much never reaches a
+    delete.  The index answers from a count per ancestor directory."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nf3\nn/Users/jay/Library/Caches/Foo/blob.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+        assert hh.open_handles("/Users/jay/Library/Caches/Foo") == 1
+        assert hh.open_handles("/Users/jay/Library/Caches") == 1
+        assert hh.open_handles("/Users/jay/Library") == 1
+        assert hh.open_handles("/Users/jay/Library/Caches/Bar") == 0
+    assert hh._OPEN_INDEX is not None, "the index must be built with the snapshot"
+    # Every ancestor of the open path is in the index.
+    assert hh._OPEN_INDEX["/Users/jay/Library/Caches/Foo"] == 1
+    assert hh._OPEN_INDEX["/Users/jay/Library/Caches"] == 1
+    assert hh._OPEN_INDEX["/Users/jay/Library"] == 1
+    assert "/Users/jay/Library/Caches/Bar" not in hh._OPEN_INDEX
+
+
+def test_the_index_answers_the_same_way_the_old_scan_did(hh):
+    """A path that is itself open, a path under it, and a path that merely
+    shares a prefix all have to answer the same as the old prefix scan."""
+    _reset_open_snapshot(hh)
+    listing = "p1\nf3\nn/Users/jay/work/thing.bin\n"
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, listing)):
+        # The exact path is open.
+        assert hh.open_handles("/Users/jay/work/thing.bin") == 1
+        # Its parent holds it.
+        assert hh.open_handles("/Users/jay/work") == 1
+        # A sibling that only shares a prefix is not under it.
+        assert hh.open_handles("/Users/jay/workspace") == 0
+        assert hh.open_handles("/Users/jay/work/other") == 0
 
 
 def test_the_snapshot_resolves_a_relative_name_against_the_working_directory(hh):
@@ -1145,6 +1181,29 @@ def test_agent_state_reports_sessions_instead_of_deleting_them(hh):
         assert by_path[str(logs)].tier == "safe", "transient state is safe to clear"
         assert by_path[str(sessions)].tier == "ask-first", "session history is not cache"
         assert by_path[str(sessions)].op == "report"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_agent_state_leaves_a_project_working_tree_alone(hh):
+    """`~/.gemini/tmp` is named like scratch but holds a `.project_root`
+    marker per project the agent has opened -- a working copy of Jay's real
+    code, with chat history beside it.  The name is not enough to call it
+    transient."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        tmp = home / ".gemini" / "tmp"
+        proj = tmp / "code"
+        proj.mkdir(parents=True)
+        (proj / ".project_root").write_text("/Users/jay/Code\n", encoding="utf-8")
+        (proj / "blob.bin").write_bytes(b"x" * 1024)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=128 * 1024 * 1024):
+            found = hh.rule_agent_state()
+        assert [c.path for c in found] == [], "a project working tree is not transient state"
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

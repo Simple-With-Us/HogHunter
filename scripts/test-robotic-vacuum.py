@@ -1587,7 +1587,15 @@ class TestTickWatchdog(unittest.TestCase):
         does.  A scan of its own takes the first exact spelling and rejects
         abbreviations, so `--tick scheduler --tick-t 60` gave main() 60s and
         the watchdog 900s -- and because _watchdog_armed stops main() from
-        arming again, the watchdog could never correct itself mid-run."""
+        arming again, the watchdog could never correct itself mid-run.
+
+        The comparison is against main()'s real parser, built by the same
+        helper main() uses.  A hand-built copy would keep passing while the
+        production parsers drifted apart: the copy declared --tick without
+        choices and three options where main() declares seven, so a change
+        that made --tick-t ambiguous or renamed the flag would break the
+        agreement the code exists to guarantee and the test would stay
+        green."""
         import maintain
 
         for argv, expected in (
@@ -1598,11 +1606,44 @@ class TestTickWatchdog(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(maintain._argv_tick_timeout(argv), expected)
                 # Whatever the pre-import arm picks, main() must not disagree.
-                parser = argparse.ArgumentParser()
-                parser.add_argument("--tick")
-                parser.add_argument("--dry-run", dest="dry_run", action="store_true")
-                parser.add_argument("--tick-timeout", type=float, default=maintain.TICK_WATCHDOG_SEC)
+                parser = maintain._build_parser()
                 self.assertEqual(parser.parse_args(argv).tick_timeout, expected)
+
+    def test_both_parsers_are_built_from_one_definition(self):
+        """main() and the pre-import arm must not drift apart.  They are
+        separate parser objects -- one is quiet and has no help action, since
+        it runs at import time -- but they have to declare the same options
+        with the same defaults, or the watchdog and the tick it bounds
+        disagree about the budget for the whole run."""
+        import maintain
+
+        main_parser = maintain._build_parser()
+        arm_parser = maintain._build_parser(quiet=True)
+        main_opts = {a.dest: a for a in main_parser._actions}
+        arm_opts = {a.dest: a for a in arm_parser._actions}
+        # The arm has no help action; every other option must match.
+        self.assertEqual(set(arm_opts) - {"help"}, set(main_opts) - {"help"})
+        for dest, action in arm_opts.items():
+            if dest == "help":
+                continue
+            self.assertEqual(action.default, main_opts[dest].default, dest)
+            self.assertEqual(action.type, main_opts[dest].type, dest)
+            self.assertEqual(action.choices, main_opts[dest].choices, dest)
+
+    def test_a_bad_flag_value_prints_nothing_from_the_pre_import_arm(self):
+        """The pre-import arm parses before main() has had a chance to report
+        a mistake.  argparse's default error() writes a usage block and the
+        message to stderr and then exits, so a malformed --tick-timeout
+        produced two usage blocks and two identical errors -- and the first
+        advertised an option set the arm does not have.  The arm must be
+        quiet so main() is the only reporter."""
+        import maintain
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            value = maintain._argv_tick_timeout(["--tick", "scheduler", "--tick-timeout", "soon"])
+        self.assertEqual(value, maintain.TICK_WATCHDOG_SEC)
+        self.assertEqual(buf.getvalue(), "", "the pre-import arm must not print anything")
 
     def test_a_dry_run_tick_never_arms_the_watchdog(self):
         """--dry-run promises one complete JSON document.  A watchdog armed at

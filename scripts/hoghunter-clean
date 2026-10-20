@@ -416,6 +416,37 @@ _OPEN_SNAPSHOT_AT: float = 0.0
 # was taken, so a file opened in between reads as absent.  Retake it past this
 # age; 60s keeps the pass bounded without making the answer meaningfully stale.
 _OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
+# The snapshot answers "is this path in use" for every candidate, and the
+# answer is the number of open paths that equal the candidate or sit under
+# it.  Scanning the whole path set once per candidate is
+# O(candidates x open paths), which on a busy Mac with tens of thousands of
+# open paths and hundreds of candidates is millions of string comparisons on
+# top of the per-candidate tree walks.  The index holds the same answer as a
+# count per ancestor directory, built once per snapshot, so a candidate costs
+# one dictionary lookup instead of a walk over every open path.
+_OPEN_INDEX: dict[str, int] | None = None
+
+
+def _build_open_index(paths: set[str]) -> dict[str, int]:
+    """Count the open paths that sit beneath every ancestor directory.
+
+    A candidate is in use when an open path equals it or lies under it, so
+    the count for a candidate is the number of open paths whose ancestor
+    chain includes it.  Counting that once per snapshot is what turns the
+    per-candidate scan into a lookup.
+    """
+    index: dict[str, int] = {}
+    for n in paths:
+        parent = os.path.dirname(n)
+        while True:
+            index[parent] = index.get(parent, 0) + 1
+            if parent == "/":
+                break
+            nxt = os.path.dirname(parent)
+            if nxt == parent:
+                break
+            parent = nxt
+    return index
 
 
 def _load_open_snapshot() -> set[str] | None:
@@ -432,7 +463,7 @@ def _load_open_snapshot() -> set[str] | None:
     DARWIN_USER_TEMP_DIR` hands back the symlink).  Matching the two by string
     would read every open handle in TMPDIR as absent.
     """
-    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_AT
+    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_AT, _OPEN_INDEX
     if _OPEN_SNAPSHOT is not None and time.monotonic() - _OPEN_SNAPSHOT_AT < _OPEN_SNAPSHOT_MAX_AGE_SEC:
         return _OPEN_SNAPSHOT
     try:
@@ -486,6 +517,7 @@ def _load_open_snapshot() -> set[str] | None:
     # another system-wide lsof.
     _OPEN_SNAPSHOT_AT = time.monotonic()
     _OPEN_SNAPSHOT = paths
+    _OPEN_INDEX = _build_open_index(paths)
     return _OPEN_SNAPSHOT
 
 
@@ -510,9 +542,20 @@ def open_handles(path: str) -> int:
         # Canonicalised for the same reason the snapshot is: the candidate may
         # be spelled through a symlink (/var, /tmp) and the handle it names is
         # not, and a mismatch here reads as "nothing holds this open".
-        target = os.path.realpath(str(path)).rstrip("/")
-        prefix = target + "/"
-        return sum(1 for n in snapshot if n == target or n.startswith(prefix))
+        target = os.path.realpath(str(path)).rstrip("/") or "/"
+        # The index holds the open paths that live UNDER the candidate; the
+        # path that IS the candidate is counted separately, because a
+        # directory's own ancestors do not include itself.
+        index = _OPEN_INDEX
+        if index is None:
+            # The index and the snapshot are set together, so this only
+            # happens if something reset one without the other.  Rebuilding
+            # is cheaper than answering "nothing is open" and deleting a
+            # directory a live process is holding.
+            index = _build_open_index(snapshot)
+        beneath = index.get(target, 0)
+        exact = 1 if target in snapshot else 0
+        return beneath + exact
     try:
         p = subprocess.run(["/usr/sbin/lsof", "-F", "p", "--", str(path)],
                            capture_output=True, text=True, timeout=25)
@@ -1512,6 +1555,33 @@ def rule_app_caches() -> list[Candidate]:
 _AGENT_HOMES = (".codex", ".claude", ".grok", ".minimax", ".cursor", ".config", ".gemini", ".opencode")
 _AGENT_TRANSIENT = ("logs", "log", "tmp", "temp", "cache", "caches", "debug", "shell-snapshots")
 _AGENT_HISTORY = ("sessions", "projects", "history", "conversations")
+# A `.project_root` file marks a directory as some agent's working copy of a
+# real project -- it holds the path to the project the agent is running
+# against.  `~/.gemini/tmp` carries one per project it has opened, so the
+# directory named "tmp" is not scratch: it is a set of project working trees
+# with chat history beside them.  Deleting it would take work with it.
+_PROJECT_MARKER = ".project_root"
+
+
+def _holds_project_root(path: Path, max_depth: int = 2) -> bool:
+    """True when the tree holds a `.project_root` marker, so it is work.
+
+    The marker sits one or two levels down in the layouts seen here
+    (`~/.gemini/tmp/code/.project_root`), so the walk is bounded rather than
+    exhaustive: a deep marker is not what makes a tree work.
+    """
+    try:
+        if (path / _PROJECT_MARKER).exists():
+            return True
+    except OSError:
+        return False
+    if max_depth <= 0:
+        return False
+    try:
+        children = [c for c in path.iterdir() if c.is_dir() and not c.is_symlink()]
+    except OSError:
+        return False
+    return any(_holds_project_root(c, max_depth - 1) for c in children)
 
 
 def _dirs_named(root: Path, names: tuple[str, ...]) -> list[Path]:
@@ -1580,6 +1650,12 @@ def rule_agent_state() -> list[Candidate]:
         for target in _agent_transient_dirs(root):
             s = str(target)
             if is_forbidden(s) or has_keep_sentinel(s):
+                continue
+            # A tree that holds a `.project_root` marker is an agent's working
+            # copy of a real project, not scratch.  `~/.gemini/tmp` is named
+            # like scratch and holds one marker per project it has opened,
+            # so the name is not enough to call it transient.
+            if _holds_project_root(target):
                 continue
             if not claim(target):
                 continue
