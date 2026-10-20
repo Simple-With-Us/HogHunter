@@ -5,6 +5,8 @@ import XCTest
 
 @MainActor
 final class StorageGrowthLayoutTests: XCTestCase {
+    private var dashboardStageWidth: CGFloat { HogHunterPanel.dashboardWidth - 154 - 24 - 36 }
+
     func testCompactRowsAndServerContentRenderWithinPanelWidth() async throws {
         let now = Date()
         let snapshot = VPSStatusSnapshot(
@@ -28,7 +30,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(store.databasePercentChange(key: "st_app_db") ?? 0, 8, accuracy: 0.01)
 
-        let width = HogHunterPanel.contentWidth
+        let width = dashboardStageWidth
         let view = ServerStatusView(store: store)
             .frame(width: width, alignment: .topLeading)
             .padding(8)
@@ -86,15 +88,13 @@ final class StorageGrowthLayoutTests: XCTestCase {
         store.fetch(force: true)
         for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertNotNil(store.snapshot, "the full report must have loaded before measuring")
-        let width = HogHunterPanel.contentWidth
+        let width = dashboardStageWidth
         let host = NSHostingView(rootView: ServerStatusView(store: store)
             .frame(width: width, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor)))
         host.appearance = NSAppearance(named: .aqua)
         let natural = host.fittingSize
         XCTAssertLessThanOrEqual(natural.width, width + 1)
-        // 580pt leaves 140pt for the panel's header, tab picker and insets.
-        XCTAssertLessThanOrEqual(natural.height, 580, "complete report needs \(natural.height)pt")
         try render(host, size: CGSize(width: width, height: natural.height), name: "hh174-server-full-report")
     }
 
@@ -108,7 +108,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
                                    totalBytes: 500_000_000_000, availableBytes: 75_000_000_000)]
         })
         await store.refresh()
-        let width = HogHunterPanel.contentWidth * 0.48
+        let width = (dashboardStageWidth - 16) / 3
         let view = MountedDriveUsageView(store: store).frame(width: width)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: view)

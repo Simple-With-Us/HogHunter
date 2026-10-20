@@ -22,6 +22,7 @@ final class UISmokeTest {
 
     private var results: [(name: String, passed: Bool, detail: String)] = []
     private var panelWindow: NSWindow?
+    private var panelStore: HogStore?
 
     static func run() -> Never {
         let test = UISmokeTest()
@@ -62,7 +63,7 @@ final class UISmokeTest {
             let size = panelWindow.contentView?.frame.size ?? .zero
             let expected = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
             let ok = abs(size.width - expected.width) < 1 && abs(size.height - expected.height) < 1
-            record("panel window is its declared size", ok, "got \(size) want \(expected)")
+            record("quick view is its declared size", ok, "got \(size) want \(expected)")
         }
 
         // **The bug that shipped.**  The gear button did nothing at all: no
@@ -82,23 +83,49 @@ final class UISmokeTest {
         let settingsCount = realWindows.filter { isSettingsWindow($0) }.count
         record("exactly one Settings window", settingsCount == 1, "found \(settingsCount)")
 
-        // Measured the way HogHunterPanel composes it -- pinned to the panel
-        // width and clipped.  Measuring the bare view would report the content's
-        // own appetite for width, which is not what ships and would make this
-        // test fail forever.
+        if let panelStore {
+            DetachedWindowManager.shared.openDetachedWindow(store: panelStore)
+            wait(0.5)
+            if let dashboard = realWindows.first(where: { $0.title == "Hog Hunter" }) {
+                let initial = dashboard.contentView?.frame.size ?? .zero
+                let declared = NSSize(width: HogHunterPanel.dashboardWidth,
+                                      height: HogHunterPanel.dashboardHeight)
+                record("dashboard opens at its declared size",
+                       abs(initial.width - declared.width) < 1 && abs(initial.height - declared.height) < 1,
+                       "got \(initial) want \(declared)")
+                dashboard.setContentSize(NSSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580))
+                wait(0.2)
+                let minimum = dashboard.contentView?.frame.size ?? .zero
+                record("dashboard fits its minimum size", minimum.width >= 859 && minimum.height >= 579,
+                       "got \(minimum)")
+                dashboard.setContentSize(NSSize(width: 1050, height: 780))
+                wait(0.2)
+                let grown = dashboard.contentView?.frame.size ?? .zero
+                record("dashboard content resizes", grown.width >= 1049 && grown.height >= 779,
+                       "got \(grown)")
+            } else {
+                record("dashboard opens at its declared size", false, "no dashboard window")
+                record("dashboard fits its minimum size", false, "no dashboard window")
+                record("dashboard content resizes", false, "no dashboard window")
+            }
+            DetachedWindowManager.shared.closeDetachedWindow()
+        }
+
+        // Measure detail views at the dashboard stage width.  The menu bar
+        // view is intentionally compact and no longer hosts full detail pages.
         checkTabFits("Storage") { store in
             StorageView(runningBundleIds: { [] }, maintainStore: MaintainStore(), embeddedInPanel: true, isTabActive: true)
-                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+                .frame(width: dashboardStageWidth, alignment: .leading)
                 .clipped()
         }
         checkTabFits("Network") { store in
             NetworkView(bundleResolver: { _ in (nil, "unknown") }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: true)
-                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+                .frame(width: dashboardStageWidth, alignment: .leading)
                 .clipped()
         }
         checkTabFits("Server") { store in
             ServerStatusView(store: store.maintain.vpsStore)
-                .frame(width: HogHunterPanel.contentWidth, alignment: .leading)
+                .frame(width: dashboardStageWidth, alignment: .leading)
                 .clipped()
         }
 
@@ -117,6 +144,7 @@ final class UISmokeTest {
     private func openPanel() {
         let store = HogStore(historyURL: URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("uismoke-panel.sqlite"))
+        panelStore = store
         let size = NSSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
@@ -125,7 +153,8 @@ final class UISmokeTest {
             defer: false
         )
         window.contentViewController = NSHostingController(
-            rootView: HogHunterPanel().environmentObject(store).frame(width: size.width, height: size.height)
+            rootView: HogHunterPanel(isQuickView: true).environmentObject(store)
+                .frame(width: size.width, height: size.height)
         )
         window.contentMinSize = size
         window.setContentSize(size)
@@ -164,9 +193,13 @@ final class UISmokeTest {
             .appendingPathComponent("uismoke-\(name).sqlite"))
         let hosting = NSHostingView(rootView: view(store))
         let fitting = hosting.fittingSize
-        let limit = HogHunterPanel.contentWidth
-        record("\(name) tab fits the panel width", fitting.width <= limit + 1,
+        let limit = dashboardStageWidth
+        record("\(name) view fits the dashboard width", fitting.width <= limit + 1,
                "ideal \(Int(fitting.width))pt vs \(Int(limit))pt")
+    }
+
+    private var dashboardStageWidth: CGFloat {
+        HogHunterPanel.dashboardMinimumWidth - 154 - 24 - 36
     }
 }
 

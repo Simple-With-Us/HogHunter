@@ -30,16 +30,18 @@ struct StorageView: View {
 
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
+    private let includesMaintenance: Bool
 
     /// `initialTab` is the mode the view opens on.  The app always takes the
     /// default; a layout test opens the Maintain mode directly instead of
     /// clicking the segmented control.
-    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner) {
+    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
         _selectedTab = State(initialValue: initialTab)
         self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
+        self.includesMaintenance = includesMaintenance
     }
 
     var body: some View {
@@ -102,7 +104,7 @@ struct StorageView: View {
         HStack(alignment: .center, spacing: 10) {
             Picker("Mode", selection: $selectedTab) {
                 Text("Clean").tag(StorageTab.diskCleaner)
-                Text("Maintain").tag(StorageTab.maintain)
+                if includesMaintenance { Text("Maintain").tag(StorageTab.maintain) }
                 Text("Apps").tag(StorageTab.appStorage)
             }
             .pickerStyle(.segmented)

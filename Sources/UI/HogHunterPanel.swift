@@ -3,10 +3,11 @@ import ApplicationServices
 import SwiftUI
 
 enum PanelTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case activity = "Activity"
     case storage = "Storage"
+    case maintenance = "Maintenance"
     case network = "Network"
-    case server = "Server"
 
     var id: String { rawValue }
 }
@@ -17,103 +18,356 @@ struct HogHunterPanel: View {
     /// `showSettingsWindow:` to `NSApp` by hand is silently dropped here and
     /// the gear button did nothing; this is the supported path.
     @Environment(\.openSettings) private var openSettings
-    @State private var selectedTab: PanelTab = .activity
+    @State private var selectedTab: PanelTab = .overview
+    @State private var hostScope: HostScope = .mac
+    @StateObject private var mountedDrives = MountedDriveStore()
     @State private var pendingQuit: HogRow?
-    @State private var hasVisitedStorage: Bool = false
-    @State private var hasVisitedNetwork: Bool = false
-    @State private var hasVisitedServer: Bool = false
+    @State private var hasVisitedStorage = false
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
     private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
+    let isQuickView: Bool
+
+    init(isQuickView: Bool = false, initialTab: PanelTab = .overview) {
+        self.isQuickView = isQuickView
+        _selectedTab = State(initialValue: initialTab)
+    }
+
+    private enum HostScope: String, CaseIterable, Identifiable {
+        case mac = "This Mac"
+        case server = "Server"
+        var id: String { rawValue }
+    }
+
+    private var dashboard: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Hog Hunter")
+                    .font(.system(size: 17, weight: .bold))
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 14)
+                ForEach(PanelTab.allCases) { tab in
+                    Button {
+                        selectedTab = tab
+                    } label: {
+                        Label(tab.rawValue, systemImage: tabSymbol(tab))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(selectedTab == tab ? Color.accentColor.opacity(0.12) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(width: 154)
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(selectedTab.rawValue)
+                        .font(.system(size: 20, weight: .semibold))
+                    if store.isStale {
+                        Text("Sampling behind")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer(minLength: 8)
+                    Picker("Host", selection: $hostScope) {
+                        ForEach(HostScope.allCases) { scope in
+                            Text(scope.rawValue).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 215)
+                    settingsMenu
+                }
+                Divider()
+                ZStack(alignment: .topLeading) {
+                    if selectedTab == .activity && hostScope == .mac {
+                        activityContent
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    } else if selectedTab == .maintenance && hostScope == .mac {
+                        MaintainView(store: store.maintain, showHeader: true)
+                    } else if selectedTab == .network && hostScope == .mac {
+                        NetworkView(bundleResolver: { pid in store.lookup(pid: pid) },
+                                    bandwidth: store.bandwidth, embeddedInPanel: true,
+                                    isTabActive: true)
+                    } else if selectedTab != .storage || hostScope != .mac {
+                        ScrollView {
+                            dashboardPage
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                    }
+                    if hasVisitedStorage {
+                        VStack(alignment: .leading, spacing: 10) {
+                            capacityCards
+                            HStack(alignment: .top, spacing: 10) {
+                                ScrollView {
+                                    MountedDriveUsageView(store: mountedDrives,
+                                                          isActive: selectedTab == .storage && hostScope == .mac)
+                                }
+                                .frame(maxWidth: .infinity)
+                                ScrollView { CodingDirectoriesView(store: directoryUsage) }
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .frame(height: 150)
+                            StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
+                                        maintainStore: store.maintain, embeddedInPanel: true,
+                                        isTabActive: selectedTab == .storage && hostScope == .mac,
+                                        includesMaintenance: false)
+                                .frame(maxHeight: .infinity)
+                        }
+                        .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
+                        .allowsHitTesting(selectedTab == .storage && hostScope == .mac)
+                        .accessibilityHidden(selectedTab != .storage || hostScope != .mac)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(minWidth: Self.dashboardMinimumWidth, minHeight: 580)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func tabSymbol(_ tab: PanelTab) -> String {
+        switch tab {
+        case .overview: return "house"
+        case .activity: return "chart.bar.xaxis"
+        case .storage: return "internaldrive"
+        case .maintenance: return "wrench.and.screwdriver"
+        case .network: return "network"
+        }
+    }
+
+    @ViewBuilder
+    private var dashboardPage: some View {
+        if hostScope == .server {
+            serverPage
+        } else {
+            switch selectedTab {
+            case .overview: overview
+            case .activity: activityContent
+            case .storage: EmptyView()
+            case .maintenance, .network: EmptyView()
+            }
+        }
+    }
+
+    private var serverPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if selectedTab == .activity {
+                Text("Remote per-process CPU and memory are unavailable.")
+                    .foregroundStyle(.secondary)
+            } else if selectedTab == .network {
+                Text("Remote per-process connections and network rates are unavailable.")
+                    .foregroundStyle(.secondary)
+            } else if selectedTab == .maintenance {
+                Text("Server tool status and significant directories")
+                    .font(.headline)
+            }
+            ServerStatusView(store: store.maintain.vpsStore)
+        }
+    }
+
+    private var activityContent: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                cpuHistoryCard.frame(width: 170)
+                Meter(title: "Memory", value: store.pulse.memoryPercent,
+                      caption: store.memorySizeCaption,
+                      severity: Severity.forPressure(store.pulse.pressure),
+                      accessibilityDetail: store.memoryCaption)
+                    .frame(width: 170)
+                pillRow(memoryPills + thermalPills)
+                Spacer(minLength: 0)
+            }
+            .frame(height: 75)
+            captions
+            controls
+            list.frame(maxHeight: .infinity)
+            footer
+        }
+    }
+
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                cpuHistoryCard
+                Meter(title: "Memory", value: store.pulse.memoryPercent,
+                      caption: store.memorySizeCaption,
+                      severity: Severity.forPressure(store.pulse.pressure),
+                      accessibilityDetail: store.memoryCaption)
+            }
+            .frame(height: 94)
+            pillRow(memoryPills + thermalPills)
+            capacityCards
+            HStack {
+                Text("Top Activity").font(.headline)
+                Spacer()
+                Button("Open Activity") { selectedTab = .activity }
+                    .buttonStyle(.link)
+            }
+            ForEach(Array(store.rows.prefix(6))) { row in
+                HStack(spacing: 8) {
+                    Text(row.name).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
+                                       coreCount: store.pulse.coreCount))
+                    Text(HogFormat.memory(row.memoryBytes))
+                }
+                .font(.system(size: 11).monospacedDigit())
+            }
+            if store.rows.isEmpty {
+                Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                    .foregroundStyle(.secondary)
+            }
+            if !store.maintain.vpsStore.configuredHost.isEmpty {
+                Text("Server").font(.headline)
+                serverStrip
+            }
+            captions
+        }
+    }
+
+    private var quickView: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Text("Hog Hunter").font(.headline)
+                Spacer()
+                if store.isStale { Text("Sampling behind").foregroundStyle(.orange) }
+                settingsMenu
+            }
+            HStack {
+                Text("CPU").fontWeight(.medium)
+                Spacer()
+                Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
+            }
+            HStack {
+                Text("Memory").fontWeight(.medium)
+                Spacer()
+                Text(store.memorySizeCaption)
+            }
+            HStack {
+                Text("Internal Storage").fontWeight(.medium)
+                Spacer()
+                Text(store.diskSpaceCaption)
+            }
+            Divider()
+            ForEach(Array(store.rows.prefix(3))) { row in
+                HStack {
+                    Text(row.name).lineLimit(1)
+                    Spacer()
+                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
+                                       coreCount: store.pulse.coreCount))
+                }
+            }
+            if !store.maintain.vpsStore.configuredHost.isEmpty {
+                Button {
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Server").fontWeight(.semibold)
+                        if let snapshot = store.maintain.vpsStore.snapshot {
+                            Text(snapshot.host).lineLimit(1)
+                            HStack {
+                                Text("CPU \(snapshot.headline?.cpuText ?? "—")")
+                                Text("RAM \(snapshot.headline?.memoryText ?? "—")")
+                                Spacer()
+                                Text(snapshot.relativeTimeString())
+                            }
+                            .foregroundStyle(.secondary)
+                        } else {
+                            Text("No readings yet").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+            Button("Open Dashboard") {
+                DetachedWindowManager.shared.openDetachedWindow(store: store)
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity)
+        }
+        .font(.system(size: 11))
+        .padding(16)
+        .frame(width: Self.panelWidth, height: Self.panelHeight)
+        .background(DockedPanelShape(beakX: beakX, isDocked: true)
+            .fill(Color(nsColor: .windowBackgroundColor)))
+        .background(MenuBarAnchorFinder { x in beakX = x })
+    }
+
+    private var capacityCards: some View {
+        HStack(alignment: .top, spacing: 8) {
+            capacityCard("Internal", value: store.diskSpaceCaption,
+                         percent: store.diskSpace.map { $0.usedFraction * 100 })
+            capacityCard("External", value: externalCapacityText,
+                         percent: externalDrives.count == 1 ? externalDrives[0].usedPercent : nil)
+            capacityCard("Time Machine", value: timeMachineDrive.map(capacityText) ?? "Not identified",
+                         percent: timeMachineDrive?.usedPercent)
+        }
+    }
+
+    private var timeMachineDrive: MountedDriveUsage? {
+        mountedDrives.rows.first { $0.name.localizedCaseInsensitiveContains("Time Machine") }
+    }
+
+    private var externalDrives: [MountedDriveUsage] {
+        mountedDrives.rows.filter { $0.id != timeMachineDrive?.id }
+    }
+
+    private var externalCapacityText: String {
+        if externalDrives.count > 1 { return "\(externalDrives.count) drives · see Storage" }
+        return externalDrives.first.map(capacityText) ?? "Not identified"
+    }
+
+    private func capacityText(_ drive: MountedDriveUsage) -> String {
+        guard let available = drive.availableBytes, let total = drive.totalBytes else { return "Unavailable" }
+        return "\(drive.name) · \(HogFormat.memory(UInt64(available))) free of \(HogFormat.memory(UInt64(total)))"
+    }
+
+    private func capacityCard(_ title: String, value: String, percent: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 11, weight: .semibold))
+            Text(value).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+            if let percent { ProgressView(value: percent, total: 100) }
+        }
+        .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-                .frame(width: Self.contentWidth)
-            ZStack(alignment: .topLeading) {
-                VStack(alignment: .leading, spacing: 12) {
-                    meters
-                    serverStrip
-                    captions
-                    controls
-                    list
-                    footer
-                }
-                .opacity(selectedTab == .activity ? 1 : 0)
-                .allowsHitTesting(selectedTab == .activity)
-                .accessibilityHidden(selectedTab != .activity)
-
-                if hasVisitedStorage {
-                    StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, maintainStore: store.maintain, embeddedInPanel: true, isTabActive: selectedTab == .storage)
-                        .frame(width: Self.contentWidth, alignment: .leading)
-                        .clipped()
-                        .opacity(selectedTab == .storage ? 1 : 0)
-                        .allowsHitTesting(selectedTab == .storage)
-                        .accessibilityHidden(selectedTab != .storage)
-                }
-
-                if hasVisitedNetwork {
-                    NetworkView(bundleResolver: { pid in store.lookup(pid: pid) }, bandwidth: store.bandwidth, embeddedInPanel: true, isTabActive: selectedTab == .network)
-                        // Both lines are load-bearing.  A tab's own content
-                        // decides its ideal width, and a long unwrapped string
-                        // anywhere in it (a hostname list, a footer sentence)
-                        // pushes that past the panel.  `ZStack` lays a child out
-                        // at its ideal width *before* the enclosing frame is
-                        // applied, so without this the panel briefly renders
-                        // wider than itself and crops.  Fixing it at the
-                        // container means no child can ever do that again,
-                        // whatever text is added later.
-                        .frame(width: Self.contentWidth, alignment: .leading)
-                        .clipped()
-                        .opacity(selectedTab == .network ? 1 : 0)
-                        .allowsHitTesting(selectedTab == .network)
-                        .accessibilityHidden(selectedTab != .network)
-                }
-
-                if hasVisitedServer {
-                    ServerStatusView(store: store.maintain.vpsStore)
-                        .frame(width: Self.contentWidth, alignment: .topLeading)
-                        .opacity(selectedTab == .server ? 1 : 0)
-                        .allowsHitTesting(selectedTab == .server)
-                        .accessibilityHidden(selectedTab != .server)
-                }
-            }
-            // Every child is laid out at exactly the panel's inner width.  A
-            // `VStack` sizes itself to its widest child's *ideal* width, and a
-            // long unwrapped caption -- the attribution line especially -- is
-            // wider than the panel, so without this the whole column is laid
-            // out past the edge and clipped on both sides instead of wrapping.
-            .frame(width: Self.contentWidth, alignment: .leading)
+        Group {
+            if isQuickView { quickView }
+            else { dashboard }
         }
-        .padding(.horizontal, Self.inset)
-        .padding(.bottom, Self.inset)
-        .padding(.top, (store.dockedToMenuBar ? 8 : 0) + Self.inset)
-        .frame(width: Self.panelWidth, height: Self.panelHeight)
-        .background(
-            DockedPanelShape(beakX: beakX, isDocked: store.dockedToMenuBar)
-                .fill(Color(nsColor: .windowBackgroundColor))
-        )
-        .overlay(
-            DockedPanelShape(beakX: beakX, isDocked: store.dockedToMenuBar)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-        )
-        .background(MenuBarAnchorFinder { x in beakX = x })
         .preferredColorScheme(store.appearance.colorScheme)
-        .task(id: selectedTab) {
-            guard selectedTab == .activity else { return }
+        .task(id: selectedTab.rawValue + hostScope.rawValue) {
+            guard selectedTab == .storage && hostScope == .mac && !isQuickView else { return }
             while !Task.isCancelled {
                 await directoryUsage.refreshIfNeeded()
-                try? await Task.sleep(for: .seconds(directoryUsage.nextRefreshDelay))
+                do { try await Task.sleep(for: .seconds(directoryUsage.nextRefreshDelay)) }
+                catch { break }
             }
         }
-        .onChange(of: selectedTab) { newTab in
-            if newTab == .storage {
-                hasVisitedStorage = true
-            } else if newTab == .network {
-                hasVisitedNetwork = true
-            } else if newTab == .server {
-                hasVisitedServer = true
+        .task {
+            guard !isQuickView else { return }
+            while !Task.isCancelled {
+                await mountedDrives.refresh()
+                do { try await Task.sleep(for: .seconds(60)) }
+                catch { break }
             }
+        }
+        .onChange(of: selectedTab) { tab in
+            if tab == .storage { hasVisitedStorage = true }
         }
         .onAppear {
             store.registerPanelVisible(panelInstanceId)
@@ -121,13 +375,6 @@ struct HogHunterPanel: View {
             // whenever a host is configured, so the strip is never stale and
             // nothing depends on this view's lifetime.
             store.maintain.refresh()
-            if selectedTab == .storage {
-                hasVisitedStorage = true
-            } else if selectedTab == .network {
-                hasVisitedNetwork = true
-            } else if selectedTab == .server {
-                hasVisitedServer = true
-            }
         }
         .onDisappear {
             store.unregisterPanelVisible(panelInstanceId)
@@ -157,22 +404,24 @@ struct HogHunterPanel: View {
 
     // MARK: - Metrics
 
-    /// A little bigger than it was: the server strip below the meters needs a
-    /// line of its own, and four tab segments need room for their labels.
-    static let panelWidth: CGFloat = 680
-    static let panelHeight: CGFloat = 720
+    /// The menu-bar quick view has fixed geometry; the dashboard uses its own minimum size.
+    static let panelWidth: CGFloat = 360
+    static let panelHeight: CGFloat = 410
+    static let dashboardWidth: CGFloat = 900
+    static let dashboardHeight: CGFloat = 700
+    static let dashboardMinimumWidth: CGFloat = 860
     static let inset: CGFloat = 14
     /// What is left of the panel once the inset is taken off both sides.
     static var contentWidth: CGFloat { panelWidth - inset * 2 }
-    /// Fixed so the control row cannot resize itself when a segment changes.
 
     /// What the panel is showing, for screen readers.
     private var panelAccessibilityLabel: String {
         switch selectedTab {
+        case .overview: return "Hog Hunter — overview"
         case .activity: return "Hog Hunter — top processes"
         case .storage: return "Hog Hunter — storage and disk cleaner"
+        case .maintenance: return "Hog Hunter — maintenance"
         case .network: return "Hog Hunter — network activity"
-        case .server: return "Hog Hunter — remote server status"
         }
     }
 
@@ -187,51 +436,6 @@ struct HogHunterPanel: View {
             : "Force Quit ends \(count) processes immediately.  Unsaved work is lost."
         return "Asks \(row.name) to quit.  It may show a save prompt or refuse.  \(included)"
             + "\n\n" + forced
-    }
-
-    // MARK: - Controls
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(alignment: .center, spacing: 8) {
-            HStack(spacing: 6) {
-                Image("HogProfile")
-                    .renderingMode(.original)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 36, height: 30)
-                if store.isStale {
-                    Text("Sampling Behind")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule().fill(Color.orange.opacity(0.15))
-                        )
-                }
-            }
-            .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter")
-
-            Spacer()
-
-            Picker("Tab", selection: $selectedTab) {
-                Label("Activity", image: "HogProfile").tag(PanelTab.activity)
-                Label("Storage", systemImage: "internaldrive").tag(PanelTab.storage)
-                Label("Network", systemImage: "network").tag(PanelTab.network)
-                Label("Server", systemImage: "server.rack").tag(PanelTab.server)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 360)
-
-            Spacer()
-
-            settingsMenu
-        }
     }
 
     /// Settings dropdown menu using the standard gear icon.  Holds Settings,
@@ -291,44 +495,21 @@ struct HogHunterPanel: View {
 
     // MARK: - Server
 
-    /// The remote server's headline, always on the Activity tab.  Hidden when
+    /// The remote server's headline, on Overview and the quick view.  Hidden when
     /// no host is configured: with no server there is nothing to report, and
     /// the Server tab says how to set one up.
     @ViewBuilder
     private var serverStrip: some View {
         if !store.maintain.vpsStore.configuredHost.isEmpty {
             VPSStatusStripView(store: store.maintain.vpsStore) {
-                selectedTab = .server
-                hasVisitedServer = true
+                hostScope = .server
+                selectedTab = .overview
+                if isQuickView { DetachedWindowManager.shared.openDetachedWindow(store: store) }
             }
         }
     }
 
     // MARK: - Meters
-
-    private var meters: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .top, spacing: 8) {
-                    cpuHistoryCard
-                    Meter(
-                        title: "Memory",
-                        value: store.pulse.memoryPercent,
-                        caption: store.memorySizeCaption,
-                        severity: Severity.forPressure(store.pulse.pressure),
-                        accessibilityDetail: store.memoryCaption
-                    )
-                }
-                pillRow(thermalPills)
-                diskCard
-                MountedDriveUsageView()
-                pillRow(memoryPills)
-            }
-            .frame(width: Self.contentWidth * 0.48)
-            CodingDirectoriesView(store: directoryUsage)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-    }
 
     private var cpuHistoryCard: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -347,27 +528,6 @@ struct HogHunterPanel: View {
         .padding(9)
         .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-    }
-
-    /// The third card, under CPU: how full the boot volume is.  It is a button
-    /// because the answer to "how full is it" is usually "which app did that",
-    /// which is one click away in the Storage tab.
-    private var diskCard: some View {
-        Button {
-            selectedTab = .storage
-            hasVisitedStorage = true
-        } label: {
-            Meter(
-                title: "Storage",
-                value: (store.diskSpace?.usedFraction ?? 0) * 100,
-                caption: store.diskSpaceCaption,
-                severity: Severity.forDisk(store.diskSpace?.usedFraction ?? 0)
-            )
-        }
-        .buttonStyle(.plain)
-        .help("Free space on the startup volume.  Click for the Storage tab.")
-        .accessibilityLabel("Storage")
-        .accessibilityValue(store.diskSpaceCaption)
     }
 
     /// Empty when there is nothing to say, so the row collapses instead of
@@ -413,16 +573,16 @@ struct HogHunterPanel: View {
         if let pct = store.pulse.batteryPercent {
             let isCharging = store.pulse.isCharging ?? false
             let isBattery = store.pulse.powerSource == "Battery Power"
-            if isBattery || pct < 100 {
-                let severity: Severity = pct <= 20 ? .hot : (pct <= 40 ? .elevated : .calm)
-                let icon = isCharging ? "⚡ " : ""
-                let text = "\(icon)\(pct)% Battery"
-                out.append(Pill(
-                    text: text,
-                    severity: severity,
-                    help: isCharging ? "Charging (\(pct)%)." : "Running on battery (\(pct)%).  High CPU processes increase discharge rate."
-                ))
-            }
+            let severity: Severity = pct <= 20 ? .hot : (pct <= 40 ? .elevated : .calm)
+            let icon = isCharging ? "⚡ " : ""
+            let text = "\(icon)\(pct)% Battery"
+            out.append(Pill(
+                text: text,
+                severity: severity,
+                help: isCharging ? "Charging (\(pct)%)." : isBattery
+                    ? "Running on battery (\(pct)%).  High CPU processes increase discharge rate."
+                    : "Battery at \(pct)%."
+            ))
         }
         return out
     }
@@ -432,7 +592,6 @@ struct HogHunterPanel: View {
     /// with RAM -- what it predicts is clock throttling, which is what the CPU
     /// meter above it is measuring.
     private var thermalPills: [Pill] {
-        guard store.pulse.thermalState != .nominal else { return [] }
         return [Pill(
             text: "Thermal \(Self.thermalLabel(store.pulse.thermalState))",
             severity: Self.thermalSeverity(store.pulse.thermalState),
