@@ -88,7 +88,11 @@ final class DiskCleanerStore: ObservableObject {
     /// An exclusion edit invalidates the results on screen.  Manual-scan mode
     /// drops them and waits for Scan; otherwise a scan follows the edit.
     private func rescanAfterOptionChange() {
-        if manualScanOnly { discardResults() }
+        if manualScanOnly {
+            // A clean in flight is already running against the items the report
+            // held, so dropping it here would blank the page mid-clean.
+            if !isCleaning { discardResults() }
+        }
         else if rescanAfterExclusionChange { scan() }
     }
 
