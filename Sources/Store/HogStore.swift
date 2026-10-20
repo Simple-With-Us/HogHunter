@@ -224,6 +224,11 @@ final class HogStore: ObservableObject {
     private(set) var remoteScanState: RemoteScanState = .idle
     private var remoteScanTask: Task<Void, Never>?
     private var remoteScanStartedAt: Date?
+    private var remoteScanTempPolicy: TempFileSafetyPolicy?
+    private var remoteScanTempPolicyRevision: UInt64?
+    private var tempPolicyObserver: AnyCancellable?
+    /// Tests substitute an isolated local policy, never the owner's defaults.
+    var remoteTempPolicy: () -> TempFileSafetyPolicy = { TempFileSafetyPolicy.load() }
     /// How long a scan may run before a new one is allowed to replace it.
     var remoteScanWatchdog: TimeInterval = 15 * 60
     /// What a phone-started scan runs.  Tests replace it so no real folder is
@@ -398,6 +403,9 @@ final class HogStore: ObservableObject {
         loadSettings()
         setupCompanionHandlers()
         observeMaintain()
+        tempPolicyObserver = NotificationCenter.default.publisher(for: .tempFileSafetyPolicyChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.invalidateRemoteScanIfTempPolicyChanged() }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(defaultsChanged),
@@ -1891,6 +1899,7 @@ final class HogStore: ObservableObject {
     /// Internal, not private, so tests can drive a whole clean without a socket.
     @MainActor
     func runRemoteClean(request: CompanionCleanRequest?) async -> CompanionServer.Reply {
+        invalidateRemoteScanIfTempPolicyChanged()
         if let refusal = Self.cleanRefusal(remoteInFlight: remoteCleanInFlight, macIsCleaning: activeCleanProgress?.isCleaning == true) {
             return refusal
         }
@@ -2029,6 +2038,7 @@ final class HogStore: ObservableObject {
     /// scan at a time, and none while a clean is running.
     @MainActor
     func beginRemoteCleanScan(_ request: CompanionCleanScanRequest) -> CompanionServer.Reply {
+        invalidateRemoteScanIfTempPolicyChanged()
         let tier: CleanTier
         switch CompanionCleanerReport.validate(request) {
         case .failure(let refusal): return refusal.reply
@@ -2048,6 +2058,8 @@ final class HogStore: ObservableObject {
             }
         }
         let id = UUID().uuidString
+        remoteScanTempPolicy = remoteTempPolicy()
+        remoteScanTempPolicyRevision = TempFileSafetyPolicy.currentRevision
         remoteScanState = .scanning(id: id, tier: tier, category: "Starting \(tier.title) scan…")
         remoteScanTask?.cancel()
         // The same call the Mac's own cleaner makes, so the phone previews
@@ -2074,17 +2086,31 @@ final class HogStore: ObservableObject {
         remoteScanTask?.cancel()
         remoteScanTask = nil
         remoteScanStartedAt = nil
+        remoteScanTempPolicy = nil
+        remoteScanTempPolicyRevision = nil
         remoteScanState = .idle
+    }
+
+    /// Only scan state is discarded.  An active clean keeps its task, busy
+    /// flag, progress, and snapshot/exclusion safeguards until it finishes.
+    @MainActor
+    private func invalidateRemoteScanIfTempPolicyChanged() {
+        guard let policy = remoteScanTempPolicy, let revision = remoteScanTempPolicyRevision else { return }
+        if policy != remoteTempPolicy() || revision != TempFileSafetyPolicy.currentRevision {
+            discardRemoteScan()
+        }
     }
 
     @MainActor
     private func noteRemoteScanProgress(id: String, category: String) {
+        invalidateRemoteScanIfTempPolicyChanged()
         guard case .scanning(let current, let tier, _) = remoteScanState, current == id else { return }
         remoteScanState = .scanning(id: id, tier: tier, category: category)
     }
 
     @MainActor
     private func finishRemoteScan(_ scan: RemoteCleanScan) {
+        invalidateRemoteScanIfTempPolicyChanged()
         guard case .scanning(let current, _, _) = remoteScanState, current == scan.id else { return }
         remoteScanState = .ready(scan)
     }
@@ -2093,6 +2119,7 @@ final class HogStore: ObservableObject {
     /// finished scan with its items, plus the recent cleanup history.
     @MainActor
     func remoteCleanReportReply(now: Date = Date()) -> CompanionServer.Reply {
+        invalidateRemoteScanIfTempPolicyChanged()
         if case .ready(let scan) = remoteScanState, now.timeIntervalSince(scan.scannedAt) > CompanionCleanerReport.scanLifetime {
             remoteScanState = .idle
         }
