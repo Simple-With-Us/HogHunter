@@ -39,13 +39,16 @@ Sources/
   Assets.xcassets/AppIcon         Square Finder/About icon; no pre-applied squircle crop
 Tests/HogHunterTests/             XCTest: CpuMath, MemoryMath, Grouping, HistoryStore, HogFormat, AlertPolicy, MetadataResolver
 scripts/install.sh                build, sign, install to ~/Applications, relaunch
+.github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
+HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
+Brand/                           traced logo and icon vectors, plus the 16 px and 32 px small-size crops
+```
 
 ## App icon
 
 The Finder / About / notification icon is `Assets.xcassets/AppIcon.appiconset`, compiled from the square Hog Hunter lockup (boar, wordmark, and the line "Monitor. Detect. Reclaim.").  The source is not squircle-cropped; macOS applies the system mask at display time.  `LSUIElement` still hides the Dock icon while the menu bar extra is running.  The menu bar extra itself stays the flame glyph plus the live CPU number.  The iPhone app uses the same lockup at 1024×1024.
-.github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
-HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
-```
+
+`Brand/` is the source for the mark outside the app bundle: the traced logo and icon vectors, the 16 px and 32 px small-size crops that keep the boar readable when the whole head is scaled down, and `Brand/README.md`, which documents the crop windows, the measured 9.5 degree rotation, and how to rebuild the `.icns` and the Windows `.ico`.  The shipped app icon set is not touched by that tree.
 
 ## Data types (Models.swift)
 
