@@ -58,6 +58,37 @@ class BoundedProcessTests(unittest.TestCase):
                 CAPTURE.run(['synthetic'], 1, 0)
         process.kill.assert_called_once()
 
+    def test_cleanup_escalates_before_reaping_with_a_bounded_grace(self):
+        # A fake clock catches omitted/delayed escalation without making loaded
+        # hosts satisfy a two-second scheduling assumption in the real fixtures.
+        for group_accepts_term in (True, False):
+            with self.subTest(group_accepts_term=group_accepts_term):
+                process = mock.Mock(pid=999999, args=['synthetic'])
+                elapsed = 0.0
+
+                def sleep(duration):
+                    nonlocal elapsed
+                    elapsed += duration
+
+                events = mock.Mock()
+                with mock.patch.object(CAPTURE.subprocess, 'Popen', return_value=process), \
+                     mock.patch.object(CAPTURE, 'wait_unreaped', return_value=0), \
+                     mock.patch.object(CAPTURE, 'signal_group',
+                                       return_value=group_accepts_term) as group_signal, \
+                     mock.patch.object(CAPTURE.time, 'monotonic', side_effect=lambda: elapsed), \
+                     mock.patch.object(CAPTURE.time, 'sleep', side_effect=sleep):
+                    events.attach_mock(group_signal, 'group_signal')
+                    events.attach_mock(process.kill, 'kill')
+                    events.attach_mock(process.wait, 'wait')
+                    self.assertEqual(CAPTURE.run(['synthetic'], 1, 0.1), 0)
+                self.assertLessEqual(elapsed, 0.1)
+                if group_accepts_term:
+                    self.assertAlmostEqual(elapsed, 0.1)
+                self.assertEqual(events.mock_calls[0], mock.call.group_signal(999999, signal.SIGTERM))
+                self.assertEqual(events.mock_calls[-3:], [
+                    mock.call.group_signal(999999, signal.SIGKILL),
+                    mock.call.kill(), mock.call.wait(timeout=5)])
+
     def test_cleanup_timeout_preserves_cancellation(self):
         process = mock.Mock(pid=999999, args=['synthetic'])
         process.wait.side_effect = subprocess.TimeoutExpired('synthetic', 5)
