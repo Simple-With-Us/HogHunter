@@ -76,8 +76,10 @@ ASCII spaces.
 
 | Surface | Bundle ID | Source |
 |---|---|---|
-| macOS app (`HogHunter`) | `com.simplewithus.hoghunter.macos` | `project.yml` `targets.HogHunter.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
-| macOS unit tests (`HogHunterTests`) | `com.simplewithus.hoghunter.macos.tests` | `project.yml` `targets.HogHunterTests.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
+| macOS app, Release (`HogHunter`) | `com.simplewithus.hoghunter.macos` | `project.yml` `targets.HogHunter.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
+| macOS unit tests, Release (`HogHunterTests`) | `com.simplewithus.hoghunter.macos.tests` | `project.yml` `targets.HogHunterTests.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
+| macOS app, Debug (`Hog Hunter Dev`) | `com.simplewithus.hoghunter.macos.development` | `project.yml` `targets.HogHunter.settings.configs.Debug` |
+| macOS unit tests, Debug | `com.simplewithus.hoghunter.macos.development.tests` | `project.yml` `targets.HogHunterTests.settings.configs.Debug` |
 | iOS companion (`HogHunterIOS`) | `com.simplewithus.hoghunter.ios` | `project.yml` `targets.HogHunterIOS.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
 
 | Capability | Value |
@@ -88,6 +90,8 @@ ASCII spaces.
 `XcodeGen` is the project source of truth (`project.yml`); the generated
 `HogHunter.xcodeproj/` is git-ignored.  Always regenerate after editing
 `project.yml`: `xcodegen generate`.
+
+Debug and XCTest hosts use their own bundle identity so LaunchServices cannot register a test build as the installed app.  UI smoke and screenshot launches disable live probes, updater startup and network bootstrap; their real views remain available to the hosted UI gate.
 
 `Info.plist` is auto-generated (`GENERATE_INFOPLIST_FILE: YES`); there is no
 checked-in `Info.plist` file, so the bundle ID flows from the build variable.

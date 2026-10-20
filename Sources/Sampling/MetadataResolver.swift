@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 /// The part of `NSRunningApplication` the resolver reads.  It exists so a test
@@ -9,6 +10,11 @@ protocol RunningApplicationInfo {
     var localizedName: String? { get }
     var activationPolicy: NSApplication.ActivationPolicy { get }
     var bundleURL: URL? { get }
+    var icon: NSImage? { get }
+}
+
+extension RunningApplicationInfo {
+    var icon: NSImage? { nil }
 }
 
 extension NSRunningApplication: RunningApplicationInfo {}
@@ -16,9 +22,8 @@ extension NSRunningApplication: RunningApplicationInfo {}
 /// Turns process keys into names, bundle identifiers and icons.
 ///
 /// Everything here touches AppKit, so it lives on the main actor and is only
-/// asked about rows that are about to be drawn.  Icons and application URLs are
-/// cached by bundle id, which is where the expensive LaunchServices lookups
-/// happen; the per-key cache keeps a redrawn row from repeating the work.
+/// asked about rows that are about to be drawn.  Names and icons come only
+/// from the already-running application table; process paths are never opened.
 @MainActor
 final class MetadataResolver {
     struct Metadata {
@@ -45,6 +50,7 @@ final class MetadataResolver {
         var localizedName: String?
         var activationPolicy: NSApplication.ActivationPolicy
         var bundleURL: URL?
+        var icon: NSImage?
 
         /// A freshly launched app publishes these asynchronously, so a partly
         /// filled entry is re-read next tick instead of being frozen.
@@ -53,14 +59,15 @@ final class MetadataResolver {
 
     private(set) var runningApps: [pid_t: AppInfo] = [:]
     private var cache: [ProcessKey: Metadata] = [:]
-    private var iconByBundle: [String: NSImage?] = [:]
-    private var iconByPath: [String: NSImage?] = [:]
-    private var urlByBundle: [String: URL?] = [:]
+    private var iconByBundle: [String: NSImage] = [:]
     private var nameByBundle: [String: String] = [:]
     private let enumerate: () -> [RunningApplicationInfo]
+    private let iconSourceAllowed: (URL?) -> Bool
 
-    init(runningApplications: @escaping () -> [RunningApplicationInfo] = { NSWorkspace.shared.runningApplications }) {
+    init(runningApplications: @escaping () -> [RunningApplicationInfo] = { NSWorkspace.shared.runningApplications },
+         iconSourceAllowed: ((URL?) -> Bool)? = nil) {
         self.enumerate = runningApplications
+        self.iconSourceAllowed = iconSourceAllowed ?? { Self.isSafeIconSource($0) }
     }
 
     /// Refreshes the running-application table and returns it.  Enumerating is
@@ -82,15 +89,57 @@ final class MetadataResolver {
                 table[pid] = known
                 continue
             }
+            let bundleURL = app.bundleURL
+            // A forced refresh re-reads the mutable properties, but a running
+            // app's icon is stable: reuse the one already fetched so the main
+            // actor does not re-request it for every local app on every forced
+            // refresh.  Only a genuinely new pid pays the read.
+            let memoizedIcon = runningApps[pid].flatMap { $0.bundleURL == bundleURL ? $0.icon : nil }
             table[pid] = AppInfo(
                 bundleId: app.bundleIdentifier,
                 localizedName: app.localizedName,
                 activationPolicy: app.activationPolicy,
-                bundleURL: app.bundleURL
+                bundleURL: bundleURL,
+                icon: memoizedIcon ?? (iconSourceAllowed(bundleURL) ? app.icon : nil)
             )
         }
         runningApps = table
+        // The bundle-keyed maps are a session-long memo: an app that quits
+        // keeps its icon and name for the history rows that still reference it.
+        // Only overwrite, never clear.
+        for info in table.values {
+            guard let bundleId = info.bundleId else { continue }
+            if let icon = info.icon { iconByBundle[bundleId] = icon }
+            if let name = info.localizedName { nameByBundle[bundleId] = name }
+        }
         return table
+    }
+
+    /// A running app may live on an external volume.  Asking AppKit for that
+    /// icon can touch the bundle, so automatic icon reads use local app roots.
+    static func isSafeIconSource(_ url: URL?, localRoots: [String]? = nil) -> Bool {
+        guard let url, url.isFileURL else { return false }
+        // Normalize lexically before touching the filesystem.  realpath or URL symlink
+        // resolution here would itself visit an external target and request access.
+        var components: [Substring] = []
+        for component in url.path.split(separator: "/") {
+            if component == "." { continue }
+            if component == ".." { if !components.isEmpty { components.removeLast() }; continue }
+            components.append(component)
+        }
+        guard components.count <= 64 else { return false }
+        let path = "/" + components.joined(separator: "/")
+        let roots = localRoots ?? ["/Applications/", "/System/Applications/", "/System/Library/CoreServices/", NSHomeDirectory() + "/Applications/"]
+        guard roots.contains(where: { path.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }) else { return false }
+        // Check local components without following links.  A local alias to an external
+        // bundle is rejected at the link itself, before any target is inspected.
+        var prefix = ""
+        for component in components {
+            prefix += "/" + component
+            var info = stat()
+            guard lstat(prefix, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
+        }
+        return true
     }
 
     func isRegularApp(_ pid: pid_t) -> Bool {
@@ -139,7 +188,7 @@ final class MetadataResolver {
             let metadata = Metadata(
                 displayName: name,
                 bundleId: bundle,
-                icon: icon(bundleId: bundle, bundleURL: app?.bundleURL, path: sample?.path),
+                icon: app?.icon ?? icon(bundleId: bundle, path: sample?.path),
                 activationPolicy: app?.activationPolicy,
                 isRunningApplication: app != nil,
                 isProvisional: app?.isSettled == false
@@ -150,50 +199,23 @@ final class MetadataResolver {
         return out
     }
 
-    /// The icon for a bundle id, an already-known bundle URL, or an executable
-    /// path, in that order of preference.
-    func icon(bundleId: String?, bundleURL: URL? = nil, path: String?) -> NSImage? {
-        if let bundleId, !bundleId.isEmpty {
-            if let cached = iconByBundle[bundleId] { return cached }
-            let url = bundleURL ?? applicationURL(bundleId: bundleId)
-            let image = url.map { NSWorkspace.shared.icon(forFile: $0.path) }
-            iconByBundle[bundleId] = image
-            return image
-        }
-        guard let path, !path.isEmpty else { return nil }
-        if let cached = iconByPath[path] { return cached }
-        let image = FileManager.default.fileExists(atPath: path)
-            ? NSWorkspace.shared.icon(forFile: path)
-            : nil
-        iconByPath[path] = image
-        return image
+    /// Icons are available only for safe, currently running application bundles.
+    /// `path` remains in the API for callers with process samples, but is never read.
+    func icon(bundleId: String?, path _: String?) -> NSImage? {
+        guard let bundleId else { return nil }
+        return iconByBundle[bundleId]
     }
 
-    /// `FileManager.displayName(atPath:)` hits the file system, and the history
-    /// rows ask for the same 25 bundle ids on every refresh, so the answer is
-    /// cached.  Only the resolved name is cached: the fallback belongs to the
-    /// caller's row, not to the bundle id.
+    /// History rows use the live app name when available and their stored name
+    /// otherwise.  Neither case opens a bundle on disk.
     func displayName(bundleId: String?, fallback: String) -> String {
         guard let bundleId else { return fallback }
-        if let cached = nameByBundle[bundleId] { return cached }
-        guard let url = applicationURL(bundleId: bundleId) else { return fallback }
-        let name = FileManager.default.displayName(atPath: url.path)
-        nameByBundle[bundleId] = name
-        return name
-    }
-
-    func applicationURL(bundleId: String) -> URL? {
-        if let cached = urlByBundle[bundleId] { return cached }
-        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
-        urlByBundle[bundleId] = url
-        return url
+        return nameByBundle[bundleId] ?? fallback
     }
 
     /// Drops cache entries for keys that no longer exist.  The caller schedules
     /// this every 60 ticks; it does not throttle itself, so building the live
-    /// set is only paid on the ticks that actually prune.  The bundle-keyed
-    /// caches are deliberately not pruned: they are bounded by the number of
-    /// distinct applications seen in one session, which is small.
+    /// set is only paid on the ticks that actually prune.
     func prune(live: Set<ProcessKey>) {
         cache = cache.filter { live.contains($0.key) }
     }

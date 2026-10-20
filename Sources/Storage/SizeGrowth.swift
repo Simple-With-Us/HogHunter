@@ -1,19 +1,23 @@
 import Foundation
 
-struct SizeGrowthSample: Codable, Equatable {
+struct SizeGrowthSample: Codable, Equatable, Sendable {
     let bytes: Int64
     let sampledAt: Date
+    var sourcePath: String? = nil
 }
 
 /// A bounded cache of observed sizes, never an extrapolation from a short interval.
 final class SizeGrowthHistory: @unchecked Sendable {
     static let shared = SizeGrowthHistory()
 
-    private struct Series: Codable {
+    private struct Series: Codable, Sendable {
         var samples: [SizeGrowthSample]
     }
     private let lock = NSLock()
     private var series: [String: Series] = [:]
+    private let writerQueue = DispatchQueue(label: "HogHunter.size-growth-writer", qos: .utility)
+    private var pendingSnapshot: [String: Series]?
+    private var writerScheduled = false
     private let fileURL: URL?
     private let now: () -> Date
     private let retention: TimeInterval = 48 * 3600
@@ -45,7 +49,7 @@ final class SizeGrowthHistory: @unchecked Sendable {
     }
 
     @discardableResult
-    func record(host: String, metric: String, path: String, bytes: Int64, sampledAt: Date) -> Bool {
+    func record(host: String, metric: String, path: String, bytes: Int64, sampledAt: Date, sourcePath: String? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let currentTime = now()
@@ -60,10 +64,10 @@ final class SizeGrowthHistory: @unchecked Sendable {
            floor(last.sampledAt.timeIntervalSince1970 / bucket) == floor(sampledAt.timeIntervalSince1970 / bucket) {
             samples.removeLast()
         }
-        samples.append(SizeGrowthSample(bytes: bytes, sampledAt: sampledAt))
+        samples.append(SizeGrowthSample(bytes: bytes, sampledAt: sampledAt, sourcePath: sourcePath))
         series[id] = Series(samples: samples)
         prune()
-        persist()
+        schedulePersistence()
         return true
     }
 
@@ -91,7 +95,7 @@ final class SizeGrowthHistory: @unchecked Sendable {
         guard !merged.isEmpty, merged != existing else { return false }
         series[id] = Series(samples: merged)
         prune()
-        persist()
+        schedulePersistence()
         return true
     }
 
@@ -131,14 +135,48 @@ final class SizeGrowthHistory: @unchecked Sendable {
         }
     }
 
-    private func persist() {
-        guard let fileURL, let data = try? JSONEncoder().encode(series) else { return }
-        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: .atomic)
+    /// Called under `lock`.  Copy-on-write captures a coherent immutable value; encoding
+    /// and disk I/O never hold the history lock or run on the caller's actor.
+    private func schedulePersistence() {
+        guard fileURL != nil else { return }
+        pendingSnapshot = series
+        guard !writerScheduled else { return }
+        writerScheduled = true
+        writerQueue.async { [self] in
+            while true {
+                lock.lock()
+                guard let snapshot = pendingSnapshot else {
+                    writerScheduled = false
+                    lock.unlock()
+                    return
+                }
+                pendingSnapshot = nil
+                lock.unlock()
+                // One serial writer guarantees an older snapshot cannot overwrite a newer one.
+                guard let fileURL, let data = try? JSONEncoder().encode(snapshot) else { continue }
+                do {
+                    try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try data.write(to: fileURL, options: .atomic)
+                } catch {
+                    // Atomic replacement preserves the last good file.  The next mutation retries.
+                }
+            }
+        }
     }
+
+    /// Deterministic test/export barrier.  UI paths must never wait for disk persistence.
+    func flushPersistence() {
+        writerQueue.sync {}
+    }
+
 }
 
 enum SizeGrowthFormat {
+    static func appreciableDelta(_ percent: Double?) -> String? {
+        guard let percent, percent.isFinite, abs(percent) >= 0.1 else { return nil }
+        return delta(percent)
+    }
+
     static func delta(_ percent: Double?) -> String? {
         guard let percent, percent.isFinite else { return nil }
         let magnitude = abs(percent)

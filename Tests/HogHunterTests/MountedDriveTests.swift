@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import HogHunter
 
 final class MountedDriveTests: XCTestCase {
@@ -27,6 +28,48 @@ final class MountedDriveTests: XCTestCase {
         XCTAssertNil(candidate("/Volumes/Disk Image", external: false).usage)
         XCTAssertNil(candidate("/Volumes/Hidden", hidden: true).usage)
         XCTAssertNil(candidate("/Volumes/Network", local: false).usage)
+    }
+
+    func testMountRecordUsesCachedFlagsAndBSDSource() {
+        let visible = mountRecord()
+        XCTAssertTrue(visible.isLocal)
+        XCTAssertFalse(visible.isHidden)
+        XCTAssertEqual(visible.volumeName, "Backup")
+        XCTAssertEqual(visible.bsdName, "disk4s2")
+        XCTAssertTrue(mountRecord(flags: UInt32(MNT_LOCAL | MNT_DONTBROWSE)).isHidden)
+        XCTAssertFalse(mountRecord(flags: 0).isLocal)
+        for source in ["server:/backup", "/dev/rdisk4", "/dev/disk", "/dev/disk4/backup", "/dev/disk4s2 extra"] {
+            XCTAssertNil(mountRecord(source: source).bsdName, source)
+        }
+        for path in ["/", "/System/Volumes/Data", "/Volumes/.hidden", "/Volumes/Backup/child", "/Volumes/", "/Volumes/../Backup"] {
+            XCTAssertNil(mountRecord(path: path).volumeName, path)
+        }
+    }
+
+    func testCachedCapacityRejectsOverflowAndUnavailableStatistics() {
+        let valid = mountRecord(blockSize: 4096, blocks: 100, availableBlocks: 20).capacity
+        XCTAssertEqual(valid.total, 409600)
+        XCTAssertEqual(valid.available, 81920)
+        let full = mountRecord(availableBlocks: 0).capacity
+        XCTAssertEqual(full.available, 0)
+        for record in [
+            mountRecord(blockSize: 0),
+            mountRecord(blocks: 0),
+            mountRecord(blockSize: 2, blocks: UInt64.max),
+            mountRecord(blockSize: 2, availableBlocks: UInt64.max),
+            mountRecord(blockSize: 1, blocks: UInt64(Int64.max) + 1),
+            mountRecord(blockSize: 1, availableBlocks: UInt64(Int64.max) + 1)
+        ] {
+            XCTAssertNil(record.capacity.total)
+            XCTAssertNil(record.capacity.available)
+        }
+    }
+
+    private func mountRecord(path: String = "/Volumes/Backup", source: String = "/dev/disk4s2",
+                             flags: UInt32 = UInt32(MNT_LOCAL), blockSize: UInt64 = 4096,
+                             blocks: UInt64 = 100, availableBlocks: UInt64 = 20) -> MountedDriveMountRecord {
+        MountedDriveMountRecord(path: path, source: source, flags: flags, blockSize: blockSize,
+                               blocks: blocks, availableBlocks: availableBlocks)
     }
 
     @MainActor

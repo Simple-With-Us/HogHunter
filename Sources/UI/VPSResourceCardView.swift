@@ -105,46 +105,43 @@ struct VPSResourceCardView: View {
 
     @ViewBuilder
     private func snapshotContent(_ snapshot: VPSStatusSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                if let cpu = snapshot.cpu {
-                    cpuBox(cpu)
+        VStack(alignment: .leading, spacing: 10) {
+            // Three metrics across uses the panel's width before adding height.
+            // Missing readings do not reserve empty metric cards.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .top), count: 3), spacing: 8) {
+                if let cpu = snapshot.cpu { cpuBox(cpu) }
+                if let mem = snapshot.memory { memoryBox(mem) }
+                if let root = snapshot.rootDevice { deviceBox(root, title: "Disk (/)") }
+                if let swap = snapshot.swap { swapBox(swap) }
+                if let tmp = snapshot.tmpDevice {
+                    deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
                 }
-                if let mem = snapshot.memory {
-                    memoryBox(mem)
-                }
-            }
-
-            HStack(spacing: 8) {
-                if let root = snapshot.rootDevice {
-                    deviceBox(root, title: "Disk (/)")
-                }
-                if let swap = snapshot.swap {
-                    swapBox(swap)
+                if let shm = snapshot.shmDevice {
+                    deviceBox(shm, title: "Shared Mem (/dev/shm)", tooltip: shm.note)
                 }
             }
 
-            if snapshot.tmpDevice != nil || snapshot.shmDevice != nil {
-                HStack(spacing: 8) {
-                    if let tmp = snapshot.tmpDevice {
-                        deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
-                    }
-                    if let shm = snapshot.shmDevice {
-                        deviceBox(shm, title: "Shared Mem (/dev/shm)", tooltip: shm.note)
-                    }
+            let dbs = snapshot.appDbs ?? [:]
+            let tools = snapshot.toolStatuses ?? []
+            let dirs = snapshot.largestDirs ?? []
+            if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
+                HStack(alignment: .top, spacing: 16) {
+                    supportingReadings(dbs: dbs, tools: tools)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    largestDirsView(dirs)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
+            } else {
+                supportingReadings(dbs: dbs, tools: tools)
+                if !dirs.isEmpty { largestDirsView(dirs) }
             }
+        }
+    }
 
-            if let dbs = snapshot.appDbs, !dbs.isEmpty {
-                appDbsRow(dbs)
-            }
-
-            if let dirs = snapshot.largestDirs, !dirs.isEmpty {
-                largestDirsView(dirs)
-            }
-            if let tools = snapshot.toolStatuses, !tools.isEmpty {
-                toolsView(tools)
-            }
+    private func supportingReadings(dbs: [String: Int64], tools: [VPSToolStatus]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !dbs.isEmpty { appDbsRow(dbs) }
+            if !tools.isEmpty { toolsView(tools) }
         }
     }
 
@@ -239,8 +236,13 @@ struct VPSResourceCardView: View {
 
     private func appDbsRow(_ dbs: [String: Int64]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("App Databases")
-                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 0) {
+                Text("App Databases")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\u{00A0} (daily change)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             ForEach([("st_app_db", "Socratic Trade"), ("ct_db", "Congress Trade"), ("um_db", "Usage Monitor")], id: \.0) { key, name in
                 if let bytes = dbs[key] {
                     SizeUsageRow(name: name, bytes: bytes, percentChange: store.databasePercentChange(key: key))
@@ -251,8 +253,13 @@ struct VPSResourceCardView: View {
 
     private func largestDirsView(_ dirs: [VPSDirectory]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Directories")
-                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 0) {
+                Text("Directories")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\u{00A0} (daily change)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             ForEach(dirs) { dir in
                 SizeUsageRow(name: dir.path, bytes: dir.bytes,
                              percentChange: store.directoryPercentChange(path: dir.path))
@@ -264,26 +271,40 @@ struct VPSResourceCardView: View {
         VStack(alignment: .leading, spacing: 5) {
             Text("Tools")
                 .font(.system(size: 11, weight: .semibold))
-            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 5) {
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 6) {
                 ForEach(tools) { tool in
                     HStack(spacing: 5) {
                         Circle()
                             .fill(toolColor(tool.state))
                             .frame(width: 6, height: 6)
-                        Text(tool.name)
-                            .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(tool.name)
+                            Text(toolStatusLabel(tool.state))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
                         if tool.state == .running, tool.count > 1 {
                             Text("\(tool.count)")
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                         }
                     }
-                    .font(.system(size: 10))
-                    .help("\(tool.name): \(tool.state.rawValue)")
+                    .font(.system(size: 11))
+                    .help("\(tool.name): \(toolStatusLabel(tool.state))")
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(tool.name), \(tool.state.rawValue)")
+                    .accessibilityLabel("\(tool.name), \(toolStatusLabel(tool.state))")
+                    .accessibilityValue(tool.state == .running && tool.count > 1 ? "\(tool.count) processes" : "")
                 }
             }
+        }
+    }
+
+    private func toolStatusLabel(_ state: VPSToolStatus.State) -> String {
+        switch state {
+        case .running: return "running"
+        case .stopped: return "not running"
+        case .absent: return "not found"
+        case .unknown: return "unknown"
         }
     }
 
