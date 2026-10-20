@@ -980,8 +980,8 @@ def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     """Filesystem facts that do not need git.  Empty string means pass."""
     # The path itself must be a plain directory: a symlinked lane could point
     # anywhere.  A symlinked PARENT is normal and must not refuse the lane:
-    # the fleet keeps ~/apps/lanes/<Repo> on the external disk behind a
-    # symlink, and the doctor reports that ~/apps/lanes spelling without
+    # the fleet keeps its lanes under a per-repository root behind a
+    # symlink, and the doctor reports that spelling without
     # resolving it.  The old check compared the path with its own realpath,
     # so every lane on the external drive was refused with "path resolves
     # somewhere else now" and could never be retired.  The lane's identity is
@@ -995,7 +995,7 @@ def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     if why:
         return why
     # The spelling above proves nothing about where the lane really lives: a symlinked parent is
-    # allowed now, so ~/apps/lanes/<Repo> can point at ~/Desktop or ~/Documents, and the old
+    # allowed now, so a lane root can point at a protected home folder, and the old
     # realpath check no longer refuses it.  git worktree remove follows the link and deletes the
     # resolved directory, so the never-touch rule has to be read against the resolved path too.
     # A lane on the external disk resolves outside home and is unaffected: the rule names folders
@@ -1192,7 +1192,11 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     # spelling resolves somewhere else cannot be confirmed and is refused.
     expected_repo = co.get("parent_repo")
     if isinstance(expected_repo, str) and expected_repo:
-        if os.path.realpath(repo_root) != os.path.realpath(expected_repo):
+        # Case-insensitively, like every other path comparison here: the two
+        # spellings are recorded independently (Git's common dir against the
+        # doctor's parent repository) and the filesystem is case-insensitive,
+        # so a case-only difference is the same directory.
+        if os.path.realpath(repo_root).casefold() != os.path.realpath(expected_repo).casefold():
             return "", "it now belongs to a different repository"
     elif os.path.realpath(path) != os.path.normpath(path):
         return "", "the doctor did not say which repository this lane belongs to"

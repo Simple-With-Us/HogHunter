@@ -897,8 +897,8 @@ class TestRecheck(unittest.TestCase):
         self.assertIn("not a plain directory", refused_reason(scan, link))
 
     def test_lane_behind_a_symlinked_parent_is_not_refused(self) -> None:
-        """The fleet keeps ~/apps/lanes/<Repo> on the external disk behind a
-        symlink, and the doctor reports the ~/apps/lanes spelling without
+        """The fleet keeps its lanes under a per-repository root in the home
+        directory, behind a symlink, and the doctor reports that spelling without
         resolving it.  Such a lane must still be removable, or every lane on
         the external drive is stuck for good."""
         external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
@@ -921,6 +921,13 @@ class TestRecheck(unittest.TestCase):
         scan = self.removable([row])
         self.assertEqual(scan.choices, [])
         self.assertIn("different repository", refused_reason(scan, self.lane))
+
+    def test_a_case_only_difference_in_the_repository_is_the_same_repository(self) -> None:
+        """The two spellings are recorded independently and the filesystem is
+        case-insensitive, so a case-only difference is the same directory."""
+        row = self.sb.row(self.lane, parent_repo=str(self.sb.main).swapcase())
+        scan = self.removable([row])
+        self.assertEqual(len(scan.choices), 1, scan.refused)
 
     def test_a_report_that_does_not_say_which_repository_refuses(self) -> None:
         """Without the parent repository there is nothing to confirm the lane
@@ -948,8 +955,8 @@ class TestRecheck(unittest.TestCase):
 
     def test_a_symlinked_parent_may_not_redirect_a_lane_into_a_never_touch_folder(self) -> None:
         """Allowing a symlinked parent must not reopen the path the removed
-        realpath check used to close: a lane spelled inside ~/apps/lanes that
-        resolves under ~/Documents is still a never-touch location, and
+        realpath check used to close: a lane spelled inside the lane root that
+        resolves under a protected home folder is still a never-touch location, and
         `git worktree remove` would follow the link and delete it there."""
         bait = self.sb.home / "Documents" / "hoghunter"
         bait.mkdir(parents=True)
@@ -958,7 +965,7 @@ class TestRecheck(unittest.TestCase):
         lane = link / "claude-redirected"
         self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/redirected", str(lane))
         self.sb.push(lane)
-        # The doctor reports the ~/apps/lanes spelling, so the resolved path is the only place the
+        # The doctor reports the lane-root spelling, so the resolved path is the only place the
         # never-touch folder shows up.
         row = self.sb.row(lane, realpath=str(lane), path=str(lane))
         scan = self.removable([row])
@@ -1928,7 +1935,7 @@ class TestEngineDependencies(unittest.TestCase):
         self.assertFalse((Path(self.cfg["data_dir"]) / lanes.ACTION_LOG_NAME).exists())
 
     def test_clears_a_lane_behind_a_symlinked_parent(self) -> None:
-        """The fleet keeps ~/apps/lanes/<Repo> on the external disk behind a symlink, so the lane's
+        """The fleet keeps its lanes under a per-repository root behind a symlink, so the lane's
         resolved path never matches its spelling.  Containment is decided on the resolved paths, and
         the folders there must still be clearable rather than refused as 'not a plain folder inside
         the lane' one by one."""
