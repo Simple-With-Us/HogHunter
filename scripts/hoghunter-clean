@@ -719,7 +719,8 @@ def proc_count(pattern: str) -> int:
     """
     try:
         p = subprocess.run(["/usr/bin/pgrep", "-f", pattern],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True,
+                           timeout=scan_op_timeout(15))
     except (subprocess.TimeoutExpired, OSError):
         log(f"pgrep {pattern!r} failed; treating it as busy")
         return PROBE_FAILED
@@ -967,7 +968,8 @@ def rule_snapshots() -> list[Candidate]:
     Keep the newest; prune the rest.  This is semi-safe: it is gated behind
     the full band.
     """
-    out = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=60)
+    out = _run(["/usr/bin/tmutil", "listlocalsnapshots", "/"],
+               timeout=scan_op_timeout(60))
     names = []
     for line in out.splitlines():
         line = line.strip()
@@ -1019,7 +1021,7 @@ def rule_temp_scratch() -> list[Candidate]:
     try:
         ssr_dirs = find_paths(
             [str(root), "-maxdepth", "3", "-type", "d", "-name", "ssr"],
-            RULE_BUDGET_SEC,
+            scan_op_timeout(RULE_BUDGET_SEC),
         )
     except (OSError, subprocess.SubprocessError):
         ssr_dirs = []
@@ -1064,7 +1066,7 @@ def rule_temp_scratch() -> list[Candidate]:
     try:
         for f in find_paths(
             [str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
-            60,
+            scan_op_timeout(60),
         ):
             if not f.strip() or f in seen:
                 continue
@@ -1338,7 +1340,7 @@ def rule_unbounded_logs() -> list[Candidate]:
                 [str(root), "-maxdepth", "3", "-type", "f",
                  "(", "-name", "*.log", "-o", "-name", "*.jsonl", "-o", "-name", "*.out",
                  "-o", "-name", "*.err", ")", "-size", "+64M"],
-                RULE_BUDGET_SEC,
+                scan_op_timeout(RULE_BUDGET_SEC),
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -1385,7 +1387,7 @@ def rule_sqlite_wals() -> list[Candidate]:
             files = find_paths(
                 [str(root), "-maxdepth", "3", "-type", "f",
                  "-name", "*.db-wal", "-size", "+32M"],
-                60,
+                scan_op_timeout(60),
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -1412,7 +1414,8 @@ def rule_brew() -> list[Candidate]:
         return []
     if proc_count("brew") or proc_count("node-gyp"):
         return []
-    out = _run(["/opt/homebrew/bin/brew", "cleanup", "--dry-run"], timeout=90)
+    out = _run(["/opt/homebrew/bin/brew", "cleanup", "--dry-run"],
+               timeout=scan_op_timeout(90))
     if not out:
         return []
     lines = [ln for ln in out.splitlines() if ln.strip() and "would remove" not in ln.lower()]

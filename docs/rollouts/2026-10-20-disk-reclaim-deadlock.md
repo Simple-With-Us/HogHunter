@@ -22,10 +22,10 @@ The owner ruling of 2026-10-02 settles the shape of the answer: pressure changes
 
 - One system-wide `lsof` snapshot with an ancestor index, so the per-candidate open-handle lookup is O(1) instead of one subprocess per candidate.  Candidate identity is deduped by inode, because the volume is case-insensitive and `Cache` and `cache` are one directory.
 - `SCAN_BUDGET_FRACTION = 0.6`.  The scan gets a fixed 60% share and the apply phase keeps the rest.  "Scan truncated" and "budget spent" are reported as two different outcomes.
-- Every scan-side subprocess timeout is clamped by `scan_op_timeout()` to the **scan share**, not merely to the whole run budget.  One candidate pays for three probes (the capped walk, the `find` walk and the `lsof` look), and together they can exceed the 60% share.  The scan share is always the smaller budget, so the whole-budget bound still holds on top of it.
+- Every scan-side subprocess timeout is clamped by `scan_op_timeout()` to the **scan share**, not merely to the whole run budget.  One candidate pays for three probes (the capped walk, the `find` walk and the `lsof` look), and together they can exceed the 60% share.  The scan share is always the smaller budget, so the whole-budget bound still holds on top of it.  That includes the rules that predate the split — `proc_count`, `rule_snapshots`, `rule_temp_scratch`, `rule_unbounded_logs`, `rule_sqlite_wals` and `rule_brew` — whose probes used to pass a fixed 15 s / 60 s / 90 s and could spend the share `scan()` only checks between rules.  The residual: the marker walk that guards a tree in `apply_delete` is an **apply**-side probe, so it takes `op_timeout()` and draws on the whole run budget rather than a slice of the delete reserve.  It is left there because a walk cut short of its answer fails closed to "marked", and a permanently blocked tree is the failure this document exists to remove.
 - Two new safe-tier rules: `app-caches` (idle application caches) and `agent-state` (transient agent logs, tmp and cache).  Both are registered in `config/reclaim-policy.json` *and* in `CleanRegimen.swift`, because a rule that is not in both places does not run.
 - A tree named like scratch is not necessarily scratch.  A directory holding a `.project_root` marker is left alone whatever it is called.
-- `holds_keep_sentinel(path, timeout)` asks whether a `.janitor-keep` marker exists *anywhere under* a tree, with a bounded `find -name` walk and no per-file stat.  It fails closed: a timeout, an `OSError` or a non-zero return all count as "marked".  It lives in `apply_delete`, the single choke point every delete passes through, so it covers every rule, and the two new rules also ask it at scan time so a marked tree is never offered in the first place.
+- `holds_keep_sentinel(path, timeout)` asks whether a `.janitor-keep` marker exists *anywhere under* a tree, with a bounded `find -iname` walk and no per-file stat.  `-iname`, not `-name`, because the sibling `has_keep_sentinel` resolves the same marker with `Path.exists()`, which is case-insensitive on the default volume: both probes have to recognize exactly the same markers, or a `.JANITOR-KEEP` is honored at a tree root and invisible inside one.  It fails closed: a timeout, an `OSError` or a non-zero return all count as "marked".  It lives in `apply_delete`, the single choke point every delete passes through, so it covers every rule, and the two new rules also ask it at scan time so a marked tree is never offered in the first place.
 
 **`scripts/vacuum/engine.py`**
 
@@ -72,7 +72,7 @@ The agent session transcripts (5.4 GB) are report-only by policy and were left i
 
 ## Verify
 
-- `python3 scripts/test-hoghunter-clean.py` -> ok (72 tests)
+- `python3 scripts/test-hoghunter-clean.py` -> ok (74 tests)
 - `python3 scripts/test-robotic-vacuum.py` -> ok (299 tests)
 - `xcodebuild -scheme HogHunter -destination 'platform=macOS' test` -> ok
 

@@ -731,6 +731,28 @@ def completed(code, out=""):
     return subprocess.CompletedProcess([], code, out, "")
 
 
+def test_the_pgrep_probe_is_bounded_by_the_scan_share(hh):
+    """`proc_count` passed a fixed 15s timeout, and it runs several times per
+    rule (builds, dev caches, brew) from the scan, so a loaded host that makes
+    pgrep hang could spend the share the deletes need -- the livelock the budget
+    split exists to stop."""
+    hh.set_budget(600)
+    try:
+        hh._SCAN_DEADLINE = time.monotonic() - 1.0
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=completed(1)) as run:
+            assert hh.proc_count("xcodebuild") == 0
+        assert run.call_args.kwargs["timeout"] == 1.0, "the timeout must follow the scan share"
+        # A scan with its share intact still gets the usual limit.
+        hh._SCAN_DEADLINE = time.monotonic() + 300.0
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=completed(1)) as run:
+            hh.proc_count("xcodebuild")
+        assert run.call_args.kwargs["timeout"] == 15.0
+    finally:
+        hh.set_budget(0)
+
+
 def test_proc_count_fails_closed(hh):
     """pgrep that times out is not 'nothing is building'.  Every caller reads a non-zero count as busy."""
     with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("pgrep", 15)):
@@ -1241,6 +1263,26 @@ def test_app_caches_leaves_a_cache_with_a_marker_inside_it_alone(hh):
             assert hh.rule_app_caches() == [], "a marked tree is not a candidate"
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_marker_inside_a_tree_is_matched_case_insensitively(hh):
+    """`find -iname` is the only thing that makes `.JANITOR-KEEP` inside a tree
+    protect it.  The sibling `has_keep_sentinel` resolves the same marker with
+    `Path.exists()`, which is case-insensitive on the default APFS volume, so
+    with `-name` a differently cased marker was honored at a tree root and
+    invisible inside one, and the walk deleted the tree and the marker
+    together.  Both probes must recognize exactly the same markers."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-case-"))
+    try:
+        (root / "inner").mkdir()
+        (root / "inner" / ".JANITOR-KEEP").write_text("", encoding="utf-8")
+        assert hh.holds_keep_sentinel(str(root), 30.0) is True
+        # ...and a tree with no marker of any casing is still unmarked, so the
+        # walk did not turn into "always true".
+        (root / "inner" / ".JANITOR-KEEP").unlink()
+        assert hh.holds_keep_sentinel(str(root), 30.0) is False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_the_delete_refuses_a_tree_with_a_marker_inside_it(hh):
