@@ -5,7 +5,6 @@
 One failed PR lookup no longer throws away the whole doctor report (HH-168):
 
 - The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.
-- A local build that is not cut from the main branch keeps the update feed off on purpose, so a developer build never gets replaced by the production release under the developer.  The owner's copy has to be a signed main build for it to update itself.
 
 Mac self-update stopped moving (HH-172):
 

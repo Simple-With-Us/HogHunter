@@ -1242,8 +1242,11 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
     """Lanes the doctor lists AND that pass the Vacuum's re-check.  Fails closed with an empty choices list."""
     if not report.ok:
         return LaneScan(False, report.reason, doctor_seconds=report.seconds)
+    # lookup_status carries the doctor's raw status token ("ok", "partial",
+    # "failed", "skipped") so a consumer can switch on it; gh_reason stays the
+    # human-readable sentence for the log.
     scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds,
-                    lookup_status=report.gh_reason if not report.gh_ok else "ok")
+                    lookup_status=str(report.data.get("gh") or "unknown"))
     # The doctor's overall gh status is NOT a gate here.  It says whether every
     # repository's PR lookup came back, and one failed lookup (a retired repo,
     # a network blip) used to throw away the whole report, so a single bad
