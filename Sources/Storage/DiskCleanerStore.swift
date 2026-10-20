@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -40,6 +41,25 @@ final class DiskCleanerStore: ObservableObject {
     /// A scan follows every exclusion edit.  Tests turn that off so they do
     /// not walk the real disk.
     private let rescanAfterExclusionChange: Bool
+    @Published private(set) var tempFilePolicy: TempFileSafetyPolicy
+    private var tempPolicyObserver: AnyCancellable?
+
+    /// Invalidate hidden dashboard stores too; changing safety never starts a scan.
+    func reloadTempFilePolicy() {
+        let policy = TempFileSafetyPolicy.load(from: exclusionsDefaults)
+        guard policy != tempFilePolicy else { return }
+        tempFilePolicy = policy
+        cancelScan()
+        report = nil
+        selectedItemIds.removeAll()
+        showConfirmation = false
+        if !isCleaning { state = .idle }
+    }
+
+    func setTempFileMinimumUntouchedHours(_ hours: Double) {
+        TempFileSafetyPolicy.save(hours: hours, to: exclusionsDefaults)
+        reloadTempFilePolicy()
+    }
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
@@ -98,7 +118,11 @@ final class DiskCleanerStore: ObservableObject {
         self.exclusionsDefaults = exclusionsDefaults
         self.rescanAfterExclusionChange = rescanAfterExclusionChange
         self.exclusions = CleanerExclusions.load(from: exclusionsDefaults)
+        self.tempFilePolicy = TempFileSafetyPolicy.load(from: exclusionsDefaults)
         self.lastCleanup = historyStore.latestRecord()
+        tempPolicyObserver = NotificationCenter.default.publisher(for: .tempFileSafetyPolicyChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reloadTempFilePolicy() }
     }
 
     deinit {
@@ -142,6 +166,7 @@ final class DiskCleanerStore: ObservableObject {
         guard ApplicationRunMode.current != .uiHarness else { return }
         cancelScan()
         reloadExclusions()
+        reloadTempFilePolicy()
         isScanInFlight = true
         let scanId = UUID()
         currentScanId = scanId
@@ -306,6 +331,7 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Executes cleaning on all selected items with APFS snapshot preservation.
     func cleanSelected(createSnapshot: Bool = true) {
+        reloadTempFilePolicy()
         guard let report else { return }
         let itemsToClean = report.categories.flatMap { $0.items }.filter { selectedItemIds.contains($0.id) }
         guard !itemsToClean.isEmpty else { return }

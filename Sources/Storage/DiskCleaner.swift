@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Categories of reclaimable disk clutter supported by Hog Hunter's disk cleaner.
 enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
@@ -20,9 +21,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     case largeAndOldFiles
     /// APFS local Time Machine snapshots pinning deleted storage blocks.
     case apfsSnapshots
-    /// Stale temporary files in `/tmp` untouched for 24+ hours, excluding
-    /// registered git worktrees, nested git checkouts, active conversion-batch
-    /// staging, and fleet-locked files.
+    /// Temporary files meeting the local untouched-age policy, excluding
+    /// worktrees, source projects, conversion staging, locks, and symlinks.
     case tempFiles
     /// Stale tool-made backups an agent left behind (Cursor database backups
     /// `state.vscdb.bak-*`), older than 7 days.  The live files are never listed.
@@ -67,7 +67,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .apfsSnapshots:
             return "Local Time Machine backup snapshots pinning deleted disk blocks on APFS containers."
         case .tempFiles:
-            return "Stale temporary files in /tmp untouched for 24+ hours.  Skips registered git worktrees, nested git checkouts, active conversion-batch staging, and fleet-locked files."
+            return TempFileSafetyPolicy.load().categoryDescription
         case .staleBackups:
             return "Tool-made backups older than 7 days (Cursor database backups).  Live files are never listed."
         }
@@ -608,6 +608,12 @@ final class DiskCleaner: @unchecked Sendable {
     /// Tests inject a fixed worktree set; the default shells out to
     /// `git worktree list --porcelain`.
     private let worktreePathsProvider: () -> Set<String>
+    private let tempPolicyProvider: () -> TempFileSafetyPolicy
+    private let tempMetadataProvider: (URL) throws -> TempEntryMetadata
+    private let tempNow: () -> Date
+    private let tempEntryCap: Int
+    private let tempUptime: () -> TimeInterval
+    private let tempWalkTimeLimit: TimeInterval
 
     init(fileManager: FileManager = .default,
          makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
@@ -615,7 +621,13 @@ final class DiskCleaner: @unchecked Sendable {
          purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) },
          homeDirectory: URL? = nil,
          tempRootDirectory: URL? = nil,
-         worktreePathsProvider: (() -> Set<String>)? = nil) {
+         worktreePathsProvider: (() -> Set<String>)? = nil,
+         tempPolicyProvider: @escaping () -> TempFileSafetyPolicy = { TempFileSafetyPolicy.load() },
+         tempMetadataProvider: @escaping (URL) throws -> TempEntryMetadata = TempEntryMetadata.read,
+         tempNow: @escaping () -> Date = { Date() },
+         tempEntryCap: Int = 25_000,
+         tempUptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         tempWalkTimeLimit: TimeInterval = 2) {
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
         self.listSnapshots = listSnapshots
@@ -623,6 +635,12 @@ final class DiskCleaner: @unchecked Sendable {
         self.homeDirectory = homeDirectory
         self.tempRootDirectory = tempRootDirectory
         self.worktreePathsProvider = worktreePathsProvider ?? Self.defaultWorktreePaths
+        self.tempPolicyProvider = tempPolicyProvider
+        self.tempMetadataProvider = tempMetadataProvider
+        self.tempNow = tempNow
+        self.tempEntryCap = tempEntryCap
+        self.tempUptime = tempUptime
+        self.tempWalkTimeLimit = tempWalkTimeLimit
     }
 
     // MARK: - Full Scan
@@ -740,11 +758,8 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Category Scanners
 
-    /// A temp entry is listed only when it is provably dead: untouched for
-    /// longer than `tempFileStaleThreshold`.  `/tmp` is transient by design;
-    /// anything idle for a full day while the machine is in active use is
-    /// abandoned staging, not live work.
-    static let tempFileStaleThreshold: TimeInterval = 24 * 3600
+    /// Age is a minimum eligibility boundary, never proof of abandonment.
+    static let tempFileStaleThreshold = TempFileSafetyPolicy().minimumUntouchedInterval
 
     /// Marker files whose presence inside a directory means an active
     /// conversion batch owns it.  Batch staging is pipeline-owned; the
@@ -758,144 +773,135 @@ final class DiskCleaner: @unchecked Sendable {
     /// batch staging (e.g. `vc-012`).  Always skipped, even without markers.
     static let batchStagingNamePrefixes = ["vc-"]
 
-    /// Scans the temp root (`/tmp`) for stale temp files.  An entry is
-    /// listed only when every exclusion below agrees it is dead:
-    /// - never symlinks (we do not follow links out of the temp root)
-    /// - never a registered git worktree, nested inside one, or a container
-    ///   holding a nested checkout (`git worktree list`, plus `.git` at the
-    ///   entry or one or more levels down)
-    /// - never active conversion-batch staging (pipeline name prefixes or
-    ///   batch marker files)
-    /// - never held by a fleet lock (adjacent `<name>.lock` sentinels, or a
-    ///   `fleet.lock` inside the directory)
-    /// - only regular files and directories (never sockets, FIFOs, devices)
-    /// - untouched for longer than `tempFileStaleThreshold`
-    ///
-    /// Items come back unselected: `/tmp` can hold live pipeline staging, so
-    /// every deletion needs explicit per-item review in the UI.
+    /// One bounded walk checks age, protections, and size together.  Incomplete
+    /// walks produce no suggestion, including unchecked rows.  Temp items still
+    /// require explicit review: idle plain files have no inferred backup status.
     func scanTempFiles() -> [CleanItem] {
-        let root = tempRootURL
-        let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .contentModificationDateKey]
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: Array(resourceKeys),
-            options: []
-        ) else {
-            return []
-        }
-
+        var enumerationFailed = false
+        guard let entries = fileManager.enumerator(at: tempRootURL, includingPropertiesForKeys: nil,
+            options: [.skipsSubdirectoryDescendants], errorHandler: { _, _ in enumerationFailed = true; return false }) else { return [] }
+        let policy = tempPolicyProvider()
+        let cutoff = tempNow().addingTimeInterval(-policy.minimumUntouchedInterval)
         let worktrees = Set(worktreePathsProvider().map(Self.resolvedPath))
-        let staleCutoff = Date().addingTimeInterval(-Self.tempFileStaleThreshold)
-        let siblingNames = Set(entries.map(\.lastPathComponent))
-
+        let deadline = tempUptime() + 10
+        var visited = 0
         var items: [CleanItem] = []
-        for url in entries {
-            if Task.isCancelled { break }
-            let values = try? url.resourceValues(forKeys: resourceKeys)
-            // Never follow symlinks: a link in /tmp can point anywhere.
-            if values?.isSymbolicLink == true { continue }
-
-            let path = Self.resolvedPath(url.path)
-
-            // Registered git worktree, or nested inside one.
-            if worktrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { continue }
-            // A top-level .git (file = worktree, dir = repo) catches checkouts
-            // the provider could not enumerate.
-            if fileManager.fileExists(atPath: (path as NSString).appendingPathComponent(".git")) { continue }
-
-            // Active conversion-batch staging is pipeline-owned.
-            if isBatchStaging(url) { continue }
-
-            // Fleet-locked entries are live by definition.
-            if isLockHeld(url, siblingNames: siblingNames) { continue }
-
-            // Only regular files and directories; never sockets, FIFOs, or devices.
-            let isDir = values?.isDirectory == true
-            let isFile = values?.isRegularFile == true
-            guard isDir || isFile else { continue }
-
-            // Provably dead: untouched longer than the stale threshold.
-            guard let modified = values?.contentModificationDate, modified < staleCutoff else { continue }
-
-            let stats = directoryStats(at: url)
-            guard stats.bytes > 0 else { continue }
-            // A directory's own mtime only moves when direct children are
-            // created, renamed, or removed; files written in place leave it
-            // alone.  Nested activity counts, so a directory holding live
-            // output is not stale even when its own mtime is old.
-            if isDir, let nested = stats.lastModified, nested >= staleCutoff { continue }
-
-            // A stale container holding a nested checkout one or more levels
-            // down would otherwise pass every other check.  Run after the
-            // freshness filters so live directories are not walked twice.
-            if isDir, containsNestedGitCheckout(url, worktrees: worktrees) { continue }
-
-            // Resolved URL so item.path, the subtitle, and the safety
-            // guard agree when `/var` and `/private/var` are the same inode.
-            let itemURL = URL(fileURLWithPath: path, isDirectory: isDir)
+        while let entry = entries.nextObject() {
+            guard !Task.isCancelled, !enumerationFailed, visited < tempEntryCap,
+                  tempUptime() < deadline, let url = entry as? URL else { return [] }
+            visited += 1
+            guard let stats = eligibleTempEntry(url, cutoff: cutoff, worktrees: worktrees),
+                  stats.bytes > 0 else { continue }
+            let itemURL = URL(fileURLWithPath: Self.resolvedPath(url.path))
             items.append(CleanItem(
-                category: .tempFiles,
-                title: url.lastPathComponent,
-                subtitle: itemURL.path,
-                url: itemURL,
-                bytes: stats.bytes,
-                fileCount: stats.fileCount,
-                isApproximate: stats.isApproximate,
-                lastModified: stats.lastModified,
-                isSelected: CleanCategory.tempFiles.defaultSelected,
-                detail: "Stale temporary file — untouched for 24+ hours"
+                category: .tempFiles, title: url.lastPathComponent, subtitle: itemURL.path,
+                url: itemURL, bytes: stats.bytes, fileCount: stats.fileCount,
+                lastModified: stats.lastModified, isSelected: false,
+                detail: "Temporary file — untouched for at least \(policy.hoursLabel) hours; review before cleaning"
             ))
         }
-
+        guard !enumerationFailed, !Task.isCancelled, policy == tempPolicyProvider() else { return [] }
         return items.sorted { $0.bytes > $1.bytes }
     }
 
-    /// True when a temp entry is (or contains) active conversion-batch
-    /// staging: a pipeline batch name prefix, or a batch marker file inside.
-    func isBatchStaging(_ url: URL) -> Bool {
-        let name = url.lastPathComponent
-        if Self.batchStagingNamePrefixes.contains(where: { name.hasPrefix($0) }) { return true }
-        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return false }
-        let contents = Set((try? fileManager.contentsOfDirectory(atPath: url.path)) ?? [])
-        return !Self.batchActiveMarkerNames.isDisjoint(with: contents)
+    /// Protect recognizable project material even when Git metadata was never
+    /// created or was lost.  Never ask a network service whether work is backed up.
+    static let tempProjectMarkers: Set<String> = [
+        ".git", ".hg", ".svn", ".project_root", ".hoghunter-keep", ".keep",
+        "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+        "package.swift", "project.yml", "cmakelists.txt", "makefile", "dockerfile",
+        "cargo.toml", "go.mod", "pyproject.toml", "requirements.txt", "setup.py",
+        "pom.xml", "build.gradle", "gemfile", "composer.json", "tsconfig.json",
+        "src", "sources"
+    ]
+    static let tempSourceExtensions: Set<String> = [
+        "swift", "m", "mm", "h", "c", "cc", "cpp", "hpp", "rs", "go", "py",
+        "js", "jsx", "ts", "tsx", "vue", "svelte", "html", "css", "scss",
+        "java", "kt", "kts", "rb", "php", "cs", "fs", "sh", "bash", "zsh",
+        "sql", "ipynb", "xcodeproj", "xcworkspace", "sln", "csproj",
+        "md", "rst", "tex", "r", "jl", "pl", "lua", "ex", "exs", "dart"
+    ]
+
+    private func protectedTempName(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return Self.tempProjectMarkers.contains(name)
+            || Self.tempSourceExtensions.contains(url.pathExtension.lowercased())
+            || name.hasSuffix(".lock")
+            || Self.batchActiveMarkerNames.contains(url.lastPathComponent)
+            || Self.batchStagingNamePrefixes.contains(where: { name.hasPrefix($0) })
     }
 
-    /// True when a fleet lock holds a temp entry: an adjacent `<name>.lock`
-    /// or `.<name>.lock` sentinel in the same directory, or a `fleet.lock`
-    /// inside the directory itself.
-    func isLockHeld(_ url: URL, siblingNames: Set<String>) -> Bool {
-        let name = url.lastPathComponent
-        if siblingNames.contains(name + ".lock") || siblingNames.contains("." + name + ".lock") { return true }
-        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return false }
-        return fileManager.fileExists(atPath: url.appendingPathComponent("fleet.lock").path)
-    }
-
-    /// True when a temp directory holds a git checkout below its own top
-    /// level: a nested `.git`, or a registered worktree under this path.
-    /// The entry's own `.git` is already handled by the caller.  Fails closed
-    /// on a cancelled or capped walk so a huge tree is not listed as dead.
-    func containsNestedGitCheckout(_ url: URL, worktrees: Set<String>) -> Bool {
+    /// nil means protected, recent, or unverified.  Do not skip packages or
+    /// hidden entries: a checkout, lock, or new write at any depth protects all
+    /// of its enclosing candidate.  Symlinks protect the container without being
+    /// followed.  Every directory listing and metadata failure fails closed.
+    private func eligibleTempEntry(_ url: URL, cutoff: Date, worktrees: Set<String>) -> DirectoryStats? {
+        let root = tempRootURL.path
         let path = Self.resolvedPath(url.path)
-        if worktrees.contains(where: { $0.hasPrefix(path + "/") }) {
-            return true
+        // Candidates are direct children only; a forged report cannot clean a
+        // nested file while sidestepping a parent's project/lock protection.
+        guard url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path == root,
+              path.hasPrefix(root + "/"), path != root,
+              !worktrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }),
+              !hasAdjacentTempLock(url) else { return nil }
+        let deadline = tempUptime() + tempWalkTimeLimit
+        var observations: [(URL, TempEntryMetadata)] = []
+        var bytes: UInt64 = 0
+        var count = 0
+        var latestModified: Date?
+        func inspect(_ entry: URL) -> TempEntryMetadata? {
+            guard !Task.isCancelled, observations.count < tempEntryCap,
+                  tempUptime() < deadline, !protectedTempName(entry),
+                  let info = try? tempMetadataProvider(entry), !info.isSymbolicLink,
+                  info.isDirectory || info.isRegularFile,
+                  info.latestActivity.timeIntervalSince1970.isFinite,
+                  info.latestActivity <= cutoff else { return nil }
+            observations.append((entry, info))
+            latestModified = max(latestModified ?? info.modified, info.modified)
+            if info.isRegularFile { bytes &+= info.bytes; count += 1 }
+            return info
         }
-        guard let enumerator = fileManager.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-            options: [.skipsPackageDescendants]
-        ) else {
-            return true
+        guard let rootInfo = inspect(url) else { return nil }
+        if rootInfo.isDirectory {
+            var enumerationFailed = false
+            guard let entries = fileManager.enumerator(at: url, includingPropertiesForKeys: nil,
+                options: [], errorHandler: { _, _ in enumerationFailed = true; return false }) else { return nil }
+            while let entry = entries.nextObject() {
+                guard !enumerationFailed, let child = entry as? URL, inspect(child) != nil else { return nil }
+            }
+            guard !enumerationFailed else { return nil }
         }
-        var visited = 0
-        for case let child as URL in enumerator {
-            if Task.isCancelled { return true }
-            visited += 1
-            if visited > 25_000 { return true }
-            if child.lastPathComponent != ".git" { continue }
-            let parent = Self.resolvedPath(child.deletingLastPathComponent().path)
-            if parent != path { return true }
+        // A second metadata read (no second directory traversal) rejects an
+        // inode replacement, nested write, or project/lock added during the
+        // walk.  Directory ctime catches additions even with preserved mtime.
+        for (entry, observed) in observations {
+            guard !Task.isCancelled, tempUptime() < deadline,
+                  let current = try? tempMetadataProvider(entry), current == observed else { return nil }
+        }
+        guard !hasAdjacentTempLock(url) else { return nil }
+        return DirectoryStats(bytes: bytes, fileCount: count, lastModified: latestModified)
+    }
+
+    /// lstat sees even dangling lock symlinks.  Permission and I/O failures
+    /// count as locked; only a missing sentinel allows the candidate through.
+    private func hasAdjacentTempLock(_ url: URL) -> Bool {
+        for name in [url.lastPathComponent + ".lock", "." + url.lastPathComponent + ".lock"] {
+            let lock = url.deletingLastPathComponent().appendingPathComponent(name)
+            do { _ = try TempEntryMetadata.read(lock); return true }
+            catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) { continue }
+            catch { return true }
         }
         return false
+    }
+
+    /// Fresh local policy and metadata checks are shared by all deletion paths,
+    /// including native regimen and companion cleans of an older report.
+    private func isTempEntrySafeNow(_ url: URL) -> Bool {
+        let policy = tempPolicyProvider()
+        let cutoff = tempNow().addingTimeInterval(-policy.minimumUntouchedInterval)
+        return eligibleTempEntry(url, cutoff: cutoff,
+            worktrees: Set(worktreePathsProvider().map(Self.resolvedPath))) != nil
+            && policy == tempPolicyProvider()
     }
 
     /// Registered git worktree paths, via `git worktree list --porcelain`
@@ -2162,13 +2168,7 @@ final class DiskCleaner: @unchecked Sendable {
             return path.hasPrefix("/.snapshots/com.apple.TimeMachine.")
 
         case .tempFiles:
-            // Same resolved root the scanner uses, so injected-root tests
-            // and the real /tmp (/private/tmp) stay on one path.  Resolve the
-            // candidate too: `standardizingPath` does not consult the file
-            // system, so `/var` and `/private/var` would otherwise disagree.
-            let tmpRoot = tempRootURL.path
-            let resolved = Self.resolvedPath(path)
-            return resolved.hasPrefix(tmpRoot + "/") && resolved != tmpRoot
+            return isTempEntrySafeNow(url)
 
         case .staleBackups:
             // Only versioned Cursor database backups under globalStorage.  The

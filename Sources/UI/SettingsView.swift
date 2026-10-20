@@ -294,9 +294,40 @@ private struct AlertsSettingsTab: View {
 private struct CleanerSettingsTab: View {
     @EnvironmentObject private var store: HogStore
     @State private var exclusions: CleanerExclusions = CleanerExclusions.load()
+    @State private var tempPolicy = TempFileSafetyPolicy.load()
 
     var body: some View {
         Form {
+            Section("Temp File Safety") {
+                Stepper(value: Binding(
+                    get: { Int(tempPolicy.minimumUntouchedHours) },
+                    set: { tempPolicy = TempFileSafetyPolicy.save(hours: Double($0)) }
+                ), in: 1...8_760) {
+                    HStack {
+                        Text("Minimum Untouched Time")
+                        TextField("Hours", value: Binding(
+                            get: { Int(tempPolicy.minimumUntouchedHours) },
+                            set: { tempPolicy = TempFileSafetyPolicy.save(hours: Double($0)) }
+                        ), format: .number.grouping(.never))
+                            .frame(width: 60)
+                        Text("Hours")
+                    }
+                }
+                HStack {
+                    Text("Presets:")
+                    ForEach([24, 72, 168, 720], id: \.self) { hours in
+                        Button("\(hours) Hours") {
+                            tempPolicy = TempFileSafetyPolicy.save(hours: Double(hours))
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                Text("Applies before /tmp items appear, including unchecked suggestions.\u{00A0} Git checkouts and recognizable source projects stay protected at every age.\u{00A0} Idle files are not evidence of a backup.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("Category Exclusions") {
                 Text("Excluded categories are skipped during disk scans and will never be cleaned.")
                     .font(.system(size: 11))
@@ -387,6 +418,7 @@ private struct CleanerSettingsTab: View {
         .frame(width: SettingsView.windowWidth - 80)
         .onAppear {
             exclusions = CleanerExclusions.load()
+            tempPolicy = TempFileSafetyPolicy.load()
         }
     }
 }
