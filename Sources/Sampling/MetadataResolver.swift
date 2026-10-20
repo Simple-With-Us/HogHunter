@@ -86,17 +86,23 @@ final class MetadataResolver {
                 continue
             }
             let bundleURL = app.bundleURL
+            // A forced refresh re-reads the mutable properties, but a running
+            // app's icon is stable: reuse the one already fetched so the main
+            // actor does not re-request it for every local app on every forced
+            // refresh.  Only a genuinely new pid pays the read.
+            let memoizedIcon = runningApps[pid]?.icon
             table[pid] = AppInfo(
                 bundleId: app.bundleIdentifier,
                 localizedName: app.localizedName,
                 activationPolicy: app.activationPolicy,
                 bundleURL: bundleURL,
-                icon: Self.isSafeIconSource(bundleURL) ? app.icon : nil
+                icon: Self.isSafeIconSource(bundleURL) ? (memoizedIcon ?? app.icon) : nil
             )
         }
         runningApps = table
-        iconByBundle.removeAll(keepingCapacity: true)
-        nameByBundle.removeAll(keepingCapacity: true)
+        // The bundle-keyed maps are a session-long memo: an app that quits
+        // keeps its icon and name for the history rows that still reference it.
+        // Only overwrite, never clear.
         for info in table.values {
             guard let bundleId = info.bundleId else { continue }
             if let icon = info.icon { iconByBundle[bundleId] = icon }
@@ -109,7 +115,10 @@ final class MetadataResolver {
     /// icon can touch the bundle, so automatic icon reads use local app roots.
     private static func isSafeIconSource(_ url: URL?) -> Bool {
         guard let url, url.isFileURL else { return false }
-        let path = url.standardizedFileURL.path
+        // `standardizedFileURL` drops `.` and `..` but does not resolve
+        // symlinks: a bundle symlinked out of a local root to an external
+        // volume must not pass the test and pull the icon off that volume.
+        let path = url.resolvingSymlinksInPath().path
         let roots = ["/Applications/", "/System/Applications/", "/System/Library/CoreServices/", NSHomeDirectory() + "/Applications/"]
         return roots.contains { path.hasPrefix($0) }
     }
