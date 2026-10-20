@@ -60,7 +60,7 @@ final class DiskCleanerStore: ObservableObject {
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {
         let updated = CleanerExclusions.load(from: exclusionsDefaults)
-        if updated != exclusions && manualScanOnly { discardResults() }
+        if updated != exclusions && manualScanOnly && !isCleaning { discardResults() }
         exclusions = updated
     }
 
@@ -333,6 +333,8 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Executes cleaning on all selected items with APFS snapshot preservation.
     func cleanSelected(createSnapshot: Bool = true) {
+        // An external exclusion edit invalidates the scan before its items are captured.
+        reloadExclusions()
         guard let report else { return }
         let itemsToClean = report.categories.flatMap { $0.items }.filter { selectedItemIds.contains($0.id) }
         guard !itemsToClean.isEmpty else { return }
@@ -343,10 +345,7 @@ final class DiskCleanerStore: ObservableObject {
         currentCleanId = cleanId
 
         let currentTier = selectedTier
-        // The scan that produced these items may be older than an edit made
-        // from the phone or Settings.  `clean` re-filters against whatever it
-        // is handed, so hand it the stored value, not the launch-time copy.
-        reloadExclusions()
+        // `clean` re-filters against the stored value, not the launch-time copy.
         let activeExclusions = exclusions
         let totalItems = max(1, itemsToClean.count)
         state = .cleaning(progress: 0, currentItem: "Preparing…")

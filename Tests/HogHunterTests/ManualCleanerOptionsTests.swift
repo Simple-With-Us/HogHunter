@@ -3,6 +3,40 @@ import XCTest
 
 @MainActor
 final class ManualCleanerOptionsTests: XCTestCase {
+    func testExternalExclusionEditPreventsCleaningAStaleSelection() async throws {
+        let suite = "hh174-clean-revalidation-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        let logs = home.appendingPathComponent("Library/Logs/FixtureLogs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let file = logs.appendingPathComponent("fixture.log")
+        try Data(repeating: 65, count: 1024).write(to: file)
+        defer { try? FileManager.default.removeItem(at: home) }
+        CleanerExclusions.update(in: defaults) { exclusions in
+            exclusions.excludedCategories = Set(CleanCategory.allCases
+                .filter { $0 != .logsAndDiagnostics }.map(\.rawValue))
+        }
+        let cleaner = DiskCleaner(homeDirectory: home)
+        let store = DiskCleanerStore(cleaner: cleaner, historyStore: CleanupHistoryStore(inMemory: true),
+                                     exclusionsDefaults: defaults, manualScanOnly: true)
+
+        store.scan()
+        for _ in 0..<100 {
+            if case .scanned = store.state { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .scanned = store.state else { return XCTFail("fixture scan did not finish") }
+        store.selectAll()
+        XCTAssertGreaterThan(store.totalSelectedItemsCount(), 0)
+
+        CleanerExclusions.update(in: defaults) { $0.excludedPaths.append(logs.path) }
+        store.cleanSelected(createSnapshot: false)
+        XCTAssertEqual(store.state, .idle, "the stale scan must be invalidated before cleaning starts")
+        XCTAssertNil(store.report)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+
     func testDashboardOptionsInvalidateReportWithoutStartingAnotherScan() async throws {
         let suite = "hh174-manual-cleaner-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
