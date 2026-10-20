@@ -2,7 +2,7 @@
 
 Vector sources for the boar head emblem the owner supplied.
 
-These files are the **standalone emblem**:  the artwork the owner uses for their own `.ico` and `.icns`.  They are **not** the app icon lockup.  The Finder / About / notification icon in `Assets.xcassets/AppIcon.appiconset` is the square Hog Hunter lockup (boar, wordmark, and the line "Monitor. Detect. Reclaim."), and it stays sourced from its own uncropped artwork, as the "App icon" section of [`docs/DESIGN.md`](../docs/DESIGN.md) requires.
+These files are the **standalone emblem**: the artwork the owner uses for their own `.ico` and `.icns`.  They are **not** the app icon lockup.  The Finder / About / notification icon in `Assets.xcassets/AppIcon.appiconset` is the square Hog Hunter lockup (boar, wordmark, and the line "Monitor. Detect. Reclaim."), and it stays sourced from its own uncropped artwork, as the "App icon" section of [`docs/DESIGN.md`](../docs/DESIGN.md) requires.
 
 ## Files
 
@@ -12,13 +12,13 @@ These files are the **standalone emblem**:  the artwork the owner uses for their
 | `HogHunter-Logo-Rotated.svg` | The same emblem rotated 9.5 degrees counter-clockwise. |
 | `HogHunter-Icon-Rotated.svg` | The emblem on a pre-cropped rounded tile (240 px corner radius at 1024, transparent corners), rotated, scaled and shifted to match the owner's `.icns`.  Display only. |
 
-`HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon:  the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
+`HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon: the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
 
 ## Provenance
 
 Traced from the owner's own raster artwork with potrace 1.16 (`-u 10 -a 1.0 -O 0.2 -t 4`), not redrawn.  The cream cut-outs inside the head are real vector holes (`fill-rule="evenodd"`), so the file holds up from 16 px to 1024 px.
 
-Fidelity, measured against the owner's own files:  the upright vector scores a brown-pixel IoU of 0.996 against the master PNG, and the icon vector scores 0.990 against the owner's `.icns` at 1024.
+Fidelity, measured against the owner's own files: the upright vector scores a brown-pixel IoU of 0.996 against the master PNG, and the icon vector scores 0.990 against the owner's `.icns` at 1024.
 
 ## Palette
 
