@@ -480,7 +480,11 @@ struct HogHunterPanel: View {
             while !Task.isCancelled {
                 let storageForeground = !isQuickView && selectedTab == .storage && hostScope == .mac
                 await directoryUsage.refreshIfNeeded(background: !storageForeground)
-                do { try await Task.sleep(for: .seconds(directoryUsage.nextRefreshDelay)) }
+                // Background pauses leave `nextAttempt` in the past, so the raw delay
+                // collapses to a second and this loop spins.  Match the idle floor.
+                let delay = storageForeground ? directoryUsage.nextRefreshDelay
+                                              : max(15, directoryUsage.nextRefreshDelay)
+                do { try await Task.sleep(for: .seconds(delay)) }
                 catch { break }
             }
         }
