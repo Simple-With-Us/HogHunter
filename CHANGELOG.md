@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Mac self-update stopped moving (HH-172):
+
+- The release for build 158 died at the stapling step with `NSURLErrorDomain -1005` against Apple's CloudKit ticket-delivery endpoint, even though both notarizations were already Accepted, and the run behind it was cancelled too.  The published feed sat at 1.0.154 while main carried on, so an installed copy that could self-update had nothing new to take.  `scripts/mac-release-build.sh` now staples through a retry (five attempts, 30 seconds apart) for the app and the disk image, the same helper ContactLogo uses for the same flake.
+- A local `scripts/install.sh` build that is not cut from `main` keeps Sparkle off on purpose, so a lane build never gets replaced by the production release under the developer.  The owner's copy has to be a signed `main` build for it to update itself.
+
 Server status on the main window (HH-163):
 
 - The remote server's readings moved out of the Maintain tab and onto the main window.  A strip under the meters shows the host with its CPU, RAM and disk, each coloured by its own severity, and a new top-level **Server** tab holds the full card (CPU, RAM, swap, disks, the app databases, the largest folders).  The strip appears when a host is configured, and it is a button: one click opens the Server tab.
