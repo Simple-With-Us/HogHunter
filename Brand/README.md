@@ -36,7 +36,7 @@ The owner's `.icns` additionally scales the artwork 1.0463x, shifts it by (-11.8
 
 In SVG, a positive `rotate()` is clockwise, so the counter-clockwise rotation is written `rotate(-9.5 512 512)`.
 
-## Rebuilding a standalone .icns or .ico
+## Rebuilding a standalone .icns
 
 Render `HogHunter-Icon-Rotated.svg` into a folder with the exact names and pixel sizes `iconutil` requires, then pack it:
 
@@ -53,5 +53,15 @@ iconutil -c icns iconset.iconset -o HogHunter.icns
 ```
 
 `iconutil -c iconset` reads the rendered PNG folder and writes `iconset.iconset`, and `iconutil -c icns` then packs that folder.
+
+## Rebuilding a Windows .ico
+
+A Windows `.ico` is a different container, and `iconutil` cannot write one.  It carries its own size set (16, 24, 32, 48, 64, 128, 256) and none of the `iconutil` naming convention, so build it in one step with a tool that writes ICO:
+
+```bash
+convert -define icon:auto-resize=16,24,32,48,64,128,256 Brand/HogHunter-Icon-Rotated.svg HogHunter.ico
+```
+
+`icotool -c` does the same from a set of rendered PNGs.  Neither ImageMagick nor `icotool` is installed on the fleet Mac, so install one before rebuilding.
 
 Render the SVG with a rasterizer that keeps transparency.  Note that `qlmanage -t` renders SVG but flattens transparency onto white, so it is fine for checking the emblem and not for the icon tile.
