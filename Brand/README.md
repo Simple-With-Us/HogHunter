@@ -119,9 +119,11 @@ The owner ruled on 2026-10-21 that the favicon should be the master's own artwor
 
 The crop is the window the owner's own render was cut to, measured off the rotated master: the snout stops short of the left edge, the ear is cut flat at the top and the mane is cut at the right and at the bottom, so the head fills the frame and the eye, the tusk and the teeth all survive at 32 px.  In the rotated master's canvas that window runs from `(62.2, 123.9)` to `(773.2, 832.9)`, which is 711 by 709 units of the 1024 canvas, about 82 per cent of the artwork's width.  The artwork itself reaches from `(85, 89)` to `(949, 913)` there, so the window misses 177 units of mane on the right and trims the ear and the lower mane.
 
-There is no padding.  The mark is the owner's own image at 1:1, which is the thing he approved, and the 711 unit window is rendered into a 711 unit square, so the head gets every pixel the frame has.  `HogHunter-Favicon-32.svg` therefore carries a `viewBox` of `0 0 711 711`.
+There is no padding.  The mark is the owner's own image at 1:1, which is the thing he approved, and the 711 unit wide window is rendered into a 711 unit square.  The window is 711 by 709, so it fills the frame from side to side with nothing at the sides, and sits one unit short of the top and the bottom, which is one unit of background above and below it and under a tenth of a pixel at 32 px.  `HogHunter-Favicon-32.svg` therefore carries a `viewBox` of `0 0 711 711`.
 
-Two things make that work, and both are easy to get wrong.  The window is **centred** in the frame rather than starting at its corner, so the translate that places it is `(side - w) / 2 - bx0`, which is `-62.2` here; computing the window's centre and subtracting the corner a second time shifts the artwork by half a window, about a pixel at 32 px.  And the window **cuts** the artwork, which a viewport cannot do, so the artwork group carries a `clipPath` whose rect is the window itself and the part of the artwork outside it is gone rather than merely out of frame.  Without the clip the ear stands whole above the frame and the mark is not the crop it claims to be.
+Three things make that work, and all three are easy to get wrong.  The window is **centred** in the frame rather than starting at its corner, so the translate that places it is `(side - w) / 2 - bx0` in x and `(side - h) / 2 - by0` in y, which is `-62.2` and `-122.9` here.  The generator used to compute the offset as the window's centre against the frame's centre and then subtract the window's corner a second time to get the translate, which gave `0` and `-1` instead: the window's left edge landed 62.2 units to the right of where it belongs and its top edge 121.9 units too low, which is 2.8 px across and 5.5 px down at the 32 px render, so the ear stood whole above the frame and the mark showed more of the boar than the crop claims.  And the window **cuts** the artwork, so the artwork group carries a `clipPath` whose rect is the window itself.
+
+That clip rect is in the rotated master's canvas space, which is the user space of the `<g>` that carries `clip-path`, and that space is the one the window was measured in and the one the outer translate is applied in.  The same four numbers would mean something else in the root frame, where the window lands at `(0, 1)` to `(711, 710)`.  The viewport cuts at the frame edge, one unit outside the window on the top and the bottom, so the `clipPath` is what makes the visible artwork the window rather than the frame.
 
 No extra rotation is applied on top of the owner's turn, so the artwork keeps the same 9.5 degrees counter-clockwise it has in `HogHunter-Logo-Rotated.svg`, and the mark is the same crop the owner approved.
 
@@ -167,10 +169,19 @@ render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
   sed "s/width=\"1024\" height=\"1024\"/width=\"$2\" height=\"$2\"/" "$1" > "$tmp/mark.svg"
   printf '<!doctype html><html><head><style>html,body{margin:0;padding:0;background:transparent}svg{display:block}</style></head><body>%s</body></html>' \
     "$(cat "$tmp/mark.svg")" > "$tmp/r.html"
-  "$CHROME" --headless=new --disable-gpu --no-sandbox --force-device-scale-factor=1 \
-    ${4:+--default-background-color=00000000} \
-    --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
-    --user-data-dir="$tmp/profile" "file://$tmp/r.html"
+  # --headless=new sometimes hangs and never writes the file, so every render
+  # runs under a 30 second watchdog and gets one retry
+  for attempt in 1 2; do
+    "$CHROME" --headless=new --disable-gpu --no-sandbox --force-device-scale-factor=1 \
+      ${4:+--default-background-color=00000000} \
+      --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
+      --user-data-dir="$tmp/profile" "file://$tmp/r.html" &
+    pid=$!
+    ( sleep 30 && kill -9 "$pid" 2>/dev/null ) & watchdog=$!
+    if wait "$pid"; then status=0; else status=$?; fi
+    kill "$watchdog" 2>/dev/null
+    [ "$status" -eq 0 ] && break
+  done
   rm -rf "$tmp"
 }
 
@@ -182,7 +193,7 @@ render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent
 render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent
 ```
 
-Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`: sharing one profile across renders makes Chrome hang on a stale singleton lock.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so give it a timeout and a retry, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`: sharing one profile across renders makes Chrome hang on a stale singleton lock.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above runs each render under a 30 second watchdog and gives it one retry, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
 
 The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
 
@@ -219,17 +230,17 @@ ImageMagick writes DIB payloads for every entry below 256 px, which is what the 
 Declare every size a browser may ask for by name, the ICO as the multi-size fallback, and the SVG for the browsers that take a vector:
 
 ```html
-<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48 64x64">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png">
 <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="32x32 48x48 64x64">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="32x32 48x48 64x64 128x128 256x256">
 ```
 
-The `sizes` attribute is the hint a browser uses to pick the most appropriate icon, so every size has to be declared.  That is why the 16 px PNG is in the block even though the ICO already carries a 16 px entry: without a `sizes="16x16"` candidate a browser is free to render the full artwork down to a 16 px tab, which is the brown smudge the reduced contour exists to avoid.  The same reason keeps the SVG out of the 16 px range: it is declared for 32 px and up, which is what it was drawn for.
+The `sizes` attribute is the hint a browser uses to pick the most appropriate icon, so every size has to be declared.  That is why the 16 px PNG is in the block even though the ICO already carries a 16 px entry: without a `sizes="16x16"` candidate a browser is free to render the full artwork down to a 16 px tab, which is the brown smudge the reduced contour exists to avoid.  The SVG starts at 32 px, which is the smallest size it was drawn for, and it runs up to 256 px because a vector is sharp at any size.
 
-`favicon.ico` carries 16, 32, 48 and 64 px, and `sizes="any"` is the honest way to declare it, because the file holds all four.  The ICO is also the one a crawler gets when it falls back to the root of the host, so its largest entry is 64 rather than 48.
+`favicon.ico` carries 16, 32, 48 and 64 px, and it is declared with those four sizes rather than with `sizes="any"`.  `any` tells the browser the resource is good at any size, and the largest bitmap here is 64, so a browser that took it at 128 px would upscale a 64 px image.  Listing the four sizes keeps the choice honest and leaves the large sizes to the vector, which is sharp at them.  The ICO is also the one a crawler gets when it falls back to the root of the host, so its largest entry is 64 rather than 48.
 
 Google Search takes **one** favicon per hostname, and its guidance is a square icon of **at least** 8x8 and **larger than 48x48**, so 64 is the size that meets it.  That is why the ICO's largest entry and the largest PNG are both 64.  Google does not read SVG at all, so the search surface is carried by the PNG and the ICO, and the SVG is for browsers only.
 
