@@ -18,7 +18,7 @@ These files are the **standalone emblem**: the artwork the owner uses for their 
 | `preview-small-icons.png` | The small variants at their true pixel size, against the owner's shipped 16 px and 32 px icons. |
 | `HogHunter-Favicon-16.svg` | The reduced contour, cropped tight, on a 1024 cream field.  For a 16 px favicon. |
 | `HogHunter-Favicon-32.svg` | The **full traced artwork**, cropped to the head and turned to the owner's own angle.  For 32 px and up. |
-| `HogHunter-Favicon-Tile.svg` | The same full artwork on the owner's rounded tile, for a tab that needs a silhouette. |
+| `HogHunter-Favicon-Tile.svg` | The same full artwork on the owner's rounded tile, for a tab that needs a silhouette.  It carries the whole head rather than the owner's crop. |
 | `favicon.svg` | The same full artwork, scalable, for browsers that accept a vector favicon. |
 | `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Renders of the favicon at true device pixels.  16 px is the reduced contour; 32, 48 and 64 px are the full artwork. |
 | `favicon-tile-32.png`, `favicon-tile-64.png` | The same full artwork on the rounded tile, with transparent corners. |
@@ -121,6 +121,8 @@ The crop is the window the owner's own small render was cut to, measured off the
 
 No extra rotation is applied on top of the owner's turn, so the artwork keeps the same 9.5 degrees counter-clockwise it has in `HogHunter-Logo-Rotated.svg`, and the mark is the same crop the owner approved.
 
+The crop is a `translate()` on the artwork group rather than an offset `viewBox`, so the number in the file is not the window itself.  The window's top left corner is moved to the padded origin of the `viewBox`, and that is where the negative translate comes from: the artwork sits inside the owner's turn, and the crop is taken in the rotated canvas.  The window above is what that translate resolves to, and it is the window the owner's own render was measured at.
+
 `HogHunter-Favicon-32.svg` and `favicon.svg` therefore carry the master's own path data: 17 subpaths and 26 cubic curves, the same as `HogHunter-Logo.svg`, with no simplification at all.  The tile variant carries the same artwork plus the owner's rounded tile as a separate path, so it holds 18 subpaths and four arc segments.
 
 ### Why 16 px is the one size that cannot carry it
@@ -143,7 +145,7 @@ Two alternatives were tried and lost.  **Rotating the unchanged artwork** does n
 
 The RDP epsilon and the spike filter work together.  RDP alone at 45 units keeps the mane as a fringe of separate spikes, and at 16 px that fringe is a row of loose pixels.  The spike filter removes any convex vertex whose height is under 30 units - 0.54 px at the 16 px crop and about 1 px at the 32 px crop - and the outline closes up into one solid mass.
 
-The 16 px mark uses 2 per cent crop padding, so the head fills the pixels it has.  The full artwork uses 6 per cent, where the extra air stops the tusk from touching the edge.  The tile variant is the same artwork at 86 per cent of the tile, so it keeps the owner's rounded silhouette.
+The 16 px mark uses 2 per cent crop padding, so the head fills the pixels it has.  The full artwork uses 6 per cent, where the extra air stops the tusk from touching the edge.  The tile variant puts the same artwork on the owner's rounded tile at 86 per cent, which keeps the owner's rounded silhouette and shows the whole head rather than the owner's crop.
 
 `favicon.ico` is a real ICO container with three 32-bit DIB entries, at 16, 32 and 48 px, and each entry carries exactly the pixels of the matching PNG.  DIB is the right choice here: a PNG-compressed ICO entry is only read by Windows at the 256x256 size, so PNG payloads below that size would be dropped or shown broken in Explorer.  The same reasoning is spelled out in the `.ico` section below.
 
