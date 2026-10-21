@@ -1713,6 +1713,162 @@ class TestTickWatchdog(unittest.TestCase):
         self.assertEqual(thread.call_count, 1)
 
 
+class TestPartialRunRecord(unittest.TestCase):
+    """A tick the watchdog kills still has to report what it reclaimed.
+
+    A finished run is appended to the history when it completes, so a tick
+    that was killed mid-work left no record at all: the panel kept showing
+    the last completed run and the bytes it had already reclaimed were
+    nowhere.  The engine now reports the run as it goes, and the store keeps
+    the in-progress copy beside the history.
+    """
+
+    def setUp(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        self.home = Path(tempfile.mkdtemp(prefix="hhpartial-"))
+        self.addCleanup(shutil.rmtree, str(self.home), True)
+        self.cfg = load_config(home=self.home)
+        self.cfg["housekeeper_lock"] = str(self.home / ".housekeeper.lock")
+        self.cfg["data_dir"] = str(self.home / "rv")
+        self.store = VacuumStore(self.cfg, home=self.home)
+        self.seen = []
+        self.engine = VacuumEngine(self.cfg, home=self.home, on_step=self.seen.append)
+
+    def run_watch(self, dry_run: bool = False):
+        """Run a watch tick with the disk sample and the thresholds stubbed."""
+        from unittest.mock import patch
+
+        sample = {"disk_free_gb": 100.0, "disk_sample_ok": True, "load1": 1.0}
+        with patch("vacuum.engine.sample_mac", return_value=sample):
+            with patch("vacuum.engine.evaluate_hits", return_value=[]):
+                return self.engine.run_watch_tick({}, None, dry_run=dry_run)
+
+    def test_a_step_reports_the_run_so_far(self):
+        record, _hits, _cleaned = self.run_watch()
+        self.assertEqual(len(self.seen), 1)
+        self.assertEqual(self.seen[0].run_id, record.run_id)
+        self.assertEqual(self.seen[0].steps[0].step_id, "resource_sample")
+
+    def test_the_store_keeps_the_in_progress_copy(self):
+        self.run_watch()
+        self.store.write_partial_run(self.seen[-1])
+        partial = self.store.load_partial_run()
+        self.assertEqual(partial["run_id"], self.seen[-1].run_id)
+        self.assertTrue(partial["steps"])
+
+    def test_a_dry_run_writes_no_partial_record(self):
+        # The dry-run contract: a plan reports what it would do and writes
+        # nothing.  A plan has reclaimed nothing, so there is nothing to
+        # record.
+        self.run_watch(dry_run=True)
+        self.assertEqual(self.seen, [])
+
+    def test_a_finished_run_clears_the_partial_record(self):
+        record, _hits, _cleaned = self.run_watch()
+        self.store.write_partial_run(record)
+        self.store.append_run(record)
+        self.store.clear_partial_run()
+        self.assertEqual(self.store.load_partial_run(), {})
+
+    def test_the_status_shows_the_partial_run(self):
+        record, _hits, _cleaned = self.run_watch()
+        self.store.write_partial_run(record)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertIsNotNone(status["partial_run"])
+        self.assertEqual(status["partial_run"]["run_id"], record.run_id)
+
+    def test_a_partial_older_than_a_completed_run_is_ignored(self):
+        # A run that finishes through a path that never clears the partial
+        # copy (the CLI's --run-now) must not be overwritten by a killed tick
+        # that came before it.
+        import dataclasses
+
+        killed, _hits, _cleaned = self.run_watch()
+        self.store.write_partial_run(killed)
+        later = dataclasses.replace(killed, run_id="later-run", started_at=killed.started_at + 60)
+        self.store.append_run(later)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertIsNone(status["partial_run"])
+
+    def test_a_partial_newer_than_every_completed_run_is_kept(self):
+        import dataclasses
+
+        done, _hits, _cleaned = self.run_watch()
+        self.store.append_run(done)
+        killed = dataclasses.replace(done, run_id="killed-run", started_at=done.started_at + 60)
+        self.store.write_partial_run(killed)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertEqual(status["partial_run"]["run_id"], "killed-run")
+
+    def test_a_finished_run_leaves_no_partial_in_the_status(self):
+        record, _hits, _cleaned = self.run_watch()
+        self.store.append_run(record)
+        self.store.clear_partial_run()
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertIsNone(status["partial_run"])
+
+
+class TestTickBudget(unittest.TestCase):
+    """The reclaim budget has to fit inside the tick the watchdog kills.
+
+    The two numbers used to be written down in two files, so a change to one
+    could leave the other too small -- and a reclaim step that overruns the
+    watchdog gets cut off mid-work.  The budget is now derived from the
+    watchdog, and these tests hold the two together.
+    """
+
+    def test_the_budget_is_derived_from_the_watchdog(self):
+        from vacuum.config import TICK_WATCHDOG_SEC
+        from vacuum.engine import (
+            _RECLAIM_BUDGET_SECONDS,
+            _RECLAIM_GRACE_SECONDS,
+            _RECLAIM_RESERVE_SECONDS,
+        )
+
+        self.assertEqual(
+            _RECLAIM_BUDGET_SECONDS,
+            int(TICK_WATCHDOG_SEC) - _RECLAIM_GRACE_SECONDS - _RECLAIM_RESERVE_SECONDS,
+        )
+
+    def test_the_budget_plus_the_grace_stays_inside_the_watchdog(self):
+        from vacuum.config import TICK_WATCHDOG_SEC
+        from vacuum.engine import _RECLAIM_BUDGET_SECONDS, _RECLAIM_GRACE_SECONDS
+
+        self.assertLess(
+            _RECLAIM_BUDGET_SECONDS + _RECLAIM_GRACE_SECONDS,
+            TICK_WATCHDOG_SEC,
+            "a reclaim that overruns the watchdog gets cut off mid-work",
+        )
+
+    def test_maintain_arms_the_same_watchdog_the_engine_derives_from(self):
+        import maintain
+        from vacuum.config import TICK_WATCHDOG_SEC
+
+        self.assertEqual(maintain.TICK_WATCHDOG_SEC, TICK_WATCHDOG_SEC)
+
+    def test_the_watchdog_config_is_a_leaf_module(self):
+        """maintain.py imports the watchdog number from vacuum.config before
+        the watchdog is armed, because the number has to be known to arm it.
+
+        That is only safe while vacuum.config stays a leaf module.  It must
+        not pull in the engine, which is where the 17-minute import wedge
+        lived, and a wedge there would happen before any watchdog was armed.
+        """
+        code = (
+            "import sys; sys.path.insert(0, %r); import vacuum.config; "
+            "print('vacuum.engine' in sys.modules)" % str(REPO / "scripts")
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+        )
+        self.assertEqual(out.stdout.strip(), "False", out.stderr)
+
+
 def load_tests(loader, tests, pattern):
     """CI runs only this file, so load the lane doctor tests beside the others."""
     import importlib.util

@@ -10,6 +10,11 @@ struct DiskCleanerView: View {
     var autoScanOnAppear: Bool = true
     var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
+    /// The unattended clean regimen, as the owner set it.
+    @State private var regimen = CleanRegimen.load()
+    /// The one runner the app uses.  Observed so the summary and the next
+    /// run time refresh themselves after a run.
+    @ObservedObject private var regimenRunner = CleanRegimenRunner.shared
 
     var body: some View {
         VStack(spacing: 10) {
@@ -24,6 +29,7 @@ struct DiskCleanerView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            regimenSection
             contentBody
             bottomBar
         }
@@ -68,6 +74,104 @@ struct DiskCleanerView: View {
             Text(CleanerCopy.confirmationMessage(sizeText: "\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))", itemCount: store.totalSelectedItemsCount()))
         }
     }
+
+    // MARK: - Automatic Cleanup Regimen
+
+    /// The unattended clean regimen.
+    ///
+    /// It is off by default and the owner turns it on.  An unattended delete
+    /// is a decision a person makes, not something an app grants itself, so
+    /// the toggle sits here beside the rest of the reclaim controls rather
+    /// than behind a settings screen nobody opens.
+    private var regimenSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Toggle("Automatic Cleanup", isOn: Binding(
+                    get: { regimen.isEnabled },
+                    set: { enabled in
+                        regimen.isEnabled = enabled
+                        regimen = regimen.sanitized()
+                        regimen.save()
+                        // Turning it on schedules the first run one interval
+                        // out.  It does not fire a clean the moment the
+                        // switch flips: an unattended delete starts at a time
+                        // the owner chose, and "Run Now" is right beside it.
+                        if regimen.isEnabled {
+                            regimenRunner.scheduleFromNow()
+                        } else {
+                            regimenRunner.refreshSchedule()
+                        }
+                    }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 11))
+
+                Spacer()
+
+                if regimen.isEnabled {
+                    Picker("Every", selection: Binding(
+                        get: { regimen.intervalHours },
+                        set: { hours in
+                            regimen.intervalHours = hours
+                            regimen = regimen.sanitized()
+                            regimen.save()
+                            // A new interval is a new schedule, so the clock
+                            // starts again from now.
+                            regimenRunner.scheduleFromNow()
+                        }
+                    )) {
+                        ForEach(Self.regimenIntervals, id: \.self) { hours in
+                            Text(hours == 1 ? "1 Hour" : "\(Int(hours)) Hours")
+                                .tag(hours)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .font(.system(size: 11))
+                    .labelsHidden()
+
+                    Button {
+                        regimenRunner.runNow()
+                    } label: {
+                        Label("Run Now", systemImage: "play.circle")
+                            .font(.system(size: 11))
+                    }
+                    .controlSize(.small)
+                    .disabled(regimenRunner.isRunning)
+                }
+            }
+
+            if regimen.isEnabled {
+                if let next = regimenRunner.nextRunDate {
+                    Text("Next run \(next.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                if let waiting = regimenRunner.waitingReason {
+                    Text(waiting)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                if let summary = regimenRunner.lastSummary {
+                    Text(summary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Off.\u{00A0} Hog Hunter never deletes anything on its own until this is turned on.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    /// The intervals the picker offers, in hours.
+    private static let regimenIntervals: [Double] = [1, 4, 12, 24]
 
     // MARK: - Tier Selector & Disclaimer
 

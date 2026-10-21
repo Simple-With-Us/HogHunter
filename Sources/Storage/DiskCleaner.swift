@@ -668,7 +668,8 @@ final class DiskCleaner: @unchecked Sendable {
             if Task.isCancelled { break }
             await Task.yield()
             progress?(category.title)
-            let items = scanCategory(category, installedApps: installedApps).filter { !exclusions.isPathExcluded($0.path) }
+            let items = scanCategory(category, installedApps: installedApps)
+                .filter { !exclusions.isPathExcluded($0.path) && !isHandsOff($0.url) }
             if Task.isCancelled { break }
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
             let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
@@ -1858,6 +1859,18 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Cleaning Execution
 
+    /// What `clean` starts its error with when the safety snapshot could not be
+    /// made.  The unattended runner reads it to stop a run that has no rollback
+    /// point, so the text lives in one place.
+    static let snapshotFailedPrefix = "APFS snapshot failed."
+
+    /// What `clean` records for an item it did not delete because the run was
+    /// stopped.  It is a sentinel and not a failure: the item was not refused,
+    /// the run was cancelled.  The unattended runner filters it out before it
+    /// counts failures, so a stop never hides a real failure that happened
+    /// before it.
+    static let cancelledMessage = "Cleanup cancelled"
+
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
     /// When `createSnapshot` is true, takes an APFS local snapshot first.
@@ -1897,7 +1910,11 @@ final class DiskCleaner: @unchecked Sendable {
             )
         }
 
-        let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
+        let activeItems = items.filter {
+            !exclusions.isCategoryExcluded($0.category)
+                && !exclusions.isPathExcluded($0.path)
+                && !isHandsOff($0.url)
+        }
         let snapshotItems = activeItems.filter { $0.category == .apfsSnapshots }
         let hasSnapshotItems = !snapshotItems.isEmpty
 
@@ -1907,7 +1924,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         if hasSnapshotItems {
             guard !Task.isCancelled else {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 return resultSoFar(removed: 0)
             }
             progress?(0.0, "Thinning APFS local snapshots…")
@@ -1928,14 +1945,14 @@ final class DiskCleaner: @unchecked Sendable {
                     noteSuccess(item)
                 }
             } else if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 progress?(1.0, "Stopped")
                 return resultSoFar(removed: thinnedCount)
             } else {
                 errors.append("Failed to thin APFS local snapshots")
             }
             if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 progress?(1.0, "Stopped")
                 return resultSoFar(removed: removedCount)
             }
@@ -1950,8 +1967,8 @@ final class DiskCleaner: @unchecked Sendable {
                 // Thinning already ran (destructive).  Report it; do not claim
                 // "Nothing was deleted" after local snapshots were thinned.
                 errors.append(thinnedCount > 0
-                    ? "APFS snapshot failed.  APFS local snapshots were already thinned; no other data was deleted."
-                    : "APFS snapshot failed.  Nothing was deleted.")
+                    ? "\(Self.snapshotFailedPrefix)  APFS local snapshots were already thinned; no other data was deleted."
+                    : "\(Self.snapshotFailedPrefix)  Nothing was deleted.")
                 progress?(1.0, "Stopped")
                 return resultSoFar(removed: thinnedCount)
             }
@@ -1961,12 +1978,12 @@ final class DiskCleaner: @unchecked Sendable {
 
         for (index, item) in activeItems.enumerated() {
             if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 break
             }
             await Task.yield()
             if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 break
             }
             let progressFraction = Double(index) / Double(totalItems)
@@ -2069,6 +2086,32 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         if prohibitedPrefixes.contains(path) {
+            return false
+        }
+
+        // The fleet's own work.  `~/apps/lanes` is a directory of symlinks to
+        // the external volume, but it resolves to the internal disk when that
+        // volume is unmounted, so a volume check alone cannot catch it.  The
+        // owner ruled on 2026-10-21 that the lanes tree is out of scope for
+        // any reclaim, so it is refused by name.
+        let lanesPath = home + "/apps/lanes"
+        if path == lanesPath || path.hasPrefix(lanesPath + "/") {
+            return false
+        }
+
+        // Never touch a volume other than the one that holds the home
+        // directory.  The external disk carries the lanes and the fleet's
+        // working copies, and a reclaim has no business there.
+        if isOnExternalVolume(path) {
+            return false
+        }
+
+        // A `.janitor-keep` marker on this path, on any parent of it, or
+        // anywhere inside it means the operator marked that tree hands off.
+        // This is the choke point every delete passes through, so it asks the
+        // inside question as well as the parent one: a tree is deleted whole,
+        // and deleting it would take the marker with it.
+        if isHandsOff(URL(fileURLWithPath: path)) {
             return false
         }
 
@@ -2350,6 +2393,49 @@ final class DiskCleaner: @unchecked Sendable {
 
     private var userHomeURL: URL {
         homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    }
+
+    /// True when a `.janitor-keep` marker keeps this candidate off every clean.
+    ///
+    /// Two questions, because the cleaner deletes whole trees.  A marker on the
+    /// path or on any parent of it protects the path (`isKept`).  A marker
+    /// anywhere *inside* a directory protects the directory too
+    /// (`containsMarker`), because trashing or removing the tree would take
+    /// the operator's marker with it.  The Python engine asks both at its own
+    /// choke point (`apply_delete`), and an unattended regimen has nobody
+    /// standing there to say "not that one", so the Swift side asks both.
+    ///
+    /// A symlink item has its *target's* children trashed (see `clean`), so the
+    /// inside question is asked of the resolved target.
+    private func isHandsOff(_ url: URL) -> Bool {
+        if KeepSentinel.isKept(url: url, fileManager: fileManager) { return true }
+        let tree = url.resolvingSymlinksInPath()
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: tree.path, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+        return KeepSentinel.containsMarker(url: tree, fileManager: fileManager)
+    }
+
+    /// True when the path lives on a volume other than the one that holds the
+    /// home directory.
+    ///
+    /// The home directory is the reference: a machine whose home is itself on
+    /// an external disk must still be able to clean its own caches.  The
+    /// cheap string checks come first because most candidates are under the
+    /// home directory and never need a volume lookup.
+    private func isOnExternalVolume(_ path: String) -> Bool {
+        let home = userHomeURL.resolvingSymlinksInPath()
+        // A home on an external volume is its own reference: nothing is
+        // external relative to it.
+        if home.path.hasPrefix("/Volumes/") { return false }
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        // A symlink out to a mounted disk lands here.
+        if resolved.path.hasPrefix("/Volumes/") { return true }
+        if path.hasPrefix(userHomeURL.path) { return false }
+        // Anything else is judged by the volume resource values, which is how
+        // a mounted disk that does not live under /Volumes is still caught.
+        return DiskCleaner.detectVolume(for: URL(fileURLWithPath: path)).isExternal
     }
 
     /// Root scanned by the temp-files category.  Tests inject an override.
