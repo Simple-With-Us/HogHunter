@@ -63,6 +63,21 @@ final class CleanRegimenRunner: ObservableObject {
     /// The run in flight, held for the same reason.
     nonisolated let runBox = CleanRegimenTaskBox()
     private let defaultsKey = "hoghunter.cleaner.regimen.lastRunAt"
+    /// When a safety gate last failed, kept apart from the completed-run
+    /// clock: a run that tripped the gate did not happen, and the two states
+    /// have to be told apart.
+    private let gateFailureKey = "hoghunter.cleaner.regimen.lastGateFailureAt"
+
+    /// How long a failed safety gate backs off before the runner tries
+    /// again.
+    ///
+    /// The gate trips after the disk scan, so a failure that persists (a
+    /// throttled or non-APFS volume) would otherwise repeat a full scan and
+    /// another snapshot attempt every fifteen minutes.  An hour is long
+    /// enough that a transient failure clears without a long wait, and short
+    /// enough that the cleaner is not left idle for a whole interval after
+    /// the blocker is gone.
+    static let gateBackoff: TimeInterval = 60 * 60
 
     /// How often the scheduler wakes to *consider* a run.  The interval
     /// between runs is the regimen's; this just checks the clock, and
@@ -190,8 +205,24 @@ final class CleanRegimenRunner: ObservableObject {
     /// Is a run due?  Pure enough to test without a timer.
     func isDue(regimen: CleanRegimen, lastRunAt: Date?) -> Bool {
         guard regimen.isEnabled else { return false }
+        // A failed safety gate holds the run back for a while.  The gate trips
+        // after the disk scan, so a failure that persists -- a throttled or
+        // non-APFS volume -- would otherwise pay a full scan every check.
+        if let gateFailure = gateFailureAt, now().timeIntervalSince(gateFailure) < Self.gateBackoff {
+            return false
+        }
         guard let lastRunAt else { return true }
         return now().timeIntervalSince(lastRunAt) >= regimen.effectiveIntervalHours * 3600
+    }
+
+    /// When a failed safety gate was last hit, if it was.
+    private var gateFailureAt: Date? {
+        lastRunDefaults.object(forKey: gateFailureKey) as? Date
+    }
+
+    /// When the runner may try the gate again.
+    private var gateRetryDate: Date? {
+        gateFailureAt.map { $0.addingTimeInterval(Self.gateBackoff) }
     }
 
     /// One look at the clock: start a scheduled run if one is due and nothing
@@ -203,8 +234,16 @@ final class CleanRegimenRunner: ObservableObject {
         let regimen = (plan ?? CleanRegimen.load()).sanitized()
         let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
-            waitingReason = nil
-            updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
+            // A gate that failed recently is holding the run, and the owner
+            // can act on that, so the panel says so rather than going quiet.
+            if let retry = gateRetryDate, retry > now() {
+                waitingReason = "The last run could not take a safety snapshot, so it will try again later."
+                let intervalNext = updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
+                nextRunDate = intervalNext.map { min(retry, $0) } ?? retry
+            } else {
+                waitingReason = nil
+                updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
+            }
             return nil
         }
         // A scheduled run honors the regimen's own conditions.  "Run Now" is
@@ -261,10 +300,13 @@ final class CleanRegimenRunner: ObservableObject {
         return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyEvent)
     }
 
-    private func updateNextRun(regimen: CleanRegimen, lastRunAt: Date?) {
-        guard regimen.isEnabled else { nextRunDate = nil; return }
+    @discardableResult
+    private func updateNextRun(regimen: CleanRegimen, lastRunAt: Date?) -> Date? {
+        guard regimen.isEnabled else { nextRunDate = nil; return nil }
         let base = lastRunAt ?? now()
-        nextRunDate = base.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
+        let next = base.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
+        nextRunDate = next
+        return next
     }
 
     /// Start the regimen's clock from now.
@@ -339,6 +381,10 @@ final class CleanRegimenRunner: ObservableObject {
         // day out for a collision that lasts minutes.  The scheduler's next
         // check retries instead.
         var recordsRun = true
+        // A safety gate that failed is its own state: the run did not
+        // happen, and the next attempt waits a little rather than repeating
+        // the scan every check.
+        var gateFailed = false
         defer {
             isRunning = false
             // A cancelled run is not a completed one: the app is quitting or
@@ -346,8 +392,13 @@ final class CleanRegimenRunner: ObservableObject {
             // restart.  The next launch finds the run still due.
             if recordsRun && !Task.isCancelled {
                 lastRunDefaults.set(started, forKey: defaultsKey)
+                // The gate works again, so the backoff it earned is over.
+                lastRunDefaults.removeObject(forKey: gateFailureKey)
                 updateNextRun(regimen: regimen, lastRunAt: started)
             } else {
+                if gateFailed {
+                    lastRunDefaults.set(started, forKey: gateFailureKey)
+                }
                 nextRunDate = regimen.isEnabled
                     ? started.addingTimeInterval(checkInterval)
                     : nil
@@ -438,6 +489,7 @@ final class CleanRegimenRunner: ObservableObject {
                     // rollback point that could not be taken.
                     recordsRun = false
                     result.skippedReason = reason
+                    gateFailed = true
                     break
                 }
             }
@@ -464,20 +516,33 @@ final class CleanRegimenRunner: ObservableObject {
             // `lastError`, which no view shows.  The panel gets a count.
             lastError = result.errors.first
         }
-        if result.itemsRemoved > 0 {
-            lastSummary = "Reclaimed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items."
+        let reclaimed: String? = result.itemsRemoved > 0
+            ? "Reclaimed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items."
+            : nil
+        if result.cancelled {
+            // The run was stopped, not refused.  Nothing failed to be
+            // removed, so the panel must not say that.
+            lastSummary = [reclaimed, "The cleanup was stopped before it finished."]
+                .compactMap { $0 }
+                .joined(separator: " ")
         } else if let reason = result.skippedReason {
             lastSummary = reason
+        } else if let reclaimed {
+            // Some items were reclaimed and some were not.  The panel says
+            // both, so a partial run does not read as a clean one.
+            lastSummary = result.errors.isEmpty
+                ? reclaimed
+                : "\(reclaimed) \(Self.failureCountText(result.errors.count))"
         } else if !result.errors.isEmpty {
-            // Nothing was removed and something went wrong, a failed safety
-            // snapshot included.  "No reclaimable items" would read as a
-            // clean no-op when the run actually stopped.
-            lastSummary = result.errors.count == 1
-                ? "1 item could not be removed."
-                : "\(result.errors.count) items could not be removed."
+            lastSummary = Self.failureCountText(result.errors.count)
         } else {
             lastSummary = "No reclaimable items."
         }
+    }
+
+    /// How a count of failures reads in the panel.
+    nonisolated static func failureCountText(_ count: Int) -> String {
+        count == 1 ? "1 item could not be removed." : "\(count) items could not be removed."
     }
 
     // MARK: - Rule mapping

@@ -403,10 +403,11 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
     func testAFailedSnapshotDoesNotStartTheIntervalClock() async {
         // A missing rollback point is a failed safety gate.  The run did not
-        // happen, so it must not start the interval's clock -- or the next
-        // cleanup waits a whole interval over a snapshot that could not be
-        // taken -- and the panel has to say why it stopped.
+        // happen, so it must not start the interval's clock -- the next
+        // cleanup would wait a whole interval over a snapshot that could not
+        // be taken -- and the panel has to say why it stopped.
         let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let gateKey = "hoghunter.cleaner.regimen.lastGateFailureAt"
         let now = Date()
         let defaults = makeDefaults()
         let regimen = makeRegimen(enabled: true, intervalHours: 24, rules: ["app-caches"])
@@ -457,13 +458,116 @@ final class CleanRegimenRunnerTests: XCTestCase {
                        "The cleanup snapshot could not be created, so the regimen did not run.")
         XCTAssertNil(defaults.object(forKey: key),
                      "a run that stopped for a missing snapshot did not happen")
-        XCTAssertTrue(runner.isDue(regimen: regimen, lastRunAt: defaults.object(forKey: key) as? Date),
-                      "the run is still due, so the next check retries")
-        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
-                       now.addingTimeInterval(15 * 60).timeIntervalSince1970,
-                       accuracy: 1)
+        XCTAssertNotNil(defaults.object(forKey: gateKey),
+                        "the failed gate is remembered as its own state")
         XCTAssertEqual(runner.lastSummary,
                        "The cleanup snapshot could not be created, so the regimen did not run.")
+    }
+
+    func testAFailedSnapshotBacksOffInsteadOfScanningEveryCheck() async {
+        // The gate trips after the disk scan, so a failure that persists
+        // would repeat a full scan every fifteen minutes.  The gate backs
+        // off for an hour instead, and the run is due again afterwards, so a
+        // transient failure still clears without a whole interval of waiting.
+        let gateKey = "hoghunter.cleaner.regimen.lastGateFailureAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let regimen = makeRegimen(enabled: true, intervalHours: 24, rules: ["app-caches"])
+
+        let item = CleanItem(
+            category: .userCaches,
+            title: "TestCache",
+            subtitle: "~/Library/Caches/TestCache",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestCache").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .userCaches,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report },
+            cleanProvider: { _, _, _ in
+                CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: 0,
+                    errors: ["\(DiskCleaner.snapshotFailedPrefix)  Nothing was deleted."],
+                    cleanedAt: now
+                )
+            }
+        )
+
+        await runner.runNow(regimen: regimen)?.value
+        XCTAssertNotNil(defaults.object(forKey: gateKey))
+
+        // The run is held for the backoff, so the next check does not scan.
+        XCTAssertFalse(runner.isDue(regimen: regimen, lastRunAt: nil),
+                       "the failed gate holds the run back")
+        runner.tick(regimen: regimen)
+        XCTAssertEqual(runner.waitingReason,
+                       "The last run could not take a safety snapshot, so it will try again later.")
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(CleanRegimenRunner.gateBackoff).timeIntervalSince1970,
+                       accuracy: 1)
+
+        // After the backoff the run is due again, so the blocker clearing is
+        // enough to get the cleaner running again.
+        let later = CleanRegimenRunner(
+            now: { now.addingTimeInterval(CleanRegimenRunner.gateBackoff + 60) },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report },
+            cleanProvider: { _, _, _ in
+                CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+        XCTAssertTrue(later.isDue(regimen: regimen, lastRunAt: nil),
+                      "the run is due again once the backoff is over")
+    }
+
+    func testAPartialRunSaysWhatCouldNotBeRemoved() {
+        // Some items went and some did not.  A panel that shows only the
+        // success reads as a clean run, and the failures are invisible.
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.itemsRemoved = 12
+        result.bytesReclaimed = 1_048_576
+        result.errors = ["Safety check failed for path: /Users/jay/Library/Caches/SomeCache"]
+        runner.finish(result, regimen: makeRegimen())
+
+        XCTAssertEqual(runner.lastSummary,
+                       "Reclaimed 1 MB from 12 items. 1 item could not be removed.")
+        XCTAssertFalse((runner.lastSummary ?? "").contains("/Users/jay"),
+                       "the panel must not name a path")
+    }
+
+    func testACancelledRunDoesNotClaimAnItemCouldNotBeRemoved() {
+        // A cancelled run records "Cleanup cancelled" as an error, but
+        // nothing was refused.  The panel must not say an item failed.
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.cancelled = true
+        result.errors = ["Cleanup cancelled"]
+        runner.finish(result, regimen: makeRegimen())
+
+        XCTAssertEqual(runner.lastSummary, "The cleanup was stopped before it finished.")
     }
 
     func testAFinishedRunClearsTheHold() {
