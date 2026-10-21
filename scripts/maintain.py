@@ -29,6 +29,8 @@ if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 
+# The watchdog that kills a wedged tick.
+#
 # The launchd job runs this every five minutes.  A tick that wedges -- on a
 # slow disk, mid-import, with the host swapping -- blocks every tick after
 # it, because launchd will not start a second instance of a StartInterval job
@@ -40,13 +42,21 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 # minutes and had written nothing.  The same tick, run by hand, took seven
 # seconds.
 #
-# The budget has to sit above the longest tick the engine can legitimately
-# run, or the watchdog kills work that was still inside its own budget.  A
-# watch tick that decides to clean hands off to a pressure run, and the cache
-# reclaim step alone runs hoghunter-clean with a 600s budget plus a 180s
-# grace (engine.py `_RECLAIM_BUDGET_SECONDS` and `_RECLAIM_GRACE_SECONDS`),
-# so 900s leaves room for that step without the watchdog cutting it short.
-TICK_WATCHDOG_SEC = 900.0
+# The number lives in vacuum.config rather than here, because the engine
+# derives the reclaim step's own budget from it.  The budget has to sit above
+# the longest tick the engine can legitimately run, or the watchdog kills work
+# that was still inside its own budget.  A watch tick that decides to clean
+# hands off to a pressure run, and the cache reclaim step alone runs
+# hoghunter-clean with a budget plus a grace (engine.py
+# `_RECLAIM_BUDGET_SECONDS` and `_RECLAIM_GRACE_SECONDS`), so 900s leaves
+# room for that step without the watchdog cutting it short.  When the two were
+# written down separately they could drift, and a drift here is a tick killed
+# in the middle of its work.
+#
+# vacuum.config is a leaf module with no heavy imports, so importing it here
+# -- before the watchdog is armed -- is safe.  The heavier vacuum imports
+# still happen below, after the watchdog is up.
+from vacuum.config import TICK_WATCHDOG_SEC  # noqa: E402
 
 _watchdog_armed = False
 

@@ -64,7 +64,10 @@ def run_scheduler_tick(
 ) -> dict[str, Any]:
     store = store or VacuumStore.open()
     cfg = store.cfg
-    engine = VacuumEngine(cfg, store.home)
+    # The engine reports what it has reclaimed after every step, so a tick the
+    # watchdog kills still leaves a record of the work it did.  The store owns
+    # the file, so the engine never has to know where it lives.
+    engine = VacuumEngine(cfg, store.home, on_step=store.write_partial_run)
     now = now or time.time()
     if dry_run:
         return run_dry_tick(store, engine, now)
@@ -80,6 +83,7 @@ def run_scheduler_tick(
     if should_run(store, cfg, "watch", now):
         record, hits, cleaned = engine.run_watch_tick(watch_scratch, prev_free_f)
         store.append_run(record)
+        store.clear_partial_run()
         if not run_skipped_for_lock(record):
             store.touch_scheduler("last_watch", now)
         results.append({"trigger": "watch", "run_id": record.run_id, "hits": len(hits), "cleaned": cleaned})
@@ -87,6 +91,7 @@ def run_scheduler_tick(
     if should_run(store, cfg, "janitor", now):
         record = engine.run(TriggerKind.JANITOR)
         store.append_run(record)
+        store.clear_partial_run()
         if not run_skipped_for_lock(record):
             store.touch_scheduler("last_janitor", now)
         results.append({"trigger": "janitor", "run_id": record.run_id})
@@ -94,6 +99,7 @@ def run_scheduler_tick(
     if should_run(store, cfg, "full", now):
         record = engine.run(TriggerKind.FULL, band="cheap")
         store.append_run(record)
+        store.clear_partial_run()
         if not run_skipped_for_lock(record):
             store.touch_scheduler("last_full", now)
         results.append({"trigger": "full", "run_id": record.run_id})
@@ -190,6 +196,15 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
         for s in record.get("steps") or []:
             step_states[s.get("step_id")] = s
 
+    # A tick the watchdog killed never reached the history, so its in-progress
+    # copy is the only record of what it reclaimed.  Fold it in: its steps are
+    # the newest results, and the run itself is shown beside the last
+    # completed one, so a killed tick is visible instead of silently absent.
+    partial = store.load_partial_run()
+    if partial:
+        for s in partial.get("steps") or []:
+            step_states[s.get("step_id")] = s
+
     return {
         "health": health,
         "disk": disk,
@@ -201,6 +216,7 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
         "next_run_at": next_runs,
         "intervals_seconds": intervals,
         "last_run": last_record,
+        "partial_run": partial or None,
         "step_last_results": step_states,
         "history_count": len(history),
         "launchd_loaded": launchd_loaded(),

@@ -1,0 +1,224 @@
+import XCTest
+@testable import HogHunter
+
+/// Covers the runner that makes the regimen actually happen.
+///
+/// The regimen was fully built and never ran: `CleanRegimenRunner` was never
+/// instantiated, so the schedule it carried was never started, and nothing in
+/// the app ever asked for a run.  These tests cover the decisions that decide
+/// whether a run happens at all -- is it due, is it allowed to start, and does
+/// it step aside when another cleaner is already working.
+///
+/// None of these tests scan the real disk or delete anything: every run here
+/// uses a regimen with no enabled rules, which returns before the scan.
+@MainActor
+final class CleanRegimenRunnerTests: XCTestCase {
+
+    private var root: URL!
+    private var lockPath: URL!
+
+    override func setUp() {
+        super.setUp()
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HogHunterRunnerTests_\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        lockPath = root.appendingPathComponent(".housekeeper.lock", isDirectory: true)
+    }
+
+    override func tearDown() {
+        if let root {
+            try? FileManager.default.removeItem(at: root)
+        }
+        super.tearDown()
+    }
+
+    // MARK: - Helpers
+
+    private func makeDefaults() -> UserDefaults {
+        let suite = "hoghunter.tests.runner.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    private func makeRunner(now: Date = Date(), defaults: UserDefaults? = nil) -> CleanRegimenRunner {
+        CleanRegimenRunner(
+            now: { now },
+            defaults: defaults ?? makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) }
+        )
+    }
+
+    /// A regimen that is on but may delete nothing, so a test can run the
+    /// scheduler's decisions without touching the disk.
+    private func makeRegimen(enabled: Bool = true, intervalHours: Double = 4, rules: Set<String> = []) -> CleanRegimen {
+        CleanRegimen(
+            isEnabled: enabled,
+            intervalHours: intervalHours,
+            enabledRules: rules
+        )
+    }
+
+    // MARK: - Is a run due
+
+    func testARegimenThatIsOffIsNeverDue() {
+        let runner = makeRunner()
+        XCTAssertFalse(runner.isDue(regimen: makeRegimen(enabled: false), lastRunAt: nil))
+    }
+
+    func testAnEnabledRegimenWithNoPreviousRunIsDue() {
+        let runner = makeRunner()
+        XCTAssertTrue(runner.isDue(regimen: makeRegimen(enabled: true), lastRunAt: nil))
+    }
+
+    func testAnEnabledRegimenIsNotDueUntilItsIntervalHasPassed() {
+        let now = Date()
+        let runner = makeRunner(now: now)
+        let regimen = makeRegimen(enabled: true, intervalHours: 4)
+
+        XCTAssertFalse(runner.isDue(regimen: regimen, lastRunAt: now.addingTimeInterval(-3 * 3600)))
+        XCTAssertTrue(runner.isDue(regimen: regimen, lastRunAt: now.addingTimeInterval(-5 * 3600)))
+    }
+
+    // MARK: - Running
+
+    func testAnOutOfRangeRegimenIsClampedRatherThanRejected() {
+        // A regimen edited by hand, or written by a future build, must never
+        // wedge the scheduler.  The stored values are clamped into a runnable
+        // shape rather than refused, so a bad value costs a wrong number and
+        // not a regimen that never runs again.
+        var regimen = makeRegimen(enabled: true)
+        regimen.intervalHours = 0
+        regimen.targetsPerChunk = 0
+        regimen.pressuredTargetsPerChunk = -5
+        regimen.chunkPauseSeconds = -1
+
+        let clamped = regimen.sanitized()
+        XCTAssertTrue(clamped.isValid)
+        XCTAssertEqual(clamped.intervalHours, 24)
+        XCTAssertEqual(clamped.targetsPerChunk, 1)
+        XCTAssertEqual(clamped.pressuredTargetsPerChunk, 1)
+        XCTAssertEqual(clamped.chunkPauseSeconds, 0)
+    }
+
+    func testAnEnabledRegimenWithAnUnreachableIntervalIsStillRunnable() async {
+        // The runner sanitizes before it checks, so an interval past the
+        // ceiling is pulled back to it rather than stopping the regimen.
+        let runner = makeRunner()
+        var regimen = makeRegimen(enabled: true, intervalHours: 24 * 365)
+        regimen = regimen.sanitized()
+        XCTAssertEqual(regimen.intervalHours, 24 * 14)
+        await runner.runNow(regimen: regimen)?.value
+        XCTAssertFalse(runner.isRunning)
+    }
+
+    func testTheRunnerWaitsWhenAnotherCleanupHoldsTheLock() async {
+        // The Python reclaim ticks and the in-app regimen delete the same
+        // kinds of things, so they must not run at the same time.  The lock is
+        // the same one the Python engine takes.
+        let peer = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(peer.acquire(), .acquired)
+
+        let runner = makeRunner()
+        await runner.runNow(regimen: makeRegimen())?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason,
+                       "Another cleanup is already running, so the regimen waited.")
+        // The peer's lock is untouched.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
+        peer.release()
+    }
+
+    func testTheRunnerTakesTheHousekeeperLockAndGivesItBack() async {
+        // A stale lock from a process that died.  If the runner takes it, it
+        // removes it on the way out; if it does not, the directory survives.
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        let old = Date().addingTimeInterval(-(HousekeeperLock.defaultStaleMinutes + 5) * 60)
+        try? FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: lockPath.path)
+
+        let runner = makeRunner()
+        await runner.runNow(regimen: makeRegimen())?.value
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockPath.path),
+                       "the runner took the lock and released it")
+    }
+
+    func testARegimenWithNoRulesReclaimsNothingAndSaysSo() async {
+        let runner = makeRunner()
+        await runner.runNow(regimen: makeRegimen(enabled: true, rules: []))?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 0)
+        XCTAssertEqual(runner.lastRun?.bytesReclaimed, 0)
+        XCTAssertFalse(runner.isRunning)
+    }
+
+    func testTwoRunsDoNotOverlap() async {
+        let runner = makeRunner()
+        let first = runner.runNow(regimen: makeRegimen())
+        XCTAssertNotNil(first)
+
+        // A second run while the first is in flight is refused rather than
+        // queued, so two regimens cannot reclaim over each other.
+        XCTAssertNil(runner.runNow(regimen: makeRegimen()))
+        await first?.value
+    }
+
+    // MARK: - Scheduling
+
+    func testTurningTheRegimenOnSchedulesItOneIntervalOut() {
+        // The owner flips the switch; the first run is one interval out, not
+        // a clean the instant the switch flips.
+        let now = Date()
+        let runner = makeRunner(now: now)
+        runner.scheduleFromNow(regimen: makeRegimen(enabled: true, intervalHours: 4))
+
+        let expected = now.addingTimeInterval(4 * 3600).timeIntervalSince1970
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0, expected, accuracy: 1)
+
+        // And a run that was just scheduled is not due yet.
+        XCTAssertFalse(runner.isDue(regimen: makeRegimen(enabled: true, intervalHours: 4), lastRunAt: now))
+    }
+
+    func testARegimenThatIsOffHasNoNextRun() {
+        let runner = makeRunner()
+        runner.scheduleFromNow(regimen: makeRegimen(enabled: false))
+        XCTAssertNil(runner.nextRunDate)
+
+        runner.refreshSchedule(regimen: makeRegimen(enabled: false))
+        XCTAssertNil(runner.nextRunDate)
+    }
+
+    func testRefreshingTheScheduleKeepsTheStoredClock() {
+        let now = Date()
+        let runner = makeRunner(now: now)
+        runner.scheduleFromNow(regimen: makeRegimen(enabled: true, intervalHours: 12))
+        let first = runner.nextRunDate
+
+        // The clock does not move when the schedule is merely re-read.
+        runner.refreshSchedule(regimen: makeRegimen(enabled: true, intervalHours: 12))
+        XCTAssertEqual(runner.nextRunDate, first)
+    }
+
+    // MARK: - Lifecycle
+
+    func testStopCanBeCalledFromAnotherThread() {
+        // `HogStore.deinit` is not main-actor isolated and still has to stop
+        // the runner, so the cancel path has to be callable from any thread.
+        let runner = makeRunner()
+        runner.start()
+
+        let done = expectation(description: "stop ran off the main thread")
+        DispatchQueue.global().async {
+            runner.stop()
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+    }
+
+    func testTheAppHasOneSharedRunner() {
+        // The storage panel and the settings window both need the runner and
+        // neither owns it.
+        XCTAssertTrue(CleanRegimenRunner.shared === CleanRegimenRunner.shared)
+    }
+}

@@ -1,0 +1,152 @@
+import Foundation
+
+/// The mkdir-based housekeeper lock, mirrored from the Python reclaim engine.
+///
+/// Why this exists
+/// ---------------
+/// `scripts/vacuum/lock.py` owns the original: it creates
+/// `~/.claude-disk-janitor/.housekeeper.lock` as a *directory*, treats a lock
+/// older than two hours as stale, and treats `HOUSEKEEPER_LOCK_OWNER=1` as
+/// re-entrancy.  `~/apps/mac-auto-cleanup.sh` uses the same directory with the
+/// same staleness rule, and the comment there says why:
+///
+/// > would make both children exit 0 with "peer holds lock" -- cleanup would
+/// > silently never
+///
+/// So the lock is deliberate mutual exclusion.  The in-app regimen calls
+/// `DiskCleaner` directly in Swift, which means it would otherwise reclaim
+/// while a Python tick is reclaiming, and the two would fight over the same
+/// files.  This is the Swift side of the same lock, so the two never run at
+/// the same time.
+///
+/// The two implementations have to agree on the path, the staleness window,
+/// the re-entrancy token, and the "only remove a lock you took" rule.
+final class HousekeeperLock {
+    /// Where the lock lives when nothing else is injected.
+    static let defaultPath = "~/.claude-disk-janitor/.housekeeper.lock"
+
+    /// A lock older than this was left behind by a process that died.
+    static let defaultStaleMinutes: Double = 120
+
+    /// The default lock path with `~` expanded.
+    static var defaultPathURL: URL {
+        URL(fileURLWithPath: (defaultPath as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    /// What an acquire attempt found.
+    enum Outcome {
+        /// This process holds the lock.
+        case acquired
+        /// Another process holds it, and it is not stale.
+        case heldByPeer
+    }
+
+    private let path: URL
+    private let staleInterval: TimeInterval
+    private let fileManager: FileManager
+    private var ownsLock = false
+
+    init(path: URL = HousekeeperLock.defaultPathURL,
+         staleMinutes: Double = HousekeeperLock.defaultStaleMinutes,
+         fileManager: FileManager = .default) {
+        self.path = path
+        self.staleInterval = staleMinutes * 60
+        self.fileManager = fileManager
+    }
+
+    /// True when this process is already the lock owner.
+    ///
+    /// The Python lock sets `HOUSEKEEPER_LOCK_OWNER=1` for its children so a
+    /// parent does not deadlock its own subprocesses, and the Swift side has
+    /// to honor the same token.
+    ///
+    /// `getenv` rather than `ProcessInfo.processInfo.environment`, because
+    /// that property is a snapshot taken when the process started: a token
+    /// set after launch would be invisible through it, and the answer has to
+    /// be true now, not only true at launch.
+    static var isReentrantOwner: Bool {
+        guard let value = getenv("HOUSEKEEPER_LOCK_OWNER") else { return false }
+        return String(cString: value) == "1"
+    }
+
+    /// Take the lock, or report that a peer holds it.
+    ///
+    /// A lock that exists but is older than the stale window belongs to a
+    /// process that died, so it is taken over.  A lock that exists and is
+    /// fresh belongs to a peer, and the caller has to wait its turn.
+    @discardableResult
+    func acquire() -> Outcome {
+        if HousekeeperLock.isReentrantOwner {
+            // Already the owner: the token says so, so do not touch the
+            // directory and do not take responsibility for removing it.
+            return .acquired
+        }
+
+        do {
+            try createLockDirectory()
+            ownsLock = true
+            return .acquired
+        } catch {
+            // The directory exists.  Either a peer holds it, or a killed
+            // process left it behind.
+            guard isStale else { return .heldByPeer }
+            removeIfEmpty()
+            do {
+                try createLockDirectory()
+                ownsLock = true
+                return .acquired
+            } catch {
+                return .heldByPeer
+            }
+        }
+    }
+
+    /// Give the lock back.
+    ///
+    /// Only a lock this process took is removed.  A peer's lock is left
+    /// exactly as it was found.
+    func release() {
+        guard ownsLock else { return }
+        ownsLock = false
+        removeIfEmpty()
+    }
+
+    deinit {
+        release()
+    }
+
+    // MARK: - Internals
+
+    private func createLockDirectory() throws {
+        // The parent has to exist first: `withIntermediateDirectories: false`
+        // is what makes this a lock, because it fails when the directory is
+        // already there instead of succeeding like `true` would.
+        try fileManager.createDirectory(at: path.deletingLastPathComponent(),
+                                        withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: path, withIntermediateDirectories: false)
+    }
+
+    /// True when the lock is older than the stale window.
+    ///
+    /// A lock whose modification date cannot be read is treated as stale: it
+    /// is more likely to be a leftover than a live peer, and the Python lock
+    /// treats an unreadable lock the same way.
+    private var isStale: Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: path.path),
+              let modified = attributes[.modificationDate] as? Date else {
+            return true
+        }
+        return Date().timeIntervalSince(modified) > staleInterval
+    }
+
+    /// Remove the lock directory, but only when it is empty.
+    ///
+    /// The Python side uses `rmdir`, which also refuses a non-empty
+    /// directory.  Matching that matters: the lock is a marker, and a
+    /// directory with contents in it is not the marker we made.
+    private func removeIfEmpty() {
+        guard let contents = try? fileManager.contentsOfDirectory(atPath: path.path),
+              contents.isEmpty else { return }
+        try? fileManager.removeItem(at: path)
+    }
+}

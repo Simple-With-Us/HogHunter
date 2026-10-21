@@ -10,6 +10,15 @@ from typing import Any, Mapping
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = REPO_ROOT / "config" / "robotic-vacuum.json"
 
+# The watchdog that kills a wedged tick.  It lives in this package because
+# both sides need it: maintain.py arms the watchdog, and the engine derives
+# the reclaim step's own budget from it.  The two numbers used to live in
+# different files, where a change to one could leave the other too small --
+# and a reclaim step that overruns the watchdog gets cut off mid-work, which
+# is how a tick reported zero bytes while the cleaner had already done most
+# of its job.
+TICK_WATCHDOG_SEC = 900.0
+
 # Step metadata: default enabled, which triggers include the step.
 STEP_CATALOG: dict[str, dict[str, Any]] = {
     "resource_sample": {

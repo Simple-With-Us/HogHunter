@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import lanes
-from .config import STEP_CATALOG, expand_path, step_enabled, steps_for_trigger
+from .config import STEP_CATALOG, TICK_WATCHDOG_SEC, expand_path, step_enabled, steps_for_trigger
 from .janitor import RetirePlan, data_dir_for, keep_regex, plan_retire_worktrees, retire_worktrees
 from .lock import HousekeeperLock, LockHeld
 from .models import RunRecord, StepResult, StepStatus, TriggerKind
@@ -72,8 +72,15 @@ _DEVICE_SUPPORT_IDLE_SECONDS = 7 * 86400.0
 # hoghunter-clean gets a time budget it keeps itself (--budget-sec), and a hard stop a little later.  The old
 # single 900 s kill reported a failure and no bytes even when the cleaner had done most of its work.  The budget
 # stays under the 900 s the steps used to get, so a tick is never longer than before.
-_RECLAIM_BUDGET_SECONDS = 600
+#
+# Derived from the watchdog rather than written down twice.  The reclaim step
+# has to finish inside the tick that the watchdog kills, and the two numbers
+# used to be hard-coded in two files, where nobody could tell they had to
+# agree.  The reserve is what the rest of the tick needs: the other steps run
+# before and after this one, and they have to fit too.
 _RECLAIM_GRACE_SECONDS = 180
+_RECLAIM_RESERVE_SECONDS = 120
+_RECLAIM_BUDGET_SECONDS = max(30, int(TICK_WATCHDOG_SEC) - _RECLAIM_GRACE_SECONDS - _RECLAIM_RESERVE_SECONDS)
 
 # The Spotlight index folder is protected by macOS (TCC).  A launchd job whose interpreter has no Full Disk Access
 # is refused when it lists the folder, with EPERM ("Operation not permitted").  That is a state of the Mac, not a
@@ -142,6 +149,7 @@ class VacuumEngine:
         runner: Optional[Callable[..., Any]] = None,
         doctor_runner: Optional[lanes.DoctorRunner] = None,
         clock: Callable[[], float] = time.time,
+        on_step: Optional[Callable[[RunRecord], None]] = None,
     ) -> None:
         self.home = home or Path.home()
         self.cfg = cfg
@@ -150,11 +158,32 @@ class VacuumEngine:
         self._runner: Callable[..., Any] = runner or _subprocess_run
         self._doctor_runner = doctor_runner
         self._clock = clock
+        # Called after every step with the run so far, so a tick the watchdog
+        # kills still leaves a record of what it reclaimed.
+        self._on_step = on_step
         self._planned_retire_plan: RetirePlan | None = None
         self._lane_report_cache: lanes.LaneReport | None = None
         self._busy_reason = ""
         # Itemized actions (dry run: what would happen; real run: what happened).  The CLI prints this.
         self.plan: list[dict[str, Any]] = []
+
+    def _emit_partial(self, record: RunRecord, dry_run: bool = False) -> None:
+        """Tell the store what this run has reclaimed so far.
+
+        A tick the watchdog kills still has to report what it reclaimed, and
+        a finished run is only appended to the history when it completes.  So
+        the store keeps an in-progress copy that is overwritten as the run
+        advances, and the status shows it beside the last completed run.
+
+        A dry run reports nothing and writes nothing: it plans, it does not
+        act, so there is nothing to have reclaimed.
+        """
+        if self._on_step is None or dry_run:
+            return
+        try:
+            self._on_step(record)
+        except Exception:  # noqa: BLE001 — bookkeeping must never kill a cleaning run
+            pass
 
     def run(
         self,
@@ -186,6 +215,7 @@ class VacuumEngine:
                         record.steps.append(
                             StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
                         )
+                        self._emit_partial(record, dry_run=dry_run)
                         continue
                     self._planned_retire_plan = None
                     if step_id == "janitor_worktree_retire":
@@ -203,9 +233,11 @@ class VacuumEngine:
                             record.steps.append(
                                 StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200])
                             )
+                            self._emit_partial(record, dry_run=dry_run)
                             continue
                     result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
                     record.steps.append(result)
+                    self._emit_partial(record, dry_run=dry_run)
                 record.finish()
         except LockHeld as exc:
             record.steps.append(
@@ -243,6 +275,7 @@ class VacuumEngine:
                         reason=_plural(len(hits), "threshold hit") if hits else "within limits",
                     )
                 )
+                self._emit_partial(record, dry_run=dry_run)
                 if hits:
                     now = time.time()
                     last_clean = float(rw_state.get("last_clean_at", 0))
@@ -256,6 +289,7 @@ class VacuumEngine:
                         should_clean = True
                         pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full", dry_run=dry_run)
                         record.steps.extend(pressure_record.steps)
+                        self._emit_partial(record, dry_run=dry_run)
                         rw_state["last_clean_at"] = now
                         if not dry_run:
                             # The sample above is the disk as it was BEFORE the

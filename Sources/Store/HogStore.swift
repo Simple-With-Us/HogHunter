@@ -259,6 +259,14 @@ final class HogStore: ObservableObject {
     /// Owned here rather than by the tab so the sampling -- and therefore the
     /// peak -- keeps running whether or not anyone is looking.
     let bandwidth: BandwidthStore
+    /// The unattended disk-clean regimen.
+    ///
+    /// It is started with the rest of the store so its cadence holds whether
+    /// or not anyone has the panel open.  It does nothing while
+    /// `CleanRegimen.isEnabled` is false, which is the default: an
+    /// unattended delete is something the owner turns on, not something an
+    /// upgrade grants.
+    private let cleanRegimen = CleanRegimenRunner.shared
 
     /// The one Maintain store.  The Mac's Storage tab and the iPhone
     /// route both use it, so a run started from either is the only run.
@@ -427,6 +435,7 @@ final class HogStore: ObservableObject {
         timer?.invalidate()
         pressureSource?.cancel()
         companionServer.stop()
+        cleanRegimen.stop()
     }
 
     // MARK: - Lifecycle
@@ -454,6 +463,9 @@ final class HogStore: ObservableObject {
         let history = self.history
         queue.async { history.openIfNeeded() }
         bandwidth.start()
+        // The unattended clean regimen keeps its cadence here, beside the
+        // bandwidth monitor, so it does not depend on the panel being open.
+        cleanRegimen.start()
         // Settle the notification decision now rather than at the moment the
         // first alert fires, which would post before the prompt was answered.
         if alertsEnabled { alerts.requestAuthorization() }
@@ -471,6 +483,7 @@ final class HogStore: ObservableObject {
         timer = nil
         pressureSource?.cancel()
         pressureSource = nil
+        cleanRegimen.stop()
         started = false
     }
 

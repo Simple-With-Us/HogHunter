@@ -25,6 +25,7 @@ class VacuumStore:
         self.state_path = self.data_dir / "scheduler-state.json"
         self.status_path = self.data_dir / "status.json"
         self.alert_state_path = self.data_dir / "alert-state.json"
+        self.partial_run_path = self.data_dir / "partial-run.json"
         self._lock_path = self.data_dir / ".store.lock"
 
     @classmethod
@@ -57,6 +58,30 @@ class VacuumStore:
             return json.loads(self.history_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
+
+    def write_partial_run(self, record: RunRecord) -> None:
+        """Record what a run has reclaimed so far, before the run finishes.
+
+        A tick the watchdog kills still has to report what it reclaimed.  The
+        finished run is appended to the history when it completes, so this is
+        the in-progress copy: one file, overwritten as the run advances, and
+        removed once a run finishes.
+        """
+        self._atomic_write(self.partial_run_path, record.as_dict())
+
+    def load_partial_run(self) -> dict[str, Any]:
+        if not self.partial_run_path.is_file():
+            return {}
+        try:
+            return json.loads(self.partial_run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def clear_partial_run(self) -> None:
+        try:
+            self.partial_run_path.unlink()
+        except OSError:
+            pass
 
     def last_run_for(self, trigger: str) -> Optional[dict[str, Any]]:
         for raw in reversed(self.load_history()):

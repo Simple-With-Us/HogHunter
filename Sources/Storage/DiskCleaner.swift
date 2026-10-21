@@ -668,7 +668,8 @@ final class DiskCleaner: @unchecked Sendable {
             if Task.isCancelled { break }
             await Task.yield()
             progress?(category.title)
-            let items = scanCategory(category, installedApps: installedApps).filter { !exclusions.isPathExcluded($0.path) }
+            let items = scanCategory(category, installedApps: installedApps)
+                .filter { !exclusions.isPathExcluded($0.path) && !KeepSentinel.isKept(url: $0.url) }
             if Task.isCancelled { break }
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
             let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
@@ -1897,7 +1898,11 @@ final class DiskCleaner: @unchecked Sendable {
             )
         }
 
-        let activeItems = items.filter { !exclusions.isCategoryExcluded($0.category) && !exclusions.isPathExcluded($0.path) }
+        let activeItems = items.filter {
+            !exclusions.isCategoryExcluded($0.category)
+                && !exclusions.isPathExcluded($0.path)
+                && !KeepSentinel.isKept(url: $0.url)
+        }
         let snapshotItems = activeItems.filter { $0.category == .apfsSnapshots }
         let hasSnapshotItems = !snapshotItems.isEmpty
 
@@ -2069,6 +2074,29 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         if prohibitedPrefixes.contains(path) {
+            return false
+        }
+
+        // The fleet's own work.  `~/apps/lanes` is a directory of symlinks to
+        // the external volume, but it resolves to the internal disk when that
+        // volume is unmounted, so a volume check alone cannot catch it.  The
+        // owner ruled on 2026-10-21 that the lanes tree is out of scope for
+        // any reclaim, so it is refused by name.
+        let lanesPath = home + "/apps/lanes"
+        if path == lanesPath || path.hasPrefix(lanesPath + "/") {
+            return false
+        }
+
+        // Never touch a volume other than the one that holds the home
+        // directory.  The external disk carries the lanes and the fleet's
+        // working copies, and a reclaim has no business there.
+        if isOnExternalVolume(path) {
+            return false
+        }
+
+        // A `.janitor-keep` marker on this path or on any parent of it means
+        // the operator marked that tree hands off.
+        if KeepSentinel.isKept(url: URL(fileURLWithPath: path)) {
             return false
         }
 
@@ -2350,6 +2378,27 @@ final class DiskCleaner: @unchecked Sendable {
 
     private var userHomeURL: URL {
         homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    }
+
+    /// True when the path lives on a volume other than the one that holds the
+    /// home directory.
+    ///
+    /// The home directory is the reference: a machine whose home is itself on
+    /// an external disk must still be able to clean its own caches.  The
+    /// cheap string checks come first because most candidates are under the
+    /// home directory and never need a volume lookup.
+    private func isOnExternalVolume(_ path: String) -> Bool {
+        let home = userHomeURL.resolvingSymlinksInPath()
+        // A home on an external volume is its own reference: nothing is
+        // external relative to it.
+        if home.path.hasPrefix("/Volumes/") { return false }
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        // A symlink out to a mounted disk lands here.
+        if resolved.path.hasPrefix("/Volumes/") { return true }
+        if path.hasPrefix(userHomeURL.path) { return false }
+        // Anything else is judged by the volume resource values, which is how
+        // a mounted disk that does not live under /Volumes is still caught.
+        return DiskCleaner.detectVolume(for: URL(fileURLWithPath: path)).isExternal
     }
 
     /// Root scanned by the temp-files category.  Tests inject an override.

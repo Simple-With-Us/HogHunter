@@ -26,6 +26,16 @@ import Foundation
 @MainActor
 final class CleanRegimenRunner: ObservableObject {
 
+    /// The one runner the app uses.
+    ///
+    /// The storage panel and the settings window both need to reach it and
+    /// neither owns it, so this is the same `static let shared` shape the rest
+    /// of the app uses (`MountedDriveStore`, `AutoUpdate`,
+    /// `DetachedWindowManager`).  It is deliberately not an `@EnvironmentObject`:
+    /// the UI smoke test builds `StorageView` with no environment object at
+    /// all, so a view that expected one would crash there.
+    static let shared = CleanRegimenRunner()
+
     // MARK: - Published state
 
     @Published private(set) var isRunning = false
@@ -39,8 +49,12 @@ final class CleanRegimenRunner: ObservableObject {
     // MARK: - Dependencies
 
     private let cleaner: DiskCleaner
-    private var timer: Timer?
-    private var task: Task<Void, Never>?
+    /// The scheduler's pending check, held so it can be cancelled from any
+    /// thread.  `HogStore.deinit` is not main-actor isolated, so the cancel
+    /// path has to be.
+    nonisolated let loopBox = CleanRegimenTaskBox()
+    /// The run in flight, held for the same reason.
+    nonisolated let runBox = CleanRegimenTaskBox()
     private let defaultsKey = "hoghunter.cleaner.regimen.lastRunAt"
 
     /// How often the scheduler wakes to *consider* a run.  The interval
@@ -53,14 +67,25 @@ final class CleanRegimenRunner: ObservableObject {
     private let now: () -> Date
     private let lastRunDefaults: UserDefaults
 
+    /// Where the runner's lock comes from.
+    ///
+    /// The lock is the same one the Python reclaim engine takes, so the two
+    /// never delete at the same time.  It is a closure rather than a value
+    /// because the default path is the real one in
+    /// `~/.claude-disk-janitor/.housekeeper.lock`, and a test has to be able
+    /// to point it at a temporary directory instead.
+    private let lockProvider: () -> HousekeeperLock
+
     init(
         cleaner: DiskCleaner = DiskCleaner(),
         now: @escaping () -> Date = { Date() },
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        lockProvider: @escaping () -> HousekeeperLock = { HousekeeperLock() }
     ) {
         self.cleaner = cleaner
         self.now = now
         self.lastRunDefaults = defaults
+        self.lockProvider = lockProvider
     }
 
     // MARK: - Lifecycle
@@ -70,27 +95,34 @@ final class CleanRegimenRunner: ObservableObject {
     /// anyone has the panel open.
     func start() {
         stop()
-        let t = Timer(timeInterval: checkInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
-        }
-        t.tolerance = 30
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        // A task rather than a run-loop timer, so the cancel path is a
+        // `Task.cancel()`, which is safe from any thread.  `HogStore.deinit`
+        // is not main-actor isolated and cannot touch a run-loop timer.
+        loopBox.set(Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                try? await Task.sleep(for: .seconds(self.checkInterval))
+                guard !Task.isCancelled else { return }
+                self.tick()
+            }
+        })
         // Consider a run promptly on launch so a first-time enable does not
         // wait a full interval to show any effect.
         tick()
     }
 
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-        task?.cancel()
-        task = nil
+    /// Stop the scheduler and any run in flight.
+    ///
+    /// `nonisolated` because `HogStore.deinit` calls it, and a deinit is not
+    /// main-actor isolated.
+    nonisolated func stop() {
+        loopBox.cancel()
+        runBox.cancel()
     }
 
     deinit {
-        timer?.invalidate()
-        task?.cancel()
+        loopBox.cancel()
+        runBox.cancel()
     }
 
     // MARK: - Scheduling
@@ -118,28 +150,66 @@ final class CleanRegimenRunner: ObservableObject {
         nextRunDate = base.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
     }
 
+    /// Start the regimen's clock from now.
+    ///
+    /// Turning the regimen on schedules the first run one interval out rather
+    /// than firing one the moment the owner flips the switch.  An unattended
+    /// delete should start at a time the owner chose, and "Run Now" is right
+    /// there for the other case.
+    func scheduleFromNow(regimen: CleanRegimen? = nil) {
+        let plan = (regimen ?? CleanRegimen.load()).sanitized()
+        guard plan.isEnabled else {
+            nextRunDate = nil
+            return
+        }
+        let started = now()
+        lastRunDefaults.set(started, forKey: defaultsKey)
+        updateNextRun(regimen: plan, lastRunAt: started)
+    }
+
+    /// Re-read the saved regimen and update what the panel shows.
+    ///
+    /// Called when the owner changes the regimen, so "Next run" answers at
+    /// once instead of at the next fifteen-minute check.
+    func refreshSchedule(regimen: CleanRegimen? = nil) {
+        let plan = (regimen ?? CleanRegimen.load()).sanitized()
+        guard plan.isEnabled else {
+            nextRunDate = nil
+            return
+        }
+        let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
+        updateNextRun(regimen: plan, lastRunAt: lastRunAt)
+    }
+
     // MARK: - Running
 
     /// Run the regimen now.  Also the manual entry point, so "Run Now" in
     /// settings and the schedule share one code path.
-    func runNow(regimen: CleanRegimen? = nil) {
-        guard !isRunning else { return }
+    ///
+    /// The task is returned so a caller can wait for it.  The UI does not
+    /// need to, but a test does, and returning the handle costs nothing.
+    @discardableResult
+    func runNow(regimen: CleanRegimen? = nil) -> Task<Void, Never>? {
+        guard !isRunning else { return nil }
         let plan = (regimen ?? CleanRegimen.load()).sanitized()
         guard plan.isValid else {
             lastError = "The regimen settings are out of range, so nothing ran."
-            return
+            return nil
         }
         isRunning = true
         lastError = nil
-        task = Task { [weak self] in
-            await self?.perform(plan)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.perform(plan)
         }
+        runBox.set(task)
+        return task
     }
 
     private func perform(_ regimen: CleanRegimen) async {
         let started = now()
         var result = RegimenRun(startedAt: started)
-        var lastRunAt = started
+        let lastRunAt = started
         defer {
             isRunning = false
             lastRunDefaults.set(lastRunAt, forKey: defaultsKey)
@@ -151,6 +221,28 @@ final class CleanRegimenRunner: ObservableObject {
         // path time out and leave orphans behind.
         if regimen.avoidDuringBuilds, Self.buildInFlight() {
             result.skippedReason = "A build is running, so the regimen waited."
+            finish(result, regimen: regimen)
+            return
+        }
+
+        // The regimen and the Python reclaim ticks must never run at the same
+        // time.  They delete the same kinds of things, and two reclaimers
+        // racing over one file is how a half-deleted cache directory happens.
+        // This is the same lock `scripts/vacuum/lock.py` takes, so the Swift
+        // runner and the Python engine exclude each other.
+        let lock = lockProvider()
+        guard lock.acquire() == .acquired else {
+            result.skippedReason = "Another cleanup is already running, so the regimen waited."
+            finish(result, regimen: regimen)
+            return
+        }
+        defer { lock.release() }
+
+        // Nothing to select means nothing to scan.  The scan walks the whole
+        // disk, so a regimen with no enabled rules must not pay for it: the
+        // answer is the same either way, and the walk is the expensive part.
+        guard !regimen.enabledRules.isEmpty else {
+            result.skippedReason = "No cleaning rules are enabled."
             finish(result, regimen: regimen)
             return
         }
@@ -273,7 +365,10 @@ final class CleanRegimenRunner: ObservableObject {
 
     /// Checked in order by `ruleName(for:)`, so a category with an alias names
     /// itself by the specific rule and keeps the older name as the alias.
-    private static let canonicalRuleNames = [
+    ///
+    /// `nonisolated` because `ruleName(for:)` is, and a main-actor-isolated
+    /// constant read from a nonisolated context is an error in Swift 6.
+    nonisolated private static let canonicalRuleNames = [
         "agent-state", "app-caches", "tmp-files", "temp-scratch", "snapshots",
         "logs", "xcode-artifacts", "ask-first",
     ]
@@ -337,5 +432,31 @@ struct RegimenRun: Equatable, Sendable {
 
     var succeeded: Bool {
         errors.isEmpty && !cancelled && skippedReason == nil
+    }
+}
+
+/// Holds a task so it can be cancelled from any thread.
+///
+/// The runner is `@MainActor`, but `HogStore.deinit` is not main-actor
+/// isolated and still has to stop it.  `Task.cancel()` is safe from any
+/// thread, so the handle lives in a small locked box that a `nonisolated`
+/// member can reach.  Without this the deinit could not call `stop()` at
+/// all, and the runner would outlive the store that owns it.
+final class CleanRegimenTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+
+    func set(_ task: Task<Void, Never>?) {
+        lock.lock()
+        self.task = task
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let task = self.task
+        self.task = nil
+        lock.unlock()
+        task?.cancel()
     }
 }
