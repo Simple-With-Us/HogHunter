@@ -114,6 +114,8 @@ The favicon is the same traced artwork with its contour simplified, cropped to t
 | Spike filter on the head contour | 30 logo units |
 | Rotation | -6 degrees |
 
+The path data in the three favicon SVGs is the master trace divided by ten, and it carries the same vertical flip as every other Brand vector.  The master paths live in a y-down space and the logo renders them through `translate(0,1024) scale(0.1,-0.1)`, so a favicon that drops that step draws the boar upside down, with the muzzle sitting high and the mane spikes pointing down.  Each favicon file therefore wraps its drawing in `translate(0,1024) scale(1,-1)` and keeps a `viewBox` that starts at `0 0`, with the crop applied as a `translate()` on the group.
+
 The features kept are the head outline, the ear, the eye, the tusk, and the snout with both nostrils.  The cream crescent along the snout is dropped: at 16 px it is a pale wedge that eats the muzzle instead of describing it.
 
 Two alternatives were tried and lost.  **Rotating the unchanged artwork** does not help at any angle, because the smudge rotates with the artwork.  **Cropping into the head** (the face, the front of the muzzle, the muzzle and tusk) puts the crop window inside the head, so the head fills the frame edge to edge and the silhouette disappears; a crop only works when it lands on a part of the drawing that is bounded on both sides.
