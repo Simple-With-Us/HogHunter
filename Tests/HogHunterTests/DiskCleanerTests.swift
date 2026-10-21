@@ -985,5 +985,103 @@ final class DiskCleanerTests: XCTestCase {
         let targetContents = try FileManager.default.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil)
         XCTAssertTrue(targetContents.isEmpty, "The child files inside target should have been cleaned")
     }
-}
 
+    // MARK: - Hands-off markers (.janitor-keep)
+
+    /// A cache tree under the injected home: `Library/Caches/<name>/inner/data.bin`,
+    /// plus a marker at `inner/<markerName>` when one is asked for.
+    private func makeCacheTree(_ name: String, markerName: String? = nil) throws -> URL {
+        let fm = FileManager.default
+        let tree = tempDirectory.appendingPathComponent("Library/Caches/\(name)", isDirectory: true)
+        let inner = tree.appendingPathComponent("inner", isDirectory: true)
+        try fm.createDirectory(at: inner, withIntermediateDirectories: true)
+        try Data("cache".utf8).write(to: inner.appendingPathComponent("data.bin"))
+        if let markerName {
+            try Data().write(to: inner.appendingPathComponent(markerName))
+        }
+        return tree
+    }
+
+    func testIsSafeToDeleteRefusesATreeWithAMarkerInsideIt() throws {
+        // The marker is not on the tree or on a parent of it, so `isKept`
+        // alone cannot see it.  Deleting the tree would take the marker with
+        // it, so the guard has to ask the inside question too.
+        let marked = try makeCacheTree("com.example.marked", markerName: KeepSentinel.fileName)
+        let plain = try makeCacheTree("com.example.plain")
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+
+        XCTAssertFalse(cleaner.isSafeToDelete(url: marked, category: .userCaches),
+                       "a tree with a marker inside it is hands off")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: plain, category: .userCaches),
+                      "a sibling with no marker is still cleanable")
+    }
+
+    func testIsSafeToDeleteSeesAMarkerSpelledInAnyCase() throws {
+        // The Python probe is `find -iname`, so `.JANITOR-KEEP` counts there.
+        // The Swift guard has to agree, or the two cleaners disagree about the
+        // same tree.
+        let marked = try makeCacheTree("com.example.upper", markerName: ".JANITOR-KEEP")
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertFalse(cleaner.isSafeToDelete(url: marked, category: .userCaches))
+    }
+
+    func testCleanLeavesATreeWithAMarkerInsideIt() async throws {
+        let marked = try makeCacheTree("com.example.keepme", markerName: KeepSentinel.fileName)
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let item = CleanItem(
+            category: .userCaches,
+            title: "com.example.keepme",
+            subtitle: marked.path,
+            url: marked,
+            bytes: 5,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+
+        let result = await cleaner.clean(items: [item], createSnapshot: false, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 0, "nothing under a marked tree is removed")
+        XCTAssertEqual(result.errors, [], "a hands-off tree is skipped quietly, as a parent marker is")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marked.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: marked.appendingPathComponent("inner/\(KeepSentinel.fileName)").path
+        ), "the operator's marker survives")
+    }
+
+    func testCleanLeavesTheTargetOfASymlinkWithAMarkerInsideIt() async throws {
+        // A symlink item has its target's children trashed, so the marker
+        // that matters is in the target, not at the link.
+        let fm = FileManager.default
+        let target = tempDirectory.appendingPathComponent("offload_target", isDirectory: true)
+        let inner = target.appendingPathComponent("inner", isDirectory: true)
+        try fm.createDirectory(at: inner, withIntermediateDirectories: true)
+        try Data("cache".utf8).write(to: inner.appendingPathComponent("data.bin"))
+        try Data().write(to: inner.appendingPathComponent(KeepSentinel.fileName))
+
+        let caches = tempDirectory.appendingPathComponent("Library/Caches", isDirectory: true)
+        try fm.createDirectory(at: caches, withIntermediateDirectories: true)
+        let link = caches.appendingPathComponent("cache_link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let item = CleanItem(
+            category: .userCaches,
+            title: "Linked Cache",
+            subtitle: link.path,
+            url: link,
+            bytes: 5,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+        XCTAssertTrue(item.isSymlink)
+
+        let result = await cleaner.clean(items: [item], createSnapshot: false, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 0)
+        XCTAssertTrue(fm.fileExists(atPath: inner.appendingPathComponent("data.bin").path),
+                      "the target's contents are untouched")
+        XCTAssertTrue(fm.fileExists(atPath: inner.appendingPathComponent(KeepSentinel.fileName).path))
+    }
+}

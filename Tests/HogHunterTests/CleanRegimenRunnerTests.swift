@@ -52,9 +52,13 @@ final class CleanRegimenRunnerTests: XCTestCase {
     /// A regimen that is on but may delete nothing, so a test can run the
     /// scheduler's decisions without touching the disk.
     private func makeRegimen(enabled: Bool = true, intervalHours: Double = 4, rules: Set<String> = []) -> CleanRegimen {
+        // `avoidDuringBuilds` is off so a compile running on the host cannot
+        // turn these into "A build is running" skips: the order of the
+        // runner's checks is the build first, the lock second.
         CleanRegimen(
             isEnabled: enabled,
             intervalHours: intervalHours,
+            avoidDuringBuilds: false,
             enabledRules: rules
         )
     }
@@ -127,6 +131,55 @@ final class CleanRegimenRunnerTests: XCTestCase {
         // The peer's lock is untouched.
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
         peer.release()
+    }
+
+    func testWaitingForTheLockDoesNotStartTheIntervalClock() async {
+        // A run that stepped aside did not happen.  Recording it would push a
+        // 24-hour regimen a whole day out for a collision that lasts minutes,
+        // so the stored clock stays where it was and the next check retries.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let lastRun = now.addingTimeInterval(-5 * 3600)
+        defaults.set(lastRun, forKey: key)
+        let regimen = makeRegimen(enabled: true, intervalHours: 4)
+
+        let peer = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(peer.acquire(), .acquired)
+        defer { peer.release() }
+
+        let runner = makeRunner(now: now, defaults: defaults)
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason,
+                       "Another cleanup is already running, so the regimen waited.")
+        XCTAssertEqual(defaults.object(forKey: key) as? Date, lastRun,
+                       "the interval's clock did not restart")
+        XCTAssertTrue(runner.isDue(regimen: regimen, lastRunAt: defaults.object(forKey: key) as? Date),
+                      "the run is still due, so the next check retries")
+        // The panel says when the retry is, not a whole interval from now.
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(15 * 60).timeIntervalSince1970,
+                       accuracy: 1)
+    }
+
+    func testARunThatFinishedStartsTheIntervalClock() async {
+        // The counterpart: a run that decided (here, "no rules enabled") is a
+        // run, and the next one is a full interval out.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let regimen = makeRegimen(enabled: true, intervalHours: 4)
+
+        let runner = makeRunner(now: now, defaults: defaults)
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual((defaults.object(forKey: key) as? Date)?.timeIntervalSince1970 ?? 0,
+                       now.timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(4 * 3600).timeIntervalSince1970,
+                       accuracy: 1)
     }
 
     func testTheRunnerTakesTheHousekeeperLockAndGivesItBack() async {

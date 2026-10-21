@@ -669,7 +669,7 @@ final class DiskCleaner: @unchecked Sendable {
             await Task.yield()
             progress?(category.title)
             let items = scanCategory(category, installedApps: installedApps)
-                .filter { !exclusions.isPathExcluded($0.path) && !KeepSentinel.isKept(url: $0.url) }
+                .filter { !exclusions.isPathExcluded($0.path) && !isHandsOff($0.url) }
             if Task.isCancelled { break }
             let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
             let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
@@ -1901,7 +1901,7 @@ final class DiskCleaner: @unchecked Sendable {
         let activeItems = items.filter {
             !exclusions.isCategoryExcluded($0.category)
                 && !exclusions.isPathExcluded($0.path)
-                && !KeepSentinel.isKept(url: $0.url)
+                && !isHandsOff($0.url)
         }
         let snapshotItems = activeItems.filter { $0.category == .apfsSnapshots }
         let hasSnapshotItems = !snapshotItems.isEmpty
@@ -2094,9 +2094,12 @@ final class DiskCleaner: @unchecked Sendable {
             return false
         }
 
-        // A `.janitor-keep` marker on this path or on any parent of it means
-        // the operator marked that tree hands off.
-        if KeepSentinel.isKept(url: URL(fileURLWithPath: path)) {
+        // A `.janitor-keep` marker on this path, on any parent of it, or
+        // anywhere inside it means the operator marked that tree hands off.
+        // This is the choke point every delete passes through, so it asks the
+        // inside question as well as the parent one: a tree is deleted whole,
+        // and deleting it would take the marker with it.
+        if isHandsOff(URL(fileURLWithPath: path)) {
             return false
         }
 
@@ -2378,6 +2381,28 @@ final class DiskCleaner: @unchecked Sendable {
 
     private var userHomeURL: URL {
         homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    }
+
+    /// True when a `.janitor-keep` marker keeps this candidate off every clean.
+    ///
+    /// Two questions, because the cleaner deletes whole trees.  A marker on the
+    /// path or on any parent of it protects the path (`isKept`).  A marker
+    /// anywhere *inside* a directory protects the directory too
+    /// (`containsMarker`), because trashing or removing the tree would take
+    /// the operator's marker with it.  The Python engine asks both at its own
+    /// choke point (`apply_delete`), and an unattended regimen has nobody
+    /// standing there to say "not that one", so the Swift side asks both.
+    ///
+    /// A symlink item has its *target's* children trashed (see `clean`), so the
+    /// inside question is asked of the resolved target.
+    private func isHandsOff(_ url: URL) -> Bool {
+        if KeepSentinel.isKept(url: url, fileManager: fileManager) { return true }
+        let tree = url.resolvingSymlinksInPath()
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: tree.path, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+        return KeepSentinel.containsMarker(url: tree, fileManager: fileManager)
     }
 
     /// True when the path lives on a volume other than the one that holds the

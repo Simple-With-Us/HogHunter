@@ -18,7 +18,7 @@ Status on 2026-10-08.  The Python half (the lane doctor feeding the Robotic Vacu
 
 ## Mode 1: Automatic Maintenance
 
-Safe only.  It never deletes user work, never prompts, and the Swift regimen stays off until the owner turns it on.  Today only the Python tick can run it, and that tick is not loaded.
+Safe only.  It never deletes user work, never prompts, and the Swift regimen stays off until the owner turns it on.  The Python tick can run it, and so can the Swift regimen once the owner turns it on (HH-183 wired `CleanRegimenRunner` into `HogStore.start()`).
 
 The table below is the target.  The Python tick reaches it two ways: the `hoghunter_reclaim` step runs `scripts/hoghunter-clean`, which applies the `config/reclaim-policy.json` rules and their gates, and the Vacuum also has older steps of its own.  Those older steps do not all meet these gates.  `The Vacuum's Older Steps` below lists what each one really does.
 
@@ -116,7 +116,7 @@ Today the Python half writes `lane-actions.jsonl` in its data folder, rotated at
 |---|---|
 | `DiskCleaner.swift`, `CleanTier.standard` | Mode 1 and Mode 2 for the Swift side.  Snapshot first, Trash put-back |
 | `CleanTier.extreme` | Today's deep tier (orphans, AI artifacts, large files).  The developer tier is separate and does not widen it |
-| `CleanRegimen`, `CleanRegimenRunner`, `CleanPressure` | Unwired.  If wired, Mode 1 only, `.standard` only (the runner already passes it).  `schedulableRules` excludes ask-first and expensive |
+| `CleanRegimen`, `CleanRegimenRunner`, `CleanPressure` | Wired by HH-183 (`HogStore.start()` starts `CleanRegimenRunner.shared`), off until the owner turns it on in the storage panel.  Mode 1 only, `.standard` only (the runner already passes it).  `schedulableRules` excludes ask-first and expensive |
 | Robotic Vacuum (`scripts/vacuum/`, 20 steps) | A five-minute tick.  The lane steps (`janitor_worktree_retire`, `pressure_apps_deps`) and `hoghunter_reclaim` are Mode 1.  The older steps meet only the gates listed under `The Vacuum's Older Steps` |
 | `scripts/hoghunter-clean` tiers | safe and semi-safe map to Mode 1.  expensive maps to Mode 3 rows.  ask-first stays report-only |
 | `scripts/clean.sh` | Shell twin of `DiskCleaner`, with `--tier` and `--confirm-extreme` |

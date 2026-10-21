@@ -154,7 +154,7 @@ struct DiskCleanerView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text("Off. Hog Hunter never deletes anything on its own until this is turned on.")
+                Text("Off.\u{00A0} Hog Hunter never deletes anything on its own until this is turned on.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }

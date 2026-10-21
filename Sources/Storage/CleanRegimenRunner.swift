@@ -209,11 +209,22 @@ final class CleanRegimenRunner: ObservableObject {
     private func perform(_ regimen: CleanRegimen) async {
         let started = now()
         var result = RegimenRun(startedAt: started)
-        let lastRunAt = started
+        // A run that stepped aside (a build in flight, or another cleanup
+        // holding the lock) did not happen, so it must not start the
+        // interval's clock.  Recording it would push a 24-hour regimen a whole
+        // day out for a collision that lasts minutes.  The scheduler's next
+        // check retries instead.
+        var recordsRun = true
         defer {
             isRunning = false
-            lastRunDefaults.set(lastRunAt, forKey: defaultsKey)
-            updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
+            if recordsRun {
+                lastRunDefaults.set(started, forKey: defaultsKey)
+                updateNextRun(regimen: regimen, lastRunAt: started)
+            } else {
+                nextRunDate = regimen.isEnabled
+                    ? started.addingTimeInterval(checkInterval)
+                    : nil
+            }
         }
 
         // A build in flight is the one case where waiting beats working: bulk
@@ -221,6 +232,7 @@ final class CleanRegimenRunner: ObservableObject {
         // path time out and leave orphans behind.
         if regimen.avoidDuringBuilds, Self.buildInFlight() {
             result.skippedReason = "A build is running, so the regimen waited."
+            recordsRun = false
             finish(result, regimen: regimen)
             return
         }
@@ -233,6 +245,7 @@ final class CleanRegimenRunner: ObservableObject {
         let lock = lockProvider()
         guard lock.acquire() == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
+            recordsRun = false
             finish(result, regimen: regimen)
             return
         }
