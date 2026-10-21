@@ -22,9 +22,15 @@
 # catalog can still answer over the public API, so an id must never be
 # rewritten from one route's evidence.  The fleet recall contribution
 # contrib/MM/2026-10-19/f11f7046 records that lesson; it is a recall id and
-# not a path in this repository.  This policy is read only from the default
-# branch and sends the id to https://api.minimax.io/anthropic, so it is pinned
-# to the stable id the owner chose rather than to the preview spelling.
+# not a path in this repository.  The pinned id was probed on the route it is
+# sent to, not inferred from the preview spelling: a live probe on 2026-10-21
+# returned HTTP 200 for MiniMax-M3.1-Flash on the anthropic-messages route
+# (https://api.minimax.io/anthropic/v1/messages, the response naming
+# MiniMax-M3.1-Flash), and a live probe on 2026-10-20 returned HTTP 200 with a
+# well-formed edits object on the chat-completions route.  This policy is read
+# only from the default branch and sends the id to
+# https://api.minimax.io/anthropic, so it is pinned to the stable id the owner
+# chose rather than to the preview spelling.
 model: MiniMax-M3.1-Flash
 max_turns: 60
 max_iterations: 5
