@@ -127,13 +127,16 @@ The 16 px and 32 px marks are the same drawing with a different crop padding: 2 
 Rebuild it from the favicon SVGs.  The 16 px entry renders the 16 px mark at 16 px, the 32 px entry renders the 32 px mark at 32 px, and the 48 px entry renders the 16 px mark at 48 px, so each entry keeps the crop it was designed with.  `favicon-64.png` is the 16 px mark at 64 px, for browsers that ask for a larger source.
 
 ```bash
-magick -background none Brand/HogHunter-Favicon-16.svg -resize 16x16 Brand/favicon-16.png
-magick -background none Brand/HogHunter-Favicon-32.svg -resize 32x32 Brand/favicon-32.png
-magick -background none Brand/HogHunter-Favicon-16.svg -resize 48x48 Brand/favicon-48.png
+magick Brand/HogHunter-Favicon-16.svg -resize 16x16 Brand/favicon-16.png
+magick Brand/HogHunter-Favicon-32.svg -resize 32x32 Brand/favicon-32.png
+magick Brand/HogHunter-Favicon-16.svg -resize 48x48 Brand/favicon-48.png
+magick Brand/HogHunter-Favicon-16.svg -resize 64x64 Brand/favicon-64.png
 magick -type TrueColorAlpha \
   Brand/favicon-16.png Brand/favicon-32.png Brand/favicon-48.png \
   Brand/favicon.ico
 ```
+
+Unlike the `.ico` section below, do not put `-background none` on these renders: `HogHunter-Favicon-16.svg` and `-32.svg` each paint an opaque cream `<rect>` across the whole viewBox, so the flag is a no-op and `favicon-16/32/48.png` and every `.ico` entry are opaque cream squares, not a boar silhouette.  The tile variant `HogHunter-Favicon-Tile.svg` is the one that keeps transparent corners.
 
 ImageMagick writes DIB payloads for every entry below 256 px, which is what the file ships.
 
