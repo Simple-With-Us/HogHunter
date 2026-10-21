@@ -136,7 +136,7 @@ magick -type TrueColorAlpha \
   Brand/favicon.ico
 ```
 
-Unlike the `.ico` section below, do not put `-background none` on these renders: `HogHunter-Favicon-16.svg` and `-32.svg` each paint an opaque cream `<rect>` across the whole viewBox, so the flag is a no-op and `favicon-16/32/48.png` and every `.ico` entry are opaque cream squares, not a boar silhouette.  The tile variant `HogHunter-Favicon-Tile.svg` is the one that keeps transparent corners.
+Unlike the `.ico` section below, do not put `-background none` on these renders: `HogHunter-Favicon-16.svg` and `-32.svg` each paint an opaque cream `<rect>` across the whole viewBox, so the flag is a no-op and `favicon-16/32/48/64.png` and every `.ico` entry are opaque cream squares, not a boar silhouette.  The tile variant `HogHunter-Favicon-Tile.svg` is the one that keeps transparent corners; render it with `-background none` to get a transparent PNG.
 
 ImageMagick writes DIB payloads for every entry below 256 px, which is what the file ships.
 
