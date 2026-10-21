@@ -16,12 +16,14 @@ These files are the **standalone emblem**: the artwork the owner uses for their 
 | `HogHunter-Icon-Small-16.svg` | The same 16 px snout crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `HogHunter-Icon-Small-32.svg` | The same 32 px snout-and-tusk crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `preview-small-icons.png` | The small variants at their true pixel size, against the owner's shipped 16 px and 32 px icons. |
-| `HogHunter-Favicon-16.svg` | The simplified head, cropped tight, on a 1024 cream field.  For a 16 px favicon. |
-| `HogHunter-Favicon-32.svg` | The same drawing with the 32 px crop.  For a 32 px favicon. |
-| `HogHunter-Favicon-Tile.svg` | The same drawing on the owner's rounded tile, for a tab that needs a silhouette. |
-| `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Renders of the favicon at true device pixels. |
-| `favicon.ico` | A Windows `.ico` carrying the 16, 32 and 48 px entries. |
-| `preview-favicons.png` | The new favicons at true size, against the artwork they replace. |
+| `HogHunter-Favicon-16.svg` | The reduced contour, cropped tight, on a 1024 cream field.  For a 16 px favicon. |
+| `HogHunter-Favicon-32.svg` | The **full traced artwork**, cropped to the owner's own window and turned to the owner's own angle.  For 32 px and up. |
+| `HogHunter-Favicon-Tile.svg` | The same full artwork and the same crop on the owner's rounded tile, for a tab that needs a silhouette. |
+| `favicon.svg` | The same full artwork, scalable, for browsers that accept a vector favicon. |
+| `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Renders of the favicon at true device pixels.  16 px is the reduced contour; 32, 48 and 64 px are the full artwork. |
+| `favicon-tile-32.png`, `favicon-tile-64.png` | The same full artwork on the rounded tile, with transparent corners. |
+| `favicon.ico` | A Windows `.ico` carrying the 16, 32, 48 and 64 px entries. |
+| `preview-favicons.png` | The favicons at true size, with the evidence for the one size that cannot carry the full artwork. |
 
 `HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon: the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
 
@@ -104,9 +106,34 @@ Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually a
 
 ## Favicons
 
-A favicon is not a small app icon.  At 16 device pixels the traced artwork has about 250 of them, and the mane, the brow, the eye and the tusk all land inside the same one or two pixels, so the mark stops being a boar and becomes a brown smudge.  The small variants above solve that by cropping.  The favicon solves it by **simplifying**.
+A favicon is not a small app icon, and the size it is drawn at decides what it can be.  At 16 device pixels the traced artwork has about 250 of them, and the mane, the brow, the eye and the tusk all land inside the same one or two pixels, so the mark stops being a boar and becomes a brown smudge.
 
-The favicon is the same traced artwork with its contour simplified, cropped to the head and rotated.  Three settings do the work.
+The owner ruled on 2026-10-21 that the favicon should be the master's own artwork.  So the set is split by what each size can actually carry.
+
+| Size | What it carries |
+|---|---|
+| 16 px | The **reduced contour**: the traced artwork simplified, cropped tight, turned -6 degrees. |
+| 32, 48, 64 px and the SVG | The **full artwork**: the master's own path data, untouched, cropped to the owner's own window, at the owner's own 9.5 degree turn. |
+
+### The full artwork, and how it is cropped
+
+The crop is the window the owner's own render was cut to, measured off the rotated master: the snout stops short of the left edge, the ear is cut flat at the top and the mane is cut at the right and at the bottom, so the head fills the frame and the eye, the tusk and the teeth all survive at 32 px.  In the rotated master's canvas that window runs from `(62.2, 123.9)` to `(773.2, 832.9)`, which is 711 by 709 units of the 1024 canvas, about 82 per cent of the artwork's width.  The artwork itself reaches from `(85, 89)` to `(949, 913)` there, so the window misses 176 units of mane on the right, 35 units off the top of the ear and 80 off the lower mane.
+
+There is no padding.  The mark is the owner's own image at 1:1, which is the thing he approved, and the 711 unit wide window is rendered into a 711 unit square.  The window is 711 by 709, so it fills the frame from side to side with nothing at the sides, and sits one unit short of the top and the bottom, which is one unit of background above and below it and under a tenth of a pixel at 32 px.  `HogHunter-Favicon-32.svg` therefore carries a `viewBox` of `0 0 711 711`.
+
+Three things make that work, and all three are easy to get wrong.  The window is **centred** in the frame rather than starting at its corner, so the translate that places it is `(side - w) / 2 - bx0` in x and `(side - h) / 2 - by0` in y, which is `-62.2` and `-122.9` here.  The generator used to compute the offset as the window's centre against the frame's centre and then subtract the window's corner a second time to get the translate, which gave `0` and `-1` instead: the window's left edge landed 62.2 units to the right of where it belongs and its top edge 121.9 units too low, which is 2.8 px across and 5.5 px down at the 32 px render, so the ear stood whole above the frame and the mark showed more of the boar than the crop claims.  And the window **cuts** the artwork, so the artwork group carries a `clipPath` whose rect is the window itself.
+
+That clip rect is in the rotated master's canvas space, which is the user space of the `<g>` that carries `clip-path`, and that space is the one the window was measured in and the one the outer translate is applied in.  The same four numbers would mean something else in the root frame, where the window lands at `(0, 1)` to `(711, 710)`.  The viewport cuts at the frame edge, one unit outside the window on the top and the bottom, so the `clipPath` is what makes the visible artwork the window rather than the frame.
+
+No extra rotation is applied on top of the owner's turn, so the artwork keeps the same 9.5 degrees counter-clockwise it has in `HogHunter-Logo-Rotated.svg`, and the mark is the same crop the owner approved.
+
+`HogHunter-Favicon-32.svg` and `favicon.svg` therefore carry the master's own path data: 17 subpaths and 26 cubic curves, the same as `HogHunter-Logo.svg`, with no simplification at all.  The tile variant carries the same artwork and the same crop plus the owner's rounded tile as a separate path, so it holds 18 subpaths and four arc segments.
+
+### Why 16 px is the one size that cannot carry it
+
+At 16 device pixels the eye, the tusk and the teeth of the full artwork each fall below one pixel.  Zooming in does not fix it: a crop tight enough to give those features a pixel each throws the ear and the mane away, so the mark stops being an animal and becomes a brown wedge with a hole in it.  Every crop and every rotation was tried at true 16 px and none of them produced a readable boar, which is why the 16 px frame keeps the reduced contour and the 32 px frame and up do not.
+
+The reduced contour is the same traced artwork with its contour simplified, cropped to the head and rotated.  Three settings do the work.
 
 | Setting | Value |
 |---|---|
@@ -114,7 +141,7 @@ The favicon is the same traced artwork with its contour simplified, cropped to t
 | Spike filter on the head contour | 30 logo units |
 | Rotation | -6 degrees |
 
-The path data in the three favicon SVGs is the `HogHunter-Logo.svg` trace flattened to polygons, simplified by the RDP epsilon and the spike filter listed above, and expressed in one tenth of the master's units.  The logo holds 17 subpaths and 26 cubic curves; the traced artwork in each favicon holds 7 subpaths and no curve commands at all, only straight lines.  The tile adds the owner's rounded tile as a separate path, so `HogHunter-Favicon-Tile.svg` holds 8 subpaths and four arc segments.  The favicons also carry the same vertical flip as every other Brand vector.  The master paths live in a y-up space and the logo renders them through `translate(0,1024) scale(0.1,-0.1)`, so a favicon that drops that step draws the boar upside down, with the muzzle sitting high and the mane spikes pointing down.  Each favicon file therefore wraps its drawing in `translate(0,1024) scale(1,-1)` and keeps a `viewBox` that starts at `0 0`.  `HogHunter-Favicon-16.svg` and `HogHunter-Favicon-32.svg` apply the crop as a `translate()` on the group; `HogHunter-Favicon-Tile.svg` additionally scales the drawing by 1.0349 on that group, which is what puts it at 86 per cent of the tile.
+The path data in `HogHunter-Favicon-16.svg` is the `HogHunter-Logo.svg` trace flattened to polygons, simplified by the RDP epsilon and the spike filter listed above, and expressed in one tenth of the master's units.  The logo holds 17 subpaths and 26 cubic curves; the reduced artwork holds 7 subpaths and no curve commands at all, only straight lines.  It also carries the same vertical flip as every other Brand vector: the master paths live in a y-up space and the logo renders them through `translate(0,1024) scale(0.1,-0.1)`, so a file that drops that step draws the boar upside down, with the muzzle sitting high and the mane spikes pointing down.  `HogHunter-Favicon-16.svg` therefore wraps its drawing in `translate(0,1024) scale(1,-1)` and keeps a `viewBox` that starts at `0 0`.
 
 The features kept are the head outline, the ear, the eye, the tusk, and the snout with both nostrils.  The cream crescent along the snout is dropped: at 16 px it is a pale wedge that eats the muzzle instead of describing it.
 
@@ -122,27 +149,106 @@ Two alternatives were tried and lost.  **Rotating the unchanged artwork** does n
 
 The RDP epsilon and the spike filter work together.  RDP alone at 45 units keeps the mane as a fringe of separate spikes, and at 16 px that fringe is a row of loose pixels.  The spike filter removes any convex vertex whose height is under 30 units - 0.54 px at the 16 px crop and about 1 px at the 32 px crop - and the outline closes up into one solid mass.
 
-The 16 px and 32 px marks are the same drawing with a different crop padding: 2 per cent for the 16 px mark, so the head fills the pixels it has, and 6 per cent for the 32 px mark, where the extra air stops the tusk from touching the edge.  The tile variant is the same drawing at 86 per cent of the tile, so it keeps the owner's rounded silhouette.
+The 16 px mark uses 2 per cent crop padding, so the head fills the pixels it has.  The full artwork uses no padding at all, because the owner's own render has none and the frame it is drawn in is square already.  The tile variant puts the same artwork and the same crop on the owner's rounded tile, scaled into the tile's inset square so the cut edges land on the flat of the tile and the rounded corners stay clear.
 
-`favicon.ico` is a real ICO container with three 32-bit DIB entries, at 16, 32 and 48 px, and each entry carries exactly the pixels of the matching PNG.  DIB is the right choice here: a PNG-compressed ICO entry is only read by Windows at the 256x256 size, so PNG payloads below that size would be dropped or shown broken in Explorer.  The same reasoning is spelled out in the `.ico` section below.
+`favicon.ico` is a real ICO container with four 32-bit DIB entries, at 16, 32, 48 and 64 px, and each entry carries exactly the pixels of the matching PNG.  DIB is the right choice here: a PNG-compressed ICO entry is only read by Windows at the 256x256 size, so PNG payloads below that size would be dropped or shown broken in Explorer.  The same reasoning is spelled out in the `.ico` section below.
 
-Rebuild it from the favicon SVGs.  The 16 px entry renders the 16 px mark at 16 px, the 32 px entry renders the 32 px mark at 32 px, and the 48 px entry renders the 16 px mark at 48 px, so each entry keeps the crop it was designed with.  `favicon-64.png` is the 16 px mark at 64 px, for browsers that ask for a larger source.
+The 16 px entry is the reduced contour and the 32, 48 and 64 px entries are the full artwork, so a browser that asks for 48 gets the artwork the owner approved.  `favicon-64.png` is the full artwork at 64 px, for a browser that asks for a larger source.
+
+### Rebuilding them
+
+Render the favicon SVGs at the exact size each file is for, and pack the ICO.  The shipped PNGs were rendered by headless Chrome at a device scale factor of 1, so the output is true device pixels rather than a resize of a large render.
+
+The mark has to be laid out at its true size in the page.  An SVG carries its own `width="1024" height="1024"`, so unless that is rewritten to the target size the browser draws it at 1024 CSS pixels and the screenshot shows the top left corner of it instead of the whole mark.
 
 ```bash
-magick Brand/HogHunter-Favicon-16.svg -resize 16x16 Brand/favicon-16.png
-magick Brand/HogHunter-Favicon-32.svg -resize 32x32 Brand/favicon-32.png
-magick Brand/HogHunter-Favicon-16.svg -resize 48x48 Brand/favicon-48.png
-magick Brand/HogHunter-Favicon-16.svg -resize 64x64 Brand/favicon-64.png
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
+  tmp="$(mktemp -d)"
+  sed "s/width=\"1024\" height=\"1024\"/width=\"$2\" height=\"$2\"/" "$1" > "$tmp/mark.svg"
+  printf '<!doctype html><html><head><style>html,body{margin:0;padding:0;background:transparent}svg{display:block}</style></head><body>%s</body></html>' \
+    "$(cat "$tmp/mark.svg")" > "$tmp/r.html"
+  # --headless=new sometimes hangs and never writes the file, so every render
+  # runs under a 30 second watchdog and gets one retry.  Each attempt gets its
+  # own profile directory, because a killed Chrome leaves a stale singleton
+  # lock behind and a retry that reuses that profile can hang the same way.
+  for attempt in 1 2; do
+    "$CHROME" --headless=new --disable-gpu --no-sandbox --force-device-scale-factor=1 \
+      ${4:+--default-background-color=00000000} \
+      --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
+      --user-data-dir="$tmp/profile-$attempt" "file://$tmp/r.html" &
+    pid=$!
+    ( sleep 30 && kill -9 "$pid" 2>/dev/null ) & watchdog=$!
+    if wait "$pid"; then status=0; else status=$?; fi
+    kill "$watchdog" 2>/dev/null
+    [ "$status" -eq 0 ] && break
+  done
+  rm -rf "$tmp"
+}
+
+render Brand/HogHunter-Favicon-16.svg 16 Brand/favicon-16.png
+render Brand/HogHunter-Favicon-32.svg 32 Brand/favicon-32.png
+render Brand/HogHunter-Favicon-32.svg 48 Brand/favicon-48.png
+render Brand/HogHunter-Favicon-32.svg 64 Brand/favicon-64.png
+render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent
+render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent
+```
+
+Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed by the watchdog leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above runs each render under a 30 second watchdog and gives it one retry on a clean profile, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+
+The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
+
+The `.ico` is packed from the PNGs above, with every entry written as a 32-bit DIB so Windows reads real pixels:
+
+```bash
 magick -type TrueColorAlpha \
   Brand/favicon-16.png Brand/favicon-32.png Brand/favicon-48.png \
+  Brand/favicon-64.png \
   Brand/favicon.ico
 ```
 
-Unlike the `.ico` section below, do not put `-background none` on these renders: `HogHunter-Favicon-16.svg` and `-32.svg` each paint an opaque cream `<rect>` across the whole viewBox, so the flag is a no-op and `favicon-16/32/48/64.png` and every `.ico` entry are opaque cream squares, not a boar silhouette.  The tile variant `HogHunter-Favicon-Tile.svg` is the one that keeps transparent corners; render it with `-background none` to get a transparent PNG.
+ImageMagick is also a shorter way to render the marks, and it is what the older entries in this file were built with.  It writes to `im-*.png` on purpose: these are an alternative to the Chrome renders above, not a replacement for them, and a different output path is what keeps them from overwriting the shipped files and desyncing the `.ico`:
+
+```bash
+magick Brand/HogHunter-Favicon-16.svg -resize 16x16 Brand/im-favicon-16.png
+magick Brand/HogHunter-Favicon-32.svg -resize 32x32 Brand/im-favicon-32.png
+magick Brand/HogHunter-Favicon-32.svg -resize 48x48 Brand/im-favicon-48.png
+magick Brand/HogHunter-Favicon-32.svg -resize 64x64 Brand/im-favicon-64.png
+magick -background none Brand/HogHunter-Favicon-Tile.svg -resize 32x32 Brand/im-favicon-tile-32.png
+magick -background none Brand/HogHunter-Favicon-Tile.svg -resize 64x64 Brand/im-favicon-tile-64.png
+```
+
+If you want these to become the shipped files, copy them over `favicon-16.png` and the rest and pack the `.ico` again, because the shipped `.ico` carries the exact pixels of the shipped PNGs and not the ones this block produces.
+
+Unlike the `.ico` section below, do not put `-background none` on the first four: `HogHunter-Favicon-16.svg` and `-32.svg` each paint an opaque cream `<rect>` across the whole viewBox, so the flag is a no-op and `favicon-16/32/48/64.png` and every `.ico` entry are opaque cream squares, not a boar silhouette.  The tile variant `HogHunter-Favicon-Tile.svg` is the one that keeps transparent corners; render it with `-background none` to get a transparent PNG.
+
+ImageMagick's `-resize` is a resize of a large render rather than a true-size render, so its pixels differ from the Chrome ones in the antialiasing along the edges.  The shipped PNGs are the Chrome ones.
 
 ImageMagick writes DIB payloads for every entry below 256 px, which is what the file ships.
 
-`preview-favicons.png` shows the new marks at true size, the artwork they replace at the same size, and the same marks in a browser tab on both a light and a dark tab bar.
+### Using them
+
+Declare every size a browser may ask for by name, the ICO as the multi-size fallback, and the SVG for the browsers that take a vector:
+
+```html
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48 64x64">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="32x32 48x48 64x64 128x128 256x256">
+```
+
+The `sizes` attribute is the hint a browser uses to pick the most appropriate icon, so every size has to be declared.  That is why the 16 px PNG is in the block even though the ICO already carries a 16 px entry: without a `sizes="16x16"` candidate a browser is free to render the full artwork down to a 16 px tab, which is the brown smudge the reduced contour exists to avoid.  The SVG starts at 32 px, which is the smallest size it was drawn for, and it runs up to 256 px because a vector is sharp at any size.
+
+`favicon.ico` carries 16, 32, 48 and 64 px, and it is declared with those four sizes rather than with `sizes="any"`.  `any` tells the browser the resource is good at any size, and the largest bitmap here is 64, so a browser that took it at 128 px would upscale a 64 px image.  Listing the four sizes keeps the choice honest and leaves the large sizes to the vector, which is sharp at them.  The ICO is also the one a crawler gets when it falls back to the root of the host, so its largest entry is 64 rather than 48.
+
+Google Search takes **one** favicon per hostname, and its guidance is a square icon of **at least** 8x8 and **larger than 48x48**, so 64 is the size that meets it.  That is why the ICO's largest entry and the largest PNG are both 64.  Google does not read SVG at all, so the search surface is carried by the PNG and the ICO, and the SVG is for browsers only.
+
+`favicon-tile-32.png` and `favicon-tile-64.png` are the rounded tile with transparent corners, for a surface that wants one silhouette instead of a square.  They are an alternative to the square marks, not an extra size of them, so declare one set or the other rather than both.
+
+`preview-favicons.png` shows the shipped set at true size, the evidence for the 16 px frame, and the same marks in a browser tab.
 
 ## Rebuilding a standalone .icns
 
