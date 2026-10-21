@@ -270,7 +270,10 @@ struct HogHunterPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
             case .activity:
-                Text("Remote per-process CPU and memory are unavailable.")
+                // The card below carries the server's overall CPU and memory,
+                // so the message says only what the snapshot cannot answer:
+                // the per-process detail.
+                Text("Remote per-process detail is unavailable; the server's overall CPU and memory are shown below.")
                     .foregroundStyle(.secondary)
             case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
@@ -547,8 +550,11 @@ struct HogHunterPanel: View {
     /// free" while the external ones said "69% used · 145.4 GB free", which
     /// read as two different facts about two different things.
     private var quickInternalText: String {
-        HogFormat.capacity(usedPercent: store.diskSpace.map { $0.usedFraction * 100 },
-                           freeBytes: store.diskSpace.map { $0.freeBytes })
+        // The reading is pending until the first sample, which is a different
+        // thing from a volume that cannot be read.
+        guard let diskSpace = store.diskSpace else { return "Reading…" }
+        return HogFormat.capacity(usedPercent: diskSpace.usedFraction * 100,
+                                  freeBytes: diskSpace.freeBytes)
     }
 
     private var capacityCards: some View {
@@ -1247,9 +1253,14 @@ final class MenuBarAnchorView: NSView {
     var onPosition: ((CGFloat) -> Void)?
     private var moveObserver: NSObjectProtocol?
     private var lastReportedX: CGFloat?
-    /// True while the view is moving the window itself, so the move it makes
-    /// does not trigger another pass.
-    private var isRepositioning = false
+    /// The origin the view last asked the window to take.
+    ///
+    /// The move notification arrives after the move, on the main queue, so a
+    /// flag cleared straight after the move would always read as false by the
+    /// time the notification is handled.  The origin is what tells the
+    /// observer apart: the window sitting at the origin the view asked for is
+    /// the view's own move and starts no new pass.
+    private var requestedOrigin: NSPoint?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1264,7 +1275,20 @@ final class MenuBarAnchorView: NSView {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            guard let self, !self.isRepositioning else { return }
+            guard let self, let window = self.window else { return }
+            if let requested = self.requestedOrigin {
+                if window.frame.origin == requested {
+                    // The move this view made itself.  The anchor for the new
+                    // position was reported when the move was made, so the
+                    // notification starts no new pass.
+                    self.requestedOrigin = nil
+                    return
+                }
+                // The window did not take the origin the view asked for.  The
+                // request stays, so the view does not ask for the same place
+                // again, and the pass below works out the anchor for where
+                // the window actually is.
+            }
             self.resolveAnchor()
         }
 
@@ -1283,20 +1307,22 @@ final class MenuBarAnchorView: NSView {
     func resolveAnchor() {
         guard let window = self.window, window.frame.width > 0 else { return }
         let winW = window.frame.width
-        let itemMidX = Self.findStatusItemMidX()
+        let anchor = Self.findStatusItemMidX()
 
         // The window hangs under the menu bar item.  Put the middle of the
         // window under the middle of the item, so the window sits centered on
         // the button instead of hanging off one side of it.  The beak keeps
-        // pointing at the item either way.
-        if let itemMidX = itemMidX {
-            centerWindow(on: itemMidX)
+        // pointing at the item either way.  Only an item that was positively
+        // identified as ours may move the window: a guess may belong to
+        // another status item, and the window would hang under that one.
+        if let anchor, anchor.matched {
+            centerWindow(on: anchor.midX)
         }
 
         let winX = window.frame.origin.x
 
         let targetX: CGFloat
-        if let itemMidX = itemMidX {
+        if let itemMidX = anchor?.midX {
             let relX = itemMidX - winX
             // Verify relX is plausibly within or near the window
             if relX >= 20 && relX <= winW - 20 {
@@ -1334,7 +1360,7 @@ final class MenuBarAnchorView: NSView {
     /// the beak gets its coordinate, so the beak and the window cannot
     /// disagree.  The window is kept on the screen it is already on.
     private func centerWindow(on itemMidX: CGFloat) {
-        guard let window, !isRepositioning else { return }
+        guard let window else { return }
         let frame = window.frame
         guard frame.width > 0 else { return }
 
@@ -1344,14 +1370,24 @@ final class MenuBarAnchorView: NSView {
             let maxX = screen.frame.maxX - frame.width - 8
             targetX = min(max(targetX, minX), max(minX, maxX))
         }
+        let origin = NSPoint(x: targetX, y: frame.origin.y)
         guard abs(targetX - frame.origin.x) > 0.5 else { return }
+        // The window did not take this origin last time; asking again would
+        // only move it back and forth.
+        guard requestedOrigin != origin else { return }
 
-        isRepositioning = true
-        window.setFrameOrigin(NSPoint(x: targetX, y: frame.origin.y))
-        isRepositioning = false
+        requestedOrigin = origin
+        window.setFrameOrigin(origin)
     }
 
-    static func findStatusItemMidX() -> CGFloat? {
+    /// The middle of the menu bar status item, and whether that item was
+    /// positively identified as Hog Hunter's own.
+    ///
+    /// The fallback below is the first extra menu bar item, which is a guess
+    /// whenever the app carries more than one.  A guess is good enough for
+    /// the beak, which only has to point at the menu bar, but the window is
+    /// moved for an item that was positively identified and no other.
+    static func findStatusItemMidX() -> (midX: CGFloat, matched: Bool)? {
         let pid = ProcessInfo.processInfo.processIdentifier
         let appAX = AXUIElementCreateApplication(pid)
 
@@ -1380,12 +1416,14 @@ final class MenuBarAnchorView: NSView {
 
             if children.count == 1 || title == "Hog Hunter" || (title?.contains("Hog") ?? false),
                let midX = axMidX(of: item) {
-                return midX
+                return (midX, true)
             }
         }
 
-        if let first = children.first {
-            return axMidX(of: first)
+        // A guess: the first extra menu bar item, which is Hog Hunter's own
+        // when it is the only one, and something else when it is not.
+        if let first = children.first, let midX = axMidX(of: first) {
+            return (midX, false)
         }
 
         return nil
