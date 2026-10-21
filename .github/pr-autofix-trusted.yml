@@ -2,14 +2,16 @@
 # PR-branch .autofix.yml may still narrow allowed_bots; it must not change model,
 # turn budget, iteration cap, or verify commands.
 
-# Owner ruling 2026-10-20: all fleet MiniMax use goes to MiniMax-M3.1-Flash.
+# Owner ruling 2026-10-20: all fleet MiniMax use over the /anthropic base URL
+# (this policy and the claude-code-autofix caller) goes to MiniMax-M3.1-Flash.
 #
 # The id below is duplicated in .github/workflows/claude-code-autofix.yml, whose
 # pinned reusable cannot read this file, so the two copies must be changed
 # together; grep for the id when this policy changes.  The kody route
 # (.github/workflows/kody-fleet-autofix.yml) targets the OpenAI-compatible base
 # URL (https://api.minimax.io/v1) and pins MiniMax-M3, a different row that was
-# left alone: an id must not be rewritten from another route's evidence.
+# left alone: an id must not be rewritten from another route's evidence, so
+# that route keeps its own row and is not covered by the ruling above.
 #
 # Two spellings of the M3.1 Flash row exist in the wild and they are not
 # interchangeable across routes.  MiniMax-M3.1-Flash-Preview was dropped from
