@@ -182,7 +182,9 @@ render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent
 render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent
 ```
 
-Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`: sharing one profile across renders makes Chrome hang on a stale singleton lock.  And `--headless=new` is the current unified headless mode; the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file.
+Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`: sharing one profile across renders makes Chrome hang on a stale singleton lock.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so give it a timeout and a retry, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+
+The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
 
 The `.ico` is packed from the PNGs above, with every entry written as a 32-bit DIB so Windows reads real pixels:
 
