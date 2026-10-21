@@ -58,6 +58,12 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 # still happen below, after the watchdog is up.
 from vacuum.config import TICK_WATCHDOG_SEC  # noqa: E402
 
+# vacuum.lock is a leaf module too: standard library only, no vacuum imports.
+# The watchdog needs it because `os._exit` skips `finally` and `atexit`, so a
+# killed tick used to leave the housekeeper lock behind and every tick after
+# it did nothing for two hours.
+from vacuum import lock as housekeeper_lock  # noqa: E402
+
 _watchdog_armed = False
 
 
@@ -69,6 +75,13 @@ def _watchdog_exit(seconds: float) -> None:
         "exiting so the next tick can run\n"
     )
     sys.stderr.flush()
+    # Give the lock back before the hard exit.  Without this the lock
+    # directory survives the kill and every later tick reports "peer holds
+    # lock" until the stale window expires.
+    try:
+        housekeeper_lock.force_release()
+    except Exception:  # pragma: no cover - the exit must not be blocked
+        pass
     os._exit(3)
 
 
