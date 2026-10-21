@@ -392,6 +392,16 @@ enum HogFormat {
         return "\(total) s"
     }
 
+    /// How full a volume is and how much room is left, said the same way for
+    /// every volume: the internal disk, an external drive, a Time Machine
+    /// destination.  The internal disk used to read "17.0 of 460.4 GB free"
+    /// while the others read "69% used · 145.4 GB free", which read as two
+    /// different facts about two different things.
+    static func capacity(usedPercent: Double?, freeBytes: UInt64?) -> String {
+        guard let usedPercent, let freeBytes else { return "Unavailable" }
+        return "\(Int(usedPercent.rounded()))% used · \(memory(freeBytes)) free"
+    }
+
     static func percent(_ fraction: Double) -> String {
         String(format: "%.0f%%", locale: posix, max(0, min(1, fraction)) * 100)
     }
