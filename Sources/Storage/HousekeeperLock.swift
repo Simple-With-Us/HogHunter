@@ -201,8 +201,22 @@ final class HousekeeperLock {
         } catch {
             return false
         }
-        guard isStale(at: aside) else {
-            // Someone else's fresh lock.  Put it back.
+        guard currentOwnerPid() == deadOwnerPid else {
+            // The owner file names somebody else now.  A new holder took over
+            // between our read and our move, so what we moved aside is that
+            // holder's lock.  Put it back.
+            putBack(aside)
+            return false
+        }
+        // The moved lock is free to take when it is old enough, or when the
+        // holder we found is gone.  The second case is not a rare one: a tick
+        // killed a minute ago leaves a *fresh* directory behind, and the age
+        // rule alone would refuse it, which is the wedge this whole change
+        // exists to undo.
+        let movedIsStale = isStale(at: aside)
+        let ownerIsGone = deadOwnerPid.map { $0 > 0 && !HousekeeperLock.isProcessAlive($0) } ?? false
+        guard movedIsStale || ownerIsGone else {
+            // Someone else's fresh lock, held by a live process.  Put it back.
             putBack(aside)
             return false
         }

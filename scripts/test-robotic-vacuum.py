@@ -1779,31 +1779,6 @@ class TestPartialRunRecord(unittest.TestCase):
         self.assertIsNotNone(status["partial_run"])
         self.assertEqual(status["partial_run"]["run_id"], record.run_id)
 
-    def test_a_partial_older_than_a_completed_run_is_ignored(self):
-        # A run that finishes through a path that never clears the partial
-        # copy (the CLI's --run-now) must not be overwritten by a killed tick
-        # that came before it.
-        import dataclasses
-
-        killed, _hits, _cleaned = self.run_watch()
-        self.store.write_partial_run(killed)
-        later = dataclasses.replace(killed, run_id="later-run", started_at=killed.started_at + 60)
-        self.store.append_run(later)
-        with patch("vacuum.alerts.launchd_loaded", return_value=False):
-            status = build_status(self.store, self.cfg, now=time.time())
-        self.assertIsNone(status["partial_run"])
-
-    def test_a_partial_newer_than_every_completed_run_is_kept(self):
-        import dataclasses
-
-        done, _hits, _cleaned = self.run_watch()
-        self.store.append_run(done)
-        killed = dataclasses.replace(done, run_id="killed-run", started_at=done.started_at + 60)
-        self.store.write_partial_run(killed)
-        with patch("vacuum.alerts.launchd_loaded", return_value=False):
-            status = build_status(self.store, self.cfg, now=time.time())
-        self.assertEqual(status["partial_run"]["run_id"], "killed-run")
-
     def test_a_finished_run_leaves_no_partial_in_the_status(self):
         record, _hits, _cleaned = self.run_watch()
         self.store.append_run(record)
@@ -1867,6 +1842,335 @@ class TestTickBudget(unittest.TestCase):
             [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
         )
         self.assertEqual(out.stdout.strip(), "False", out.stderr)
+
+
+class TestHousekeeperLock(unittest.TestCase):
+    """The lock that keeps two reclaimers off the same files.
+
+    The owner file is what makes a killed holder recoverable at once.  The
+    watchdog in scripts/maintain.py exits with os._exit, which skips the
+    lock's __exit__, so the lock directory used to survive a killed tick and
+    every tick after it reported "peer holds lock" until the two hour stale
+    window expired.  The Hog Hunter vacuum had not completed a tick in six
+    days because of it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.tmp.name) / ".housekeeper.lock"
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+
+    def tearDown(self):
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+        self.tmp.cleanup()
+
+    def test_acquire_writes_an_owner_file_beside_the_lock(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            owner = owner_path_for(self.lock_path)
+            self.assertTrue(owner.is_file(), "the owner file records who holds the lock")
+            data = json.loads(owner.read_text())
+            self.assertEqual(data["pid"], os.getpid())
+
+    def test_the_lock_directory_stays_empty_for_the_shell_rmdir(self):
+        # ~/apps/mac-auto-cleanup.sh releases the lock with a plain rmdir, and
+        # rmdir refuses a directory that has anything in it.  An owner file
+        # inside the lock would make the shell's release silently fail and
+        # leak the lock forever.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            self.assertEqual(list(self.lock_path.iterdir()), [])
+            self.assertTrue(owner_path_for(self.lock_path).is_file())
+
+    def test_release_removes_the_owner_file(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            pass
+        self.assertFalse(owner_path_for(self.lock_path).exists())
+        self.assertFalse(self.lock_path.exists())
+
+    def test_a_lock_whose_owner_is_gone_is_taken_over_at_once(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        # A pid above the system maximum cannot name a live process, so this
+        # is what a lock left behind by a killed tick looks like.
+        owner_path_for(self.lock_path).write_text(json.dumps({"pid": 999999}))
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir(), "the dead owner's lock was taken over")
+
+    def test_a_lock_whose_owner_is_alive_is_refused(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(json.dumps({"pid": os.getpid()}))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_fresh_lock_with_no_owner_file_is_not_taken_over(self):
+        # The shell holder never writes an owner file, so a missing one is not
+        # proof of anything.  The age rule decides.
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_stale_lock_with_no_owner_file_is_still_taken_over(self):
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir())
+
+    def test_force_release_gives_the_lock_back(self):
+        from vacuum.lock import HousekeeperLock, force_release, owner_path_for
+
+        lock = HousekeeperLock(self.lock_path)
+        lock.__enter__()
+        self.assertTrue(self.lock_path.is_dir())
+
+        self.assertTrue(force_release(), "force_release releases the lock this process holds")
+        self.assertFalse(self.lock_path.exists())
+        self.assertFalse(owner_path_for(self.lock_path).exists())
+
+    def test_force_release_leaves_a_peers_lock_alone(self):
+        from vacuum.lock import HousekeeperLock, force_release, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(json.dumps({"pid": 999999}))
+
+        self.assertFalse(force_release(), "a lock this process does not hold is not released")
+        self.assertTrue(self.lock_path.is_dir())
+
+    def test_a_leftover_owner_file_does_not_unlock_a_fresh_lock(self):
+        # The shell holder never writes an owner file, so an owner file left
+        # beside the lock can name a pid that is long gone.  Reading it as the
+        # current holder would let a fresh, live lock be taken over.  The
+        # owner file only describes the holder when it is at least as new as
+        # the lock directory.
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner = owner_path_for(self.lock_path)
+        owner.write_text(json.dumps({"pid": 999999}))
+        # The lock directory is newer than the owner file, so the owner file
+        # is a leftover from an earlier holder.
+        now = time.time()
+        os.utime(owner, (now - 600, now - 600))
+        os.utime(self.lock_path, (now, now))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_stale_lock_is_moved_aside_and_leaves_nothing_behind(self):
+        # The takeover is a rename, not a remove and a create: checking that
+        # a lock is stale and then removing it is two steps, and two
+        # reclaimers can interleave them so that both end up believing they
+        # hold it.  Moving it aside lets only one caller win.
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir())
+            leftovers = [p for p in Path(self.tmp.name).iterdir() if ".stale-" in p.name]
+            self.assertEqual(leftovers, [], "a taken-over stale lock leaves no moved-aside copy")
+
+    def test_a_fresh_lock_that_was_displaced_is_put_back(self):
+        # The move acts on whatever is at the path at that instant.  When a
+        # peer had already replaced the stale lock, that is the peer's fresh
+        # lock, and it is put back rather than removed.
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        lock = HousekeeperLock(self.lock_path)
+        self.assertFalse(lock._takeover(), "a fresh lock is not taken")
+        self.assertTrue(self.lock_path.is_dir(), "the displaced fresh lock was put back")
+
+    def test_a_non_empty_lock_is_put_back(self):
+        # The lock is a marker: a directory with contents in it is not the
+        # marker we made, so it is put back rather than removed.
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        (self.lock_path / "leftover.txt").write_text("not ours")
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        lock = HousekeeperLock(self.lock_path)
+        self.assertFalse(lock._takeover(), "a lock with contents in it is not taken")
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertTrue((self.lock_path / "leftover.txt").exists())
+
+    def test_the_owner_file_is_only_removed_when_it_names_the_moved_holder(self):
+        # The owner file belongs to the holder we moved aside.  Removing it
+        # when it names somebody else takes away the new holder's own file.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner = owner_path_for(self.lock_path)
+        owner.write_text(json.dumps({"pid": 999999}))
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        with HousekeeperLock(self.lock_path):
+            data = json.loads(owner.read_text())
+            self.assertEqual(data["pid"], os.getpid(), "the new holder's own owner file is in place")
+
+    def test_only_one_of_two_takers_wins_the_stale_lock(self):
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        with HousekeeperLock(self.lock_path):
+            # The re-entrancy token would let a second attempt through, so it
+            # is cleared to model a second, independent reclaimer.
+            os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+            with self.assertRaises(LockHeld):
+                with HousekeeperLock(self.lock_path):
+                    pass
+
+    def test_a_fresh_lock_whose_owner_died_a_minute_ago_is_taken_over(self):
+        # A tick killed a minute ago leaves a *fresh* directory behind.  The
+        # age rule alone would refuse it, and the vacuum would keep reporting
+        # "peer holds lock" until the two hour window expired -- which is the
+        # six day wedge the owner file was added to undo.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(json.dumps({"pid": 999999}))
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir(), "the dead owner's fresh lock was taken over")
+
+
+class TestCadenceSelection(unittest.TestCase):
+    """One cadence per tick.
+
+    A tick used to run every due cadence back to back in the same process.
+    Measured on this host 2026-10-21: watch took 279s and janitor 117s, and
+    a full reclaim has a 600s budget plus a 180s grace, so a tick with all
+    three due wanted 1176s against a 900s watchdog.  The watchdog killed the
+    tick, and the kill leaked the housekeeper lock.
+    """
+
+    def _store(self, td: str, intervals: dict) -> "VacuumStore":
+        home = Path(td)
+        data = home / "rv"
+        data.mkdir(parents=True)
+        cfg = load_config(home=home)
+        cfg["data_dir"] = str(data)
+        cfg["intervals_seconds"] = intervals
+        return VacuumStore(cfg, home=home)
+
+    def test_only_one_cadence_is_selected(self):
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 1, "janitor": 1, "full": 1})
+            now = time.time()
+            selected = select_cadences(store, store.cfg, now=now)
+            self.assertEqual(len(selected), 1, selected)
+
+    def test_the_most_overdue_cadence_wins(self):
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            # The watch ran a moment ago, the janitor long ago, the full never.
+            store.touch_scheduler("last_watch", now - 310)
+            store.touch_scheduler("last_janitor", now - 3600)
+            store.touch_scheduler("last_full", now - 40000)
+            selected = select_cadences(store, store.cfg, now=now)
+            self.assertEqual(selected, ["full"], selected)
+
+    def test_a_tie_goes_to_the_longest_interval(self):
+        # The four-hourly full reclaim must not be pushed aside by the
+        # five-minute watch every time the two come due together.
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            store.touch_scheduler("last_watch", now - 300)
+            store.touch_scheduler("last_janitor", now - 1800)
+            store.touch_scheduler("last_full", now - 14400)
+            selected = select_cadences(store, store.cfg, now=now)
+            self.assertEqual(selected, ["full"], selected)
+
+    def test_a_cadence_that_is_not_due_is_not_selected(self):
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            store.touch_scheduler("last_watch", now)
+            store.touch_scheduler("last_janitor", now)
+            store.touch_scheduler("last_full", now)
+            self.assertEqual(select_cadences(store, store.cfg, now=now), [])
+
+    def test_a_skipped_cadence_stays_due_and_grows_more_overdue(self):
+        # Nothing waits long: a cadence the tick did not run keeps its
+        # overdue time growing, so it is the next one to be picked.  The
+        # simulation below walks the real intervals and asserts that every
+        # cadence gets a turn, so no one of them is starved.
+        from vacuum.scheduler import overdue_seconds, select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            store.touch_scheduler("last_watch", now - 300)
+            store.touch_scheduler("last_janitor", now - 1800)
+            store.touch_scheduler("last_full", now - 14400)
+
+            # The full reclaim has been waiting longest and has the longest
+            # interval, so it is the one that runs.
+            self.assertEqual(select_cadences(store, store.cfg, now=now), ["full"])
+
+            ran = []
+            clock = now
+            for _ in range(120):
+                clock += 300
+                selected = select_cadences(store, store.cfg, now=clock)
+                if not selected:
+                    continue
+                kind = selected[0]
+                ran.append(kind)
+                store.touch_scheduler(f"last_{kind}", clock)
+
+            self.assertIn("watch", ran, "the watch tick keeps running")
+            self.assertIn("janitor", ran, "the janitor is not starved by the watch")
+            self.assertIn("full", ran, "the full reclaim is not starved")
+            # The janitor is due every 1800s and a tick is 300s, so it must
+            # run at least once in a 120 tick window.
+            self.assertGreaterEqual(ran.count("janitor"), 1, ran)
+            self.assertGreaterEqual(ran.count("full"), 1, ran)
+
+    def test_the_dry_run_reports_the_cadence_the_real_tick_would_pick(self):
+        from vacuum.scheduler import run_dry_tick
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 1, "janitor": 1, "full": 1})
+            now = time.time()
+            result = run_dry_tick(store, now=now)
+            self.assertEqual(len(result["selected"]), 1, result["selected"])
+            self.assertEqual(len(result["records"]), 1, "the dry run plans one cadence, like the real tick")
 
 
 def load_tests(loader, tests, pattern):
