@@ -90,7 +90,7 @@ final class HousekeeperLock {
             // The directory exists.  Either a peer holds it, or a killed
             // process left it behind.
             guard isStale else { return .heldByPeer }
-            removeIfEmpty()
+            guard takeOverStaleLock() else { return .heldByPeer }
             do {
                 try createLockDirectory()
                 ownsLock = true
@@ -132,11 +132,52 @@ final class HousekeeperLock {
     /// is more likely to be a leftover than a live peer, and the Python lock
     /// treats an unreadable lock the same way.
     private var isStale: Bool {
-        guard let attributes = try? fileManager.attributesOfItem(atPath: path.path),
+        isStale(at: path)
+    }
+
+    private func isStale(at url: URL) -> Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
               let modified = attributes[.modificationDate] as? Date else {
             return true
         }
         return Date().timeIntervalSince(modified) > staleInterval
+    }
+
+    /// Clear a stale lock so the caller can create a fresh one.
+    ///
+    /// Checking that the lock is stale and then removing it is two steps, and
+    /// two reclaimers can interleave them: both see the stale lock, one
+    /// removes it and creates a fresh one, and the other then removes that
+    /// fresh, empty lock and creates its own, so both believe they hold it.
+    /// Removing is therefore a rename, which only one caller can win: the
+    /// stale directory is moved aside under a name no one else uses, and a
+    /// caller that finds nothing to move lost the race and backs off.
+    ///
+    /// The rename acts on whatever is at the path at that instant.  When a
+    /// peer had already replaced the stale lock, that is the peer's fresh
+    /// lock, and it is put back rather than removed.
+    private func takeOverStaleLock() -> Bool {
+        let aside = path.deletingLastPathComponent()
+            .appendingPathComponent(".housekeeper.lock.stale-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fileManager.moveItem(at: path, to: aside)
+        } catch {
+            return false
+        }
+        guard isStale(at: aside) else {
+            // Someone else's fresh lock.  Put it back.
+            try? fileManager.moveItem(at: aside, to: path)
+            return false
+        }
+        // Only the stale directory is gone, and only when it is empty, as the
+        // Python side's `rmdir` would.
+        if let contents = try? fileManager.contentsOfDirectory(atPath: aside.path), contents.isEmpty {
+            try? fileManager.removeItem(at: aside)
+        } else {
+            try? fileManager.moveItem(at: aside, to: path)
+            return false
+        }
+        return true
     }
 
     /// Remove the lock directory, but only when it is empty.

@@ -148,6 +148,11 @@ struct DiskCleanerView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
+                if let waiting = regimenRunner.waitingReason {
+                    Text(waiting)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
                 if let summary = regimenRunner.lastSummary {
                     Text(summary)
                         .font(.system(size: 10))

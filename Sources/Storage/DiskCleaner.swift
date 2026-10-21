@@ -1859,6 +1859,11 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Cleaning Execution
 
+    /// What `clean` starts its error with when the safety snapshot could not be
+    /// made.  The unattended runner reads it to stop a run that has no rollback
+    /// point, so the text lives in one place.
+    static let snapshotFailedPrefix = "APFS snapshot failed."
+
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
     /// When `createSnapshot` is true, takes an APFS local snapshot first.
@@ -1955,8 +1960,8 @@ final class DiskCleaner: @unchecked Sendable {
                 // Thinning already ran (destructive).  Report it; do not claim
                 // "Nothing was deleted" after local snapshots were thinned.
                 errors.append(thinnedCount > 0
-                    ? "APFS snapshot failed.  APFS local snapshots were already thinned; no other data was deleted."
-                    : "APFS snapshot failed.  Nothing was deleted.")
+                    ? "\(Self.snapshotFailedPrefix)  APFS local snapshots were already thinned; no other data was deleted."
+                    : "\(Self.snapshotFailedPrefix)  Nothing was deleted.")
                 progress?(1.0, "Stopped")
                 return resultSoFar(removed: thinnedCount)
             }

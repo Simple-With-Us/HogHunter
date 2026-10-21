@@ -1779,6 +1779,31 @@ class TestPartialRunRecord(unittest.TestCase):
         self.assertIsNotNone(status["partial_run"])
         self.assertEqual(status["partial_run"]["run_id"], record.run_id)
 
+    def test_a_partial_older_than_a_completed_run_is_ignored(self):
+        # A run that finishes through a path that never clears the partial
+        # copy (the CLI's --run-now) must not be overwritten by a killed tick
+        # that came before it.
+        import dataclasses
+
+        killed, _hits, _cleaned = self.run_watch()
+        self.store.write_partial_run(killed)
+        later = dataclasses.replace(killed, run_id="later-run", started_at=killed.started_at + 60)
+        self.store.append_run(later)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertIsNone(status["partial_run"])
+
+    def test_a_partial_newer_than_every_completed_run_is_kept(self):
+        import dataclasses
+
+        done, _hits, _cleaned = self.run_watch()
+        self.store.append_run(done)
+        killed = dataclasses.replace(done, run_id="killed-run", started_at=done.started_at + 60)
+        self.store.write_partial_run(killed)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertEqual(status["partial_run"]["run_id"], "killed-run")
+
     def test_a_finished_run_leaves_no_partial_in_the_status(self):
         record, _hits, _cleaned = self.run_watch()
         self.store.append_run(record)

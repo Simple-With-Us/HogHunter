@@ -106,6 +106,40 @@ final class HousekeeperLockTests: XCTestCase {
         fresh.release()
     }
 
+    func testATakeOverLeavesNothingBehindBesideTheLock() throws {
+        // The stale lock is moved aside to be replaced, and the moved copy is
+        // removed.  A leftover would pile up one directory per crash.
+        let dead = HousekeeperLock(path: lockPath)
+        _ = dead.acquire()
+        let old = Date().addingTimeInterval(-(HousekeeperLock.defaultStaleMinutes + 5) * 60)
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: lockPath.path)
+
+        let fresh = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(fresh.acquire(), .acquired)
+
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(siblings, [".housekeeper.lock"], "only the new lock is left")
+        fresh.release()
+    }
+
+    func testAStaleLockWithSomethingInsideIsLeftWhereItWas() throws {
+        // The Python side's `rmdir` refuses a directory with contents, so a
+        // stale lock holding something is not the marker this code made and
+        // is not taken over.  Moving it aside must not lose it.
+        let dead = HousekeeperLock(path: lockPath)
+        _ = dead.acquire()
+        let inside = lockPath.appendingPathComponent("owner.txt")
+        FileManager.default.createFile(atPath: inside.path, contents: Data("busy".utf8))
+        let old = Date().addingTimeInterval(-(HousekeeperLock.defaultStaleMinutes + 5) * 60)
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: lockPath.path)
+
+        let other = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(other.acquire(), .heldByPeer)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: inside.path), "the lock is back in place with its contents")
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(siblings, [".housekeeper.lock"])
+    }
+
     func testAFreshLockIsNotTakenOver() {
         let live = HousekeeperLock(path: lockPath)
         _ = live.acquire()

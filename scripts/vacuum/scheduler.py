@@ -200,7 +200,16 @@ def build_status(store: VacuumStore, cfg: dict[str, Any], now: float | None = No
     # copy is the only record of what it reclaimed.  Fold it in: its steps are
     # the newest results, and the run itself is shown beside the last
     # completed one, so a killed tick is visible instead of silently absent.
+    #
+    # It counts only while it is newer than every completed run.  A run that
+    # finishes through a path that never clears it (the CLI's --run-now) leaves
+    # the old copy on disk, and an old copy must not overwrite the results of
+    # a run that finished after it.
     partial = store.load_partial_run()
+    if partial:
+        newest_started = max((float(r.get("started_at") or 0.0) for r in history), default=0.0)
+        if float(partial.get("started_at") or 0.0) <= newest_started:
+            partial = {}
     if partial:
         for s in partial.get("steps") or []:
             step_states[s.get("step_id")] = s

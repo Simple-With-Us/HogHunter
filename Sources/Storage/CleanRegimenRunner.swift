@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Runs `CleanRegimen` unattended, on a timer, in bounded chunks.
@@ -46,6 +47,11 @@ final class CleanRegimenRunner: ObservableObject {
     /// A short human summary of the most recent run, for the panel.
     @Published private(set) var lastSummary: String?
 
+    /// Why a run that is due has not started, when the regimen's own
+    /// conditions (the Mac being idle, the panel being open) are what holds it.
+    /// Nil whenever nothing is holding it.
+    @Published private(set) var waitingReason: String?
+
     // MARK: - Dependencies
 
     private let cleaner: DiskCleaner
@@ -53,6 +59,8 @@ final class CleanRegimenRunner: ObservableObject {
     /// thread.  `HogStore.deinit` is not main-actor isolated, so the cancel
     /// path has to be.
     nonisolated let loopBox = CleanRegimenTaskBox()
+    /// True while the scheduler's loop is running.
+    nonisolated var isScheduling: Bool { loopBox.isSet }
     /// The run in flight, held for the same reason.
     nonisolated let runBox = CleanRegimenTaskBox()
     private let defaultsKey = "hoghunter.cleaner.regimen.lastRunAt"
@@ -76,16 +84,32 @@ final class CleanRegimenRunner: ObservableObject {
     /// to point it at a temporary directory instead.
     private let lockProvider: () -> HousekeeperLock
 
+    /// Seconds since the person last touched the keyboard or the mouse.
+    ///
+    /// A closure so a test can say "the Mac has been idle for an hour" without
+    /// waiting an hour.
+    private let idleSeconds: () -> TimeInterval
+
+    /// True while the panel is open.  `HogStore` supplies it, because the
+    /// runner is process-wide and does not own the panel.
+    var presenceProvider: () -> Bool = { false }
+
+    /// How many stores have asked for the schedule to keep running.  The
+    /// runner is shared, so one store going away must not stop it for another.
+    nonisolated private let holders = CleanRegimenHolderCount()
+
     init(
         cleaner: DiskCleaner = DiskCleaner(),
         now: @escaping () -> Date = { Date() },
         defaults: UserDefaults = .standard,
-        lockProvider: @escaping () -> HousekeeperLock = { HousekeeperLock() }
+        lockProvider: @escaping () -> HousekeeperLock = { HousekeeperLock() },
+        idleSeconds: @escaping () -> TimeInterval = { CleanRegimenRunner.systemIdleSeconds() }
     ) {
         self.cleaner = cleaner
         self.now = now
         self.lastRunDefaults = defaults
         self.lockProvider = lockProvider
+        self.idleSeconds = idleSeconds
     }
 
     // MARK: - Lifecycle
@@ -109,6 +133,22 @@ final class CleanRegimenRunner: ObservableObject {
         // Consider a run promptly on launch so a first-time enable does not
         // wait a full interval to show any effect.
         tick()
+    }
+
+    /// A store asks for the schedule to keep running.  The first holder starts
+    /// it.  `release()` is the matching call, and the last one stops it.
+    func acquire() {
+        if holders.increment() == 1 { start() }
+    }
+
+    /// A store no longer needs the schedule.  Only the last holder stops it, so
+    /// tearing one store down cannot cancel the schedule or an in-flight clean
+    /// another store still depends on.
+    ///
+    /// `nonisolated` because `HogStore.deinit` calls it, and a deinit is not
+    /// main-actor isolated.
+    nonisolated func release() {
+        if holders.decrement() == 0 { stop() }
     }
 
     /// Stop the scheduler and any run in flight.
@@ -138,10 +178,49 @@ final class CleanRegimenRunner: ObservableObject {
         let regimen = CleanRegimen.load().sanitized()
         let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
+            waitingReason = nil
             updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
             return
         }
+        // A scheduled run honors the regimen's own conditions.  "Run Now" is
+        // a person asking, so it does not go through this gate.
+        if let reason = Self.scheduleBlocker(
+            regimen: regimen,
+            idleSeconds: idleSeconds(),
+            panelOpen: presenceProvider()
+        ) {
+            waitingReason = reason
+            nextRunDate = now().addingTimeInterval(checkInterval)
+            return
+        }
+        waitingReason = nil
         runNow(regimen: regimen)
+    }
+
+    /// Why a due, scheduled run must not start yet, or nil when it may.
+    ///
+    /// `requireIdleMinutes` and `requireUserPresent` are the regimen's own
+    /// conditions.  They were written down and never read, which was harmless
+    /// while the runner never ran and is not harmless now: a reclaim on a Mac
+    /// someone is using is the case the design set out to avoid.
+    nonisolated static func scheduleBlocker(regimen: CleanRegimen,
+                                            idleSeconds: TimeInterval,
+                                            panelOpen: Bool) -> String? {
+        if regimen.requireUserPresent && !panelOpen {
+            return "Waiting for the panel to be open."
+        }
+        if regimen.requireIdleMinutes > 0 && idleSeconds < regimen.requireIdleMinutes * 60 {
+            return "Waiting for the Mac to be idle."
+        }
+        return nil
+    }
+
+    /// Seconds since the last keyboard, mouse or trackpad event in this login
+    /// session.
+    nonisolated static func systemIdleSeconds() -> TimeInterval {
+        // `~0` is the "any event type" value for this call.
+        guard let anyEvent = CGEventType(rawValue: ~0) else { return 0 }
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyEvent)
     }
 
     private func updateNextRun(regimen: CleanRegimen, lastRunAt: Date?) {
@@ -217,7 +296,10 @@ final class CleanRegimenRunner: ObservableObject {
         var recordsRun = true
         defer {
             isRunning = false
-            if recordsRun {
+            // A cancelled run is not a completed one: the app is quitting or
+            // the schedule was stopped, so the interval's clock must not
+            // restart.  The next launch finds the run still due.
+            if recordsRun && !Task.isCancelled {
                 lastRunDefaults.set(started, forKey: defaultsKey)
                 updateNextRun(regimen: regimen, lastRunAt: started)
             } else {
@@ -280,21 +362,38 @@ final class CleanRegimenRunner: ObservableObject {
         result.pressureLabel = pressure.label
         result.chunkSize = chunk
 
+        // One rollback point per run, not one per chunk.  Every `clean` call
+        // with a snapshot asks for a whole-volume local snapshot, so a run of
+        // dozens of chunks would pin dozens of them and keep the space it just
+        // deleted from coming back.  The first chunk takes it.
+        var snapshotTaken = false
         var index = 0
         while index < pending.count {
             if Task.isCancelled { break }
             let end = min(index + chunk, pending.count)
             let batch = Array(pending[index..<end])
+            let takeSnapshot = regimen.createSnapshotBeforeClean && !snapshotTaken
             let cleaned = await cleaner.clean(
                 items: batch,
                 tier: .standard,
-                createSnapshot: regimen.createSnapshotBeforeClean,
+                createSnapshot: takeSnapshot,
                 exclusions: exclusions
             )
             result.itemsRemoved += cleaned.itemsRemoved
             result.bytesReclaimed += cleaned.bytesReclaimed
             result.errors.append(contentsOf: cleaned.errors)
             index = end
+
+            if takeSnapshot {
+                if cleaned.snapshotName != nil {
+                    snapshotTaken = true
+                } else if cleaned.errors.contains(where: { $0.hasPrefix(DiskCleaner.snapshotFailedPrefix) }) {
+                    // No rollback point, so no unattended delete.  `clean`
+                    // deleted nothing in this chunk; the rest of the run
+                    // does not go on without one.
+                    break
+                }
+            }
 
             if index < pending.count && pause > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000))
@@ -448,6 +547,31 @@ struct RegimenRun: Equatable, Sendable {
     }
 }
 
+/// Counts the stores that depend on the shared runner.
+///
+/// Locked rather than main-actor isolated because `HogStore.deinit`, which
+/// releases, is not main-actor isolated.
+final class CleanRegimenHolderCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    /// Returns the count after adding one.
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return count
+    }
+
+    /// Returns the count after taking one away, never below zero.
+    func decrement() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count = max(0, count - 1)
+        return count
+    }
+}
+
 /// Holds a task so it can be cancelled from any thread.
 ///
 /// The runner is `@MainActor`, but `HogStore.deinit` is not main-actor
@@ -471,5 +595,12 @@ final class CleanRegimenTaskBox: @unchecked Sendable {
         self.task = nil
         lock.unlock()
         task?.cancel()
+    }
+
+    /// True while a task is held.
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return task != nil
     }
 }

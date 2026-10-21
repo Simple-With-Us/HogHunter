@@ -1002,6 +1002,30 @@ final class DiskCleanerTests: XCTestCase {
         return tree
     }
 
+    func testAFailedSafetySnapshotStopsTheCleanAndSaysSoInTheWordsTheRunnerReads() async throws {
+        // The unattended runner takes one snapshot per run and stops the run
+        // when that snapshot fails.  It recognizes the failure by this prefix.
+        let tree = try makeCacheTree("com.example.snapfail")
+        let cleaner = DiskCleaner(makeSnapshot: { (false, nil) }, homeDirectory: tempDirectory)
+        let item = CleanItem(
+            category: .userCaches,
+            title: "com.example.snapfail",
+            subtitle: tree.path,
+            url: tree,
+            bytes: 5,
+            fileCount: 1,
+            lastModified: Date(),
+            isSelected: true
+        )
+
+        let result = await cleaner.clean(items: [item], createSnapshot: true, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tree.path), "nothing is deleted without a rollback point")
+        XCTAssertTrue(result.errors.contains { $0.hasPrefix(DiskCleaner.snapshotFailedPrefix) })
+        XCTAssertNil(result.snapshotName)
+    }
+
     func testIsSafeToDeleteRefusesATreeWithAMarkerInsideIt() throws {
         // The marker is not on the tree or on a parent of it, so `isKept`
         // alone cannot see it.  Deleting the tree would take the marker with

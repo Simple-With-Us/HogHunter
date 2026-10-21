@@ -262,6 +262,10 @@ final class HogStore: ObservableObject {
     /// unattended delete is something the owner turns on, not something an
     /// upgrade grants.
     private let cleanRegimen = CleanRegimenRunner.shared
+    /// True while this store holds the shared runner.  The runner is
+    /// process-wide, so a store releases it only if it asked for it, and the
+    /// runner stops when the last holder lets go.
+    private var holdsCleanRegimen = false
 
     /// The one Maintain store.  The Mac's Storage tab and the iPhone
     /// route both use it, so a run started from either is the only run.
@@ -445,7 +449,7 @@ final class HogStore: ObservableObject {
         timer?.invalidate()
         pressureSource?.cancel()
         companionServer.stop()
-        cleanRegimen.stop()
+        if holdsCleanRegimen { cleanRegimen.release() }
     }
 
     // MARK: - Lifecycle
@@ -475,7 +479,10 @@ final class HogStore: ObservableObject {
         bandwidth.start()
         // The unattended clean regimen keeps its cadence here, beside the
         // bandwidth monitor, so it does not depend on the panel being open.
-        cleanRegimen.start()
+        // `requireUserPresent` asks the store whether the panel is open.
+        cleanRegimen.presenceProvider = { [weak self] in self?.panelVisible ?? false }
+        cleanRegimen.acquire()
+        holdsCleanRegimen = true
         // Settle the notification decision now rather than at the moment the
         // first alert fires, which would post before the prompt was answered.
         if alertsEnabled { alerts.requestAuthorization() }
@@ -493,7 +500,10 @@ final class HogStore: ObservableObject {
         timer = nil
         pressureSource?.cancel()
         pressureSource = nil
-        cleanRegimen.stop()
+        if holdsCleanRegimen {
+            holdsCleanRegimen = false
+            cleanRegimen.release()
+        }
         started = false
     }
 

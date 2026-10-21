@@ -182,6 +182,21 @@ final class CleanRegimenRunnerTests: XCTestCase {
                        accuracy: 1)
     }
 
+    func testACancelledRunDoesNotStartTheIntervalClock() async {
+        // The app is quitting or the schedule was stopped: the run did not
+        // finish, so the next launch finds it still due.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let defaults = makeDefaults()
+        let runner = makeRunner(defaults: defaults)
+
+        let task = runner.runNow(regimen: makeRegimen(enabled: true, intervalHours: 4))
+        task?.cancel()
+        await task?.value
+
+        XCTAssertNil(defaults.object(forKey: key), "a cancelled run is not a completed one")
+        XCTAssertFalse(runner.isRunning)
+    }
+
     func testTheRunnerTakesTheHousekeeperLockAndGivesItBack() async {
         // A stale lock from a process that died.  If the runner takes it, it
         // removes it on the way out; if it does not, the directory survives.
@@ -253,6 +268,54 @@ final class CleanRegimenRunnerTests: XCTestCase {
         XCTAssertEqual(runner.nextRunDate, first)
     }
 
+    // MARK: - The regimen's own conditions
+
+    func testAScheduledRunWaitsUntilTheMacHasBeenIdleLongEnough() {
+        var regimen = makeRegimen(enabled: true)
+        regimen.requireIdleMinutes = 30
+
+        XCTAssertEqual(
+            CleanRegimenRunner.scheduleBlocker(regimen: regimen, idleSeconds: 5 * 60, panelOpen: false),
+            "Waiting for the Mac to be idle."
+        )
+        XCTAssertNil(
+            CleanRegimenRunner.scheduleBlocker(regimen: regimen, idleSeconds: 31 * 60, panelOpen: false)
+        )
+    }
+
+    func testAnIdleRequirementOfZeroNeverWaits() {
+        var regimen = makeRegimen(enabled: true)
+        regimen.requireIdleMinutes = 0
+        XCTAssertNil(CleanRegimenRunner.scheduleBlocker(regimen: regimen, idleSeconds: 0, panelOpen: false))
+    }
+
+    func testRequireUserPresentWaitsForTheOpenPanel() {
+        var regimen = makeRegimen(enabled: true)
+        regimen.requireIdleMinutes = 0
+        regimen.requireUserPresent = true
+
+        XCTAssertEqual(
+            CleanRegimenRunner.scheduleBlocker(regimen: regimen, idleSeconds: 3600, panelOpen: false),
+            "Waiting for the panel to be open."
+        )
+        XCTAssertNil(CleanRegimenRunner.scheduleBlocker(regimen: regimen, idleSeconds: 3600, panelOpen: true))
+    }
+
+    func testRunNowIgnoresTheIdleRequirement() async {
+        // "Run Now" is a person asking, so the regimen's conditions gate the
+        // schedule and not the button.
+        var regimen = makeRegimen(enabled: true)
+        regimen.requireIdleMinutes = 30
+        let runner = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 }
+        )
+        await runner.runNow(regimen: regimen)?.value
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+    }
+
     // MARK: - Lifecycle
 
     func testStopCanBeCalledFromAnotherThread() {
@@ -267,6 +330,21 @@ final class CleanRegimenRunnerTests: XCTestCase {
             done.fulfill()
         }
         wait(for: [done], timeout: 5)
+    }
+
+    func testOneHoldersReleaseDoesNotStopTheRunnerForAnother() {
+        // The runner is shared, so a store going away must not cancel the
+        // schedule another store still depends on.
+        let runner = makeRunner()
+        runner.acquire()
+        runner.acquire()
+        XCTAssertTrue(runner.isScheduling)
+
+        runner.release()
+        XCTAssertTrue(runner.isScheduling, "one holder is still using it")
+
+        runner.release()
+        XCTAssertFalse(runner.isScheduling, "the last holder stops it")
     }
 
     func testTheAppHasOneSharedRunner() {

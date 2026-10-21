@@ -12,7 +12,17 @@ An unattended run gets no extra authority.  It takes the same `.janitor-keep` ma
 - `KeepSentinel` asks the two questions the Python engine asks.  `isKept` finds a marker on a path or any parent of it.  `containsMarker` finds a marker anywhere inside a tree, which matters because the cleaner deletes whole trees and would take the marker with them.  `DiskCleaner.isHandsOff` asks both, at the scan, at the clean, and in `isSafeToDelete`, the choke point every delete passes through.  A symlink item has its target's children trashed, so the inside question is asked of the resolved target.
 - The cleaner refuses a path on an external volume, and refuses `~/apps/lanes` by name, because that tree resolves to the internal disk when the external volume is unmounted.
 
+A scheduled run honors the regimen's own conditions.  `requireIdleMinutes` (30 by default) holds a due run until the Mac has had no keyboard or mouse input for that long, and `requireUserPresent` holds it until the panel is open.  The panel says which one is holding it.  Run Now is a person asking, so it skips both.
+
+A run takes one APFS safety snapshot, with its first chunk, not one per chunk.  If that snapshot cannot be made the run stops, because an unattended delete with no rollback point is not recoverable.  A cancelled run (the app quitting, or the schedule stopped) does not start the interval's clock either.  The runner is process-wide, so `HogStore` holds it by count and the last holder to let go stops it.
+
 A run that steps aside because a build is running or another cleanup holds the lock did not happen, so it does not start the interval's clock.  The runner leaves the stored last run alone and the next 15 minute check retries; the panel shows that retry time.  A run that decided something, including "no rules enabled" and "nothing reclaimable", is a run and starts the clock.
+
+## What the marker walk does not do
+
+`KeepSentinel.containsMarker` is bounded (6 levels, 2,000 entries) and answers "no marker found in what was read" when it hits the bound, the same way it treats an unreadable part of a tree.  The Python engine has no entry cap: it walks the whole tree under a time budget and treats a timeout as "do not delete".  The Swift walk deliberately does not fail closed at the bound, because a tree with more than 2,000 entries is the normal state of an Xcode or package cache, and refusing every such tree would stop both the regimen and a manual clean from ever reclaiming the biggest caches.  A marker in a tree deeper or larger than the bound is therefore not seen.  The right shape is the Python one, a complete walk with a time budget that fails closed on timeout, and it needs a budget shared with the scan.
+
+The stale-lock takeover in `HousekeeperLock` moves the stale directory aside atomically, so two Swift callers cannot both remove and recreate it.  The Python lock (`scripts/vacuum/lock.py`) and `mac-auto-cleanup.sh` still remove and recreate it in two steps, so a takeover that races one of them is narrowed and not closed.
 
 ## The controls stay on the Mac
 
