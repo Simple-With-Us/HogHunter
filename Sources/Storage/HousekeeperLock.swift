@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// The mkdir-based housekeeper lock, mirrored from the Python reclaim engine.
 ///
@@ -21,6 +24,21 @@ import Foundation
 ///
 /// The two implementations have to agree on the path, the staleness window,
 /// the re-entrancy token, and the "only remove a lock you took" rule.
+///
+/// The owner file
+/// --------------
+/// The lock directory on disk does not say who is holding it.  When a tick is
+/// killed hard -- `os._exit` skips `finally` and `atexit` -- the directory
+/// survived and every tick after it reported "peer holds lock" until the two
+/// hour stale window expired.  That is why the vacuum had not completed a
+/// tick in six days.
+///
+/// Both sides now write an *owner file* beside the lock directory, naming the
+/// pid that holds it.  A holder whose pid is gone is taken over at once
+/// instead of after the stale window.  The owner file is a sibling and not a
+/// file inside the lock directory, because `mac-auto-cleanup.sh` releases the
+/// lock with a plain `rmdir`, and `rmdir` refuses a directory with anything
+/// in it.
 final class HousekeeperLock {
     /// Where the lock lives when nothing else is injected.
     static let defaultPath = "~/.claude-disk-janitor/.housekeeper.lock"
@@ -54,6 +72,16 @@ final class HousekeeperLock {
         self.fileManager = fileManager
     }
 
+    /// The identity file that sits beside the lock directory.
+    ///
+    /// It has to be a sibling, not a file inside the lock directory, because
+    /// `mac-auto-cleanup.sh` releases the lock with a plain `rmdir` and
+    /// `rmdir` refuses a directory that has anything in it.
+    var ownerPath: URL {
+        path.deletingLastPathComponent()
+            .appendingPathComponent(path.lastPathComponent + ".owner")
+    }
+
     /// True when this process is already the lock owner.
     ///
     /// The Python lock sets `HOUSEKEEPER_LOCK_OWNER=1` for its children so a
@@ -73,7 +101,9 @@ final class HousekeeperLock {
     ///
     /// A lock that exists but is older than the stale window belongs to a
     /// process that died, so it is taken over.  A lock that exists and is
-    /// fresh belongs to a peer, and the caller has to wait its turn.
+    /// fresh belongs to a peer, and the caller has to wait its turn -- unless
+    /// the peer is demonstrably gone, in which case it is taken over at once
+    /// rather than after the stale window.
     @discardableResult
     func acquire() -> Outcome {
         if HousekeeperLock.isReentrantOwner {
@@ -85,15 +115,18 @@ final class HousekeeperLock {
         do {
             try createLockDirectory()
             ownsLock = true
+            writeOwnerFile()
             return .acquired
         } catch {
             // The directory exists.  Either a peer holds it, or a killed
             // process left it behind.
-            guard isStale else { return .heldByPeer }
+            guard isStale || isOwnerGone else { return .heldByPeer }
+            removeOwnerFile()
             removeIfEmpty()
             do {
                 try createLockDirectory()
                 ownsLock = true
+                writeOwnerFile()
                 return .acquired
             } catch {
                 return .heldByPeer
@@ -108,6 +141,7 @@ final class HousekeeperLock {
     func release() {
         guard ownsLock else { return }
         ownsLock = false
+        removeOwnerFile()
         removeIfEmpty()
     }
 
@@ -137,6 +171,61 @@ final class HousekeeperLock {
             return true
         }
         return Date().timeIntervalSince(modified) > staleInterval
+    }
+
+    /// True when the recorded owner is definitely gone.
+    ///
+    /// A missing or unreadable owner file is *not* proof of anything: the
+    /// shell holder never wrote one, so the caller falls back to the age
+    /// rule.  Guessing wrong in that direction would steal a live lock.
+    private var isOwnerGone: Bool {
+        guard let pid = ownerPid(), pid > 0, pid != getpid() else { return false }
+        return !HousekeeperLock.isProcessAlive(pid)
+    }
+
+    /// The pid recorded in the owner file, when there is a readable one.
+    private func ownerPid() -> Int32? {
+        guard let data = fileManager.contents(atPath: ownerPath.path),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any],
+              let pid = dict["pid"] as? NSNumber else {
+            return nil
+        }
+        return pid.int32Value
+    }
+
+    /// True when a pid still names a live process.
+    ///
+    /// Signal 0 delivers nothing; it only asks the kernel whether the process
+    /// exists.  EPERM means it exists but belongs to somebody else, and that
+    /// counts as alive.
+    static func isProcessAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    /// Record who holds the lock.
+    ///
+    /// The pid is what makes a killed holder recoverable.  A failure to write
+    /// is not fatal: the lock directory is the real mutex, and the owner file
+    /// only makes recovery fast.
+    private func writeOwnerFile() {
+        var payload: [String: Any] = [
+            "pid": Int(getpid()),
+            "acquired_at": Date().timeIntervalSince1970,
+            "lock": path.path,
+        ]
+        let host = ProcessInfo.processInfo.hostName
+        if !host.isEmpty { payload["host"] = host }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        try? data.write(to: ownerPath, options: .atomic)
+    }
+
+    /// Remove the owner file.
+    private func removeOwnerFile() {
+        guard fileManager.fileExists(atPath: ownerPath.path) else { return }
+        try? fileManager.removeItem(at: ownerPath)
     }
 
     /// Remove the lock directory, but only when it is empty.

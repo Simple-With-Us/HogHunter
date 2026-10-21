@@ -28,6 +28,64 @@ def should_run(store: VacuumStore, cfg: dict[str, Any], kind: str, now: float | 
     return (now - last) >= interval
 
 
+# The cadences, cheapest first.  The order is also the tie-break order for
+# picking a cadence: the longest interval wins a tie, because the short
+# interval runs again in five minutes and the long one does not.
+CADENCES = ("watch", "janitor", "full")
+
+# How many cadences one tick may run.
+#
+# One.  A tick used to run every due cadence back to back in the same
+# process, and the sum could be longer than the watchdog that bounds a tick.
+# Measured on this host 2026-10-21: watch took 279s and janitor 117s, and a
+# full reclaim has a 600s budget plus a 180s grace, so a tick with all three
+# due wanted 1176s against a 900s watchdog.  The watchdog then killed the
+# tick, and because the kill skipped the lock's `__exit__`, the housekeeper
+# lock survived it and blocked every tick after it.  The vacuum had not
+# completed a tick in six days.
+#
+# One cadence per tick keeps every tick inside the watchdog: the worst
+# single cadence is a full reclaim at 780s.  Nothing is delayed for long,
+# because a cadence that is skipped stays due and its overdue time keeps
+# growing, so it is the next one to be picked.
+MAX_CADENCES_PER_TICK = 1
+
+
+def overdue_seconds(store: VacuumStore, cfg: dict[str: Any], kind: str, now: float) -> float:
+    """How long a cadence has been past its interval.  Negative means not yet due."""
+    intervals = cfg.get("intervals_seconds", {})
+    interval = float(intervals.get(kind, 0))
+    if interval <= 0:
+        return float("-inf")
+    state = store.scheduler_state()
+    last = float(state.get(f"last_{kind}", 0))
+    return (now - last) - interval
+
+
+def select_cadences(
+    store: VacuumStore, cfg: dict[str: Any], now: float | None = None
+) -> list[str]:
+    """Pick the cadences this tick should run, most overdue first.
+
+    Only cadences that are actually due are considered, and at most
+    `MAX_CADENCES_PER_TICK` of them come back.  The one that has been
+    waiting longest goes first, and a tie goes to the cadence with the
+    longest interval, so the rare four-hourly full reclaim is not pushed
+    aside by the five-minute watch every time the two come due together.
+    """
+    now = now or time.time()
+    due = [kind for kind in CADENCES if should_run(store, cfg, kind, now)]
+    if not due:
+        return []
+    due.sort(
+        key=lambda kind: (
+            -overdue_seconds(store, cfg, kind, now),
+            -float(cfg.get("intervals_seconds", {}).get(kind, 0)),
+        )
+    )
+    return due[:MAX_CADENCES_PER_TICK]
+
+
 def run_dry_tick(
     store: VacuumStore, engine: VacuumEngine | None = None, now: float | None = None
 ) -> dict[str, Any]:
@@ -42,18 +100,22 @@ def run_dry_tick(
         scratch["last_clean_at"] = state["last_clean_at"]
     prev = state.get("prev_disk_free_gb")
     prev_f = float(prev) if prev is not None else None
-    due = {kind: should_run(store, cfg, kind, now) for kind in ("watch", "janitor", "full")}
+    due = {kind: should_run(store, cfg, kind, now) for kind in CADENCES}
+    selected = select_cadences(store, cfg, now)
     records: list[RunRecord] = []
-    if due["watch"]:
+    # Plan only the cadence the real tick would pick, so the dry run does
+    # not over-report work the next tick is not going to do.
+    if "watch" in selected:
         record, _hits, _cleaned = engine.run_watch_tick(scratch, prev_f, dry_run=True)
         records.append(record)
-    if due["janitor"]:
+    if "janitor" in selected:
         records.append(engine.run(TriggerKind.JANITOR, dry_run=True))
-    if due["full"]:
+    if "full" in selected:
         records.append(engine.run(TriggerKind.FULL, band="cheap", dry_run=True))
     return {
         "dry_run": True,
         "due": due,
+        "selected": selected,
         "plan": engine.plan,
         "records": [r.as_dict() for r in records],
     }
@@ -80,7 +142,12 @@ def run_scheduler_tick(
     prev_free = state.get("prev_disk_free_gb")
     prev_free_f = float(prev_free) if prev_free is not None else None
 
-    if should_run(store, cfg, "watch", now):
+    # One cadence per tick, the most overdue one.  Running every due cadence
+    # back to back could take longer than the watchdog that bounds a tick,
+    # and the watchdog's kill used to leave the housekeeper lock behind.
+    selected = select_cadences(store, cfg, now)
+
+    if "watch" in selected:
         record, hits, cleaned = engine.run_watch_tick(watch_scratch, prev_free_f)
         store.append_run(record)
         store.clear_partial_run()
@@ -88,7 +155,7 @@ def run_scheduler_tick(
             store.touch_scheduler("last_watch", now)
         results.append({"trigger": "watch", "run_id": record.run_id, "hits": len(hits), "cleaned": cleaned})
 
-    if should_run(store, cfg, "janitor", now):
+    if "janitor" in selected:
         record = engine.run(TriggerKind.JANITOR)
         store.append_run(record)
         store.clear_partial_run()
@@ -96,7 +163,7 @@ def run_scheduler_tick(
             store.touch_scheduler("last_janitor", now)
         results.append({"trigger": "janitor", "run_id": record.run_id})
 
-    if should_run(store, cfg, "full", now):
+    if "full" in selected:
         record = engine.run(TriggerKind.FULL, band="cheap")
         store.append_run(record)
         store.clear_partial_run()
