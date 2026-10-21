@@ -142,12 +142,12 @@ struct HogHunterApp: App {
 
     var body: some Scene {
         MenuBarExtra(isInserted: .constant(Self.shouldInsertMenuBarExtra)) {
-            if store.dockedToMenuBar {
-                HogHunterPanel(isQuickView: true)
-                    .environmentObject(store)
-            } else {
-                DetachedMenuBarPopover(store: store)
-            }
+            // The menu bar window is the only quick view now.  Detaching put a
+            // second copy of the same readings in a floating window beside the
+            // dashboard window that already showed them, and there was no
+            // reason for the small one to exist on its own.
+            HogHunterPanel(isQuickView: true)
+                .environmentObject(store)
         } label: {
             HStack(spacing: 5) {
                 Image("HogProfile")
@@ -203,53 +203,4 @@ struct HogHunterApp: App {
     }
 }
 
-/// Compact menu bar popover displayed when Hog Hunter is running in detached
-/// window mode.  Provides instant access to bring the window forward or re-attach.
-struct DetachedMenuBarPopover: View {
-    @ObservedObject var store: HogStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image("HogProfile")
-                    .renderingMode(.original)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 15)
-                Text("Hog Hunter")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-                Text("Detached")
-                    .font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.blue.opacity(0.15)))
-                    .foregroundStyle(.blue)
-            }
-            Text("Hog Hunter is running in standalone window mode.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            Divider()
-            HStack(spacing: 8) {
-                Button("Open Dashboard") {
-                    DetachedWindowManager.shared.openDetachedWindow(store: store)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-
-                Button("Attach to Menu Bar") {
-                    store.dockedToMenuBar = true
-                    DetachedWindowManager.shared.closeDetachedWindow()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        }
-        .padding(14)
-        .frame(width: 280)
-        .onAppear {
-            DetachedWindowManager.shared.openDetachedWindow(store: store)
-        }
-    }
-}
 

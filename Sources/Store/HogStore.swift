@@ -111,11 +111,6 @@ final class HogStore: ObservableObject {
             restartTimer()
         }
     }
-    @Published var dockedToMenuBar: Bool = true {
-        didSet {
-            persist()
-        }
-    }
     var effectiveRefreshInterval: TimeInterval {
         panelVisible ? refreshInterval : backgroundRefreshInterval
     }
@@ -284,7 +279,6 @@ final class HogStore: ObservableObject {
         static let infisicalProjectId = "infisicalProjectId"
         static let refreshInterval = "refreshInterval"
         static let backgroundRefreshInterval = "backgroundRefreshInterval"
-        static let dockedToMenuBar = "dockedToMenuBar"
         static let alertsEnabled = "alertsEnabled"
         static let alertThresholdPercent = "alertThresholdPercent"
         static let alertSustainedMinutes = "alertSustainedMinutes"
@@ -305,6 +299,14 @@ final class HogStore: ObservableObject {
         static let renamedKeys: [String: String] = [
             "allowRemoteVacuum": "allowRemoteMaintain",
         ]
+
+        /// Settings keys that no longer have a setting behind them.  The menu
+        /// bar window is the only quick view now, so the attach/detach
+        /// preference is gone; the stored value is cleared rather than left
+        /// behind for a build that will never read it.
+        static let retiredKeys: [String] = [
+            "dockedToMenuBar",
+        ]
     }
 
     /// Carries a stored value across a key rename instead of resetting it.
@@ -321,6 +323,14 @@ final class HogStore: ObservableObject {
             if newKey == Key.allowRemoteMaintain {
                 allowRemoteMaintain = value as? Bool ?? false
             }
+        }
+    }
+
+    /// Drops the stored values of settings that no longer exist, so a saved
+    /// preference is not left behind for a build that will never read it.
+    private func clearRetiredKeys() {
+        for key in Key.retiredKeys {
+            defaults.removeObject(forKey: key)
         }
     }
 
@@ -1235,10 +1245,8 @@ final class HogStore: ObservableObject {
         allowRemoteMaintain = defaults.object(forKey: Key.allowRemoteMaintain) as? Bool ?? false
         let bgInterval = defaults.double(forKey: Key.backgroundRefreshInterval)
         if bgInterval >= 1 { backgroundRefreshInterval = bgInterval }
-        if defaults.object(forKey: Key.dockedToMenuBar) != nil {
-            dockedToMenuBar = defaults.bool(forKey: Key.dockedToMenuBar)
-        }
         migrateRenamedKeys()
+        clearRetiredKeys()
         if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
             companionCode = code
         } else {
@@ -1348,7 +1356,6 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
         defaults.set(allowRemoteMaintain, forKey: Key.allowRemoteMaintain)
         defaults.set(backgroundRefreshInterval, forKey: Key.backgroundRefreshInterval)
-        defaults.set(dockedToMenuBar, forKey: Key.dockedToMenuBar)
     }
 
     // MARK: - Test hooks
@@ -1428,10 +1435,6 @@ final class HogStore: ObservableObject {
             let bgInterval = self.defaults.double(forKey: Key.backgroundRefreshInterval)
             if bgInterval >= 1, bgInterval != self.backgroundRefreshInterval {
                 self.backgroundRefreshInterval = bgInterval
-            }
-            if let docked = self.defaults.object(forKey: Key.dockedToMenuBar) as? Bool,
-               docked != self.dockedToMenuBar {
-                self.dockedToMenuBar = docked
             }
             let enabled = self.defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
             if enabled != self.alertsEnabled {

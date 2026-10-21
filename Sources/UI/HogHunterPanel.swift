@@ -44,10 +44,24 @@ struct HogHunterPanel: View {
         _hasVisitedNetwork = State(initialValue: initialTab == .network)
     }
 
-    private enum HostScope: String, CaseIterable, Identifiable {
+    enum HostScope: String, CaseIterable, Identifiable {
         case mac = "This Mac"
         case server = "Server"
         var id: String { rawValue }
+    }
+
+    /// Which part of the server snapshot a section shows.  Every section has
+    /// an answer, and no two sections answer with the same readings, so a
+    /// section can never look like the one before it.  Network is the one
+    /// section the snapshot cannot answer, and it says so instead.
+    static func serverSection(for tab: PanelTab) -> VPSResourceSection? {
+        switch tab {
+        case .overview: return .all
+        case .activity: return .activity
+        case .storage: return .storage
+        case .maintenance: return .maintenance
+        case .network: return nil
+        }
     }
 
     private var hostScope: HostScope {
@@ -57,34 +71,11 @@ struct HogHunterPanel: View {
 
     private var dashboard: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Hog Hunter")
-                    .font(.system(size: 17, weight: .bold))
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 14)
-                ForEach(PanelTab.allCases) { tab in
-                    Button {
-                        selectedTab = tab
-                    } label: {
-                        Label(tab.rawValue, systemImage: tabSymbol(tab))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(selectedTab == tab ? Color.accentColor.opacity(0.12) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(width: 154)
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor))
+            sidebar
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text(selectedTab.rawValue)
+                    Text(pageTitle)
                         .font(.system(size: 20, weight: .semibold))
                     if store.isStale {
                         Text("Sampling behind")
@@ -92,17 +83,6 @@ struct HogHunterPanel: View {
                             .foregroundStyle(.orange)
                     }
                     Spacer(minLength: 8)
-                    Picker("Host", selection: Binding(
-                        get: { hostScope },
-                        set: { hostScope = $0 }
-                    )) {
-                        ForEach(HostScope.allCases) { scope in
-                            Text(scope.rawValue).tag(scope)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 215)
-                    settingsMenu
                 }
                 Divider()
                 ZStack(alignment: .topLeading) {
@@ -174,6 +154,88 @@ struct HogHunterPanel: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    /// The left rail: which host the sections below are about, the sections
+    /// themselves, and Settings at the bottom.
+    ///
+    /// The host used to be a picker in the window header, above the content.
+    /// From there it read like a setting rather than a destination, and the
+    /// section list underneath kept its Mac meaning while the server was on,
+    /// so choosing a section looked like it did nothing.  The host now sits
+    /// at the top of the same rail as the sections it governs, every section
+    /// renders for the host that is selected, and Settings is a rail item
+    /// instead of a gear in the header.
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Hog Hunter")
+                .font(.system(size: 17, weight: .bold))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            scopeTabs
+                .padding(.horizontal, 6)
+                .padding(.bottom, 8)
+            ForEach(PanelTab.allCases) { tab in
+                sectionButton(tab)
+            }
+            Spacer(minLength: 0)
+            Button {
+                openSettingsWindow()
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .help("Open Hog Hunter Settings")
+            .accessibilityLabel("Settings")
+        }
+        .frame(width: 154)
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// "This Mac" and "Server" as a pair of tabs at the top of the rail.
+    private var scopeTabs: some View {
+        HStack(spacing: 4) {
+            ForEach(HostScope.allCases) { scope in
+                Button {
+                    hostScope = scope
+                } label: {
+                    Text(scope.rawValue)
+                        .font(.system(size: 11, weight: hostScope == scope ? .semibold : .regular))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                        .background(hostScope == scope ? Color.accentColor.opacity(0.16) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(hostScope == scope ? [.isSelected] : [])
+                .accessibilityLabel(scope.rawValue)
+            }
+        }
+    }
+
+    private func sectionButton(_ tab: PanelTab) -> some View {
+        Button {
+            selectedTab = tab
+        } label: {
+            Label(tab.rawValue, systemImage: tabSymbol(tab))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(selectedTab == tab ? Color.accentColor.opacity(0.12) : .clear,
+                            in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
+    }
+
+    /// The header names the section, and says which host it is about when the
+    /// server is the one being looked at.
+    private var pageTitle: String {
+        hostScope == .server ? "Server \(selectedTab.rawValue)" : selectedTab.rawValue
+    }
+
     private func tabSymbol(_ tab: PanelTab) -> String {
         switch tab {
         case .overview: return "house"
@@ -198,19 +260,36 @@ struct HogHunterPanel: View {
         }
     }
 
+    /// The server's answer for the selected section.
+    ///
+    /// The snapshot carries the server's CPU, memory, disks, app databases,
+    /// directories and tool states, so each section shows the part of it that
+    /// belongs there.  The two sections the snapshot cannot answer say so
+    /// plainly instead of showing the same card every other section shows.
     private var serverPage: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if selectedTab == .activity {
-                Text("Remote per-process CPU and memory are unavailable.")
+            switch selectedTab {
+            case .activity:
+                // The card below carries the server's overall CPU and memory,
+                // so the message says only what the snapshot cannot answer:
+                // the per-process detail.
+                Text("Remote per-process detail is unavailable; the server's overall CPU and memory are shown below.")
                     .foregroundStyle(.secondary)
-            } else if selectedTab == .network {
+            case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
                     .foregroundStyle(.secondary)
-            } else if selectedTab == .maintenance {
-                Text("Server tool status and significant directories")
+            case .storage:
+                Text("Server disks, app databases and largest directories")
                     .font(.headline)
+            case .maintenance:
+                Text("Server tool status")
+                    .font(.headline)
+            case .overview:
+                EmptyView()
             }
-            ServerStatusView(store: store.maintain.vpsStore)
+            if let section = Self.serverSection(for: selectedTab) {
+                ServerStatusView(store: store.maintain.vpsStore, section: section)
+            }
         }
     }
 
@@ -274,6 +353,21 @@ struct HogHunterPanel: View {
         }
     }
 
+    /// The menu bar window has two sizes.  Quick is the glanceable strip:
+    /// the numbers and the busy apps, read at a glance.  Summary is the same
+    /// readings with the history, the meters and the volume cards, which
+    /// makes the window grow a long way.
+    private enum QuickViewMode: String, CaseIterable, Identifiable {
+        case quick = "Quick"
+        case summary = "Summary"
+        var id: String { rawValue }
+    }
+
+    /// Which size the menu bar window is showing.
+    @State private var quickMode: QuickViewMode = .quick
+    /// True while the pointer is over the activity list, which opens it up.
+    @State private var activityHovered = false
+
     private var quickView: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack {
@@ -282,6 +376,45 @@ struct HogHunterPanel: View {
                 if store.isStale { Text("Sampling behind").foregroundStyle(.orange) }
                 settingsMenu
             }
+            quickModeToggle
+            if quickMode == .summary {
+                quickSummary
+            } else {
+                quickGlance
+            }
+        }
+        .font(.system(size: 11))
+        .padding(16)
+        .frame(width: Self.panelWidth)
+        .background(DockedPanelShape(beakX: beakX, isDocked: true)
+            .fill(Color(nsColor: .windowBackgroundColor)))
+        .background(MenuBarAnchorFinder { x in beakX = x })
+    }
+
+    /// Quick or Summary, at the top of the menu bar window.
+    private var quickModeToggle: some View {
+        HStack(spacing: 4) {
+            ForEach(QuickViewMode.allCases) { mode in
+                Button {
+                    quickMode = mode
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 10, weight: quickMode == mode ? .semibold : .regular))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 3)
+                        .background(quickMode == mode ? Color.accentColor.opacity(0.16) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(quickMode == mode ? [.isSelected] : [])
+                .accessibilityLabel(mode.rawValue)
+            }
+        }
+    }
+
+    /// The glanceable strip: the numbers, the volumes, and the busy apps.
+    private var quickGlance: some View {
+        VStack(alignment: .leading, spacing: 11) {
             HStack {
                 Text("CPU").fontWeight(.medium)
                 Spacer()
@@ -294,8 +427,9 @@ struct HogHunterPanel: View {
             }
             HStack {
                 Text("Internal Storage").fontWeight(.medium)
-                Spacer()
-                Text(store.diskSpaceCaption)
+                Spacer(minLength: 6)
+                Text(quickInternalText)
+                    .lineLimit(1)
             }
             HStack {
                 Text("External").fontWeight(.medium)
@@ -312,54 +446,120 @@ struct HogHunterPanel: View {
                     .lineLimit(1)
             }
             Divider()
-            ForEach(Array(store.rows.prefix(3))) { row in
-                HStack {
-                    Text(row.name).lineLimit(1)
-                    Spacer()
-                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
-                                       coreCount: store.pulse.coreCount))
-                }
-            }
+            quickActivityList
             if !store.maintain.vpsStore.configuredHost.isEmpty {
-                Button {
-                    hostScope = .server
-                    DetachedWindowManager.shared.openDetachedWindow(store: store)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Server").fontWeight(.semibold)
-                        if let snapshot = store.maintain.vpsStore.snapshot {
-                            Text(snapshot.host).lineLimit(1)
-                            HStack {
-                                Text("CPU \(snapshot.headline?.cpuText ?? "—")")
-                                Text("RAM \(snapshot.headline?.memoryText ?? "—")")
-                                Spacer()
-                                Text(snapshot.relativeTimeString())
-                            }
-                            .foregroundStyle(.secondary)
-                        } else {
-                            Text("No readings yet").foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
+                quickServerButton
             }
-            Button("Open Dashboard") {
-                DetachedWindowManager.shared.openDetachedWindow(store: store)
-            }
-            .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
+            openDashboardButton
         }
-        .font(.system(size: 11))
-        .padding(16)
-        .frame(width: Self.panelWidth)
-        .background(DockedPanelShape(beakX: beakX, isDocked: true)
-            .fill(Color(nsColor: .windowBackgroundColor)))
-        .background(MenuBarAnchorFinder { x in beakX = x })
+    }
+
+    /// The long form: the history, the meters, the volumes and the busy apps.
+    private var quickSummary: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cpuHistoryCard
+            Meter(title: "Memory", value: store.pulse.memoryPercent,
+                  caption: store.memorySizeCaption,
+                  severity: Severity.forPressure(store.pulse.pressure),
+                  accessibilityDetail: store.memoryCaption)
+            pillRow(memoryPills + thermalPills)
+            capacityCards
+            Divider()
+            Text("Top Activity").font(.system(size: 11, weight: .semibold))
+            quickActivityList
+            if !store.maintain.vpsStore.configuredHost.isEmpty {
+                quickServerButton
+            }
+            openDashboardButton
+        }
+    }
+
+    /// The busy apps.  Three rows to glance at, and hovering the list opens
+    /// it up to more of them with room to scroll, so the same window can be
+    /// read when a glance is not enough.  Each row carries the CPU it is
+    /// using and the memory it is holding.
+    private var quickActivityList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
+                    HogActivityRow(
+                        name: row.name,
+                        cpuText: HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
+                                               coreCount: store.pulse.coreCount),
+                        memoryText: HogFormat.memory(row.memoryBytes)
+                    )
+                }
+                if store.rows.isEmpty {
+                    Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(height: quickActivityHeight)
+        .onHover { inside in
+            withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
+        }
+    }
+
+    /// How many activity rows the list shows: three until the pointer is over
+    /// it, then more, with the rest a scroll away.
+    private var activityRowLimit: Int {
+        activityHovered ? 8 : 3
+    }
+
+    private var quickActivityHeight: CGFloat {
+        let visible = min(activityRowLimit, max(store.rows.count, 1))
+        return CGFloat(visible) * 15 + 4
+    }
+
+    /// The server's headline, which opens the dashboard on the server scope.
+    private var quickServerButton: some View {
+        Button {
+            hostScope = .server
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Server").fontWeight(.semibold)
+                if let snapshot = store.maintain.vpsStore.snapshot {
+                    Text(snapshot.host).lineLimit(1)
+                    HStack {
+                        Text("CPU \(snapshot.headline?.cpuText ?? "—")")
+                        Text("RAM \(snapshot.headline?.memoryText ?? "—")")
+                        Spacer()
+                        Text(snapshot.relativeTimeString())
+                    }
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text("No readings yet").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var openDashboardButton: some View {
+        Button("Open Dashboard") {
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(maxWidth: .infinity)
+    }
+
+    /// One wording for every volume: how much of it is spoken for, and how
+    /// much room is left.  The internal disk used to say "17.0 of 460.4 GB
+    /// free" while the external ones said "69% used · 145.4 GB free", which
+    /// read as two different facts about two different things.
+    private var quickInternalText: String {
+        // The reading is pending until the first sample, which is a different
+        // thing from a volume that cannot be read.
+        guard let diskSpace = store.diskSpace else { return "Reading…" }
+        return HogFormat.capacity(usedPercent: diskSpace.usedFraction * 100,
+                                  freeBytes: diskSpace.freeBytes)
     }
 
     private var capacityCards: some View {
         HStack(alignment: .top, spacing: 8) {
-            capacityCard("Internal", value: store.diskSpaceCaption,
+            capacityCard("Internal", value: quickInternalText,
                          percent: store.diskSpace.map { $0.usedFraction * 100 })
             capacityCard("External", value: externalCapacityText,
                          percent: externalDrives.count == 1 ? externalDrives[0].usedPercent : nil)
@@ -387,7 +587,7 @@ struct HogHunterPanel: View {
             return selectedTab == .storage ? "\(externalDrives.count) drives · details below"
                 : "\(externalDrives.count) drives · see Storage"
         }
-        return externalDrives.first.map(capacityText) ?? unrecognizedDriveText
+        return externalDrives.first.map(quickDriveText) ?? unrecognizedDriveText
     }
 
     private var timeMachineCapacityText: String {
@@ -395,7 +595,7 @@ struct HogHunterPanel: View {
             return selectedTab == .storage ? "\(timeMachineDrives.count) destinations · details below"
                 : "\(timeMachineDrives.count) destinations · see Storage"
         }
-        return timeMachineDrive.map(capacityText) ?? unrecognizedDriveText
+        return timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText
     }
 
     private var unrecognizedDriveText: String {
@@ -446,8 +646,8 @@ struct HogHunterPanel: View {
     }
 
     private func quickDriveText(_ drive: MountedDriveUsage) -> String {
-        guard let percent = drive.usedPercent, let available = drive.availableBytes else { return "Unavailable" }
-        return "\(Int(percent.rounded()))% used · \(HogFormat.memory(UInt64(available))) free"
+        HogFormat.capacity(usedPercent: drive.usedPercent,
+                           freeBytes: drive.availableBytes.map { UInt64(max(0, $0)) })
     }
 
     private func capacityText(_ drive: MountedDriveUsage) -> String {
@@ -537,8 +737,10 @@ struct HogHunterPanel: View {
 
     /// The menu-bar quick view has a fixed width and a content-fitting height.
     static let panelWidth: CGFloat = 360
-    /// The maximum expected quick-view height, including an optional server summary.
-    static let panelHeight: CGFloat = 410
+    /// The maximum expected quick-view height, including an optional server
+    /// summary.  The Summary mode of the menu bar window is taller than this
+    /// on purpose and is not measured against it.
+    static let panelHeight: CGFloat = 470
     static let dashboardWidth: CGFloat = 900
     static let dashboardHeight: CGFloat = 700
     static let dashboardMinimumWidth: CGFloat = 860
@@ -581,6 +783,11 @@ struct HogHunterPanel: View {
 
     /// Settings dropdown menu using the standard gear icon.  Holds Settings,
     /// Activity Monitor, Launch at Login, and Quit.
+    ///
+    /// There is no attach/detach entry any more.  Detaching put a second copy
+    /// of the same readings in a floating window beside a dashboard window
+    /// that already showed them, so the small window had no reason to exist
+    /// on its own; the dashboard opens from the menu bar window instead.
     private var settingsMenu: some View {
         Menu {
             Button("Settings…") {
@@ -593,17 +800,6 @@ struct HogHunterPanel: View {
             Toggle("Launch at Login", isOn: Binding(
                 get: { store.launchesAtLogin },
                 set: { _ in store.toggleLoginItem() }
-            ))
-            Toggle("Attach to Menu Bar", isOn: Binding(
-                get: { store.dockedToMenuBar },
-                set: { newValue in
-                    store.dockedToMenuBar = newValue
-                    if !newValue {
-                        DetachedWindowManager.shared.openDetachedWindow(store: store)
-                    } else {
-                        DetachedWindowManager.shared.closeDetachedWindow()
-                    }
-                }
             ))
             Divider()
             Button("Quit Hog Hunter") {
@@ -925,6 +1121,35 @@ struct HogHunterPanel: View {
     }
 }
 
+/// One row of the activity list: the app's name, the CPU it is using, and
+/// the memory it is holding.
+///
+/// Both numbers, because the old row carried only CPU, so the apps that
+/// were holding memory without burning CPU looked idle.
+struct HogActivityRow: View {
+    let name: String
+    let cpuText: String
+    let memoryText: String
+
+    /// What a screen reader says for the row.
+    var accessibilityLabel: String {
+        "\(name), CPU \(cpuText), memory \(memoryText)"
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(name).lineLimit(1)
+            Spacer(minLength: 4)
+            Text(cpuText)
+            Text(memoryText)
+                .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 11))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
 /// The outline of the Hog Hunter panel.  When docked to the menu bar, the top
 /// edge features a smooth curved triangular beak (anchor notch) pointing up to
 /// touch the menu bar item, with the shoulders inset by 8 pt.  When detached,
@@ -1028,6 +1253,14 @@ final class MenuBarAnchorView: NSView {
     var onPosition: ((CGFloat) -> Void)?
     private var moveObserver: NSObjectProtocol?
     private var lastReportedX: CGFloat?
+    /// The origin the view last asked the window to take.
+    ///
+    /// The move notification arrives after the move, on the main queue, so a
+    /// flag cleared straight after the move would always read as false by the
+    /// time the notification is handled.  The origin is what tells the
+    /// observer apart: the window sitting at the origin the view asked for is
+    /// the view's own move and starts no new pass.
+    private var requestedOrigin: NSPoint?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1042,7 +1275,21 @@ final class MenuBarAnchorView: NSView {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            self?.resolveAnchor()
+            guard let self, let window = self.window else { return }
+            if let requested = self.requestedOrigin {
+                if window.frame.origin == requested {
+                    // The move this view made itself.  The anchor for the new
+                    // position was reported when the move was made, so the
+                    // notification starts no new pass.
+                    self.requestedOrigin = nil
+                    return
+                }
+                // The window did not take the origin the view asked for.  The
+                // request stays, so the view does not ask for the same place
+                // again, and the pass below works out the anchor for where
+                // the window actually is.
+            }
+            self.resolveAnchor()
         }
 
         resolveAnchor()
@@ -1059,11 +1306,23 @@ final class MenuBarAnchorView: NSView {
 
     func resolveAnchor() {
         guard let window = self.window, window.frame.width > 0 else { return }
-        let winX = window.frame.origin.x
         let winW = window.frame.width
+        let anchor = Self.findStatusItemMidX()
+
+        // The window hangs under the menu bar item.  Put the middle of the
+        // window under the middle of the item, so the window sits centered on
+        // the button instead of hanging off one side of it.  The beak keeps
+        // pointing at the item either way.  Only an item that was positively
+        // identified as ours may move the window: a guess may belong to
+        // another status item, and the window would hang under that one.
+        if let anchor, anchor.matched {
+            centerWindow(on: anchor.midX)
+        }
+
+        let winX = window.frame.origin.x
 
         let targetX: CGFloat
-        if let itemMidX = Self.findStatusItemMidX() {
+        if let itemMidX = anchor?.midX {
             let relX = itemMidX - winX
             // Verify relX is plausibly within or near the window
             if relX >= 20 && relX <= winW - 20 {
@@ -1095,7 +1354,40 @@ final class MenuBarAnchorView: NSView {
         onPosition?(clampedX)
     }
 
-    static func findStatusItemMidX() -> CGFloat? {
+    /// Moves the window so its middle sits under the menu bar item's middle.
+    ///
+    /// The item's position comes from the accessibility tree, the same place
+    /// the beak gets its coordinate, so the beak and the window cannot
+    /// disagree.  The window is kept on the screen it is already on.
+    private func centerWindow(on itemMidX: CGFloat) {
+        guard let window else { return }
+        let frame = window.frame
+        guard frame.width > 0 else { return }
+
+        var targetX = itemMidX - frame.width / 2
+        if let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) {
+            let minX = screen.frame.minX + 8
+            let maxX = screen.frame.maxX - frame.width - 8
+            targetX = min(max(targetX, minX), max(minX, maxX))
+        }
+        let origin = NSPoint(x: targetX, y: frame.origin.y)
+        guard abs(targetX - frame.origin.x) > 0.5 else { return }
+        // The window did not take this origin last time; asking again would
+        // only move it back and forth.
+        guard requestedOrigin != origin else { return }
+
+        requestedOrigin = origin
+        window.setFrameOrigin(origin)
+    }
+
+    /// The middle of the menu bar status item, and whether that item was
+    /// positively identified as Hog Hunter's own.
+    ///
+    /// The fallback below is the first extra menu bar item, which is a guess
+    /// whenever the app carries more than one.  A guess is good enough for
+    /// the beak, which only has to point at the menu bar, but the window is
+    /// moved for an item that was positively identified and no other.
+    static func findStatusItemMidX() -> (midX: CGFloat, matched: Bool)? {
         let pid = ProcessInfo.processInfo.processIdentifier
         let appAX = AXUIElementCreateApplication(pid)
 
@@ -1124,12 +1416,14 @@ final class MenuBarAnchorView: NSView {
 
             if children.count == 1 || title == "Hog Hunter" || (title?.contains("Hog") ?? false),
                let midX = axMidX(of: item) {
-                return midX
+                return (midX, true)
             }
         }
 
-        if let first = children.first {
-            return axMidX(of: first)
+        // A guess: the first extra menu bar item, which is Hog Hunter's own
+        // when it is the only one, and something else when it is not.
+        if let first = children.first, let midX = axMidX(of: first) {
+            return (midX, false)
         }
 
         return nil
