@@ -1864,6 +1864,13 @@ final class DiskCleaner: @unchecked Sendable {
     /// point, so the text lives in one place.
     static let snapshotFailedPrefix = "APFS snapshot failed."
 
+    /// What `clean` records for an item it did not delete because the run was
+    /// stopped.  It is a sentinel and not a failure: the item was not refused,
+    /// the run was cancelled.  The unattended runner filters it out before it
+    /// counts failures, so a stop never hides a real failure that happened
+    /// before it.
+    static let cancelledMessage = "Cleanup cancelled"
+
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
     /// When `createSnapshot` is true, takes an APFS local snapshot first.
@@ -1917,7 +1924,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         if hasSnapshotItems {
             guard !Task.isCancelled else {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 return resultSoFar(removed: 0)
             }
             progress?(0.0, "Thinning APFS local snapshots…")
@@ -1938,14 +1945,14 @@ final class DiskCleaner: @unchecked Sendable {
                     noteSuccess(item)
                 }
             } else if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 progress?(1.0, "Stopped")
                 return resultSoFar(removed: thinnedCount)
             } else {
                 errors.append("Failed to thin APFS local snapshots")
             }
             if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 progress?(1.0, "Stopped")
                 return resultSoFar(removed: removedCount)
             }
@@ -1971,12 +1978,12 @@ final class DiskCleaner: @unchecked Sendable {
 
         for (index, item) in activeItems.enumerated() {
             if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 break
             }
             await Task.yield()
             if Task.isCancelled {
-                errors.append("Cleanup cancelled")
+                errors.append(Self.cancelledMessage)
                 break
             }
             let progressFraction = Double(index) / Double(totalItems)

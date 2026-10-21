@@ -570,6 +570,125 @@ final class CleanRegimenRunnerTests: XCTestCase {
         XCTAssertEqual(runner.lastSummary, "The cleanup was stopped before it finished.")
     }
 
+    func testACancelledRunStillSaysWhatCouldNotBeRemoved() {
+        // A stop does not undo a failure that happened before it.  The
+        // cancelled sentinel is not a failure, but a safety check that refused
+        // a path is one, and hiding it behind the stop loses it.
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.cancelled = true
+        result.errors = [
+            DiskCleaner.cancelledMessage,
+            "Safety check failed for path: /Users/jay/Library/Caches/SomeCache"
+        ]
+        runner.finish(result, regimen: makeRegimen())
+
+        XCTAssertEqual(runner.lastSummary,
+                       "The cleanup was stopped before it finished. 1 item could not be removed.")
+        XCTAssertFalse((runner.lastSummary ?? "").contains("/Users/jay"),
+                       "the panel must not name a path")
+    }
+
+    func testASkippedRunThatRemovedItemsSaysSo() {
+        // The snapshot gate fails AFTER the engine thinned local snapshots, so
+        // a run can remove something and skip at the same time.  A panel that
+        // shows only the skip reason claims the regimen did nothing while it
+        // was deleting, and the reclaim count is nowhere to be seen.
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.itemsRemoved = 3
+        result.bytesReclaimed = 1_048_576
+        result.skippedReason = "The cleanup snapshot could not be created, so the rest of the regimen did not run."
+        runner.finish(result, regimen: makeRegimen())
+
+        XCTAssertEqual(
+            runner.lastSummary,
+            "Reclaimed 1 MB from 3 items. The cleanup snapshot could not be created, so the rest of the regimen did not run."
+        )
+    }
+
+    func testAFailedGatePublishesTheBackoffNotTheCheckInterval() async throws {
+        // The gate holds the run back for an hour.  Publishing the fifteen
+        // minute check interval would advertise a run that cannot happen for
+        // three quarters of an hour, and nothing would explain the delay.
+        let gateKey = "hoghunter.cleaner.regimen.lastGateFailureAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let regimen = makeRegimen(enabled: true, intervalHours: 24, rules: ["app-caches"])
+
+        let item = CleanItem(
+            category: .userCaches,
+            title: "TestCache",
+            subtitle: "~/Library/Caches/TestCache",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestCache").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .userCaches,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report },
+            cleanProvider: { _, _, _ in
+                CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: 0,
+                    errors: ["\(DiskCleaner.snapshotFailedPrefix)  Nothing was deleted."],
+                    cleanedAt: now
+                )
+            }
+        )
+
+        await runner.runNow(regimen: regimen)?.value
+
+        let next = try XCTUnwrap(runner.nextRunDate)
+        XCTAssertEqual(next, now.addingTimeInterval(60 * 60),
+                       "the published next run must be the gate's backoff, not the check interval")
+        XCTAssertNotNil(defaults.object(forKey: gateKey))
+    }
+
+    func testAPastIntervalDoesNotPublishAPastNextRun() throws {
+        // The gate failure never writes the completed-run clock, so the
+        // interval next-run is computed from the last SUCCESSFUL run and is
+        // already in the past for every run that was due.  Publishing the
+        // earlier of the two shows a time that has gone by for the whole
+        // backoff.
+        let now = Date()
+        let defaults = makeDefaults()
+        defaults.set(now.addingTimeInterval(-600), forKey: "hoghunter.cleaner.regimen.lastGateFailureAt")
+        defaults.set(now.addingTimeInterval(-24 * 3600), forKey: "hoghunter.cleaner.regimen.lastRunAt")
+
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) }
+        )
+        runner.tick(regimen: makeRegimen(enabled: true, intervalHours: 24))
+
+        let next = try XCTUnwrap(runner.nextRunDate)
+        XCTAssertGreaterThan(next, now,
+                             "the published next run must not be a time that has already passed")
+        XCTAssertEqual(next, now.addingTimeInterval(60 * 60 - 600),
+                       "the gate backoff is what holds the run")
+    }
+
     func testAFinishedRunClearsTheHold() {
         // "Waiting..." beside a finished run says cleanup is still blocked
         // when it is not.  A finished run clears the hold wherever it ended.

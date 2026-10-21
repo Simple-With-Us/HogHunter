@@ -236,10 +236,20 @@ final class CleanRegimenRunner: ObservableObject {
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
             // A gate that failed recently is holding the run, and the owner
             // can act on that, so the panel says so rather than going quiet.
-            if let retry = gateRetryDate, retry > now() {
+            if regimen.isEnabled, let retry = gateRetryDate, retry > now() {
                 waitingReason = "The last run could not take a safety snapshot, so it will try again later."
-                let intervalNext = updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
-                nextRunDate = intervalNext.map { min(retry, $0) } ?? retry
+                // The interval is a lower bound only when there IS a previous
+                // run: a regimen with no previous run is due now, so the gate
+                // backoff is the only thing holding it.  When there is one, a
+                // run has to wait for both the backoff and the interval, and
+                // the interval next-run is already in the past for every run
+                // that was due -- which is every gate failure -- so taking
+                // the later of the two is what keeps the panel off a time
+                // that has gone by.
+                let intervalNext = lastRunAt.map {
+                    $0.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
+                }
+                nextRunDate = intervalNext.map { max(retry, $0) } ?? retry
             } else {
                 waitingReason = nil
                 updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
@@ -286,8 +296,16 @@ final class CleanRegimenRunner: ObservableObject {
     /// returned rather than acted on here so a test can ask the question
     /// without a disk in front of it.
     nonisolated static func snapshotGateReason(errors: [String]) -> String? {
-        guard errors.contains(where: { $0.hasPrefix(DiskCleaner.snapshotFailedPrefix) }) else {
+        guard let failure = errors.first(where: { $0.hasPrefix(DiskCleaner.snapshotFailedPrefix) }) else {
             return nil
+        }
+        // The engine thins APFS local snapshots BEFORE it takes the safety
+        // snapshot, so a snapshot failure can arrive after it has already
+        // deleted something.  Saying the regimen "did not run" would then be
+        // false, and the panel would contradict the reclaim count it shows
+        // beside it.
+        if failure.contains("already thinned") {
+            return "The cleanup snapshot could not be created, so the rest of the regimen did not run."
         }
         return "The cleanup snapshot could not be created, so the regimen did not run."
     }
@@ -399,8 +417,12 @@ final class CleanRegimenRunner: ObservableObject {
                 if gateFailed {
                     lastRunDefaults.set(started, forKey: gateFailureKey)
                 }
+                // A failed gate waits out the backoff, so that is the time to
+                // publish.  The check interval would advertise a run in fifteen
+                // minutes that `isDue` refuses to start for an hour, and the
+                // waiting reason is already gone by then.
                 nextRunDate = regimen.isEnabled
-                    ? started.addingTimeInterval(checkInterval)
+                    ? started.addingTimeInterval(gateFailed ? Self.gateBackoff : checkInterval)
                     : nil
             }
         }
@@ -510,23 +532,34 @@ final class CleanRegimenRunner: ObservableObject {
         // A finished run is not waiting any more, whatever the panel showed
         // before it started.
         waitingReason = nil
+        // A cancelled item is not a failure: it was not refused, the run was
+        // stopped.  A failure that happened BEFORE the stop still is one, and
+        // the stop must not hide it.
+        let failures = result.errors.filter { $0 != DiskCleaner.cancelledMessage }
         if !result.errors.isEmpty {
             // The raw message can carry an absolute path -- a safety check
             // that failed names the path it refused to delete -- so it goes to
             // `lastError`, which no view shows.  The panel gets a count.
-            lastError = result.errors.first
+            lastError = failures.first ?? result.errors.first
         }
         let reclaimed: String? = result.itemsRemoved > 0
             ? "Reclaimed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items."
             : nil
         if result.cancelled {
-            // The run was stopped, not refused.  Nothing failed to be
-            // removed, so the panel must not say that.
-            lastSummary = [reclaimed, "The cleanup was stopped before it finished."]
+            // The run was stopped, not refused.  The panel keeps both facts:
+            // what it reclaimed and what it could not remove.
+            var parts = [reclaimed, "The cleanup was stopped before it finished."]
                 .compactMap { $0 }
-                .joined(separator: " ")
+            if !failures.isEmpty {
+                parts.append(Self.failureCountText(failures.count))
+            }
+            lastSummary = parts.joined(separator: " ")
         } else if let reason = result.skippedReason {
-            lastSummary = reason
+            // A run that removed something and then skipped still removed it:
+            // the snapshot gate fails AFTER the engine thinned local
+            // snapshots, so the reclaim is real.  Showing only the reason
+            // would claim the regimen did nothing while it was deleting.
+            lastSummary = [reclaimed, reason].compactMap { $0 }.joined(separator: " ")
         } else if let reclaimed {
             // Some items were reclaimed and some were not.  The panel says
             // both, so a partial run does not read as a clean one.
