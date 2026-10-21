@@ -170,12 +170,14 @@ render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
   printf '<!doctype html><html><head><style>html,body{margin:0;padding:0;background:transparent}svg{display:block}</style></head><body>%s</body></html>' \
     "$(cat "$tmp/mark.svg")" > "$tmp/r.html"
   # --headless=new sometimes hangs and never writes the file, so every render
-  # runs under a 30 second watchdog and gets one retry
+  # runs under a 30 second watchdog and gets one retry.  Each attempt gets its
+  # own profile directory, because a killed Chrome leaves a stale singleton
+  # lock behind and a retry that reuses that profile can hang the same way.
   for attempt in 1 2; do
     "$CHROME" --headless=new --disable-gpu --no-sandbox --force-device-scale-factor=1 \
       ${4:+--default-background-color=00000000} \
       --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
-      --user-data-dir="$tmp/profile" "file://$tmp/r.html" &
+      --user-data-dir="$tmp/profile-$attempt" "file://$tmp/r.html" &
     pid=$!
     ( sleep 30 && kill -9 "$pid" 2>/dev/null ) & watchdog=$!
     if wait "$pid"; then status=0; else status=$?; fi
@@ -193,7 +195,7 @@ render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent
 render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent
 ```
 
-Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`: sharing one profile across renders makes Chrome hang on a stale singleton lock.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above runs each render under a 30 second watchdog and gives it one retry, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed by the watchdog leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above runs each render under a 30 second watchdog and gives it one retry on a clean profile, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
 
 The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
 
