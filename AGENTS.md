@@ -64,6 +64,21 @@ Rules that go with it.  Every opt-in is off by default and the phone confirms ea
 
 No LaunchAgent.  The running menu bar app is the sampler.  History only covers time it has been open.
 
+## Automatic disk clean
+
+The Mac app runs its own disk-clean regimen, and it is **opt-in and off by default** (`CleanRegimen.isEnabled`, `Sources/Storage/CleanRegimen.swift`).  Turning it on in the Disk Cleaner window **schedules** the first run one interval out; it never fires an immediate unattended clean, and **Run Now** is the explicit path.  An unattended delete is something the owner turns on, not something an upgrade grants.
+
+- `Sources/Storage/CleanRegimenRunner.swift` — the runner.  A singleton (`CleanRegimenRunner.shared`), started and stopped by `HogStore` (`Sources/Store/HogStore.swift` `start()` / `stop()` / `deinit`).  It drives a `Task` loop, not a `Timer` on a `RunLoop`.  It takes the lock through an **injected** `lockProvider`, never by constructing one itself, so a test can supply its own.
+- `Sources/Storage/HousekeeperLock.swift` — the Swift mirror of `scripts/vacuum/lock.py`.  It takes the **same** mkdir-based lock (`~/.claude-disk-janitor/.housekeeper.lock`, stale after 120 minutes) as the Python engine, so the in-app regimen and the launchd ticks never reclaim at once.  Re-entrant through `HOUSEKEEPER_LOCK_OWNER=1`; read that with `getenv`, never `ProcessInfo.processInfo.environment`, which is a launch-time snapshot and would miss a token set later.  It releases only a lock it took, and `removeIfEmpty()` matches Python's `rmdir` so it never removes a peer's.
+- `Sources/Storage/KeepSentinel.swift` — the `.janitor-keep` marker, on a path or any parent, matched case-insensitively like the Python engine's `find -iname`.
+- `Sources/Storage/DiskCleaner.swift` `isSafeToDelete` — refuses `<home>/apps/lanes` **by name** as well as by volume, because `apps/lanes` resolves to the internal disk when the external volume is unmounted.  It also refuses any external volume (`isOnExternalVolume`) and anything `KeepSentinel` marks.
+
+A regimen with no enabled rules must **not** scan the disk at all, so the empty-rule check runs before the scan.
+
+The Python engine keeps its own budget.  `scripts/vacuum/config.py` owns `TICK_WATCHDOG_SEC = 900.0` and `scripts/vacuum/engine.py` derives `_RECLAIM_BUDGET_SECONDS` from it (600s), so the two numbers cannot drift apart again; `scripts/maintain.py` imports the constant rather than restating it.  A tick that runs long writes a partial run record (`scripts/vacuum/store.py` `partial-run.json`), which `build_status` folds into `step_states` and exposes as `partial_run`, so a long run is visible instead of silently truncated.  The engine must never write a partial record under `dry_run=True`.
+
+Tests: `Tests/HogHunterTests/{HousekeeperLockTests,KeepSentinelTests,CleanRegimenRunnerTests}.swift`, and `TestPartialRunRecord` / `TestTickBudget` in `scripts/test-robotic-vacuum.py`.
+
 ## Copy
 
 Theme default is **system** — the fleet-wide owner ruling of 2026-09-19 in
