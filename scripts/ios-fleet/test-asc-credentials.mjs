@@ -211,6 +211,12 @@ test("an ASC_KEY_P8 that is not a PEM private key is a credential error, not a s
   });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /ASC_KEY_P8 is set but is not a PEM private key/);
+  //  The rejection carries a MASKED PREVIEW -- the first eight and the last
+  //  four characters -- and never the key itself.
+  assert.match(r.stderr, /preview: not a pr\.\.\. all/,
+    "the rejected key was reported without a masked preview");
+  assert.ok(!r.stderr.includes("not a private key at all"),
+    "the rejected key was reported whole");
   assert.equal(r.kid, null);
 });
 

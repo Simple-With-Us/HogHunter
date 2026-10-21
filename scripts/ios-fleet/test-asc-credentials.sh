@@ -50,13 +50,14 @@ esac
 FAKE
 chmod +x "${tmp}/fleet-secrets"
 export FAKE_LOG="${tmp}/fake.log"
+export ASC_TEST_LOG="${tmp}/ship.log"
 export FAKE_ASC_PEM="${tmp}/asc.p8"
 export FAKE_OTHER_PEM="${tmp}/other.p8"
 : > "$FAKE_LOG"
 
 extract() {
   awk '
-    /^fs_get\(\) \{/ || /^load_secrets\(\) \{/ || /^cleanup_asc_tmp\(\) \{/ || /^expand_tilde\(\) \{/ { grab = 1 }
+    /^fs_get\(\) \{/ || /^load_secrets\(\) \{/ || /^cleanup_asc_tmp\(\) \{/ || /^expand_tilde\(\) \{/ || /^key_preview\(\) \{/ { grab = 1 }
     grab { print }
     grab && /^\}/ { grab = 0 }
   ' "$script"
@@ -83,7 +84,7 @@ CJS
 
 funcs="${tmp}/funcs.sh"
 {
-  echo 'log() { :; }'
+  echo 'log() { echo "$*" >> "${ASC_TEST_LOG:-/dev/null}"; }'
   echo 'ASC_TMP_DIR=""'
   echo "FLEET_SECRETS_BIN=\"${tmp}/fleet-secrets\""
   echo "FLEET_DIR=\"${here}\""
@@ -106,6 +107,20 @@ FUNCS
 } > "$funcs"
 grep -q '^load_secrets()' "$funcs" || fail "load_secrets not found in ship-testflight.sh"
 grep -q '^fs_get()' "$funcs" || fail "fs_get not found in ship-testflight.sh"
+grep -q '^key_preview()' "$funcs" || fail "key_preview not found in ship-testflight.sh"
+
+#  The masked preview shows the first eight and the last four characters and
+#  nothing else.  A value too short to mask safely is withheld whole, so a
+#  preview can never become the secret it describes.
+preview_of() {
+  bash -c 'source "'"$funcs"'"; key_preview "$1"' _ "$1"
+}
+[[ "$(preview_of "not a private key at all")" == "not a pr... all" ]] \
+  || fail "key_preview did not mask the first eight and last four characters"
+[[ "$(preview_of "short")" == "[5 chars, withheld]" ]] \
+  || fail "key_preview did not withhold a short value"
+[[ "$(preview_of "")" == "(empty)" ]] \
+  || fail "key_preview did not report an empty value"
 
 # 1. Nothing in the environment:  credentials come from Infisical, the key is a 0600 temp file.
 out="$(env -u ASC_KEY_ID -u ASC_ISSUER_ID -u ASC_KEY_PATH -u ASC_KEY_P8 bash -c '
@@ -254,8 +269,10 @@ for shape in plain plain-with-or split-across-lines nested; do
 done
 
 # 2b. An ambient ASC_KEY_P8 that is not a PEM private key is ignored, and the
-# run fails closed rather than signing with something that is not a key.
+# run fails closed rather than signing with something that is not a key.  The
+# rejection is reported with a MASKED PREVIEW, never with the key itself.
 : > "$FAKE_LOG"
+: > "$ASC_TEST_LOG"
 ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at all" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
@@ -263,6 +280,11 @@ ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at 
   [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
   [[ -z "${ASC_KEY_P8:-}" ]]
 ' || fail "an ASC_KEY_P8 that is not a key was adopted"
+grep -q "preview: not a pr\.\.\. all" "$ASC_TEST_LOG" \
+  || fail "the rejected key was reported without a masked preview"
+if grep -q "not a private key at all" "$ASC_TEST_LOG"; then
+  fail "the rejected key was reported whole"
+fi
 
 # 2c. An ambient ASC_KEY_P8 without a key id is ignored:  the key id, the
 # issuer and the key belong together.

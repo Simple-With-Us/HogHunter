@@ -214,6 +214,24 @@ fs_get() {
 # materialization for the Apple tools that can only read a key from disk
 # (altool, xcodebuild -authenticationKeyPath);  it is written FROM the
 # resolved credential and is never read back as one.
+#  A rejected key is reported with a MASKED PREVIEW, never with the key
+#  itself:  the first eight and the last four characters, nothing else
+#  (Kody rule 28).  A value too short to mask safely is withheld whole, so
+#  the preview can never become the secret.
+key_preview() {
+  local v="${1:-}" n
+  n=${#v}
+  if [[ "$n" -eq 0 ]]; then
+    printf '%s' "(empty)"
+    return 0
+  fi
+  if [[ "$n" -le 12 ]]; then
+    printf '[%d chars, withheld]' "$n"
+    return 0
+  fi
+  printf '%s...%s' "${v:0:8}" "${v: -4}"
+}
+
 load_secrets() {
   AUTH_MODE="none"
   local kid="${ASC_KEY_ID:-}" iss="${ASC_ISSUER_ID:-}" p8="" fkid="" lower
@@ -227,7 +245,9 @@ load_secrets() {
   if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
     case "$APPLE_API_KEY_P8_BASE64" in
       *BEGIN*) p8="$APPLE_API_KEY_P8_BASE64" ;;
-      *) p8="$(printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode 2>/dev/null)" || p8="" ;;
+      #  The encoded value reaches the decoder through a here-string, so the
+      #  shell never prints it:  a credential belongs in no output stream.
+      *) p8="$(base64 --decode <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8="" ;;
     esac
     if [[ -n "$p8" ]]; then
       key_pem="$p8"
@@ -242,13 +262,13 @@ load_secrets() {
   #    resolved before the vault, so nothing can override it.
   if [[ -z "$key_pem" && -n "${ASC_KEY_P8:-}" ]]; then
     if [[ -z "$kid" || -z "$iss" ]]; then
-      log "ASC_KEY_P8 is set without ASC_KEY_ID and ASC_ISSUER_ID; ignoring it"
+      log "ASC_KEY_P8 is set without ASC_KEY_ID and ASC_ISSUER_ID; ignoring it; preview: $(key_preview "$ASC_KEY_P8")"
       unset ASC_KEY_P8
     else
       rc=0
       node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$ASC_KEY_P8" || rc=$?
       if [[ "$rc" -ne 0 ]]; then
-        log "ASC_KEY_P8 is set but does not hold a PEM private key; ignoring it"
+        log "ASC_KEY_P8 is set but does not hold a PEM private key; ignoring it; preview: $(key_preview "$ASC_KEY_P8")"
         unset ASC_KEY_P8
       else
         key_pem="$ASC_KEY_P8"

@@ -217,19 +217,12 @@ function spawnTracked(args, env) {
   };
 }
 
-// The environment of one process, the way another process of the same user
-// can read it on this platform.
-function processEnvironment(pid) {
-  if (process.platform === "darwin") {
-    // macOS's ps prints the environment with -E.
-    return execFileSync("ps", ["-E", "-p", String(pid), "-o", "args="], { encoding: "utf8" });
-  }
-  // Linux's ps has no such flag and keeps the environment in a file the owner
-  // of the process can read.  The contract job runs on Linux,  so the probe
-  // has to work there too.
-  return readFileSync(`/proc/${pid}/environ`, "utf8").replace(/\0/g, "\n");
-}
-
+// The environment of another process is NOT read here.  On macOS `ps -E`
+// prints it and on Linux it sits in /proc/<pid>/environ, and either way the
+// dump carries the private key and every unrelated credential the operator
+// has.  The handoff is proved by the SIGNED REQUEST the client makes with
+// the key:  a request whose JWT carries the key id can only be signed with
+// the key that was handed over.
 function jwtKeyId(authorization) {
   const token = String(authorization || "").replace(/^Bearer /, "");
   if (!token) return null;
@@ -299,11 +292,9 @@ test("the key never reaches argv, and the child's environment carries it", async
     //  carry the key in its command line.
     const table = execFileSync("ps", ["-A", "-o", "args="], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
     assert.ok(!table.includes(needle), "the key reached a command line");
-    //  The environment of a same-user process is readable on this platform,
-    //  and the key is in the environment of the key-bearing child by design.
-    //  The check can see it there, so it fails when the handoff breaks.
-    assert.ok(processEnvironment(app.pid).includes(needle),
-      "the key did not reach the environment of the client");
+    //  The client is holding the key in its environment by design, so the
+    //  environment of another process is never read:  the delivery is proved
+    //  by the signed request below, not by a dump of a live process.
     server.releaseAll();
     const result = await app.done;
     assert.equal(result.code, 0, `the client failed: ${result.stderr}`);
