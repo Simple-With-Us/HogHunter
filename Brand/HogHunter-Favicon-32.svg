@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 796.3200 796.3200">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 711.0000 711.0000">
 <title>Hog Hunter boar head favicon, full artwork, for 32 px and up</title>
-<rect width="796.3200" height="796.3200" fill="#FAF2E7"/>
-<g transform="translate(-42.6600 -43.6600)">
+<rect width="711.0000" height="711.0000" fill="#FAF2E7"/>
+<defs>
+<clipPath id="hh-crop">
+<rect x="62.2000" y="123.9000" width="711.0000" height="709.0000"/>
+</clipPath>
+</defs>
+<g transform="translate(-62.2000 -122.9000)">
 <g transform="rotate(-9.5000 512 512)">
+<g clip-path="url(#hh-crop)">
 <g transform="translate(0,1024) scale(0.1,-0.1)"><path fill="#6F390B" fill-rule="evenodd" d="M7530 8957 c-41 -19 -140 -73 -220 -121 -183 -110 -306 -170 -490
 -236 -309 -111 -517 -235 -733 -439 -134 -127 -263 -318 -304 -452 -19 -64
 -21 -193 -4 -267 20 -83 7 -83 -34 1 -97 196 -36 406 201 698 35 43 64 81 64
@@ -90,6 +96,7 @@ l-45 -25 25 29 c65 75 330 328 366 350 80 48 164 50 334 9z m-1499 -418 c-71
 -20 96 -20 104 0 32 28 0 79 -89z m-399 -61 c23 -73 48 -151 56 -173 20 -59
 18 -98 -8 -122 -31 -28 -61 -36 -91 -22 -45 20 -48 44 -37 242 6 100 13 188
 15 195 11 31 26 2 65 -120z"/></g>
+</g>
 </g>
 </g>
 </svg>
