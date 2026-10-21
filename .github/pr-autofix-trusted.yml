@@ -29,9 +29,13 @@
 # MiniMax-M3.1-Flash), and a live probe on 2026-10-20 returned HTTP 200 with a
 # well-formed edits object on the chat-completions route.  This policy is read
 # only from the default branch and sends the id to
-# https://api.minimax.io/anthropic, unless the org or repo variables
+# https://api.minimax.io/anthropic under the pinned reusable
+# (pr-autofix-reusable.yml@b634b51), which hardcodes that base URL and resolves
+# the model from its input and this file.  The org or repo variables
 # SWU_AUTOFIX_MODEL_BASE_URL and SWU_AUTOFIX_MODEL retarget the route and the
-# effective model; check those variables too when this policy changes.  The id
+# effective model only on a vars-enabled reusable revision, and even there the
+# base URL retargets only when it is exactly https://api.meta.ai; check the
+# pinned revision before relying on those variables.  The id
 # is pinned to the stable id the owner chose rather than to the preview
 # spelling.
 model: MiniMax-M3.1-Flash
