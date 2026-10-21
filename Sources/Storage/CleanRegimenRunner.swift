@@ -54,7 +54,6 @@ final class CleanRegimenRunner: ObservableObject {
 
     // MARK: - Dependencies
 
-    private let cleaner: DiskCleaner
     /// The scheduler's pending check, held so it can be cancelled from any
     /// thread.  `HogStore.deinit` is not main-actor isolated, so the cancel
     /// path has to be.
@@ -90,6 +89,20 @@ final class CleanRegimenRunner: ObservableObject {
     /// waiting an hour.
     private let idleSeconds: () -> TimeInterval
 
+    /// The scan a run works from.
+    ///
+    /// A closure, like every other seam here, because the default path walks
+    /// the whole disk and a test must never do that: a test that reaches the
+    /// cleaning loop needs a scan it chose, not the real one.
+    private let scanProvider: (CleanerExclusions) async -> CleanScanReport
+
+    /// How a chunk of items is cleaned.
+    ///
+    /// A closure so a test can hand the runner a chunk whose safety snapshot
+    /// failed, which is the one error that ends a run, without asking the real
+    /// cleaner to delete anything.
+    private let cleanProvider: ([CleanItem], CleanerExclusions, Bool) async -> CleanResult
+
     /// True while the panel is open.  `HogStore` supplies it, because the
     /// runner is process-wide and does not own the panel.
     var presenceProvider: () -> Bool = { false }
@@ -103,13 +116,20 @@ final class CleanRegimenRunner: ObservableObject {
         now: @escaping () -> Date = { Date() },
         defaults: UserDefaults = .standard,
         lockProvider: @escaping () -> HousekeeperLock = { HousekeeperLock() },
-        idleSeconds: @escaping () -> TimeInterval = { CleanRegimenRunner.systemIdleSeconds() }
+        idleSeconds: @escaping () -> TimeInterval = { CleanRegimenRunner.systemIdleSeconds() },
+        scanProvider: ((CleanerExclusions) async -> CleanScanReport)? = nil,
+        cleanProvider: (([CleanItem], CleanerExclusions, Bool) async -> CleanResult)? = nil
     ) {
-        self.cleaner = cleaner
         self.now = now
         self.lastRunDefaults = defaults
         self.lockProvider = lockProvider
         self.idleSeconds = idleSeconds
+        self.scanProvider = scanProvider ?? { exclusions in
+            await cleaner.scan(tier: .standard, exclusions: exclusions)
+        }
+        self.cleanProvider = cleanProvider ?? { items, exclusions, createSnapshot in
+            await cleaner.clean(items: items, tier: .standard, createSnapshot: createSnapshot, exclusions: exclusions)
+        }
     }
 
     // MARK: - Lifecycle
@@ -217,6 +237,20 @@ final class CleanRegimenRunner: ObservableObject {
             return "Waiting for the Mac to be idle."
         }
         return nil
+    }
+
+    /// Why a chunk's errors mean the run must stop, or nil when the run may
+    /// go on.
+    ///
+    /// A failed safety snapshot is the one error that ends an unattended run:
+    /// without a rollback point a delete has nothing to undo.  The reason is
+    /// returned rather than acted on here so a test can ask the question
+    /// without a disk in front of it.
+    nonisolated static func snapshotGateReason(errors: [String]) -> String? {
+        guard errors.contains(where: { $0.hasPrefix(DiskCleaner.snapshotFailedPrefix) }) else {
+            return nil
+        }
+        return "The cleanup snapshot could not be created, so the regimen did not run."
     }
 
     /// Seconds since the last keyboard, mouse or trackpad event in this login
@@ -354,7 +388,7 @@ final class CleanRegimenRunner: ObservableObject {
         }
 
         let exclusions = CleanerExclusions.load()
-        let scan = await cleaner.scan(tier: .standard, exclusions: exclusions)
+        let scan = await scanProvider(exclusions)
         // `CleanScanReport` groups by category rather than exposing a flat
         // item list, so flatten the selected items from each report.
         let scanned = scan.categories.flatMap { $0.items.filter(\.isSelected) }
@@ -384,12 +418,7 @@ final class CleanRegimenRunner: ObservableObject {
             let end = min(index + chunk, pending.count)
             let batch = Array(pending[index..<end])
             let takeSnapshot = regimen.createSnapshotBeforeClean && !snapshotTaken
-            let cleaned = await cleaner.clean(
-                items: batch,
-                tier: .standard,
-                createSnapshot: takeSnapshot,
-                exclusions: exclusions
-            )
+            let cleaned = await cleanProvider(batch, exclusions, takeSnapshot)
             result.itemsRemoved += cleaned.itemsRemoved
             result.bytesReclaimed += cleaned.bytesReclaimed
             result.errors.append(contentsOf: cleaned.errors)
@@ -398,10 +427,17 @@ final class CleanRegimenRunner: ObservableObject {
             if takeSnapshot {
                 if cleaned.snapshotName != nil {
                     snapshotTaken = true
-                } else if cleaned.errors.contains(where: { $0.hasPrefix(DiskCleaner.snapshotFailedPrefix) }) {
+                } else if let reason = Self.snapshotGateReason(errors: cleaned.errors) {
                     // No rollback point, so no unattended delete.  `clean`
                     // deleted nothing in this chunk; the rest of the run
                     // does not go on without one.
+                    //
+                    // A missing snapshot is a failed safety gate, so the run
+                    // did not happen: it must not start the interval's clock,
+                    // or the next cleanup waits a whole interval over a
+                    // rollback point that could not be taken.
+                    recordsRun = false
+                    result.skippedReason = reason
                     break
                 }
             }
@@ -419,15 +455,26 @@ final class CleanRegimenRunner: ObservableObject {
     /// result without scanning the disk.
     func finish(_ result: RegimenRun, regimen: CleanRegimen) {
         lastRun = result
+        // A finished run is not waiting any more, whatever the panel showed
+        // before it started.
+        waitingReason = nil
+        if !result.errors.isEmpty {
+            // The raw message can carry an absolute path -- a safety check
+            // that failed names the path it refused to delete -- so it goes to
+            // `lastError`, which no view shows.  The panel gets a count.
+            lastError = result.errors.first
+        }
         if result.itemsRemoved > 0 {
             lastSummary = "Reclaimed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items."
         } else if let reason = result.skippedReason {
             lastSummary = reason
-        } else if let failure = result.errors.first {
+        } else if !result.errors.isEmpty {
             // Nothing was removed and something went wrong, a failed safety
             // snapshot included.  "No reclaimable items" would read as a
             // clean no-op when the run actually stopped.
-            lastSummary = failure
+            lastSummary = result.errors.count == 1
+                ? "1 item could not be removed."
+                : "\(result.errors.count) items could not be removed."
         } else {
             lastSummary = "No reclaimable items."
         }

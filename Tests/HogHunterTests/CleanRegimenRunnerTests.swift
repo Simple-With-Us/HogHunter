@@ -369,7 +369,122 @@ final class CleanRegimenRunnerTests: XCTestCase {
         var result = RegimenRun(startedAt: Date())
         result.errors = ["APFS snapshot failed.  Nothing was deleted."]
         runner.finish(result, regimen: makeRegimen())
-        XCTAssertEqual(runner.lastSummary, "APFS snapshot failed.  Nothing was deleted.")
+        XCTAssertEqual(runner.lastSummary, "1 item could not be removed.")
+        XCTAssertEqual(runner.lastError, "APFS snapshot failed.  Nothing was deleted.")
+    }
+
+    func testThePanelSummaryNeverShowsAPath() {
+        // A safety check that failed names the path it refused to delete.
+        // The panel is the one surface a screenshot can leave the machine on,
+        // so the summary carries a count and the raw text stays in
+        // `lastError`, which no view shows.
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.errors = ["Safety check failed for path: /Users/jay/Library/Caches/SomeCache"]
+        runner.finish(result, regimen: makeRegimen())
+
+        let summary = runner.lastSummary ?? ""
+        XCTAssertFalse(summary.contains("/Users/jay"), "the panel must not name a path")
+        XCTAssertFalse(summary.contains("Caches"), "the panel must not name the path at all")
+        XCTAssertEqual(summary, "1 item could not be removed.")
+        XCTAssertEqual(runner.lastError,
+                       "Safety check failed for path: /Users/jay/Library/Caches/SomeCache")
+    }
+
+    func testTheSummaryCountsEverythingThatCouldNotBeRemoved() {
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.errors = ["first", "second", "third"]
+        runner.finish(result, regimen: makeRegimen())
+
+        XCTAssertEqual(runner.lastSummary, "3 items could not be removed.")
+        XCTAssertEqual(runner.lastError, "first")
+    }
+
+    func testAFailedSnapshotDoesNotStartTheIntervalClock() async {
+        // A missing rollback point is a failed safety gate.  The run did not
+        // happen, so it must not start the interval's clock -- or the next
+        // cleanup waits a whole interval over a snapshot that could not be
+        // taken -- and the panel has to say why it stopped.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let regimen = makeRegimen(enabled: true, intervalHours: 24, rules: ["app-caches"])
+
+        let item = CleanItem(
+            category: .userCaches,
+            title: "TestCache",
+            subtitle: "~/Library/Caches/TestCache",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestCache").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .userCaches,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report },
+            cleanProvider: { _, _, _ in
+                CleanResult(
+                    bytesReclaimed: 0,
+                    itemsRemoved: 0,
+                    errors: ["\(DiskCleaner.snapshotFailedPrefix)  Nothing was deleted."],
+                    cleanedAt: now
+                )
+            }
+        )
+
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason,
+                       "The cleanup snapshot could not be created, so the regimen did not run.")
+        XCTAssertNil(defaults.object(forKey: key),
+                     "a run that stopped for a missing snapshot did not happen")
+        XCTAssertTrue(runner.isDue(regimen: regimen, lastRunAt: defaults.object(forKey: key) as? Date),
+                      "the run is still due, so the next check retries")
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(15 * 60).timeIntervalSince1970,
+                       accuracy: 1)
+        XCTAssertEqual(runner.lastSummary,
+                       "The cleanup snapshot could not be created, so the regimen did not run.")
+    }
+
+    func testAFinishedRunClearsTheHold() {
+        // "Waiting..." beside a finished run says cleanup is still blocked
+        // when it is not.  A finished run clears the hold wherever it ended.
+        let runner = makeRunner()
+        var regimen = makeRegimen(enabled: true)
+        regimen.requireIdleMinutes = 30
+        let waiting = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 }
+        )
+        waiting.tick(regimen: regimen)
+        XCTAssertEqual(waiting.waitingReason, "Waiting for the Mac to be idle.")
+
+        var result = RegimenRun(startedAt: Date())
+        result.skippedReason = "No cleaning rules are enabled."
+        waiting.finish(result, regimen: regimen)
+        XCTAssertNil(waiting.waitingReason, "a finished run is not waiting")
     }
 
     func testAnIdleRequirementOfZeroNeverWaits() {

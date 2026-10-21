@@ -14,9 +14,11 @@ An unattended run gets no extra authority.  It takes the same `.janitor-keep` ma
 
 A scheduled run honors the regimen's own conditions.  `requireIdleMinutes` (30 by default) holds a due run until the Mac has had no keyboard or mouse input for that long, and `requireUserPresent` holds it until the panel is open.  The panel says which one is holding it.  Run Now is a person asking, so it skips both.
 
-A run takes one APFS safety snapshot, with its first chunk, not one per chunk.  If that snapshot cannot be made the run stops, because an unattended delete with no rollback point is not recoverable.  A cancelled run (the app quitting, or the schedule stopped) does not start the interval's clock either.  The runner is process-wide, so `HogStore` holds it by count and the last holder to let go stops it.
+A run takes one APFS safety snapshot, with its first chunk, not one per chunk.  If that snapshot cannot be made the run stops, because an unattended delete with no rollback point is not recoverable.  A cancelled run (the app quitting, or the schedule stopped) does not start the interval's clock either, and neither does a run that stopped for that missing snapshot: a failed safety gate is not a completed run.  The runner is process-wide, so `HogStore` holds it by count and the last holder to let go stops it.
 
 A run that steps aside because a build is running or another cleanup holds the lock did not happen, so it does not start the interval's clock.  The runner leaves the stored last run alone and the next 15 minute check retries; the panel shows that retry time.  A run that decided something, including "no rules enabled" and "nothing reclaimable", is a run and starts the clock.
+
+The panel's summary never carries a raw error.  A safety check that failed names the path it refused to delete, and the panel is the one surface a screenshot can leave the machine on, so the raw text stays in `lastError`, which no view shows, and the summary carries a count ("3 items could not be removed.").  A finished run also clears the hold, so "Waiting..." cannot sit beside a run that already finished.
 
 ## What the marker walk does not do
 
