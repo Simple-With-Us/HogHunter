@@ -99,10 +99,11 @@ final class KeepSentinelTests: XCTestCase {
     }
 
     func testTheWalkRespectsItsDepthBound() {
-        // A marker deeper than the bound is not reported.  The answer stays
-        // "not seen", which is the safe direction: an unreadable part of a
-        // tree is unreadable to the delete as well, so the marker survives
-        // it instead of being taken with it.
+        // A marker deeper than the bound is not reported.  The answer is
+        // "not seen", and that is a known limit and not the safe direction:
+        // `clean()` trashes the whole tree, so a marker past the bound goes
+        // with it.  HH-184 replaces the bound with a complete walk under a
+        // time budget; until then this test pins the current behavior.
         let tree = makeDirectory("deep")
         let deep = tree.appendingPathComponent("1/2/3/4/5/6/7/8", isDirectory: true)
         try? FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)

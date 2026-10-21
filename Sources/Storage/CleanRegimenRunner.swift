@@ -174,13 +174,18 @@ final class CleanRegimenRunner: ObservableObject {
         return now().timeIntervalSince(lastRunAt) >= regimen.effectiveIntervalHours * 3600
     }
 
-    private func tick() {
-        let regimen = CleanRegimen.load().sanitized()
+    /// One look at the clock: start a scheduled run if one is due and nothing
+    /// holds it.  The regimen is a parameter so a test can hand it one; the
+    /// scheduler's loop passes none and gets the saved one.  The task is
+    /// returned so a test can wait for the run it started.
+    @discardableResult
+    func tick(regimen plan: CleanRegimen? = nil) -> Task<Void, Never>? {
+        let regimen = (plan ?? CleanRegimen.load()).sanitized()
         let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
             waitingReason = nil
             updateNextRun(regimen: regimen, lastRunAt: lastRunAt)
-            return
+            return nil
         }
         // A scheduled run honors the regimen's own conditions.  "Run Now" is
         // a person asking, so it does not go through this gate.
@@ -191,10 +196,9 @@ final class CleanRegimenRunner: ObservableObject {
         ) {
             waitingReason = reason
             nextRunDate = now().addingTimeInterval(checkInterval)
-            return
+            return nil
         }
-        waitingReason = nil
-        runNow(regimen: regimen)
+        return runNow(regimen: regimen)
     }
 
     /// Why a due, scheduled run must not start yet, or nil when it may.
@@ -237,6 +241,8 @@ final class CleanRegimenRunner: ObservableObject {
     /// there for the other case.
     func scheduleFromNow(regimen: CleanRegimen? = nil) {
         let plan = (regimen ?? CleanRegimen.load()).sanitized()
+        // A new schedule ends whatever hold the old one was under.
+        waitingReason = nil
         guard plan.isEnabled else {
             nextRunDate = nil
             return
@@ -252,6 +258,8 @@ final class CleanRegimenRunner: ObservableObject {
     /// once instead of at the next fifteen-minute check.
     func refreshSchedule(regimen: CleanRegimen? = nil) {
         let plan = (regimen ?? CleanRegimen.load()).sanitized()
+        // The next check sets the hold again if one still applies.
+        waitingReason = nil
         guard plan.isEnabled else {
             nextRunDate = nil
             return
@@ -277,6 +285,9 @@ final class CleanRegimenRunner: ObservableObject {
         }
         isRunning = true
         lastError = nil
+        // A run that starts is no longer waiting, whether the schedule or Run
+        // Now started it.
+        waitingReason = nil
         let task = Task { [weak self] in
             guard let self else { return }
             await self.perform(plan)
@@ -404,12 +415,19 @@ final class CleanRegimenRunner: ObservableObject {
         finish(result, regimen: regimen)
     }
 
-    private func finish(_ result: RegimenRun, regimen: CleanRegimen) {
+    /// Record a finished run for the panel.  Internal so a test can hand it a
+    /// result without scanning the disk.
+    func finish(_ result: RegimenRun, regimen: CleanRegimen) {
         lastRun = result
         if result.itemsRemoved > 0 {
             lastSummary = "Reclaimed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items."
         } else if let reason = result.skippedReason {
             lastSummary = reason
+        } else if let failure = result.errors.first {
+            // Nothing was removed and something went wrong, a failed safety
+            // snapshot included.  "No reclaimable items" would read as a
+            // clean no-op when the run actually stopped.
+            lastSummary = failure
         } else {
             lastSummary = "No reclaimable items."
         }

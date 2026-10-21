@@ -166,7 +166,7 @@ final class HousekeeperLock {
         }
         guard isStale(at: aside) else {
             // Someone else's fresh lock.  Put it back.
-            try? fileManager.moveItem(at: aside, to: path)
+            putBack(aside)
             return false
         }
         // Only the stale directory is gone, and only when it is empty, as the
@@ -174,10 +174,28 @@ final class HousekeeperLock {
         if let contents = try? fileManager.contentsOfDirectory(atPath: aside.path), contents.isEmpty {
             try? fileManager.removeItem(at: aside)
         } else {
-            try? fileManager.moveItem(at: aside, to: path)
+            putBack(aside)
             return false
         }
         return true
+    }
+
+    /// Return a directory that was moved aside to the lock path.
+    ///
+    /// `moveItem` fails when the path is already taken, and that is the case
+    /// to leave alone: a third caller created a lock in the instant the path
+    /// was empty, and putting this one back would mean replacing theirs.  So
+    /// a failed put-back changes nothing.  The moved directory stays beside the
+    /// lock under its `.stale-` name and is never deleted, because it may be
+    /// a live peer's lock.  That peer is displaced, which is the window a
+    /// rename cannot close and only a lock primitive shared with the Python
+    /// and shell sides could.
+    private func putBack(_ aside: URL) {
+        do {
+            try fileManager.moveItem(at: aside, to: path)
+        } catch {
+            // Deliberately nothing: see above.
+        }
     }
 
     /// Remove the lock directory, but only when it is empty.

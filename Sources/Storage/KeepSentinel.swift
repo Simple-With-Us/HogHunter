@@ -39,14 +39,18 @@ enum KeepSentinel {
         }
     }
 
-    /// True when a marker sits anywhere under this path.
+    /// True when a marker sits anywhere under this path, within the walk's bound.
     ///
     /// The walk is bounded on both depth and entry count, because this runs
     /// on every candidate the cleaner considers.  A tree too big to answer
     /// within the bound answers "no marker found in what was read" rather
-    /// than blocking the whole tree forever: an unreadable part of the tree
-    /// is unreadable to the delete as well, so a marker inside one of those
-    /// parts survives the delete instead of being taken with it.
+    /// than blocking the whole tree forever, because a tree of more than
+    /// 2,000 entries is the normal state of an Xcode or package cache.  That
+    /// makes this a best-effort check and not a guarantee: a marker deeper or
+    /// further in than the bound is not seen, and `clean()` trashes the whole
+    /// tree, including the parts the walk did not read.  HH-184 replaces the
+    /// bound with a complete walk under a time budget that fails closed on
+    /// timeout, as the Python engine does.
     static func containsMarker(url: URL,
                                maxDepth: Int = 6,
                                fileCap: Int = 2_000,

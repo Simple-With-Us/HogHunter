@@ -283,6 +283,95 @@ final class CleanRegimenRunnerTests: XCTestCase {
         )
     }
 
+    func testTheSchedulerHoldsADueRunThatIsNotIdleEnough() {
+        // `scheduleBlocker` is only half of the gate: the other half is that
+        // `tick()` asks it.  Take that call out and every other test here
+        // stays green while files are deleted on a Mac someone is using.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4)
+        regimen.requireIdleMinutes = 30
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 60 }
+        )
+
+        let task = runner.tick(regimen: regimen)
+
+        XCTAssertNil(task, "no run was started")
+        XCTAssertNil(runner.lastRun)
+        XCTAssertFalse(runner.isRunning)
+        XCTAssertNil(defaults.object(forKey: key), "a held run records nothing")
+        XCTAssertEqual(runner.waitingReason, "Waiting for the Mac to be idle.")
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(15 * 60).timeIntervalSince1970,
+                       accuracy: 1)
+    }
+
+    func testTheSchedulerStartsADueRunOnceTheMacIsIdleAndClearsTheHold() async {
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4)
+        regimen.requireIdleMinutes = 30
+        var idle: TimeInterval = 60
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { idle }
+        )
+
+        runner.tick(regimen: regimen)
+        XCTAssertEqual(runner.waitingReason, "Waiting for the Mac to be idle.")
+
+        idle = 31 * 60
+        await runner.tick(regimen: regimen)?.value
+
+        XCTAssertNil(runner.waitingReason, "a run that starts is no longer waiting")
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+    }
+
+    func testRunNowAndANewScheduleClearAHold() async {
+        var regimen = makeRegimen(enabled: true, intervalHours: 4)
+        regimen.requireIdleMinutes = 30
+        let runner = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 }
+        )
+
+        runner.tick(regimen: regimen)
+        XCTAssertNotNil(runner.waitingReason)
+        await runner.runNow(regimen: regimen)?.value
+        XCTAssertNil(runner.waitingReason)
+
+        // A fresh runner, because the run above started the interval's clock
+        // and a clock that is running has nothing due to hold.
+        let other = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 }
+        )
+        other.tick(regimen: regimen)
+        XCTAssertNotNil(other.waitingReason)
+        other.scheduleFromNow(regimen: regimen)
+        XCTAssertNil(other.waitingReason)
+    }
+
+    func testAFailedRunThatRemovedNothingSaysWhatWentWrong() {
+        // The summary used to fall back to "No reclaimable items." for a run
+        // that stopped on an error, which reads as a clean no-op.
+        let runner = makeRunner()
+        var result = RegimenRun(startedAt: Date())
+        result.errors = ["APFS snapshot failed.  Nothing was deleted."]
+        runner.finish(result, regimen: makeRegimen())
+        XCTAssertEqual(runner.lastSummary, "APFS snapshot failed.  Nothing was deleted.")
+    }
+
     func testAnIdleRequirementOfZeroNeverWaits() {
         var regimen = makeRegimen(enabled: true)
         regimen.requireIdleMinutes = 0
