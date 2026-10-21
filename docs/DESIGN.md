@@ -41,14 +41,20 @@ Tests/HogHunterTests/             XCTest: CpuMath, MemoryMath, Grouping, History
 scripts/install.sh                build, sign, install to ~/Applications, relaunch
 .github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
 HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
-Brand/                           traced logo and icon vectors, plus the 16 px and 32 px small-size crops
+Brand/                           traced logo and icon vectors, the 16 px and 32 px small-size crops, and the favicon set
 ```
 
 ## App icon
 
 The Finder / About / notification icon is `Assets.xcassets/AppIcon.appiconset`, compiled from the square Hog Hunter lockup (boar, wordmark, and the line "Monitor. Detect. Reclaim.").  The source is not squircle-cropped; macOS applies the system mask at display time.  `LSUIElement` still hides the Dock icon while the menu bar extra is running.  The menu bar extra itself stays the flame glyph plus the live CPU number.  The iPhone app uses the same lockup at 1024×1024.
 
-`Brand/` is the source for the mark outside the app bundle: the traced logo and icon vectors, the 16 px and 32 px small-size crops that keep the boar readable when the whole head is scaled down, and `Brand/README.md`, which documents the crop windows, the measured 9.5 degree rotation, and how to rebuild the `.icns` and the Windows `.ico`.  The shipped app icon set is not touched by that tree.
+`Brand/` is the source for the mark outside the app bundle: the traced logo and icon vectors, the 16 px and 32 px small-size crops that keep the boar readable when the whole head is scaled down, the favicon set, and `Brand/README.md`, which documents the crop windows, the measured 9.5 degree rotation, the favicon simplification settings, and how to rebuild the `.icns` and the Windows `.ico`.  The shipped app icon set is not touched by that tree.
+
+## Favicon
+
+A favicon is not a small app icon.  At 16 device pixels the traced artwork has about 250 of them, and the mane, the brow, the eye and the tusk all land inside the same one or two pixels, so the mark stops being a boar and becomes a brown smudge.  `Brand/HogHunter-Favicon-16.svg` and `Brand/HogHunter-Favicon-32.svg` solve that by simplifying rather than only cropping: the traced contour is reduced with a Ramer-Douglas-Peucker epsilon of 45 logo units, a spike filter removes convex vertices under 30 units so the mane fringe closes into one solid mass, and the result is cropped to the head and rotated -6 degrees.  The ear, the eye, the tusk and the snout survive; the cream crescent along the snout is dropped because at 16 px it eats the muzzle.
+
+`Brand/favicon.ico` carries 16, 32 and 48 px entries as 32-bit DIBs, not PNG payloads, because a PNG-compressed ICO entry is only read by Windows at the 256x256 size.  `Brand/preview-favicons.png` shows the marks at true device pixels against the artwork they replace.  The method and the failed alternatives are in `Brand/README.md`.
 
 ## Data types (Models.swift)
 

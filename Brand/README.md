@@ -16,6 +16,12 @@ These files are the **standalone emblem**: the artwork the owner uses for their 
 | `HogHunter-Icon-Small-16.svg` | The same 16 px snout crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `HogHunter-Icon-Small-32.svg` | The same 32 px snout-and-tusk crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `preview-small-icons.png` | The small variants at their true pixel size, against the owner's shipped 16 px and 32 px icons. |
+| `HogHunter-Favicon-16.svg` | The simplified head, cropped tight, on a 1024 cream field.  For a 16 px favicon. |
+| `HogHunter-Favicon-32.svg` | The same drawing with the 32 px crop.  For a 32 px favicon. |
+| `HogHunter-Favicon-Tile.svg` | The same drawing on the owner's rounded tile, for a tab that needs a silhouette. |
+| `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Renders of the favicon at true device pixels. |
+| `favicon.ico` | A Windows `.ico` carrying the 16, 32 and 48 px entries. |
+| `preview-favicons.png` | The new favicons at true size, against the artwork they replace. |
 
 `HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon: the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
 
@@ -95,6 +101,48 @@ HTML
 ```
 
 Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of a tusk also reads cleanly at 16 px, as a distinct cream curve, but it reads as a shape rather than as the animal, and a tight crop of the eye comes out as a plain slash.  The snout is the candidate that still reads as a hog, and the same method is how the snout and the snout-and-tusk crops were chosen.
+
+## Favicons
+
+A favicon is not a small app icon.  At 16 device pixels the traced artwork has about 250 of them, and the mane, the brow, the eye and the tusk all land inside the same one or two pixels, so the mark stops being a boar and becomes a brown smudge.  The small variants above solve that by cropping.  The favicon solves it by **simplifying**.
+
+The favicon is the same traced artwork with its contour simplified, cropped to the head and rotated.  Three settings do the work.
+
+| Setting | Value |
+|---|---|
+| Ramer-Douglas-Peucker epsilon, head contour | 45 logo units |
+| Spike filter on the head contour | 30 logo units |
+| Rotation | -6 degrees |
+
+The path data in the three favicon SVGs is the `HogHunter-Logo.svg` trace flattened to polygons, simplified by the RDP epsilon and the spike filter listed above, and expressed in one tenth of the master's units.  The logo holds 17 subpaths and 26 cubic curves; the traced artwork in each favicon holds 7 subpaths and no curve commands at all, only straight lines.  The tile adds the owner's rounded tile as a separate path, so `HogHunter-Favicon-Tile.svg` holds 8 subpaths and four arc segments.  The favicons also carry the same vertical flip as every other Brand vector.  The master paths live in a y-up space and the logo renders them through `translate(0,1024) scale(0.1,-0.1)`, so a favicon that drops that step draws the boar upside down, with the muzzle sitting high and the mane spikes pointing down.  Each favicon file therefore wraps its drawing in `translate(0,1024) scale(1,-1)` and keeps a `viewBox` that starts at `0 0`.  `HogHunter-Favicon-16.svg` and `HogHunter-Favicon-32.svg` apply the crop as a `translate()` on the group; `HogHunter-Favicon-Tile.svg` additionally scales the drawing by 1.0349 on that group, which is what puts it at 86 per cent of the tile.
+
+The features kept are the head outline, the ear, the eye, the tusk, and the snout with both nostrils.  The cream crescent along the snout is dropped: at 16 px it is a pale wedge that eats the muzzle instead of describing it.
+
+Two alternatives were tried and lost.  **Rotating the unchanged artwork** does not help at any angle, because the smudge rotates with the artwork.  **Cropping into the head** (the face, the front of the muzzle, the muzzle and tusk) puts the crop window inside the head, so the head fills the frame edge to edge and the silhouette disappears; a crop only works when it lands on a part of the drawing that is bounded on both sides.
+
+The RDP epsilon and the spike filter work together.  RDP alone at 45 units keeps the mane as a fringe of separate spikes, and at 16 px that fringe is a row of loose pixels.  The spike filter removes any convex vertex whose height is under 30 units - 0.54 px at the 16 px crop and about 1 px at the 32 px crop - and the outline closes up into one solid mass.
+
+The 16 px and 32 px marks are the same drawing with a different crop padding: 2 per cent for the 16 px mark, so the head fills the pixels it has, and 6 per cent for the 32 px mark, where the extra air stops the tusk from touching the edge.  The tile variant is the same drawing at 86 per cent of the tile, so it keeps the owner's rounded silhouette.
+
+`favicon.ico` is a real ICO container with three 32-bit DIB entries, at 16, 32 and 48 px, and each entry carries exactly the pixels of the matching PNG.  DIB is the right choice here: a PNG-compressed ICO entry is only read by Windows at the 256x256 size, so PNG payloads below that size would be dropped or shown broken in Explorer.  The same reasoning is spelled out in the `.ico` section below.
+
+Rebuild it from the favicon SVGs.  The 16 px entry renders the 16 px mark at 16 px, the 32 px entry renders the 32 px mark at 32 px, and the 48 px entry renders the 16 px mark at 48 px, so each entry keeps the crop it was designed with.  `favicon-64.png` is the 16 px mark at 64 px, for browsers that ask for a larger source.
+
+```bash
+magick Brand/HogHunter-Favicon-16.svg -resize 16x16 Brand/favicon-16.png
+magick Brand/HogHunter-Favicon-32.svg -resize 32x32 Brand/favicon-32.png
+magick Brand/HogHunter-Favicon-16.svg -resize 48x48 Brand/favicon-48.png
+magick Brand/HogHunter-Favicon-16.svg -resize 64x64 Brand/favicon-64.png
+magick -type TrueColorAlpha \
+  Brand/favicon-16.png Brand/favicon-32.png Brand/favicon-48.png \
+  Brand/favicon.ico
+```
+
+Unlike the `.ico` section below, do not put `-background none` on these renders: `HogHunter-Favicon-16.svg` and `-32.svg` each paint an opaque cream `<rect>` across the whole viewBox, so the flag is a no-op and `favicon-16/32/48/64.png` and every `.ico` entry are opaque cream squares, not a boar silhouette.  The tile variant `HogHunter-Favicon-Tile.svg` is the one that keeps transparent corners; render it with `-background none` to get a transparent PNG.
+
+ImageMagick writes DIB payloads for every entry below 256 px, which is what the file ships.
+
+`preview-favicons.png` shows the new marks at true size, the artwork they replace at the same size, and the same marks in a browser tab on both a light and a dark tab bar.
 
 ## Rebuilding a standalone .icns
 
