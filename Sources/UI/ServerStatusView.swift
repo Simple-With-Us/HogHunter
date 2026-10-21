@@ -133,13 +133,16 @@ struct VPSStatusStripView: View {
 /// the Maintain tab carries no server figures at all.
 struct ServerStatusView: View {
     @ObservedObject var store: VPSStatusStore
+    /// Which part of the server snapshot this view shows, so each section of
+    /// the server scope answers with its own readings.
+    var section: VPSResourceSection = .all
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Remote Server")
                 .font(.system(size: 13, weight: .semibold))
 
-            VPSResourceCardView(store: store)
+            VPSResourceCardView(store: store, section: section)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)

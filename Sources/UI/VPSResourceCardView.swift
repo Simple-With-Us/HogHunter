@@ -1,11 +1,42 @@
 import AppKit
 import SwiftUI
 
+/// Which part of the server snapshot a card shows.
+///
+/// The dashboard's server sections each ask for the part that belongs to
+/// them, so no two sections show the same readings and every section says
+/// something different from the one before it.
+enum VPSResourceSection: String {
+    /// Everything the snapshot carries: the headline readings, the app
+    /// databases, the largest directories and the tool states.
+    case all
+    /// CPU, memory and swap: the readings that describe what the server is
+    /// doing right now.
+    case activity
+    /// The server's disks, its app databases and its largest directories.
+    case storage
+    /// The tool states: the maintenance work the server runs.
+    case maintenance
+
+    /// Whether this section shows the server's headline readings.
+    var showsHeadline: Bool { self == .all || self == .activity }
+    /// Whether this section shows the server's disks.
+    var showsDevices: Bool { self == .all || self == .storage }
+    /// Whether this section shows the app databases.
+    var showsDatabases: Bool { self == .all || self == .storage }
+    /// Whether this section shows the largest directories.
+    var showsDirectories: Bool { self == .all || self == .storage }
+    /// Whether this section shows the tool states.
+    var showsTools: Bool { self == .all || self == .maintenance }
+}
+
 /// Remote VPS resource-usage card showing CPU, RAM (including swap),
 /// and storage from `/root/vps-storage-status.json`.
 struct VPSResourceCardView: View {
     @ObservedObject var store: VPSStatusStore
     @Environment(\.openSettings) private var openSettings
+    /// Which part of the snapshot this card shows.
+    var section: VPSResourceSection = .all
 
     var body: some View {
         GroupBox {
@@ -109,21 +140,23 @@ struct VPSResourceCardView: View {
             // Three metrics across uses the panel's width before adding height.
             // Missing readings do not reserve empty metric cards.
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .top), count: 3), spacing: 8) {
-                if let cpu = snapshot.cpu { cpuBox(cpu) }
-                if let mem = snapshot.memory { memoryBox(mem) }
-                if let root = snapshot.rootDevice { deviceBox(root, title: "Disk (/)") }
-                if let swap = snapshot.swap { swapBox(swap) }
-                if let tmp = snapshot.tmpDevice {
+                if section.showsHeadline, let cpu = snapshot.cpu { cpuBox(cpu) }
+                if section.showsHeadline, let mem = snapshot.memory { memoryBox(mem) }
+                if section.showsDevices, let root = snapshot.rootDevice { deviceBox(root, title: "Disk (/)") }
+                if section.showsHeadline, let swap = snapshot.swap { swapBox(swap) }
+                if section.showsDevices, let tmp = snapshot.tmpDevice {
                     deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
                 }
-                if let shm = snapshot.shmDevice {
+                if section.showsDevices, let shm = snapshot.shmDevice {
                     deviceBox(shm, title: "Shared Mem (/dev/shm)", tooltip: shm.note)
                 }
             }
 
-            let dbs = snapshot.appDbs ?? [:]
-            let tools = snapshot.toolStatuses ?? []
-            let dirs = snapshot.largestDirs ?? []
+            // A section only carries the readings it owns, so two sections
+            // never show the same rows.
+            let dbs = section.showsDatabases ? (snapshot.appDbs ?? [:]) : [:]
+            let tools = section.showsTools ? (snapshot.toolStatuses ?? []) : []
+            let dirs = section.showsDirectories ? (snapshot.largestDirs ?? []) : []
             if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
                 HStack(alignment: .top, spacing: 16) {
                     supportingReadings(dbs: dbs, tools: tools)
