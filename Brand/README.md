@@ -118,11 +118,24 @@ The features kept are the head outline, the ear, the eye, the tusk, and the snou
 
 Two alternatives were tried and lost.  **Rotating the unchanged artwork** does not help at any angle, because the smudge rotates with the artwork.  **Cropping into the head** (the face, the front of the muzzle, the muzzle and tusk) puts the crop window inside the head, so the head fills the frame edge to edge and the silhouette disappears; a crop only works when it lands on a part of the drawing that is bounded on both sides.
 
-The RDP epsilon and the spike filter work together.  RDP alone at 45 units keeps the mane as a fringe of separate spikes, and at 16 px that fringe is a row of loose pixels.  The spike filter removes any convex vertex whose height is under 30 units, which is under half a pixel at this crop, and the outline closes up into one solid mass.
+The RDP epsilon and the spike filter work together.  RDP alone at 45 units keeps the mane as a fringe of separate spikes, and at 16 px that fringe is a row of loose pixels.  The spike filter removes any convex vertex whose height is under 30 units - 0.54 px at the 16 px crop and about 1 px at the 32 px crop - and the outline closes up into one solid mass.
 
 The 16 px and 32 px marks are the same drawing with a different crop padding: 2 per cent for the 16 px mark, so the head fills the pixels it has, and 6 per cent for the 32 px mark, where the extra air stops the tusk from touching the edge.  The tile variant is the same drawing at 86 per cent of the tile, so it keeps the owner's rounded silhouette.
 
 `favicon.ico` is a real ICO container with three 32-bit DIB entries, at 16, 32 and 48 px, and each entry carries exactly the pixels of the matching PNG.  DIB is the right choice here: a PNG-compressed ICO entry is only read by Windows at the 256x256 size, so PNG payloads below that size would be dropped or shown broken in Explorer.  The same reasoning is spelled out in the `.ico` section below.
+
+Rebuild it from the favicon SVGs.  The 16 px entry renders the 16 px mark at 16 px, the 32 px entry renders the 32 px mark at 32 px, and the 48 px entry renders the 16 px mark at 48 px, so each entry keeps the crop it was designed with.  `favicon-64.png` is the 16 px mark at 64 px, for browsers that ask for a larger source.
+
+```bash
+magick -background none Brand/HogHunter-Favicon-16.svg -resize 16x16 Brand/favicon-16.png
+magick -background none Brand/HogHunter-Favicon-32.svg -resize 32x32 Brand/favicon-32.png
+magick -background none Brand/HogHunter-Favicon-16.svg -resize 48x48 Brand/favicon-48.png
+magick -type TrueColorAlpha \
+  Brand/favicon-16.png Brand/favicon-32.png Brand/favicon-48.png \
+  Brand/favicon.ico
+```
+
+ImageMagick writes DIB payloads for every entry below 256 px, which is what the file ships.
 
 `preview-favicons.png` shows the new marks at true size, the artwork they replace at the same size, and the same marks in a browser tab on both a light and a dark tab bar.
 
