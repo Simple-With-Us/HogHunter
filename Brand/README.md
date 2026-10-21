@@ -16,6 +16,12 @@ These files are the **standalone emblem**: the artwork the owner uses for their 
 | `HogHunter-Icon-Small-16.svg` | The same 16 px snout crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `HogHunter-Icon-Small-32.svg` | The same 32 px snout-and-tusk crop, with the owner's rotation, scale and shift applied, on the owner's rounded tile. |
 | `preview-small-icons.png` | The small variants at their true pixel size, against the owner's shipped 16 px and 32 px icons. |
+| `HogHunter-Favicon-16.svg` | The simplified head, cropped tight, on a 1024 cream field.  For a 16 px favicon. |
+| `HogHunter-Favicon-32.svg` | The same drawing with the 32 px crop.  For a 32 px favicon. |
+| `HogHunter-Favicon-Tile.svg` | The same drawing on the owner's rounded tile, for a tab that needs a silhouette. |
+| `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Renders of the favicon at true device pixels. |
+| `favicon.ico` | A Windows `.ico` carrying the 16, 32 and 48 px entries. |
+| `preview-favicons.png` | The new favicons at true size, against the artwork they replace. |
 
 `HogHunter-Icon-Rotated.svg` already carries the rounded tile, so macOS would apply its system mask a second time if that file were installed as the app icon: the artwork would sit smaller than the mask expects, with corner artifacts inside the squircle.  Use it for a standalone `.icns` or `.ico`, where the tile is wanted.  Do not install it as `Assets.xcassets/AppIcon.appiconset`.
 
@@ -95,6 +101,30 @@ HTML
 ```
 
 Scale that 16x16 PNG up with nearest-neighbour to see what the pixels actually are.  A wide crop of a tusk also reads cleanly at 16 px, as a distinct cream curve, but it reads as a shape rather than as the animal, and a tight crop of the eye comes out as a plain slash.  The snout is the candidate that still reads as a hog, and the same method is how the snout and the snout-and-tusk crops were chosen.
+
+## Favicons
+
+A favicon is not a small app icon.  At 16 device pixels the traced artwork has about 250 of them, and the mane, the brow, the eye and the tusk all land inside the same one or two pixels, so the mark stops being a boar and becomes a brown smudge.  The small variants above solve that by cropping.  The favicon solves it by **simplifying**.
+
+The favicon is the same traced artwork with its contour simplified, cropped to the head and rotated.  Three settings do the work.
+
+| Setting | Value |
+|---|---|
+| Ramer-Douglas-Peucker epsilon, head contour | 45 logo units |
+| Spike filter on the head contour | 30 logo units |
+| Rotation | -6 degrees |
+
+The features kept are the head outline, the ear, the eye, the tusk, and the snout with both nostrils.  The cream crescent along the snout is dropped: at 16 px it is a pale wedge that eats the muzzle instead of describing it.
+
+Two alternatives were tried and lost.  **Rotating the unchanged artwork** does not help at any angle, because the smudge rotates with the artwork.  **Cropping into the head** (the face, the front of the muzzle, the muzzle and tusk) puts the crop window inside the head, so the head fills the frame edge to edge and the silhouette disappears; a crop only works when it lands on a part of the drawing that is bounded on both sides.
+
+The RDP epsilon and the spike filter work together.  RDP alone at 45 units keeps the mane as a fringe of separate spikes, and at 16 px that fringe is a row of loose pixels.  The spike filter removes any convex vertex whose height is under 30 units, which is under half a pixel at this crop, and the outline closes up into one solid mass.
+
+The 16 px and 32 px marks are the same drawing with a different crop padding: 2 per cent for the 16 px mark, so the head fills the pixels it has, and 6 per cent for the 32 px mark, where the extra air stops the tusk from touching the edge.  The tile variant is the same drawing at 86 per cent of the tile, so it keeps the owner's rounded silhouette.
+
+`favicon.ico` is a real ICO container with three 32-bit DIB entries, at 16, 32 and 48 px, and each entry carries exactly the pixels of the matching PNG.  DIB is the right choice here: a PNG-compressed ICO entry is only read by Windows at the 256x256 size, so PNG payloads below that size would be dropped or shown broken in Explorer.  The same reasoning is spelled out in the `.ico` section below.
+
+`preview-favicons.png` shows the new marks at true size, the artwork they replace at the same size, and the same marks in a browser tab on both a light and a dark tab bar.
 
 ## Rebuilding a standalone .icns
 
