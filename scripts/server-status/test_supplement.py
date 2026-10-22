@@ -44,12 +44,20 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(output['largest_dirs'], [])
 
     def test_native_running_and_safe_negative_states(self):
-        rows = module.tool_statuses([{'codex'}], True, lambda cmd: '/bin/caddy' if cmd == 'caddy' else None, installed=lambda _: False)
+        rows = module.tool_statuses([{'codex'}], True, lambda cmd: '/bin/postgres' if cmd == 'postgres' else None, installed=lambda _: False)
         states = {row['id']: row for row in rows}
         self.assertEqual(states['codex']['state'], 'running')
         self.assertEqual(states['codex']['count'], 1)
-        self.assertEqual(states['caddy']['state'], 'stopped')
+        self.assertEqual(states['postgres']['state'], 'stopped')
         self.assertEqual(states['muse']['state'], 'absent')
+
+    def test_caddy_is_not_a_reported_tool(self):
+        """Caddy no longer runs on the server, so it is no longer in the tool list."""
+        rows = module.tool_statuses([{'codex'}], True,
+                                    lambda cmd: '/bin/caddy' if cmd == 'caddy' else None,
+                                    installed=lambda _: False)
+        self.assertNotIn('caddy', [row['id'] for row in rows])
+        self.assertNotIn('Caddy', [row['name'] for row in rows])
 
     def test_incomplete_inventory_and_interpreters_are_not_stopped(self):
         for inventory, complete in [([], False), ([{'python3'}], True)]:

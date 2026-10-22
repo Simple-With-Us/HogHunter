@@ -23,6 +23,10 @@ final class MaintainStore: ObservableObject {
     /// the cleaning runs out of the list within hours.
     @Published private(set) var history: [MaintainRun] = []
     @Published private(set) var stepToggles: [String: Bool] = [:]
+    /// True when the step toggles on disk and in Infisical match what the
+    /// panel shows.  A save takes a moment, and "Run Now" must not reach the
+    /// script before the step it runs is really on.
+    @Published private(set) var stepTogglesPersisted: Bool = true
     @Published private(set) var isRunningNow = false
     @Published var lastError: String?
 
@@ -273,8 +277,49 @@ final class MaintainStore: ObservableObject {
         }
     }
 
+    /// Runs one named step and nothing else.
+    ///
+    /// The server scope of the panel is display-only, so the owner had no way to
+    /// run the one step that acts on a remote host.  This calls the CLI's
+    /// `--run-step`, which takes the same housekeeper lock the scheduled tick
+    /// takes, so a step can never run over a tick.
+    ///
+    /// The step's own on/off toggle still governs it: the CLI refuses a step
+    /// that is off, so the panel enables the step first and the owner sees the
+    /// same switch the Mac's Maintenance tab has.
+    @discardableResult
+    func runStep(_ stepId: String) -> Task<Void, Never>? {
+        guard !isRunningNow else { return nil }
+        isRunningNow = true
+        lastError = nil
+        let launcher = self.launcher
+        return Task { [weak self] in
+            let outcome: Result<Bool, Error>
+            do {
+                outcome = .success(try await launcher(["--run-step", stepId]))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self else { return }
+            switch outcome {
+            case .success(true):
+                break
+            case .success(false):
+                self.lastError = "That step did not finish cleanly.\u{00A0} Check Logs for details."
+            case .failure(let error):
+                self.lastError = error.localizedDescription
+            }
+            self.isRunningNow = false
+            self.refresh()
+        }
+    }
+
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
+        // The toggle is not on the Mac's disk until the save lands, and the
+        // script refuses a step that is still off, so "Run Now" waits for the
+        // save rather than racing it.
+        stepTogglesPersisted = false
         let launcher = self.launcher
         let infisical = self.infisical
         Task { [weak self] in
@@ -293,6 +338,7 @@ final class MaintainStore: ObservableObject {
                     // over the local one and flip the toggle back with no word.
                     guard let self else { return }
                     self.lastError = Self.infisicalSaveFailure("that step setting", error: error)
+                    self.stepTogglesPersisted = true
                     self.refresh()
                     return
                 }
@@ -312,6 +358,7 @@ final class MaintainStore: ObservableObject {
             case .failure(let error):
                 self.lastError = error.localizedDescription
             }
+            self.stepTogglesPersisted = true
             self.refresh()
         }
     }

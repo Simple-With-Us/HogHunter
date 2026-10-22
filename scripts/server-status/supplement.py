@@ -24,7 +24,6 @@ TOOLS = (
     ('recall', 'Fleet Recall', ('recall',)),
     ('shellular', 'Shellular', ('shellular',)),
     ('docker', 'Docker', ('dockerd',)),
-    ('caddy', 'Caddy', ('caddy',)),
     ('postgres', 'PostgreSQL', ('postgres',)),
     ('redis', 'Redis', ('redis-server',)),
 )
@@ -77,7 +76,7 @@ def tool_statuses(inventory, complete, which=shutil.which, installed=installed_c
         is_installed = any(which(command) is not None or installed(command) for command in commands)
         if count:
             state = 'running'
-        elif not complete or (interpreted and ident not in {'docker', 'caddy', 'postgres', 'redis'}):
+        elif not complete or (interpreted and ident not in {'docker', 'postgres', 'redis'}):
             state = 'unknown'
         else:
             state = 'stopped' if is_installed else 'absent'

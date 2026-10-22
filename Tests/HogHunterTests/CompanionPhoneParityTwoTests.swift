@@ -140,15 +140,30 @@ final class CompanionSettingsValidatorTests: XCTestCase {
     }
 
     func testValuesOutsideWhatTheMacOffersAreRefused() {
+        // The Mac's own rule for an interval is a second or more, and that is
+        // the rule the validator uses:  a value the Mac holds is never
+        // refused, so a value below a second is what has to be refused here.
         let bad: [CompanionSettingsUpdateRequest] = [
-            .init(refreshInterval: 0), .init(refreshInterval: 1), .init(refreshInterval: 7), .init(refreshInterval: 3600),
-            .init(refreshInterval: .nan),
+            .init(refreshInterval: 0), .init(refreshInterval: 0.5), .init(refreshInterval: -1),
+            .init(refreshInterval: .nan), .init(refreshInterval: .infinity),
+            .init(backgroundRefreshInterval: 0), .init(backgroundRefreshInterval: 0.5),
+            .init(backgroundRefreshInterval: .nan),
             .init(alertThresholdPercent: 50), .init(alertThresholdPercent: 125), .init(alertThresholdPercent: 1050),
             .init(alertThresholdPercent: .infinity), .init(alertThresholdPercent: .nan), .init(alertThresholdPercent: -300),
             .init(alertSustainedMinutes: 0), .init(alertSustainedMinutes: 31), .init(alertSustainedMinutes: -5),
         ]
         for request in bad {
             guard case .failure = validate(request) else { return XCTFail("accepted \(request)") }
+        }
+    }
+
+    func testAnIntervalTheMacHoldsIsAcceptedEvenWhenItIsNotOnThePickers() throws {
+        // The Mac's own settings window offers a small set, but a value can
+        // reach the Mac from elsewhere, and then the phone offers it back.
+        // The Mac must not refuse a value it is already using.
+        for interval in [1.0, 7.0, 3600.0] {
+            XCTAssertEqual(try validate(.init(refreshInterval: interval)).get().refreshInterval, interval)
+            XCTAssertEqual(try validate(.init(backgroundRefreshInterval: interval)).get().backgroundRefreshInterval, interval)
         }
     }
 
@@ -352,7 +367,7 @@ final class CompanionSettingsRouteTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
 
-        let refused = store.performRemoteSettings(.init(refreshInterval: 7))
+        let refused = store.performRemoteSettings(.init(refreshInterval: 0))
         XCTAssertEqual(refused.status, 400)
         let decoded = try JSONDecoder().decode(CompanionSettingsUpdateResponse.self, from: refused.body)
         XCTAssertEqual(decoded.status, "rejected")
