@@ -5,10 +5,18 @@
  *
  * Auth: resolves credentials from the first source that is present
  * (never prints values):
- *   1. ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the environment
- *   2. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64
+ *   1. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64
  *      (hosted ios-ship / Infisical; p8 is base64, decoded to a PEM held in
  *      memory and never written to disk)
+ *   2. ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 in the environment
+ *   3. Fleet-OPS prod /asc through fleet-secrets
+ *
+ * A caller-supplied file is NOT a credential source (AFC-459):  the private
+ * key is a secret, and the approved sources are the process environment, a
+ * captured `fleet-secrets get NAME` and bootstrap-only Keychain credentials.
+ * ASC_KEY_PATH is therefore never read here:  the shell layer that owns the
+ * credential stages a key file for the Apple tools and hands the key over in
+ * the environment.
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -26,9 +34,25 @@ import { createHash, createSign } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { normalizePrivateKey } from "./asc-key.mjs";
 
 function base64url(input) {
   return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// A rejected key is reported with a MASKED PREVIEW, never with the key
+// itself:  the first eight and the last four characters, nothing else
+// (Kody rule 28).  A value too short to mask safely is withheld whole, so
+// the preview can never become the secret.
+function maskedPreview(value) {
+  const text = String(value ?? "");
+  if (text.length === 0) return "(empty)";
+  //  Withheld unless the value is comfortably longer than the twelve
+  //  characters a preview discloses:  a 13-character rejected credential
+  //  would otherwise be reported as 12 of its 13 characters, which is the
+  //  mask becoming the secret.
+  if (text.length <= 24) return `[${text.length} chars, withheld]`;
+  return `${text.slice(0, 8)}...${text.slice(-4)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,41 +108,69 @@ function fleetSecretsGet(name, folder) {
   }
 }
 
-function fromFile(keyId, issuerId, keyPath, source) {
-  try {
-    return { keyId: keyId.trim(), issuerId: issuerId.trim(), privateKeyPem: readFileSync(keyPath, "utf8"), source };
-  } catch {
-    return null;
-  }
-}
-
+// Resolves the App Store Connect credential.
+//
 // Returns { keyId, issuerId, privateKeyPem, source } or { error } or { error: null }.
+//
+// The order is the rule:  the environment beats the vault, and a file is not a
+// source at all.  A path on disk is not an approved secret source, so
+// ASC_KEY_PATH is never read here;  the shell layer that owns the credential
+// stages a key for the Apple tools and hands it over in the environment.
+//
+// The PEM from the environment is parsed before it is accepted, so a
+// truncated key is a credential error rather than a signer stack trace.  The
+// parse check lives in asc-key.mjs, which the shell layer uses as well, so
+// both sides of the handoff accept exactly the same keys.
 function resolveCredential() {
-  // 1) Already-exported ASC_* (DealDex's workflow does this).
   const envKeyId = String(process.env.ASC_KEY_ID || "").trim();
   const envIssuer = String(process.env.ASC_ISSUER_ID || "").trim();
-  const envKeyPath = String(process.env.ASC_KEY_PATH || "").replace(/^~(?=\/)/, homedir()).trim();
-  if (envKeyId && envIssuer && envKeyPath && existsSync(envKeyPath)) {
-    const got = fromFile(envKeyId, envIssuer, envKeyPath, "ASC_KEY_* environment");
-    if (got) return got;
-  }
+  const envKeyPem = String(process.env.ASC_KEY_P8 || "").trim();
 
-  // No file is read here (AFC-359).  Local-Mac operators set ASC_KEY_ID /
-  // ASC_ISSUER_ID / ASC_KEY_PATH (or the APPLE_API_* names) in their shell, or
-  // let ship-testflight.sh stage the Infisical key and export ASC_* before
-  // it invokes this module (step 3 below also reads Infisical directly).  The hosted ios-ship runner only has the APPLE_API_*
-  // form in $GITHUB_ENV.
-
-  // 2) The APPLE_API_* trio the ship workflow exports from Infisical.
+  // 1) The APPLE_API_* trio the ship workflow exports from Infisical.  The
+  //    key itself is in the environment, so it wins over every other source.
   const keyId = String(process.env.APPLE_API_KEY_ID || "").trim();
   const issuerId = String(process.env.APPLE_API_ISSUER_ID || "").trim();
   if (keyId && issuerId && process.env.APPLE_API_KEY_P8_BASE64) {
-    const pem = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
-    if (!pem) return { error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key" };
+    //  The decoded key is parsed with the same validator the ASC_KEY_P8
+    //  branch uses:  an envelope passes decodeP8 even when the key inside
+    //  is truncated, and that key would reach the signer and come back as
+    //  a stack trace instead of this credential error.
+    const decoded = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
+    const pem = decoded ? normalizePrivateKey(decoded) : null;
+    if (!pem) return {
+      error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key"
+        + `; preview: ${maskedPreview(process.env.APPLE_API_KEY_P8_BASE64)}`
+    };
     return { keyId, issuerId, privateKeyPem: pem, source: "APPLE_API_* environment (base64 p8)" };
   }
 
-  // 3) Infisical Fleet-OPS /asc: key id and issuer (unless the environment already
+  // 2) The same secret as a plain environment variable.  This is the form
+  //    fleet-secrets hands out, and the form the shell layer uses when it
+  //    hands a staged key to this client.
+  let deferredEnvError = null;
+  if (envKeyId && envIssuer && envKeyPem) {
+    const pem = normalizePrivateKey(envKeyPem);
+    if (!pem) {
+      //  An invalid ambient key is ignored, the way the shell layer ignores
+      //  it and falls back to Infisical:  the vault still resolves below,
+      //  and the rejection - with its masked preview - is only the answer
+      //  when nothing else yields a credential.
+      deferredEnvError = {
+        error: "ASC_KEY_P8 is set but is not a PEM private key"
+          + `; preview: ${maskedPreview(envKeyPem)}`
+      };
+    } else {
+      return { keyId: envKeyId, issuerId: envIssuer, privateKeyPem: pem, source: "ASC_KEY_P8 environment" };
+    }
+  }
+
+  // 3) No file is read here (AFC-359, and AFC-459):  a path on disk is not an
+  //    approved secret source, so ASC_KEY_PATH is not a credential source
+  //    here.  The shell layer that owns the credential reads a staged key and
+  //    exports it as ASC_KEY_P8.  Step 4 reads Infisical directly, so a local
+  //    operator needs nothing exported at all.
+
+  // 4) Infisical Fleet-OPS /asc: key id and issuer (unless the environment already
   //    has them) and the PEM as ASC_KEY_P8 when the key id is the /asc one;  another
   //    key id falls back to AUTHKEY_<KEY_ID> in /authkey-<key id lower case>-p8.
   //    Kept in memory, never written to disk.
@@ -140,7 +192,7 @@ function resolveCredential() {
     }
   }
 
-  return { error: null };
+  return deferredEnvError || { error: null };
 }
 
 function signJwt({ keyId, issuerId, privateKeyPem }) {
@@ -651,8 +703,11 @@ async function main() {
   if (!cred.privateKeyPem) {
     console.error(
       "asc-auth: no App Store Connect credential found. Tried, in order:\n" +
-      "  1) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the environment\n" +
-      "  2) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment"
+      "  1) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment\n" +
+      "  2) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 in the environment\n" +
+      "  3) Fleet-OPS prod /asc through fleet-secrets\n" +
+      "  A path in ASC_KEY_PATH is not a credential source:  the shell layer that owns the\n" +
+      "  credential hands the key over in ASC_KEY_P8.\n"
     );
     process.exit(1);
   }
