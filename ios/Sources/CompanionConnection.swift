@@ -165,21 +165,54 @@ enum CompanionConnection {
         return try decode(CompanionExclusionsUpdateResponse.self, from: reply)
     }
 
+    /// Changes what the Mac's list shows: the time window, the grouping, the
+    /// CPU scale, and the sort the list runs in.
+    ///
+    /// The sort travels in the request body and in the query string, with the
+    /// same value in both, so the phone and the Mac cannot read two different
+    /// copies of the request and end up disagreeing about the sort.
     static func triggerViewUpdate(
         endpoint: NWEndpoint,
         token: String,
         window: String? = nil,
         grouping: String? = nil,
         cpuScale: String? = nil,
+        sort: String? = nil,
+        sortAscending: Bool? = nil,
         useTLS: Bool? = nil
     ) async throws -> CompanionViewUpdateResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.viewRequest(token: token, window: window, grouping: grouping, cpuScale: cpuScale, host: hostHeader(for: endpoint)),
+            request: CompanionHTTP.viewRequest(
+                token: token,
+                window: window,
+                grouping: grouping,
+                cpuScale: cpuScale,
+                sort: sort,
+                sortAscending: sortAscending,
+                host: hostHeader(for: endpoint)
+            ),
             timeout: defaultTimeout,
             useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
-        return try decode(CompanionViewUpdateResponse.self, from: reply)
+        let response = try decode(CompanionViewUpdateResponse.self, from: reply)
+        if response.status != "ok" {
+            // The Mac understood the change and refused it, and it said why.
+            // Show what it said instead of a generic failure.
+            throw CompanionClientError.rejected(
+                refusalMessage(in: reply.body) ?? response.message ?? "The Mac did not accept that change."
+            )
+        }
+        return response
+    }
+
+    /// The reason a refusal carries, when the Mac sent one.  The Mac puts it
+    /// in "error" and echoes the change in "message".
+    private static func refusalMessage(in body: Data) -> String? {
+        let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        if let reason = json?["error"] as? String, !reason.isEmpty { return reason }
+        if let reason = json?["message"] as? String, !reason.isEmpty { return reason }
+        return nil
     }
 
     /// Changes the refresh interval, alerts or webhook on the Mac.  The Mac

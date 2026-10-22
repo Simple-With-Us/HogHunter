@@ -40,6 +40,8 @@ struct MacSettingsView: View {
                 }
                 if let settings = snapshot.settings {
                     refreshSection(settings)
+                    displaySection(settings)
+                    appearanceSection(settings)
                     alertsSection(settings)
                     webhookSection(settings)
                     Section {
@@ -95,7 +97,7 @@ struct MacSettingsView: View {
     private func refreshSection(_ settings: CompanionSettingsSummary) -> some View {
         Section {
             Picker("Refresh Every", selection: Binding(
-                get: { settings.refreshInterval },
+                get: { offeredInterval(settings.refreshInterval, choices: refreshChoices(including: settings.refreshInterval)) },
                 set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(refreshInterval: next)) } }
             )) {
                 ForEach(refreshChoices(including: settings.refreshInterval), id: \.self) { seconds in
@@ -107,6 +109,57 @@ struct MacSettingsView: View {
             Text("Sampling")
         } footer: {
             Text("How often \(snapshot.hostName) samples processes.\u{00A0} A shorter interval is more current and uses a little more CPU.")
+        }
+    }
+
+    /// The Mac's own display settings: the cadence it samples at while its
+    /// panel is closed, and what its menu bar shows.
+    private func displaySection(_ settings: CompanionSettingsSummary) -> some View {
+        Section {
+            Picker("Background Refresh (When Closed)", selection: Binding(
+                get: { offeredInterval(settings.backgroundRefreshInterval, choices: backgroundRefreshChoices(including: settings.backgroundRefreshInterval)) },
+                set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(backgroundRefreshInterval: next)) } }
+            )) {
+                ForEach(backgroundRefreshChoices(including: settings.backgroundRefreshInterval), id: \.self) { seconds in
+                    Text("\(Int(seconds)) Seconds").tag(seconds)
+                }
+            }
+            .disabled(!canEdit || model.isApplyingSettings)
+
+            Picker("Menu Bar Shows", selection: Binding(
+                get: { settings.menuBarLabelMode },
+                set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(menuBarLabelMode: next)) } }
+            )) {
+                ForEach(CompanionSettingsLimits.menuBarLabelModes, id: \.self) { mode in
+                    Text(mode).tag(mode)
+                }
+            }
+            .disabled(!canEdit || model.isApplyingSettings)
+        } header: {
+            Text("Mac Display")
+        } footer: {
+            Text("The background refresh is how often \(snapshot.hostName) samples while its panel is closed.\u{00A0} The menu bar setting is what the Mac shows in the menu bar.")
+        }
+    }
+
+    /// The Mac's appearance.  This iPhone follows it, so the two never look
+    /// like different apps.
+    private func appearanceSection(_ settings: CompanionSettingsSummary) -> some View {
+        Section {
+            Picker("Theme", selection: Binding(
+                get: { settings.appearance },
+                set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(appearance: next)) } }
+            )) {
+                ForEach(CompanionSettingsLimits.appearances, id: \.self) { choice in
+                    Text(choice).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!canEdit || model.isApplyingSettings)
+        } header: {
+            Text("Appearance")
+        } footer: {
+            Text("System follows whatever the Mac shows right now, so the two never look like different apps.\u{00A0} Light and Dark pin it either way, on the Mac and on this iPhone.")
         }
     }
 
@@ -289,11 +342,37 @@ struct MacSettingsView: View {
         if pendingSend == nil { minutesDraft = settings.alertSustainedMinutes }
     }
 
-    /// The Mac's own choices, plus the current value when something else set it.
+    /// The Mac's own choices, plus the current value when the Mac would take
+    /// it again.
     private func refreshChoices(including current: Double) -> [Double] {
-        var choices = CompanionSettingsLimits.refreshIntervals
-        if !choices.contains(current) { choices.append(current); choices.sort() }
-        return choices
+        companionIntervalChoices(CompanionSettingsLimits.refreshIntervals, including: current)
+    }
+
+    /// The Mac's own background choices, plus the current value when the Mac
+    /// would take it again.
+    private func backgroundRefreshChoices(including current: Double) -> [Double] {
+        companionIntervalChoices(CompanionSettingsLimits.backgroundRefreshIntervals, including: current)
+    }
+
+    /// The Mac takes any interval of a second or more, the same bound its
+    /// own stored value uses, so it never refuses a value it already holds.
+    /// A value the Mac would refuse is not offered: it would be a choice the
+    /// person can make and the Mac will not take.
+    private func companionIntervalChoices(_ choices: [Double], including current: Double) -> [Double] {
+        var offered = choices
+        if current >= 1, !offered.contains(current) {
+            offered.append(current)
+            offered.sort()
+        }
+        return offered
+    }
+
+    /// The value a picker shows.  A selection the picker does not offer
+    /// renders an empty picker, so a value the phone cannot offer falls back
+    /// to the first one the Mac accepts.
+    private func offeredInterval(_ current: Double, choices: [Double]) -> Double {
+        if choices.contains(current) { return current }
+        return choices.first ?? current
     }
 
     /// The threshold is stated on the per-core scale whatever the rows show,

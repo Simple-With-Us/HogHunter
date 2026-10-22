@@ -4,7 +4,9 @@ import SwiftUI
 
 @MainActor
 private enum DashboardMountedDrives {
-    static let shared = MountedDriveStore()
+    /// The same store the companion snapshot reads, so the panel and the
+    /// phone always agree about what is mounted.
+    static let shared = MountedDriveStore.shared
 }
 
 enum PanelTab: String, CaseIterable, Identifiable {
@@ -102,19 +104,7 @@ struct HogHunterPanel: View {
                         GeometryReader { stage in
                             VStack(alignment: .leading, spacing: 10) {
                                 capacityCards
-                                if externalDrives.count > 1 || timeMachineDrives.count > 1 {
-                                    ScrollView {
-                                        VStack(alignment: .leading, spacing: 6) {
-                                            if externalDrives.count > 1 {
-                                                driveDetails("External Drives", drives: externalDrives)
-                                            }
-                                            if timeMachineDrives.count > 1 {
-                                                driveDetails("Time Machine Drives", drives: timeMachineDrives)
-                                            }
-                                        }
-                                    }
-                                    .frame(height: min(100, 24 + CGFloat(externalDrives.count + timeMachineDrives.count) * 16))
-                                }
+                                mountedDriveList
                                 ScrollView { CodingDirectoriesView(store: directoryUsage) }
                                     .frame(maxWidth: .infinity)
                                     .frame(height: min(260, max(200, stage.size.height * 0.4)))
@@ -282,8 +272,11 @@ struct HogHunterPanel: View {
                 Text("Server disks, app databases and largest directories")
                     .font(.headline)
             case .maintenance:
-                Text("Server tool status")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Server Status")
+                        .font(.headline)
+                    remoteMaintenanceCard
+                }
             case .overview:
                 EmptyView()
             }
@@ -291,6 +284,17 @@ struct HogHunterPanel: View {
                 ServerStatusView(store: store.maintain.vpsStore, section: section)
             }
         }
+    }
+
+    /// The one action the server scope can take.
+    ///
+    /// The server scope used to be display-only: the owner could read the
+    /// server's CPU, memory and disks but could not act on them.  The remote
+    /// maintenance step is the step that belongs to the server, and it is the
+    /// same step the Mac's Maintenance tab runs, against the same configured
+    /// host.
+    private var remoteMaintenanceCard: some View {
+        RemoteMaintenanceCard(maintain: store.maintain)
     }
 
     private var activityContent: some View {
@@ -631,17 +635,61 @@ struct HogHunterPanel: View {
         return Severity.forDisk(highest / 100).color
     }
 
-    private func driveDetails(_ title: String, drives: [MountedDriveUsage]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 11, weight: .semibold))
-            ForEach(drives) { drive in
-                HStack {
-                    Text(drive.name).lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(capacityAmountsText(drive)).lineLimit(1)
+    /// The mounted volumes, each with the path it is mounted at.
+    ///
+    /// The prior layout listed the drives with their mount paths and a
+    /// severity bar.  The redesigned panel shows capacity cards only, so a
+    /// drive that was nearly full looked the same as one with room to spare,
+    /// and the path a drive was mounted at was hidden in a tooltip.
+    private var mountedDriveList: some View {
+        let drives = mountedDrives.rows
+        return Group {
+            if !drives.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Mounted Drives").font(.system(size: 11, weight: .semibold))
+                    ForEach(drives) { drive in
+                        mountedDriveRow(drive)
+                    }
                 }
-                .font(.system(size: 10))
             }
+        }
+    }
+
+    private func mountedDriveRow(_ drive: MountedDriveUsage) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Label(drive.name, systemImage: "externaldrive")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(drive.usedPercent.map { String(format: "%.0f%% used", $0) } ?? "unavailable")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(driveSeverityColor(drive.severity))
+            }
+            Text(drive.path)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let percent = drive.usedPercent {
+                ProgressView(value: percent, total: 100)
+                    .tint(driveSeverityColor(drive.severity))
+            }
+            Text(capacityAmountsText(drive))
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .help(drive.path)
+    }
+
+    private func driveSeverityColor(_ severity: MountedDriveUsage.Severity) -> Color {
+        switch severity {
+        case .normal: return .green
+        case .warning: return .orange
+        case .critical: return .red
+        case .unavailable: return .secondary
         }
     }
 

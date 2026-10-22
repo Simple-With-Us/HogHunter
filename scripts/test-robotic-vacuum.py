@@ -1869,6 +1869,257 @@ class TestTickBudget(unittest.TestCase):
         self.assertEqual(out.stdout.strip(), "False", out.stderr)
 
 
+# A fixed host sample, so nothing here reads the disk or the load of the machine the tests run on.
+SAMPLE = {
+    "at": 1_800_000_000,
+    "disk_sample_ok": True,
+    "disk_free_gb": 100.0,
+    "disk_used_pct": 50.0,
+    "swap_total_gb": 0.0,
+    "swap_used_gb": 0.0,
+    "swap_used_pct": 0.0,
+    "load1": 0.0,
+    "load5": 0.0,
+    "load15": 0.0,
+}
+
+
+class _RunStepCase(unittest.TestCase):
+    """A store in a throwaway home, with the housekeeper lock and the data dir inside it.
+
+    Everything here is hermetic: the home is a temp folder, the host sample is a fixed dictionary, and the
+    dispatcher is stubbed, so no step can reach this Mac and nothing is deleted anywhere.
+    """
+
+    def setUp(self) -> None:
+        self.home = Path(tempfile.mkdtemp(prefix="hhrunstep-"))
+        self.addCleanup(shutil.rmtree, str(self.home), True)
+        data = self.home / "rv"
+        data.mkdir()
+        self.cfg = load_config(home=self.home)
+        self.cfg["data_dir"] = str(data)
+        self.cfg["housekeeper_lock"] = str(self.home / ".housekeeper.lock")
+        self.store = VacuumStore(self.cfg, home=self.home)
+        self.dispatched: list[str] = []
+
+    def stub_dispatch(self, status: StepStatus = StepStatus.RAN):
+        """A dispatcher that records the step ids it is asked for and does nothing else."""
+        calls: list[str] = self.dispatched
+
+        def fake_dispatch(engine, step_id, *args, **kwargs):
+            calls.append(step_id)
+            return 0, "stubbed", status
+
+        return fake_dispatch
+
+    def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        """Run maintain.main() against the throwaway store.  Returns (exit code, stdout, stderr)."""
+        import maintain
+        from vacuum.engine import VacuumEngine
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(maintain.VacuumStore, "open", return_value=self.store):
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch("vacuum.script_registry.bootstrap_registry"):
+                    with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+                            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                    code = maintain.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_nothing_written(self) -> None:
+        """No history, no status, no scheduler state."""
+        self.assertFalse(self.store.history_path.exists(), "history was written")
+        self.assertFalse(self.store.status_path.exists(), "status was written")
+        self.assertEqual(self.store.scheduler_state(), {}, "scheduler state was written")
+
+
+class TestRunStepCli(_RunStepCase):
+    """`maintain.py --run-step STEP_ID` runs exactly one step, so a server-scoped page can reach it.
+
+    The scope of the Hog Hunter panel is display-only for servers, so the one step that acts on a remote
+    host (coolify_remote) could not be run from it.  This is the entry point the Mac side calls.
+    """
+
+    def test_an_unknown_step_exits_two_and_writes_nothing(self) -> None:
+        code, out, err = self.run_cli(["--run-step", "not_a_step"])
+        self.assertEqual(code, 2)
+        self.assertIn("Unknown maintain step: not_a_step", err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.dispatched, [], "an unknown step must not run anything")
+        self.assert_nothing_written()
+
+    def test_a_step_whose_toggle_is_off_exits_two_and_names_the_step(self) -> None:
+        self.store.cfg["steps"]["pm2_logs"] = {"enabled": False}
+        code, out, err = self.run_cli(["--run-step", "pm2_logs"])
+        self.assertEqual(code, 2)
+        self.assertIn("Cap oversized PM2 logs", err)
+        self.assertIn("off", err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.dispatched, [], "a step that is off must not run")
+        self.assert_nothing_written()
+
+    def test_a_step_that_ships_off_is_refused_until_the_owner_turns_it_on(self) -> None:
+        """coolify_remote ships off, and it is the step the server-scoped page needs."""
+        self.assertFalse(step_enabled(self.store.cfg, "coolify_remote"))
+        code, out, err = self.run_cli(["--run-step", "coolify_remote"])
+        self.assertEqual(code, 2)
+        self.assertIn("Remote server maintenance is off", err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.dispatched, [])
+        self.assert_nothing_written()
+
+    def test_an_enabled_step_runs_that_one_step_and_is_appended_to_history(self) -> None:
+        code, out, err = self.run_cli(["--run-step", "pm2_logs", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.dispatched, ["pm2_logs"], "exactly one step, the one that was named")
+        history = self.store.load_history()
+        self.assertEqual(len(history), 1)
+        record = history[0]
+        self.assertEqual([s["step_id"] for s in record["steps"]], ["pm2_logs"])
+        self.assertEqual(record["trigger"], "manual")
+        self.assertTrue(self.store.status_path.exists(), "the status must be published")
+        payload = json.loads(out)
+        self.assertEqual(payload["run_id"], record["run_id"])
+
+    def test_a_step_turned_on_runs(self) -> None:
+        self.store.cfg["steps"]["coolify_remote"] = {"enabled": True}
+        code, _out, err = self.run_cli(["--run-step", "coolify_remote"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.dispatched, ["coolify_remote"])
+
+    def test_a_dry_run_writes_nothing(self) -> None:
+        code, out, err = self.run_cli(["--run-step", "pm2_logs", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual([r["steps"][0]["step_id"] for r in payload["records"]], ["pm2_logs"])
+        self.assert_nothing_written()
+
+    def test_a_single_step_run_does_not_advance_the_scheduler_clock(self) -> None:
+        """A manual step is not a cadence, so it must not make one look like it has already run."""
+        self.store.touch_scheduler("last_full", 1000.0)
+        before = self.store.scheduler_state()
+        code, _out, err = self.run_cli(["--run-step", "pm2_logs"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store.scheduler_state(), before)
+        self.assertEqual(self.store.scheduler_state().get("last_full"), 1000.0)
+
+    def test_run_step_and_run_now_cannot_be_combined(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli(["--run-step", "pm2_logs", "--run-now", "full"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.dispatched, [])
+
+    def test_a_dry_run_still_refuses_the_other_flags(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli(["--run-step", "pm2_logs", "--dry-run", "--status"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.dispatched, [])
+
+
+class TestRunSingleStep(_RunStepCase):
+    """The engine side of the single-step run: the lock, one step, and nothing else."""
+
+    def engine(self):
+        from vacuum.engine import VacuumEngine
+
+        return VacuumEngine(self.cfg, home=self.home)
+
+    def test_it_runs_only_the_named_step(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                record = engine.run_single_step("pm2_logs")
+        self.assertEqual(self.dispatched, ["pm2_logs"])
+        self.assertEqual([s.step_id for s in record.steps], ["pm2_logs"])
+        self.assertEqual(record.exit_code, 0)
+
+    def test_a_step_that_is_off_is_skipped_and_never_dispatched(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        self.cfg["steps"]["pm2_logs"] = {"enabled": False}
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                record = engine.run_single_step("pm2_logs")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+        self.assertEqual(record.exit_code, 2)
+
+    def test_a_heavy_step_skipped_under_extreme_load_is_not_a_successful_run(self) -> None:
+        """Nothing ran, so the run is not a success:  the exit code has to say so.
+
+        A heavy step is refused when the host is under extreme load, and the refusal is
+        a skip rather than a failure.  The run still ends with an exit code of zero,
+        which is how `maintain.py --run-step` told the owner that nothing had run.
+        """
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        self.cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch("vacuum.engine.janitor_pressure_mode", return_value="hard"):
+                with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                    record = engine.run_single_step("janitor_worktree_retire")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+        self.assertNotEqual(record.exit_code, 0)
+        self.assertIn("host under extreme load", record.summary)
+
+    def test_the_cli_reports_a_load_skipped_step_as_a_failure(self) -> None:
+        """`--run-step` hands back the run's exit code, so a load skip must not read as success."""
+        import maintain
+        from vacuum.engine import VacuumEngine
+
+        self.cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(maintain.VacuumStore, "open", return_value=self.store):
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch("vacuum.script_registry.bootstrap_registry"):
+                    with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+                            with patch("vacuum.engine.janitor_pressure_mode", return_value="hard"):
+                                with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                        code = maintain.main(["--run-step", "janitor_worktree_retire"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.dispatched, [])
+
+    def test_a_peer_holding_the_lock_is_reported_as_skipped(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        Path(self.cfg["housekeeper_lock"]).mkdir(parents=True)
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                record = engine.run_single_step("pm2_logs")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.summary, "skipped; peer holds lock")
+        self.assertEqual([s.step_id for s in record.steps], ["housekeeper_lock"])
+        self.assertEqual(record.exit_code, 0)
+
+    def test_a_dry_run_hands_the_step_the_plan_only_flag(self) -> None:
+        """The dispatcher takes (pressure, band, sample, mode, dry_run), so the last argument is the flag."""
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        seen: list[tuple[str, object]] = []
+
+        def fake_dispatch(engine_self, step_id, *args, **kwargs):
+            seen.append((step_id, args[-1]))
+            return 0, "dry run; no changes", StepStatus.SKIPPED
+
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", fake_dispatch):
+                record = engine.run_single_step("pm2_logs", dry_run=True)
+        self.assertEqual(seen, [("pm2_logs", True)])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+
+
 def load_tests(loader, tests, pattern):
     """CI runs only this file, so load the lane doctor tests beside the others."""
     import importlib.util
