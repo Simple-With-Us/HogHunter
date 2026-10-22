@@ -116,11 +116,11 @@ This is not a limitation to work around; it is the design.  Consequences:
   daemon stores only a SHA-256 hash for comparison.  `POST /v1/enroll` is
   not implemented on the daemon.
 - Auth, Mac app (future work): Infisical becomes an auth option alongside
-  the pairing flow — Jay's call 2026-10-21, since the Infisical session
-  persists and the current pairing barely works on the Mac or the iOS app.
-  The pairing/enroll flow itself needs repair too; that is Mac/iOS app
-  work, tracked separately.  Per this repo's AGENTS.md, the Mac app owns
-  the Infisical read and the iOS app never touches Infisical.
+  the pairing flow — Jay's call 2026-10-21.  Pairing works again since the
+  iOS app update, so no repair is currently needed; Infisical is the
+  alternative for when pairing is unavailable.  Per this repo's AGENTS.md,
+  the Mac app owns the Infisical read and the iOS app never touches
+  Infisical.
 - Destructive routes sit behind explicit opt-ins, off by default, following
   the repo's route-table convention (`AGENTS.md`):
 
@@ -375,8 +375,8 @@ Only the real advantages, no marketing:
 
 1. Auth: the Linux daemon is Infisical-only (token via Coolify env from
    Infisical; no enroll flow).  The Mac app gains Infisical as an auth
-   option, and its pairing flow gets repaired — pairing barely works on the
-   Mac or the iOS app today.
+   option alongside pairing — pairing works again since the iOS app update
+   (2026-10-21), but Infisical stays as the alternative.
 2. Prune scope: Docker objects by default; host-level temp (`/tmp`,
    journals) is an explicit opt-in (`--host-temp` / `"host-temp"`).
 3. Devices: the UI concept is Devices, not Hosts.  The Devices view lists
