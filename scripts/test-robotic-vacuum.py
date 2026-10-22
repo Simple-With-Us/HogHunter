@@ -2056,7 +2056,16 @@ class TestHousekeeperLock(unittest.TestCase):
         # os.rename is the primitive that replaces an empty directory, so a
         # put-back that used it would still have the window even with a check
         # in front of it.
+        #
+        # This is a macOS property.  The atomic no-replace rename is
+        # renamex_np, which only macOS has, and the fallback on any other
+        # platform is a check followed by a rename.  The lock this file
+        # guards runs on the Mac; the suite also runs on Linux in CI, where
+        # the assertion below does not hold and the weaker fallback is used.
         from vacuum import lock as lock_module
+
+        if lock_module._renamex_np() is None:
+            self.skipTest("the atomic no-replace rename is macOS-only")
 
         calls = []
         real_rename = lock_module.os.rename
