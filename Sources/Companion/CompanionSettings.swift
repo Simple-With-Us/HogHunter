@@ -2,11 +2,11 @@ import Foundation
 
 /// Checks a settings change from the phone before the Mac applies any of it.
 ///
-/// The phone's pickers offer only values the Mac accepts, but the router
-/// receives bytes, not pickers.  `defaultsChanged` accepts any refresh
-/// interval of one second or more, so nothing downstream would catch a bad
-/// value; this is the only gate.  A change is applied whole or not at all:
-/// one bad field rejects the request.
+/// The phone's pickers offer the Mac's own choices plus whatever the Mac is
+/// already using, but the router receives bytes, not pickers.  `defaultsChanged`
+/// accepts any refresh interval of one second or more, so nothing downstream
+/// would catch a bad value; this is the only gate.  A change is applied whole
+/// or not at all: one bad field rejects the request.
 enum CompanionSettingsValidator {
     /// A change that passed every check, in the shape the store applies.
     struct Validated: Equatable {
@@ -29,8 +29,8 @@ enum CompanionSettingsValidator {
         var validated = Validated(testWebhook: request.testWebhook == true)
 
         if let interval = request.refreshInterval {
-            guard CompanionSettingsLimits.refreshIntervals.contains(interval) else {
-                return .failure(.init("The refresh interval must be 2, 3, 5, 10 or 15 seconds."))
+            guard Self.isAcceptedInterval(interval) else {
+                return .failure(.init("The refresh interval must be at least one second."))
             }
             validated.refreshInterval = interval
         }
@@ -69,8 +69,8 @@ enum CompanionSettingsValidator {
             validated.appearance = choice
         }
         if let interval = request.backgroundRefreshInterval {
-            guard CompanionSettingsLimits.backgroundRefreshIntervals.contains(interval) else {
-                return .failure(.init("The background refresh interval must be 5, 10, 15 or 30 seconds."))
+            guard Self.isAcceptedInterval(interval) else {
+                return .failure(.init("The background refresh interval must be at least one second."))
             }
             validated.backgroundRefreshInterval = interval
         }
@@ -81,6 +81,18 @@ enum CompanionSettingsValidator {
             validated.menuBarLabelMode = mode
         }
         return .success(validated)
+    }
+
+    /// The Mac's own rule for both refresh intervals.
+    ///
+    /// `defaultsChanged` applies any interval of a second or more when the
+    /// settings are loaded, and the Mac's own Settings window offers the
+    /// small set of choices in `CompanionSettingsLimits`.  The validator
+    /// uses the load rule rather than the small set, so the Mac can never
+    /// refuse a value it is already holding, and the phone is never offered
+    /// a choice the Mac would turn down.
+    static func isAcceptedInterval(_ interval: Double) -> Bool {
+        interval.isFinite && interval >= 1
     }
 
     /// The Mac's appearance, from the name the phone sent.  The phone's
@@ -142,7 +154,8 @@ extension CompanionSnapshotBuilder {
         backgroundRefreshInterval: Double = 10,
         menuBarLabelMode: MenuBarLabelMode = .machinePercent,
         sort: HogSort = .cpu,
-        sortAscending: Bool = false
+        sortAscending: Bool = false,
+        resolvedAppearance: String = "Light"
     ) -> CompanionSettingsSummary {
         let trimmed = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let configured = !trimmed.isEmpty
@@ -163,7 +176,8 @@ extension CompanionSnapshotBuilder {
             backgroundRefreshInterval: backgroundRefreshInterval,
             menuBarLabelMode: menuBarLabelMode.rawValue,
             sort: sort.rawValue,
-            sortAscending: sortAscending
+            sortAscending: sortAscending,
+            resolvedAppearance: resolvedAppearance
         )
     }
 
@@ -198,26 +212,94 @@ extension CompanionSnapshotBuilder {
     }
 }
 
+/// A name that arrived over the wire, folded into the form a whole-token
+/// comparison can use:  trimmed, lower case, one space between words.
+///
+/// The routes take bytes, not pickers, so a name is checked against the
+/// exact set the Mac accepts.  A name that merely contains a known word is
+/// not that word:  "program" is not "Memory", and "cpu usage" is not "CPU".
+enum CompanionNames {
+    static func normalized(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+    }
+}
+
 extension CpuScale {
     /// The scale a phone's name for it means.  The phone sends the stored
     /// names ("Per Core", "Share of Machine"); the label it shows for the
     /// second is "Per Machine", so both are understood.
     static func fromPhone(_ name: String) -> CpuScale? {
-        let lower = name.lowercased()
-        if lower.contains("machine") || lower.contains("share") { return .machineShare }
-        if lower.contains("core") { return .perCore }
-        return nil
+        switch CompanionNames.normalized(name) {
+        case "per core", "core": return .perCore
+        case "share of machine", "per machine", "machine share", "machine", "share": return .machineShare
+        default: return nil
+        }
     }
 }
 
 extension HogSort {
     /// The sort a phone's name for it means.  The Mac's own names are "CPU"
-    /// and "Memory"; the phone's picker offers them, and a hand-built
-    /// request can spell them any way it likes.
+    /// and "Memory", and the phone's picker sends one of them, so only those
+    /// two names are understood.
     static func fromPhone(_ name: String) -> HogSort? {
-        let lower = name.lowercased()
-        if lower.contains("memory") || lower.contains("ram") { return .memory }
-        if lower.contains("cpu") { return .cpu }
-        return nil
+        switch CompanionNames.normalized(name) {
+        case "memory": return .memory
+        case "cpu": return .cpu
+        default: return nil
+        }
+    }
+}
+
+/// The Mac's view state:  the window, grouping, CPU scale and sort its panel
+/// is showing.
+///
+/// The published properties live on the main actor and the phone's view route
+/// answers on the server queue, so the state is carried here and resolved in
+/// one place.  A field the request leaves out keeps the value the Mac has,
+/// so the reply describes the state the Mac is really in.
+struct CompanionViewState: Equatable {
+    var window: TimeWindow = .now
+    var grouping: HogGrouping = .apps
+    var cpuScale: CpuScale = .perCore
+    var sort: HogSort = .cpu
+    var sortAscending: Bool = false
+
+    /// The state the Mac is in after the request.
+    func resolving(after request: CompanionViewUpdateRequest) -> CompanionViewState {
+        var next = self
+        if let raw = request.window, let value = Self.window(from: raw) { next.window = value }
+        if let raw = request.grouping, let value = Self.grouping(from: raw) { next.grouping = value }
+        if let raw = request.cpuScale, let value = CpuScale.fromPhone(raw) { next.cpuScale = value }
+        if let raw = request.sort, let value = HogSort.fromPhone(raw) { next.sort = value }
+        if let ascending = request.sortAscending {
+            next.sortAscending = ascending
+        } else if next.sort != sort {
+            // The Mac puts the list back the right way round when the sort
+            // changes, so the reply must not claim the old direction.
+            next.sortAscending = false
+        }
+        return next
+    }
+
+    /// The window a phone's name for it means.
+    static func window(from raw: String) -> TimeWindow? {
+        switch CompanionNames.normalized(raw) {
+        case "now": return .now
+        case "1h", "1 hour", "past hour", "past 1 hour": return .hour
+        case "24h", "24 hours", "past 24 hours", "day": return .day
+        default: return nil
+        }
+    }
+
+    /// The grouping a phone's name for it means.
+    static func grouping(from raw: String) -> HogGrouping? {
+        switch CompanionNames.normalized(raw) {
+        case "apps": return .apps
+        case "processes": return .processes
+        default: return nil
+        }
     }
 }

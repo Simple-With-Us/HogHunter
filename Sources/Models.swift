@@ -78,6 +78,21 @@ enum AppearanceChoice: String, CaseIterable, Identifiable {
         case .system: return nil
         }
     }
+
+    /// The appearance the Mac is actually showing:  "Light" or "Dark", never
+    /// "System".
+    ///
+    /// The phone's System choice follows the Mac, and the phone cannot see
+    /// the Mac's screen, so it needs the resolved name.
+    var resolvedName: String {
+        switch self {
+        case .light: return "Light"
+        case .dark: return "Dark"
+        case .system:
+            let match = NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+            return match == .darkAqua ? "Dark" : "Light"
+        }
+    }
 }
 
 // MARK: - Sampling types

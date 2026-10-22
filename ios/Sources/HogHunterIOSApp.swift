@@ -25,13 +25,20 @@ struct HogHunterIOSApp: App {
     }
 
     /// The Mac's appearance, so this iPhone never looks like a different app
-    /// from the Mac it watches.  "System" leaves the phone on its own setting,
-    /// and a phone with no Mac yet keeps the light default.
+    /// from the Mac it watches.  "System" means the Mac's own resolved
+    /// appearance, which the snapshot carries, and a phone with no Mac yet
+    /// keeps the light default.
     private var colorScheme: ColorScheme? {
         guard let appearance = model.snapshot?.settings?.appearance else { return .light }
         switch appearance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "light": return .light
         case "dark": return .dark
+        case "system":
+            // "System" means the Mac's own resolved appearance, so the
+            // snapshot carries it; without it the phone falls back to the
+            // light default.
+            guard let resolved = model.snapshot?.settings?.resolvedAppearance else { return .light }
+            return resolved.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "dark" ? .dark : .light
         default: return nil
         }
     }

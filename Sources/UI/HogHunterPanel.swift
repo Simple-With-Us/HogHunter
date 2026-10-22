@@ -273,7 +273,7 @@ struct HogHunterPanel: View {
                     .font(.headline)
             case .maintenance:
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Server tool status")
+                    Text("Server Status")
                         .font(.headline)
                     remoteMaintenanceCard
                 }

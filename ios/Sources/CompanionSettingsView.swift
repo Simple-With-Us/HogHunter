@@ -97,7 +97,7 @@ struct MacSettingsView: View {
     private func refreshSection(_ settings: CompanionSettingsSummary) -> some View {
         Section {
             Picker("Refresh Every", selection: Binding(
-                get: { settings.refreshInterval },
+                get: { offeredInterval(settings.refreshInterval, choices: refreshChoices(including: settings.refreshInterval)) },
                 set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(refreshInterval: next)) } }
             )) {
                 ForEach(refreshChoices(including: settings.refreshInterval), id: \.self) { seconds in
@@ -117,7 +117,7 @@ struct MacSettingsView: View {
     private func displaySection(_ settings: CompanionSettingsSummary) -> some View {
         Section {
             Picker("Background Refresh (When Closed)", selection: Binding(
-                get: { settings.backgroundRefreshInterval },
+                get: { offeredInterval(settings.backgroundRefreshInterval, choices: backgroundRefreshChoices(including: settings.backgroundRefreshInterval)) },
                 set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(backgroundRefreshInterval: next)) } }
             )) {
                 ForEach(backgroundRefreshChoices(including: settings.backgroundRefreshInterval), id: \.self) { seconds in
@@ -159,7 +159,7 @@ struct MacSettingsView: View {
         } header: {
             Text("Appearance")
         } footer: {
-            Text("System follows the Mac's own setting.\u{00A0} Light and Dark pin it either way, on the Mac and on this iPhone.")
+            Text("System follows whatever the Mac shows right now, so the two never look like different apps.\u{00A0} Light and Dark pin it either way, on the Mac and on this iPhone.")
         }
     }
 
@@ -342,19 +342,37 @@ struct MacSettingsView: View {
         if pendingSend == nil { minutesDraft = settings.alertSustainedMinutes }
     }
 
-    /// The Mac's own choices, plus the current value when something else set it.
+    /// The Mac's own choices, plus the current value when the Mac would take
+    /// it again.
     private func refreshChoices(including current: Double) -> [Double] {
-        var choices = CompanionSettingsLimits.refreshIntervals
-        if !choices.contains(current) { choices.append(current); choices.sort() }
-        return choices
+        companionIntervalChoices(CompanionSettingsLimits.refreshIntervals, including: current)
     }
 
-    /// The Mac's own background choices, plus the current value when
-    /// something else set it.
+    /// The Mac's own background choices, plus the current value when the Mac
+    /// would take it again.
     private func backgroundRefreshChoices(including current: Double) -> [Double] {
-        var choices = CompanionSettingsLimits.backgroundRefreshIntervals
-        if !choices.contains(current) { choices.append(current); choices.sort() }
-        return choices
+        companionIntervalChoices(CompanionSettingsLimits.backgroundRefreshIntervals, including: current)
+    }
+
+    /// The Mac takes any interval of a second or more, the same bound its
+    /// own stored value uses, so it never refuses a value it already holds.
+    /// A value the Mac would refuse is not offered: it would be a choice the
+    /// person can make and the Mac will not take.
+    private func companionIntervalChoices(_ choices: [Double], including current: Double) -> [Double] {
+        var offered = choices
+        if current >= 1, !offered.contains(current) {
+            offered.append(current)
+            offered.sort()
+        }
+        return offered
+    }
+
+    /// The value a picker shows.  A selection the picker does not offer
+    /// renders an empty picker, so a value the phone cannot offer falls back
+    /// to the first one the Mac accepts.
+    private func offeredInterval(_ current: Double, choices: [Double]) -> Double {
+        if choices.contains(current) { return current }
+        return choices.first ?? current
     }
 
     /// The threshold is stated on the per-core scale whatever the rows show,

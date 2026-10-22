@@ -445,6 +445,9 @@ struct DashboardView: View {
     @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
+    /// Counts the sort requests this view has sent, so a reply for an older
+    /// one cannot put a sort the Mac has already left back on the list.
+    @State private var sortRequestGeneration: Int = 0
     @State private var networkSortOrder: CompanionNetworkSort = .connections
     @State private var appStorageSortOrder: CompanionAppStorageSort = .total
     @State private var showCleanConfirm = false
@@ -561,10 +564,18 @@ struct DashboardView: View {
     /// Sends the phone's sort to the Mac, so the two lists agree about which
     /// app is on top.  The Mac's opt-in governs: without it the phone still
     /// sorts its own list and the Mac keeps the sort it has.
+    ///
+    /// The list is changed before the Mac answers, so a refused or failed
+    /// change has to be undone.  Each request takes a number, and only the
+    /// newest one may undo the change: an older answer must not put a sort
+    /// the Mac has already left back on the list.
     private func sendSort(_ order: CompanionSort, ascending: Bool) {
         guard canEdit else { return }
+        sortRequestGeneration += 1
+        let generation = sortRequestGeneration
         Task {
             await model.switchSort(order.macValue, ascending: ascending)
+            guard generation == sortRequestGeneration else { return }
             fallBackToMacSort()
         }
     }
@@ -574,6 +585,9 @@ struct DashboardView: View {
     /// failed change reverts instead of leaving the list sorted a way the
     /// Mac did not take.  Read through the model (a reference, always
     /// current), not this view's snapshot (a value, fixed when tapped).
+    ///
+    /// Only the newest request gets here, so a slow answer cannot undo a
+    /// sort the person has made since.
     private func fallBackToMacSort() {
         guard let settings = model.snapshot?.settings else { return }
         if let macSort = CompanionSort(macValue: settings.sort), macSort != sortOrder {

@@ -23,6 +23,10 @@ final class MaintainStore: ObservableObject {
     /// the cleaning runs out of the list within hours.
     @Published private(set) var history: [MaintainRun] = []
     @Published private(set) var stepToggles: [String: Bool] = [:]
+    /// True when the step toggles on disk and in Infisical match what the
+    /// panel shows.  A save takes a moment, and "Run Now" must not reach the
+    /// script before the step it runs is really on.
+    @Published private(set) var stepTogglesPersisted: Bool = true
     @Published private(set) var isRunningNow = false
     @Published var lastError: String?
 
@@ -312,6 +316,10 @@ final class MaintainStore: ObservableObject {
 
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
+        // The toggle is not on the Mac's disk until the save lands, and the
+        // script refuses a step that is still off, so "Run Now" waits for the
+        // save rather than racing it.
+        stepTogglesPersisted = false
         let launcher = self.launcher
         let infisical = self.infisical
         Task { [weak self] in
@@ -330,6 +338,7 @@ final class MaintainStore: ObservableObject {
                     // over the local one and flip the toggle back with no word.
                     guard let self else { return }
                     self.lastError = Self.infisicalSaveFailure("that step setting", error: error)
+                    self.stepTogglesPersisted = true
                     self.refresh()
                     return
                 }
@@ -349,6 +358,7 @@ final class MaintainStore: ObservableObject {
             case .failure(let error):
                 self.lastError = error.localizedDescription
             }
+            self.stepTogglesPersisted = true
             self.refresh()
         }
     }

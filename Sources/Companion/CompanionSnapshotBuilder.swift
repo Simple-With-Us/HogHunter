@@ -187,7 +187,7 @@ enum CompanionSnapshotBuilder {
                 path: row.path,
                 bytes: UInt64(max(0, bytes)),
                 bytesText: HogFormat.memory(UInt64(max(0, bytes))),
-                detail: row.statusText
+                detail: row.statusLine
             )
         }
     }

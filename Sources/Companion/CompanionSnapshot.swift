@@ -383,14 +383,18 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     var sort: String = "CPU"
     /// True when the Mac's list runs from least to most.
     var sortAscending: Bool = false
+    /// The appearance the Mac is actually showing: "Light" or "Dark", never
+    /// "System".  The phone's System choice follows the Mac, and the Mac's
+    /// own preference says nothing about what the Mac is showing.
+    var resolvedAppearance: String = "Light"
 }
 
 extension CompanionSettingsSummary {
     /// Reads tolerantly: a Mac that predates the appearance, background
-    /// refresh, menu label or sort fields sends no keys for them, which read
-    /// as the defaults instead of failing the whole snapshot.  In an
-    /// extension so the memberwise initializer and the synthesized encoder
-    /// stay intact.
+    /// refresh, menu label, sort or resolved appearance fields sends no keys
+    /// for them, which read as the defaults instead of failing the whole
+    /// snapshot.  In an extension so the memberwise initializer and the
+    /// synthesized encoder stay intact.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         refreshInterval = try container.decode(Double.self, forKey: .refreshInterval)
@@ -406,6 +410,7 @@ extension CompanionSettingsSummary {
         menuBarLabelMode = try container.decodeIfPresent(String.self, forKey: .menuBarLabelMode) ?? "Machine CPU"
         sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
         sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? false
+        resolvedAppearance = try container.decodeIfPresent(String.self, forKey: .resolvedAppearance) ?? "Light"
     }
 }
 

@@ -37,7 +37,7 @@ struct RemoteMaintenanceCard: View {
                     }
                 }
                 if host.isEmpty {
-                    Text("No remote server is configured. Set one in Settings, then run it from here.")
+                    Text("No remote server is configured.\u{00A0} Set one in Settings, then run it from here.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 } else {
@@ -46,7 +46,7 @@ struct RemoteMaintenanceCard: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help("The remote server this runs against.")
-                    Toggle("Run on the schedule", isOn: Binding(
+                    Toggle("Run on Schedule", isOn: Binding(
                         get: { isEnabled },
                         set: { maintain.setStepEnabled("coolify_remote", enabled: $0) }
                     ))
@@ -55,9 +55,13 @@ struct RemoteMaintenanceCard: View {
                     .controlSize(.small)
                     HStack(spacing: 8) {
                         Button("Run Now") { confirmRun = true }
-                            .disabled(maintain.isRunningNow || !isEnabled)
-                        if !isEnabled {
-                            Text("Turn the step on to run it.")
+                            .disabled(maintain.isRunningNow || !isEnabled || !maintain.stepTogglesPersisted)
+                        if !maintain.stepTogglesPersisted {
+                            Text("Saving…")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        } else if !isEnabled {
+                            Text("Turn on Run on Schedule or use Run Now.")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
@@ -80,7 +84,7 @@ struct RemoteMaintenanceCard: View {
             Button("Run on \(host)") { maintain.runStep("coolify_remote") }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This prunes unused containers, images and logs on \(host) over SSH. It cannot be undone.")
+            Text("This prunes unused containers, images and logs on \(host) over SSH.\u{00A0} It cannot be undone.")
         }
     }
 }

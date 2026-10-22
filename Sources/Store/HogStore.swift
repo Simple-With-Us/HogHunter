@@ -84,8 +84,8 @@ final class HogStore: ObservableObject {
 
     // MARK: - Persisted choices
 
-    @Published var window: TimeWindow = .now { didSet { persist(); scheduleChoiceChanged() } }
-    @Published var grouping: HogGrouping = .apps { didSet { persist(); scheduleChoiceChanged() } }
+    @Published var window: TimeWindow = .now { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
+    @Published var grouping: HogGrouping = .apps { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
     @Published var sort: HogSort = .cpu {
         didSet {
             if sort != oldValue {
@@ -93,10 +93,11 @@ final class HogStore: ObservableObject {
             }
             persist()
             scheduleChoiceChanged()
+            syncViewStateMirror()
         }
     }
-    @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged() } }
-    @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
+    @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
+    @Published var cpuScale: CpuScale = .perCore { didSet { persist(); syncViewStateMirror() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 5 {
         didSet {
@@ -349,6 +350,10 @@ final class HogStore: ObservableObject {
     /// A sample pauses its target and writes a report that can be megabytes,
     /// so one runs at a time, whoever asked.
     private let sampleInFlight = CompanionLocked(false)
+    /// The Mac's view state, mirrored for the server queue.  The published
+    /// properties are main-actor state and the phone's view route answers on
+    /// the server queue, so the reply cannot read them there.
+    private let viewStateMirror = CompanionLocked(CompanionViewState())
     nonisolated static let webhookTestCooldown: TimeInterval = 15
     /// The phones paired with this Mac, one token each.
     let companionDevices: CompanionDeviceRegistry
@@ -1228,7 +1233,12 @@ final class HogStore: ObservableObject {
 
     private func loadSettings() {
         loadingSettings = true
-        defer { loadingSettings = false }
+        defer {
+            loadingSettings = false
+            // The mirror is told what the Mac starts in, so the first reply
+            // to a phone describes the Mac's own state.
+            syncViewStateMirror()
+        }
         if let raw = defaults.string(forKey: Key.window), let value = TimeWindow(rawValue: raw) { window = value }
         if let raw = defaults.string(forKey: Key.grouping), let value = HogGrouping(rawValue: raw) { grouping = value }
         if let raw = defaults.string(forKey: Key.sort), let value = HogSort(rawValue: raw) { sort = value }
@@ -1366,6 +1376,19 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
         defaults.set(allowRemoteMaintain, forKey: Key.allowRemoteMaintain)
         defaults.set(backgroundRefreshInterval, forKey: Key.backgroundRefreshInterval)
+    }
+
+    /// Keeps the server's copy of the view state in step with the published
+    /// properties, so the reply to a phone's view change describes the Mac's
+    /// own state and not a default.
+    private func syncViewStateMirror() {
+        viewStateMirror.value = CompanionViewState(
+            window: window,
+            grouping: grouping,
+            cpuScale: cpuScale,
+            sort: sort,
+            sortAscending: sortAscending
+        )
     }
 
     // MARK: - Test hooks
@@ -1701,27 +1724,9 @@ final class HogStore: ObservableObject {
     }
 
     private func performRemoteViewUpdate(_ req: CompanionViewUpdateRequest) -> (status: Int, body: Data) {
-        var targetWindow: TimeWindow?
-        if let win = req.window {
-            if win.caseInsensitiveCompare("now") == .orderedSame {
-                targetWindow = .now
-            } else if win.caseInsensitiveCompare("1h") == .orderedSame || win.caseInsensitiveCompare("1 Hour") == .orderedSame || win.caseInsensitiveCompare("Past Hour") == .orderedSame || win.caseInsensitiveCompare("Past 1 Hour") == .orderedSame {
-                targetWindow = .hour
-            } else if win.caseInsensitiveCompare("24h") == .orderedSame || win.caseInsensitiveCompare("24 Hours") == .orderedSame || win.caseInsensitiveCompare("Past 24 Hours") == .orderedSame || win.caseInsensitiveCompare("day") == .orderedSame {
-                targetWindow = .day
-            }
-        }
-
-        var targetGrouping: HogGrouping?
-        if let grp = req.grouping {
-            if grp.caseInsensitiveCompare("apps") == .orderedSame {
-                targetGrouping = .apps
-            } else if grp.caseInsensitiveCompare("processes") == .orderedSame {
-                targetGrouping = .processes
-            }
-        }
-
-        let targetCpuScale: CpuScale? = req.cpuScale.flatMap { CpuScale.fromPhone($0) }
+        let targetWindow = req.window.flatMap { CompanionViewState.window(from: $0) }
+        let targetGrouping = req.grouping.flatMap { CompanionViewState.grouping(from: $0) }
+        let targetCpuScale = req.cpuScale.flatMap { CpuScale.fromPhone($0) }
 
         // A sort the Mac does not recognise is refused rather than ignored.
         // A phone that was told "ok" would show its own sort while the Mac
@@ -1736,6 +1741,17 @@ final class HogStore: ObservableObject {
         }
         let targetSortAscending: Bool? = req.sortAscending
 
+        // The state the Mac is in after the change.  A field the request
+        // leaves out keeps the value the Mac has, so the reply describes the
+        // Mac's own state instead of a default the Mac never had.  The
+        // resolved state is written back under the same lock, so a second
+        // request sees the first one's pending change.
+        let resolved = viewStateMirror.withLock { current -> CompanionViewState in
+            let next = current.resolving(after: req)
+            current = next
+            return next
+        }
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if let targetWindow { self.window = targetWindow }
@@ -1748,11 +1764,11 @@ final class HogStore: ObservableObject {
 
         let resp = CompanionViewUpdateResponse(
             status: "ok",
-            window: targetWindow?.rawValue ?? req.window ?? "now",
-            grouping: targetGrouping?.rawValue ?? req.grouping ?? "apps",
-            cpuScale: targetCpuScale?.rawValue ?? req.cpuScale ?? "machineShare",
-            sort: targetSort?.rawValue ?? req.sort ?? "CPU",
-            sortAscending: targetSortAscending ?? false,
+            window: resolved.window.rawValue,
+            grouping: resolved.grouping.rawValue,
+            cpuScale: resolved.cpuScale.rawValue,
+            sort: resolved.sort.rawValue,
+            sortAscending: resolved.sortAscending,
             message: "View updated."
         )
         let data = (try? JSONEncoder().encode(resp)) ?? Data("{}".utf8)
@@ -2451,7 +2467,8 @@ final class HogStore: ObservableObject {
                 backgroundRefreshInterval: backgroundRefreshInterval,
                 menuBarLabelMode: menuBarLabelMode,
                 sort: sort,
-                sortAscending: sortAscending
+                sortAscending: sortAscending,
+                resolvedAppearance: appearance.resolvedName
             ),
             remoteMaintainAllowed: allowRemoteMaintain,
             maintain: maintainStatusForPhone()
