@@ -294,6 +294,24 @@ struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
     var error: String? = nil
 }
 
+extension CompanionViewUpdateResponse {
+    /// Reads tolerantly: a Mac that predates the sort fields sends no keys
+    /// for them, which read as the defaults instead of failing the whole
+    /// response.  In an extension so the memberwise initializer and the
+    /// synthesized encoder stay intact.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(String.self, forKey: .status)
+        window = try container.decode(String.self, forKey: .window)
+        grouping = try container.decode(String.self, forKey: .grouping)
+        cpuScale = try container.decode(String.self, forKey: .cpuScale)
+        sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
+        sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? false
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+    }
+}
+
 /// The values the Mac accepts for the settings a phone may change.  Shared so
 /// the phone's pickers offer exactly what the Mac will take; the Mac checks
 /// every value again, so a hand-built request gets no further.
@@ -365,6 +383,30 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     var sort: String = "CPU"
     /// True when the Mac's list runs from least to most.
     var sortAscending: Bool = false
+}
+
+extension CompanionSettingsSummary {
+    /// Reads tolerantly: a Mac that predates the appearance, background
+    /// refresh, menu label or sort fields sends no keys for them, which read
+    /// as the defaults instead of failing the whole snapshot.  In an
+    /// extension so the memberwise initializer and the synthesized encoder
+    /// stay intact.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        refreshInterval = try container.decode(Double.self, forKey: .refreshInterval)
+        alertsEnabled = try container.decode(Bool.self, forKey: .alertsEnabled)
+        alertThresholdPercent = try container.decode(Double.self, forKey: .alertThresholdPercent)
+        alertSustainedMinutes = try container.decode(Int.self, forKey: .alertSustainedMinutes)
+        webhookConfigured = try container.decode(Bool.self, forKey: .webhookConfigured)
+        webhookHost = try container.decodeIfPresent(String.self, forKey: .webhookHost)
+        webhookStatus = try container.decodeIfPresent(String.self, forKey: .webhookStatus)
+        notificationsDenied = try container.decodeIfPresent(Bool.self, forKey: .notificationsDenied)
+        appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "System"
+        backgroundRefreshInterval = try container.decodeIfPresent(Double.self, forKey: .backgroundRefreshInterval) ?? 10
+        menuBarLabelMode = try container.decodeIfPresent(String.self, forKey: .menuBarLabelMode) ?? "Machine CPU"
+        sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
+        sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? false
+    }
 }
 
 /// A change to the settings above.  Every field is optional; only the ones

@@ -1536,6 +1536,7 @@ final class HogStore: ObservableObject {
         companionServer.onSnapshotServed = { [weak self] in
             self?.refreshCompanionNetworkIfStale()
             self?.refreshCompanionMaintainIfStale()
+            self?.refreshCompanionDrivesIfStale()
         }
         companionServer.onRemoteMaintainRun = { [weak self] kind in
             guard let self else {
@@ -2326,6 +2327,20 @@ final class HogStore: ObservableObject {
     /// snapshot, so the files are read only while someone is looking.
     nonisolated private func refreshCompanionMaintainIfStale() {
         Task { @MainActor [weak self] in self?.maintain.refreshIfStale(maxAge: 30) }
+    }
+
+    /// Asks the drive store for a fresh probe when its copy is stale.  Called
+    /// on the server queue each time a phone fetches a snapshot, so the
+    /// phone's drives section stays fresh even when the Mac's panel is closed
+    /// and its refresh loop is not running.  The store throttles probes to
+    /// one a minute; a probe that changed nothing publishes nothing.
+    nonisolated private func refreshCompanionDrivesIfStale() {
+        Task { @MainActor [weak self] in
+            let before = MountedDriveStore.shared.rows
+            await MountedDriveStore.shared.refresh()
+            guard let self, MountedDriveStore.shared.rows != before else { return }
+            self.publishCompanion()
+        }
     }
 
     /// Starts a full Maintain run and answers at once.  Runs on the

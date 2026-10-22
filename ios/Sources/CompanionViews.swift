@@ -563,7 +563,25 @@ struct DashboardView: View {
     /// sorts its own list and the Mac keeps the sort it has.
     private func sendSort(_ order: CompanionSort, ascending: Bool) {
         guard canEdit else { return }
-        Task { await model.switchSort(order.macValue, ascending: ascending) }
+        Task {
+            await model.switchSort(order.macValue, ascending: ascending)
+            fallBackToMacSort()
+        }
+    }
+
+    /// Falls back to the sort the Mac took.  `switchSort` refreshes before it
+    /// returns, so the model's snapshot is the Mac's answer: a refused or
+    /// failed change reverts instead of leaving the list sorted a way the
+    /// Mac did not take.  Read through the model (a reference, always
+    /// current), not this view's snapshot (a value, fixed when tapped).
+    private func fallBackToMacSort() {
+        guard let settings = model.snapshot?.settings else { return }
+        if let macSort = CompanionSort(macValue: settings.sort), macSort != sortOrder {
+            sortOrder = macSort
+        }
+        if settings.sortAscending != sortAscending {
+            sortAscending = settings.sortAscending
+        }
     }
 
     /// Takes the sort the Mac holds, so the phone shows what the Mac shows.
