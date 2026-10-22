@@ -315,4 +315,38 @@ final class HousekeeperLockTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
         peer.release()
     }
+
+    // MARK: - The put-back refuses an occupied path, atomically
+
+    func testThePutBackRefusesAnOccupiedPathAndLeavesThePeersLockAlone() {
+        // A put-back that renames onto an occupied path would replace a third
+        // reclaimer's fresh lock, and that reclaimer goes on believing it
+        // holds the lock while this one sweeps at the same time.  The lock
+        // marker is an empty directory, and a plain rename onto an empty
+        // directory succeeds, so the refusal has to be the atomic one.
+        let aside = root.appendingPathComponent(".housekeeper.lock.stale-test", isDirectory: true)
+        try? FileManager.default.createDirectory(at: aside, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        // A marker inside the peer's lock: if the put-back replaced the
+        // peer's directory, the marker would be gone with it.
+        let peerMarker = lockPath.appendingPathComponent("peer-marker.txt")
+        FileManager.default.createFile(atPath: peerMarker.path, contents: Data("peer's".utf8))
+
+        XCTAssertFalse(HousekeeperLock.moveExclusive(aside, lockPath),
+                       "the put-back must refuse an occupied path")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: peerMarker.path),
+                      "the peer's lock must not have been replaced")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: aside.path),
+                      "the moved-aside copy stays where it is")
+    }
+
+    func testThePutBackMovesOntoAFreePath() {
+        let aside = root.appendingPathComponent(".housekeeper.lock.stale-test", isDirectory: true)
+        try? FileManager.default.createDirectory(at: aside, withIntermediateDirectories: true)
+
+        XCTAssertTrue(HousekeeperLock.moveExclusive(aside, lockPath),
+                      "the put-back must move onto a free path")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path))
+    }
 }

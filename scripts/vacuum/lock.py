@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import socket
@@ -11,6 +12,57 @@ from pathlib import Path
 # hard exit can release exactly what was taken, without guessing the
 # configured path.
 _HELD: set[Path] = set()
+
+# macOS renamex_np flag: fail the rename when the destination already exists.
+# This is the atomic no-replace primitive the housekeeper lock needs.
+_RENAME_EXCL = 0x00000004
+_RENAME_EXCL_UNSET = object()
+_RENAME_EXCL_FN = _RENAME_EXCL_UNSET
+
+
+def _renamex_np():
+    """macOS's renamex_np, or None where it does not exist."""
+    global _RENAME_EXCL_FN
+    if _RENAME_EXCL_FN is _RENAME_EXCL_UNSET:
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            fn = libc.renamex_np
+        except (OSError, AttributeError):
+            _RENAME_EXCL_FN = None
+        else:
+            fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            fn.restype = ctypes.c_int
+            _RENAME_EXCL_FN = fn
+    return _RENAME_EXCL_FN
+
+
+def _rename_exclusive(src: Path, dst: Path) -> bool:
+    """Rename src to dst, refusing to replace anything already at dst.
+
+    os.rename is not that primitive.  On POSIX a rename onto an existing EMPTY
+    directory SUCCEEDS and replaces it, and the housekeeper lock marker is an
+    empty directory, so a plain rename can replace a third reclaimer's fresh
+    lock while that reclaimer still believes it holds the lock and sweeps at
+    the same time.
+
+    macOS has renamex_np with RENAME_EXCL, which is the atomic no-replace
+    rename: the move and the refusal are one decision, so there is no window
+    between a check and a rename for a peer to slip into.  Elsewhere the
+    fallback checks and then renames, which is strictly weaker but still
+    refuses an occupied destination.
+    """
+    fn = _renamex_np()
+    if fn is not None:
+        if fn(os.fsencode(str(src)), os.fsencode(str(dst)), _RENAME_EXCL) == 0:
+            return True
+        return False
+    try:
+        if dst.exists() or dst.is_symlink():
+            return False
+        os.rename(src, dst)
+        return True
+    except OSError:
+        return False
 
 
 def owner_path_for(lock_path: Path) -> Path:
@@ -307,11 +359,7 @@ class HousekeeperLock:
         the lock under its ``.stale-`` name and is never deleted, because it
         may be a live peer's lock.
         """
-        try:
-            os.rename(aside, self.lock_path)
-        except OSError:
-            # Deliberately nothing: see above.
-            pass
+        _rename_exclusive(aside, self.lock_path)
 
     def _owner_pid(self) -> int | None:
         """The pid in the owner file right now, when there is a readable one."""

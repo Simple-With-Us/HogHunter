@@ -239,20 +239,58 @@ final class HousekeeperLock {
 
     /// Return a directory that was moved aside to the lock path.
     ///
-    /// `moveItem` fails when the path is already taken, and that is the case
+    /// The move refuses when the path is already taken, and that is the case
     /// to leave alone: a third caller created a lock in the instant the path
     /// was empty, and putting this one back would mean replacing theirs.  So
     /// a failed put-back changes nothing.  The moved directory stays beside the
     /// lock under its `.stale-` name and is never deleted, because it may be
-    /// a live peer's lock.  That peer is displaced, which is the window a
-    /// rename cannot close and only a lock primitive shared with the Python
-    /// and shell sides could.
+    /// a live peer's lock.
+    ///
+    /// The refusal has to be atomic.  `FileManager.moveItem` checks that the
+    /// destination is free and then renames, so a peer that takes the path in
+    /// between is replaced instead of refused, and the replacement is silent:
+    /// the peer goes on believing it holds the lock while this one sweeps at
+    /// the same time.  macOS's `renameatx_np` with `RENAME_EXCL` makes the
+    /// move and the refusal one decision, so there is no window for a peer to
+    /// slip into.
     private func putBack(_ aside: URL) {
+        #if canImport(Darwin)
+        _ = HousekeeperLock.moveExclusive(aside, path)
+        #else
         do {
             try fileManager.moveItem(at: aside, to: path)
         } catch {
             // Deliberately nothing: see above.
         }
+        #endif
+    }
+
+    /// Move a directory onto a path that must be free, atomically.
+    ///
+    /// Returns false when the destination is already taken, and nothing is
+    /// changed: the source stays where it is and the destination is left
+    /// exactly as it was.  The check and the move are one decision, so a peer
+    /// that takes the destination a moment later is refused rather than
+    /// replaced.
+    static func moveExclusive(_ source: URL, _ destination: URL) -> Bool {
+        #if canImport(Darwin)
+        let renameExcl: UInt32 = 0x00000004
+        return source.path.withCString { sourcePath in
+            destination.path.withCString { destinationPath in
+                renameatx_np(AT_FDCWD, sourcePath, AT_FDCWD, destinationPath, renameExcl) == 0
+            }
+        }
+        #else
+        if FileManager.default.fileExists(atPath: destination.path) {
+            return false
+        }
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+            return true
+        } catch {
+            return false
+        }
+        #endif
     }
 
     /// True when the recorded owner is definitely gone.

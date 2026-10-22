@@ -2015,6 +2015,68 @@ class TestHousekeeperLock(unittest.TestCase):
         self.assertTrue(self.lock_path.is_dir())
         self.assertTrue((self.lock_path / "leftover.txt").exists())
 
+    def test_the_put_back_refuses_an_occupied_path_and_leaves_the_peer_alone(self):
+        # os.rename onto an existing EMPTY directory SUCCEEDS and replaces it,
+        # and the lock marker is an empty directory, so a put-back built on a
+        # plain rename replaces a third reclaimer's fresh lock while that
+        # reclaimer still believes it holds the lock and sweeps at the same
+        # time.  The refusal has to be the atomic one.
+        from vacuum.lock import HousekeeperLock
+
+        aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-test")
+        aside.mkdir(parents=True)
+        self.lock_path.mkdir(parents=True)
+        # The peer's lock is an empty marker, and the inode is what tells the
+        # two apart: a replaced directory has a new one.
+        peer_inode = self.lock_path.stat().st_ino
+
+        lock = HousekeeperLock(self.lock_path)
+        lock._put_back(aside)
+
+        self.assertEqual(
+            self.lock_path.stat().st_ino,
+            peer_inode,
+            "the peer's lock must not have been replaced",
+        )
+        self.assertTrue(aside.is_dir(), "the moved-aside copy stays where it is")
+
+    def test_the_put_back_moves_onto_a_free_path(self):
+        from vacuum.lock import HousekeeperLock
+
+        aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-test")
+        aside.mkdir(parents=True)
+
+        lock = HousekeeperLock(self.lock_path)
+        lock._put_back(aside)
+
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertFalse(aside.exists())
+
+    def test_the_put_back_never_goes_through_os_rename(self):
+        # os.rename is the primitive that replaces an empty directory, so a
+        # put-back that used it would still have the window even with a check
+        # in front of it.
+        from vacuum import lock as lock_module
+
+        calls = []
+        real_rename = lock_module.os.rename
+
+        def spy(src, dst, *args, **kwargs):
+            calls.append((str(src), str(dst)))
+            return real_rename(src, dst, *args, **kwargs)
+
+        aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-test")
+        aside.mkdir(parents=True)
+        lock_module.os.rename = spy
+        try:
+            lock = lock_module.HousekeeperLock(self.lock_path)
+            lock._put_back(aside)
+        finally:
+            lock_module.os.rename = real_rename
+
+        self.assertEqual(calls, [], "the put-back must not go through os.rename")
+        self.assertTrue(self.lock_path.is_dir(), "the put-back still moved the copy back")
+
     def test_the_owner_file_is_only_removed_when_it_names_the_moved_holder(self):
         # The owner file belongs to the holder we moved aside.  Removing it
         # when it names somebody else takes away the new holder's own file.
