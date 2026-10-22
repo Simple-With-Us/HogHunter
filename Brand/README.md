@@ -121,7 +121,7 @@ The crop is the window the owner's own render was cut to, measured off the rotat
 
 There is no padding.  The mark is the owner's own image at 1:1, which is the thing he approved, and the 711 unit wide window is rendered into a 711 unit square.  The window is 711 by 709, so it fills the frame from side to side with nothing at the sides, and sits one unit short of the top and the bottom, which is one unit of background above and below it and under a tenth of a pixel at 32 px.  `HogHunter-Favicon-32.svg` therefore carries a `viewBox` of `0 0 711 711`.
 
-Three things make that work, and all three are easy to get wrong.  The window is **centred** in the frame rather than starting at its corner, so the translate that places it is `(side - w) / 2 - bx0` in x and `(side - h) / 2 - by0` in y, which is `-62.2` and `-122.9` here.  The generator used to compute the offset as the window's centre against the frame's centre and then subtract the window's corner a second time to get the translate, which gave `0` and `-1` instead: the window's left edge landed 62.2 units to the right of where it belongs and its top edge 121.9 units too low, which is 2.8 px across and 5.5 px down at the 32 px render, so the ear stood whole above the frame and the mark showed more of the boar than the crop claims.  And the window **cuts** the artwork, so the artwork group carries a `clipPath` whose rect is the window itself.
+Three things make that work, and all three are easy to get wrong.  The window is **centred** in the frame rather than starting at its corner, so the translate that places it is `(side - w) / 2 - bx0` in x and `(side - h) / 2 - by0` in y, which is `-62.2` and `-122.9` here.  The generator used to compute the offset as the window's centre against the frame's centre and then subtract the window's corner a second time to get the translate, which gave `0` and `-1` instead: the window's left edge landed 62.2 units to the right of where it belongs and its top edge 121.9 units too low, which is 2.8 px across and 5.5 px down at the 32 px render.  The symptom of that mistake is a mark that sits low in its frame: the ear stood whole inside the frame with 88 units of blank canvas above it, about 4 px at the 32 px render, instead of being cut flat at the top, and the lower mane ran off the bottom of the frame.  And the window **cuts** the artwork, so the artwork group carries a `clipPath` whose rect is the window itself.  That clip is what cuts the ear flat, because the correct translate puts the ear's tip 35 units above the window's top edge, which is where the crop says the ear ends.
 
 That clip rect is in the rotated master's canvas space, which is the user space of the `<g>` that carries `clip-path`, and that space is the one the window was measured in and the one the outer translate is applied in.  The same four numbers would mean something else in the root frame, where the window lands at `(0, 1)` to `(711, 710)`.  The viewport cuts at the frame edge, one unit outside the window on the top and the bottom, so the `clipPath` is what makes the visible artwork the window rather than the frame.
 
@@ -170,32 +170,51 @@ render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
   printf '<!doctype html><html><head><style>html,body{margin:0;padding:0;background:transparent}svg{display:block}</style></head><body>%s</body></html>' \
     "$(cat "$tmp/mark.svg")" > "$tmp/r.html"
   # --headless=new sometimes hangs and never writes the file, so every render
-  # runs under a 30 second watchdog and gets one retry.  Each attempt gets its
+  # runs under a 90 second deadline and gets one retry.  Each attempt gets its
   # own profile directory, because a killed Chrome leaves a stale singleton
   # lock behind and a retry that reuses that profile can hang the same way.
+  status=1
   for attempt in 1 2; do
+    # clear the target before every attempt, so a file left by an earlier run
+    # can never satisfy the size check below
+    rm -f "$3"
     "$CHROME" --headless=new --disable-gpu --no-sandbox --force-device-scale-factor=1 \
       ${4:+--default-background-color=00000000} \
       --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
       --user-data-dir="$tmp/profile-$attempt" "file://$tmp/r.html" &
     pid=$!
-    ( sleep 30 && kill -9 "$pid" 2>/dev/null ) & watchdog=$!
+    # date-based deadline: works under any POSIX sh, not only bash (SECONDS
+    # is bash-only and silently unset under dash)
+    deadline=$(( $(date +%s) + 90 ))
+    while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+    kill -9 "$pid" 2>/dev/null
     if wait "$pid"; then status=0; else status=$?; fi
-    kill "$watchdog" 2>/dev/null
-    [ "$status" -eq 0 ] && break
+    [ "$status" -eq 0 ] && [ -s "$3" ] && break
+    # a killed attempt can leave a truncated file behind, so clear it before
+    # the retry and again on the way out
+    rm -f "$3"
   done
   rm -rf "$tmp"
+  # a failed render has to stop the recipe, and it must not leave a stale or
+  # partial PNG behind for the ICO pack step to pick up and desync from the
+  # sources
+  [ "$status" -eq 0 ] && [ -s "$3" ] || { rm -f "$3"; return 1; }
 }
 
-render Brand/HogHunter-Favicon-16.svg 16 Brand/favicon-16.png
-render Brand/HogHunter-Favicon-32.svg 32 Brand/favicon-32.png
-render Brand/HogHunter-Favicon-32.svg 48 Brand/favicon-48.png
-render Brand/HogHunter-Favicon-32.svg 64 Brand/favicon-64.png
-render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent
-render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent
+rebuild_favicons() {
+  # return, not exit: this block is meant to be pasted into an interactive
+  # shell, and a failed render must not kill that shell and its session
+  render Brand/HogHunter-Favicon-16.svg 16 Brand/favicon-16.png || return 1
+  render Brand/HogHunter-Favicon-32.svg 32 Brand/favicon-32.png || return 1
+  render Brand/HogHunter-Favicon-32.svg 48 Brand/favicon-48.png || return 1
+  render Brand/HogHunter-Favicon-32.svg 64 Brand/favicon-64.png || return 1
+  render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent || return 1
+  render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent || return 1
+}
+rebuild_favicons
 ```
 
-Three details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed by the watchdog leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  And a headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above runs each render under a 30 second watchdog and gives it one retry on a clean profile, and the old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+Four details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed at the deadline leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  A headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above gives each attempt a 90 second deadline and one retry on a clean profile, and it returns non-zero when both attempts fail or when the PNG is missing, so a failed render stops the recipe instead of leaving a stale file behind for the ICO pack step to pick up.  The deadline is 90 seconds and not 30 because a healthy render is not quick: the slowest single healthy render measured 24 seconds on this machine, so 90 seconds covers that worst case with margin, while a 30 second deadline was killing healthy renders and the recipe failed at the 64 px render with no PNG to show for it.  The roughly 220 seconds a full pass takes is an end-to-end figure for all six renders including profile setup, poll sleeps, and retry attempts, not six back-to-back 24 second renders.  A failed attempt also deletes its own output, and every attempt clears the target before Chrome starts, so a render killed at the deadline cannot leave a truncated PNG behind for the pack step to find and a PNG left by an earlier run cannot pass the size check.  The old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
 
 The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
 
