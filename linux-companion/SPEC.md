@@ -3,9 +3,15 @@
 One binary, two faces: a headless daemon (`hh-agent serve`) that watches and
 cleans a Docker host, and a local CLI (`hh-agent <cmd>`) that drives it from
 the server itself — over SSH, by fleet agents, or by scripts.  The HogHunter
-Mac app's Server tab and the iOS app talk to the daemon over HTTP; the CLI
+Mac app's Devices view and the iOS app talk to the daemon over HTTP; the CLI
 talks to it over a local Unix socket and degrades gracefully when the daemon
 is down.
+
+A managed node is a **device** — a Linux host running this daemon, a Mac
+running HogHunter, or an iPhone reporting its own resources.  The Mac app can
+connect to many devices at once (multiple companions, and multiple Macs in
+the future); each device is independently addressable, so no primary is
+needed — the Devices view aggregates per device.
 
 Status: spec + scaffold on branch `feature/linux-companion`.  Host process
 listing, lane scanning, the safety policy, and the Docker-socket client are
@@ -29,13 +35,22 @@ through the safety policy but marked clearly in code.
   control surface for agents over SSH — no HogHunter UI required.
 - Lane drift visibility: report which fleet lane checkouts have changes not
   in GitHub, in the same shape the Mac app reports.
+- Infisical for secrets: the Linux daemon takes its API token from Infisical
+  (via Coolify env) — no enroll flow.  The Mac app gains Infisical as an auth
+  option too, alongside a repaired pairing flow.
+- Devices, not hosts: the UI concept is a device.  The Devices view lists
+  every connected device, each reachable over SSH or the companion HTTP API,
+  with per-device settings.
+- iOS as a device: the iPhone app optionally reports its own CPU/RAM/storage
+  so the Mac's Devices view can show it.
 
 ## 2. Non-goals
 
 - No macOS code, no Swift.  The Mac-app side of the lane schema is future
   HogHunter repo work; this spec only defines the shared schema.
-- No metrics history database, no alerting pipeline, no multi-host
-  aggregation.  One daemon, one host, current state.
+- No metrics history database, no alerting pipeline.  One daemon, one host,
+  current state — the Mac app's Devices view aggregates the per-device
+  lists; the daemon never does.
 - No automatic killing or pruning.  Every destructive action is
   user-initiated (UI, CLI, or explicit API call) and audit-logged.
 
@@ -54,11 +69,11 @@ safety but the first-party Docker SDK and faster iteration win for this.
 
 ```
                   Tailscale (HTTP :24241, Bearer token)
-  Mac Server tab ──────────────▶  hh-agent serve
-  iOS app ──────────────────────▶    ├─ Docker client (/var/run/docker.sock)
-                                     ├─ /proc reader
-  ssh / local agent ──▶ hh-agent ─▶  ├─ lane scanner (git, read-only)
-  (Unix socket                      └─ audit log (JSONL)
+  Mac Devices view ───────────────▶  hh-agent serve
+  iOS app ────────────────────────▶    ├─ Docker client (/var/run/docker.sock)
+                                       ├─ /proc reader
+  ssh / local agent ──▶ hh-agent ──▶   ├─ lane scanner (git, read-only)
+  (Unix socket                        └─ audit log (JSONL)
    /run/hh-agent.sock)
 ```
 
@@ -70,12 +85,19 @@ safety but the first-party Docker SDK and faster iteration win for this.
 - HTTP API version is `/v1` under a new device path namespace.  It is
   deliberately separate from the Mac companion protocol (`Sources/Companion`
   in this repo): different device class, different capabilities.
-- Backward compatibility with the existing Server tab: the daemon can also
+- Backward compatibility with the existing Server tab (becoming the Devices
+  view): the daemon can also
   emit the legacy `/root/vps-storage-status.json` shape
   (`VPSStatusSnapshot`, snake_case, `generated_at`) that
   `Sources/Storage/VPSStatusStore.swift` already polls over SSH.  The HTTP
   API is the primary surface; the legacy file is a bridge until the Mac app
   migrates.
+- Devices view (Mac app, future work in this repo): a settings screen lists
+  devices — each with a name, address, and transport: the companion HTTP API
+  (preferred) or an SSH command that runs the helper remotely.  Multiple
+  companions, and later multiple Macs, are all first-class; the view shows
+  one section per device and every action targets the device the user
+  picked.  No primary device is needed.
 
 ## 5. Security model — read this first
 
@@ -87,14 +109,18 @@ This is not a limitation to work around; it is the design.  Consequences:
   Never on shared or customer infrastructure.
 - The HTTP listener binds to the Tailscale IP (and loopback) only — never
   `0.0.0.0` on a public interface.  All callers present a Bearer token.
-- Pairing: on first start the daemon prints a one-time pairing code and
-  stores only a SHA-256 hash of each issued token (same convention as the
-  Mac app: `hh1_` prefix, 192 bits; the shared 8-character pairing code is
-  read-only and can never issue destructive calls).  A phone or the Mac
-  trades the code for its own token at `POST /v1/enroll`; the token travels
-  as a Bearer credential thereafter.  Revoking a token cuts off that
-  device only.  The link is plain HTTP, so the port is never forwarded
-  outside the tailnet; TLS stays an open follow-up, as in the Mac app.
+- Auth, Linux daemon: Infisical only — no pairing-code enroll flow.  The
+  daemon reads its API token from the `HH_AGENT_API_TOKEN` env var, which
+  Coolify injects from Infisical (the same sync Jay already uses for app
+  env).  Token format follows the Mac convention (`hh1_` prefix); the
+  daemon stores only a SHA-256 hash for comparison.  `POST /v1/enroll` is
+  not implemented on the daemon.
+- Auth, Mac app (future work): Infisical becomes an auth option alongside
+  the pairing flow — Jay's call 2026-10-21, since the Infisical session
+  persists and the current pairing barely works on the Mac or the iOS app.
+  The pairing/enroll flow itself needs repair too; that is Mac/iOS app
+  work, tracked separately.  Per this repo's AGENTS.md, the Mac app owns
+  the Infisical read and the iOS app never touches Infisical.
 - Destructive routes sit behind explicit opt-ins, off by default, following
   the repo's route-table convention (`AGENTS.md`):
 
@@ -104,7 +130,7 @@ This is not a limitation to work around; it is the design.  Consequences:
 | `POST /v1/processes/{pid}/kill`, `POST /v1/containers/{id}/stop|kill` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/containers/{id}/limit` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/prune` | a device's own token | Allow Remote Disk Pruning | tailnet |
-| `POST /v1/enroll` (code for token) | the pairing code | none | tailnet |
+| `POST /v1/enroll` | not implemented on the daemon (Infisical only) | — | — |
 
   Each device confirms every destructive action in its own UI; the daemon
   re-checks the safety policy (§8) per action.
@@ -143,7 +169,10 @@ Writes (all require explicit confirmation semantics; see §8):
 
 - `POST /v1/prune` — body `{"targets": ["images","volumes","build-cache",
   "stopped-containers"], "dry_run": true}`.  `dry_run` defaults true; the
-  response lists what would be / was reclaimed.
+  response lists what would be / was reclaimed.  An additional opt-in target
+  `"host-temp"` covers host-level temp (`/tmp`, journal logs); it is never
+  included unless explicitly requested — Docker-scoped is the default
+  (Jay's call 2026-10-21: optionally both).
 - `POST /v1/processes/{pid}/kill` — body `{"signal": "TERM"}`; TERM first,
   escalates to KILL after a grace period unless `{"signal":"KILL"}`.
 - `POST /v1/containers/{id}/stop` — body `{"timeout": 10}`; then
@@ -173,10 +202,11 @@ hh-agent containers [--json]
   All containers with cpu/mem/io/storage/limits/oom-kills.  Needs the daemon.
 
 hh-agent prune [--images] [--volumes] [--cache] [--stopped-containers]
-               [--dry-run] [--yes] [--json]
-  Default with no flags: dry-run across all four targets and print what would
-  go.  --dry-run is the default; applying requires --yes.  Never touches
-  running containers, in-use images, or in-use volumes.
+               [--host-temp] [--dry-run] [--yes] [--json]
+  Default with no flags: dry-run across the four Docker targets and print
+  what would go.  --dry-run is the default; applying requires --yes.  Never
+  touches running containers, in-use images, or in-use volumes.  --host-temp
+  adds host-level temp and journal logs; it is opt-in only.
 
 hh-agent stop <container|pid> [--timeout 10] [--yes] [--json]
 hh-agent kill <container|pid> [--yes] [--json]
@@ -241,8 +271,8 @@ day's file.
 
 ## 9. Lane status — shared schema (Mac app + Linux companion)
 
-Both apps report lanes in this identical shape so the Server tab renders one
-table.  JSON keys are snake_case, matching the existing
+Both apps report lanes in this identical shape so the Devices view renders one
+table per device.  JSON keys are snake_case, matching the existing
 `VPSStatusSnapshot` conventions.
 
 ```json
@@ -336,16 +366,26 @@ Only the real advantages, no marketing:
 - The agent's own container gets resource limits in Coolify
   (e.g. 0.5 CPU, 256 MB) so the watchdog cannot become the problem.
 - Env: `HH_AGENT_PORT` (default 24241), `HH_AGENT_LANE_ROOTS`
-  (comma-separated), `HH_AGENT_TOKEN_FILE` (default
-  `/etc/hh-agent/token`).
+  (comma-separated), `HH_AGENT_API_TOKEN` (injected by Coolify from
+  Infisical — the daemon's only auth source; never in the image or repo).
 - Tailscale: the Coolify host is already on the tailnet; the daemon binds
   the host's Tailscale IP.  No exposure outside the tailnet.
 
-## 12. Open questions for Jay
+## 12. Decisions (Jay, 2026-10-21)
 
-1. Pairing UX: reuse the Mac app's pairing-code → token enroll flow for the
-   Linux daemon (consistent), or a simpler pre-shared token in Infisical?
-2. Should `hh-agent prune` also cover host-level temp (e.g. `/tmp`,
-   journal logs) or stay Docker-scoped?  Spec says Docker-scoped for now.
-3. Legacy `/root/vps-storage-status.json` bridge: keep the SSH-script path
-   working in parallel, or cut over the Server tab to HTTP immediately?
+1. Auth: the Linux daemon is Infisical-only (token via Coolify env from
+   Infisical; no enroll flow).  The Mac app gains Infisical as an auth
+   option, and its pairing flow gets repaired — pairing barely works on the
+   Mac or the iOS app today.
+2. Prune scope: Docker objects by default; host-level temp (`/tmp`,
+   journals) is an explicit opt-in (`--host-temp` / `"host-temp"`).
+3. Devices: the UI concept is Devices, not Hosts.  The Devices view lists
+   every connected device with per-device transport (companion HTTP API or
+   an SSH command running the helper); multiple companions and future
+   multiple Macs are first-class, with no primary device.
+4. iOS as a device: the iPhone app optionally reports its own CPU/RAM/
+   storage so the Mac's Devices view can show it (iOS app work; spec the
+   payload alongside the existing snapshot).
+
+Open: legacy `/root/vps-storage-status.json` bridge — keep the SSH-script
+path working in parallel, or cut the Devices view to HTTP immediately?
