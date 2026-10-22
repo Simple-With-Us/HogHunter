@@ -59,6 +59,12 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 # still happen below, after the watchdog is up.
 from vacuum.config import TICK_WATCHDOG_SEC  # noqa: E402
 
+# vacuum.lock is a leaf module too: standard library only, no vacuum imports.
+# The watchdog needs it because `os._exit` skips `finally` and `atexit`, so a
+# killed tick used to leave the housekeeper lock behind and every tick after
+# it did nothing for two hours.
+from vacuum import lock as housekeeper_lock  # noqa: E402
+
 _watchdog_armed = False
 
 
@@ -70,6 +76,13 @@ def _watchdog_exit(seconds: float) -> None:
         "exiting so the next tick can run\n"
     )
     sys.stderr.flush()
+    # Give the lock back before the hard exit.  Without this the lock
+    # directory survives the kill and every later tick reports "peer holds
+    # lock" until the stale window expires.
+    try:
+        housekeeper_lock.force_release()
+    except Exception:  # pragma: no cover - the exit must not be blocked
+        pass
     os._exit(3)
 
 
@@ -219,7 +232,13 @@ from vacuum.alerts import NO_NOTIFY_ENV, evaluate_alerts, notify_macos  # noqa: 
 from vacuum.config import STEP_CATALOG, load_config, step_enabled  # noqa: E402
 from vacuum.engine import VacuumEngine  # noqa: E402
 from vacuum.models import TriggerKind  # noqa: E402
-from vacuum.scheduler import build_status, run_scheduler_tick, run_skipped_for_lock  # noqa: E402
+from vacuum.scheduler import (  # noqa: E402
+    build_status,
+    current_occupancy,
+    occupancy_view,
+    run_scheduler_tick,
+    run_skipped_for_lock,
+)
 from vacuum.script_registry import bootstrap_registry  # noqa: E402
 from vacuum.store import VacuumStore  # noqa: E402
 
@@ -396,7 +415,11 @@ def main(argv: list[str] | None = None) -> int:
         return record.exit_code
 
     if args.check_alerts:
-        alerts = evaluate_alerts(store, store.cfg)
+        # The same view the tick uses, so a cadence that is only waiting its
+        # turn does not raise a banner here either.
+        alerts = evaluate_alerts(
+            occupancy_view(store, current_occupancy(store, store.cfg)), store.cfg
+        )
         for alert in alerts:
             if alert.should_notify:
                 notify_macos("Hog Hunter", alert.message)
