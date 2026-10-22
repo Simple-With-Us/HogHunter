@@ -183,8 +183,10 @@ render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
       --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
       --user-data-dir="$tmp/profile-$attempt" "file://$tmp/r.html" &
     pid=$!
-    deadline=$((SECONDS + 90))
-    while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 1; done
+    # date-based deadline: works under any POSIX sh, not only bash (SECONDS
+    # is bash-only and silently unset under dash)
+    deadline=$(( $(date +%s) + 90 ))
+    while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
     kill -9 "$pid" 2>/dev/null
     if wait "$pid"; then status=0; else status=$?; fi
     [ "$status" -eq 0 ] && [ -s "$3" ] && break
@@ -199,15 +201,20 @@ render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
   [ "$status" -eq 0 ] && [ -s "$3" ] || { rm -f "$3"; return 1; }
 }
 
-render Brand/HogHunter-Favicon-16.svg 16 Brand/favicon-16.png || exit 1
-render Brand/HogHunter-Favicon-32.svg 32 Brand/favicon-32.png || exit 1
-render Brand/HogHunter-Favicon-32.svg 48 Brand/favicon-48.png || exit 1
-render Brand/HogHunter-Favicon-32.svg 64 Brand/favicon-64.png || exit 1
-render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent || exit 1
-render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent || exit 1
+rebuild_favicons() {
+  # return, not exit: this block is meant to be pasted into an interactive
+  # shell, and a failed render must not kill that shell and its session
+  render Brand/HogHunter-Favicon-16.svg 16 Brand/favicon-16.png || return 1
+  render Brand/HogHunter-Favicon-32.svg 32 Brand/favicon-32.png || return 1
+  render Brand/HogHunter-Favicon-32.svg 48 Brand/favicon-48.png || return 1
+  render Brand/HogHunter-Favicon-32.svg 64 Brand/favicon-64.png || return 1
+  render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent || return 1
+  render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent || return 1
+}
+rebuild_favicons
 ```
 
-Four details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed at the deadline leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  A headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above gives each attempt a 90 second deadline and one retry on a clean profile, and it returns non-zero when both attempts fail or when the PNG is missing, so a failed render stops the recipe instead of leaving a stale file behind for the ICO pack step to pick up.  The deadline is 90 seconds and not 30 because a healthy render is not quick: one render measures between 3 and 24 seconds on this machine, and the six of them together take about 220 seconds, so a 30 second deadline was killing healthy renders and the recipe failed at the 64 px render with no PNG to show for it.  A failed attempt also deletes its own output, and every attempt clears the target before Chrome starts, so a render killed at the deadline cannot leave a truncated PNG behind for the pack step to find and a PNG left by an earlier run cannot pass the size check.  The old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+Four details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed at the deadline leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  A headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above gives each attempt a 90 second deadline and one retry on a clean profile, and it returns non-zero when both attempts fail or when the PNG is missing, so a failed render stops the recipe instead of leaving a stale file behind for the ICO pack step to pick up.  The deadline is 90 seconds and not 30 because a healthy render is not quick: the slowest single healthy render measured 24 seconds on this machine, so 90 seconds covers that worst case with margin, while a 30 second deadline was killing healthy renders and the recipe failed at the 64 px render with no PNG to show for it.  The roughly 220 seconds a full pass takes is an end-to-end figure for all six renders including profile setup, poll sleeps, and retry attempts, not six back-to-back 24 second renders.  A failed attempt also deletes its own output, and every attempt clears the target before Chrome starts, so a render killed at the deadline cannot leave a truncated PNG behind for the pack step to find and a PNG left by an earlier run cannot pass the size check.  The old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
 
 The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
 
