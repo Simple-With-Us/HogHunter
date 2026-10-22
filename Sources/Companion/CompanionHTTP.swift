@@ -221,6 +221,8 @@ enum CompanionHTTP {
                         if k == "window" { updateReq.window = v }
                         if k == "grouping" { updateReq.grouping = v }
                         if k == "cpuScale" || k == "scale" { updateReq.cpuScale = v }
+                        if k == "sort" { updateReq.sort = v }
+                        if k == "sortAscending" { updateReq.sortAscending = (v == "true" || v == "1") }
                     }
                 }
             }
@@ -230,6 +232,8 @@ enum CompanionHTTP {
                     if decoded.window != nil { updateReq.window = decoded.window }
                     if decoded.grouping != nil { updateReq.grouping = decoded.grouping }
                     if decoded.cpuScale != nil { updateReq.cpuScale = decoded.cpuScale }
+                    if decoded.sort != nil { updateReq.sort = decoded.sort }
+                    if decoded.sortAscending != nil { updateReq.sortAscending = decoded.sortAscending }
                 }
             }
             let (code, resBody) = viewHandler(updateReq)
@@ -765,21 +769,58 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func viewRequest(token: String, window: String? = nil, grouping: String? = nil, cpuScale: String? = nil, host: String? = nil) -> Data {
+    /// The view request.
+    ///
+    /// The view fields travel in the request body and in the query string,
+    /// with the same value in both, so the phone and the Mac cannot read two
+    /// different copies of the request and end up disagreeing about the sort.
+    static func viewRequest(
+        token: String,
+        window: String? = nil,
+        grouping: String? = nil,
+        cpuScale: String? = nil,
+        sort: String? = nil,
+        sortAscending: Bool? = nil,
+        host: String? = nil
+    ) -> Data {
         var queryItems: [String] = []
-        if let window { queryItems.append("window=\(queryAllowedValue(window))") }
-        if let grouping { queryItems.append("grouping=\(queryAllowedValue(grouping))") }
-        if let cpuScale { queryItems.append("cpuScale=\(queryAllowedValue(cpuScale))") }
+        var fields: [String: Any] = [:]
+        if let window {
+            queryItems.append("window=\(queryAllowedValue(window))")
+            fields["window"] = window
+        }
+        if let grouping {
+            queryItems.append("grouping=\(queryAllowedValue(grouping))")
+            fields["grouping"] = grouping
+        }
+        if let cpuScale {
+            queryItems.append("cpuScale=\(queryAllowedValue(cpuScale))")
+            fields["cpuScale"] = cpuScale
+        }
+        if let sort {
+            queryItems.append("sort=\(queryAllowedValue(sort))")
+            fields["sort"] = sort
+        }
+        if let sortAscending {
+            queryItems.append("sortAscending=\(sortAscending)")
+            fields["sortAscending"] = sortAscending
+        }
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
+        let body = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])) ?? Data("{}".utf8)
         let lines = [
             "POST \(CompanionService.viewPath)\(queryString) HTTP/1.1",
             hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
+            "Content-Type: application/json",
+            "Content-Length: \(body.count)",
             "Connection: close",
             "",
+            "",
         ]
-        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+        var data = Data(lines.joined(separator: "\r\n").utf8)
+        data.append(body)
+        return data
     }
 
     /// A request with a JSON body.  The body is sent in the same write as the

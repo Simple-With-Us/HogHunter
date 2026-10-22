@@ -21,6 +21,38 @@ struct DirectoryUsageRow: Identifiable, Equatable {
     var hasResolvedPath = false
 }
 
+extension DirectoryUsageRow {
+    /// The one-line status beside a directory:  what the Mac's own rows show
+    /// and what the phone shows under the same directory.
+    ///
+    /// It lives here rather than in a view, because the two surfaces have to
+    /// agree and only one of them can reach a view.
+    var statusLine: String {
+        if scanStartedAt != nil, progressEntries > 0 {
+            return "\(HogFormat.memory(UInt64(max(0, progressBytes)))) scanned · \(progressEntries) entries · \(statusText.lowercased())"
+        }
+        if statusText == "Complete", let sampledAt = sampledAt {
+            return "walk began " + DirectoryUsageRow.timestamp(sampledAt)
+        }
+        return statusText
+    }
+
+    /// The Mac's stamp for a moment:  "Oct 22, 2:03pm".
+    static func timestamp(_ date: Date) -> String {
+        stampFormatter.string(from: date)
+            .replacingOccurrences(of: "AM", with: "am")
+            .replacingOccurrences(of: "PM", with: "pm")
+    }
+
+    private static let stampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "America/Chicago")
+        formatter.dateFormat = "MMM d, h:mma"
+        return formatter
+    }()
+}
+
 @MainActor
 final class DirectoryUsageStore: ObservableObject {
     typealias Probe = @Sendable (String) -> Int64?

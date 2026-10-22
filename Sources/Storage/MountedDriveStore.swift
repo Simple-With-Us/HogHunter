@@ -94,6 +94,13 @@ struct MountedDriveMountRecord: Sendable {
 @MainActor
 final class MountedDriveStore: ObservableObject {
     typealias Probe = @Sendable () -> [MountedDriveCandidate]
+
+    /// The store the dashboard and the companion snapshot share.  It used to
+    /// live inside the panel as a private singleton, which is why the phone
+    /// could never see the drives: there was no way to reach the list from
+    /// anywhere else.
+    static let shared = MountedDriveStore()
+
     @Published private(set) var rows: [MountedDriveUsage] = []
     @Published private(set) var isRefreshing = false
     private let probe: Probe

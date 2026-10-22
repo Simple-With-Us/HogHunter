@@ -90,7 +90,10 @@ enum CompanionSnapshotBuilder {
         )
     }
 
-    static func currentStorageSummary() -> CompanionStorageSummary? {
+    static func currentStorageSummary(
+        drives: [MountedDriveUsage] = [],
+        directories: [DirectoryUsageRow] = []
+    ) -> CompanionStorageSummary? {
         let homeURL = URL(fileURLWithPath: NSHomeDirectory())
         guard let values = try? homeURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
               let total = values.volumeTotalCapacity, total > 0 else {
@@ -126,8 +129,93 @@ enum CompanionSnapshotBuilder {
             categoryBreakdown: breakdown,
             excludedPaths: Array(exclusions.excludedPaths).sorted(),
             topApps: Self.cachedTopApps(),
-            topAppsScannedAt: Self.topAppsCache?.at
+            topAppsScannedAt: Self.topAppsCache?.at,
+            drives: Self.driveRows(drives, homeURL: homeURL, totalBytes: totalBytes, freeBytes: freeBytes, usedPercent: usedPct),
+            topDirectories: Self.directoryRows(directories)
         )
+    }
+
+    /// The drives the phone can see, each with the path it is mounted at.
+    ///
+    /// The boot volume comes first because it is the one the storage summary
+    /// itself describes, and the mounted volumes follow.  The mount path is
+    /// the point of the row: the old Mac layout listed the drives with where
+    /// they were mounted, and the new dashboard shows only capacity cards.
+    private static func driveRows(
+        _ drives: [MountedDriveUsage],
+        homeURL: URL,
+        totalBytes: UInt64,
+        freeBytes: UInt64,
+        usedPercent: Double
+    ) -> [CompanionDriveRow] {
+        let volumeName = (try? homeURL.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? "Macintosh HD"
+        var rows = [CompanionDriveRow(
+            id: "/",
+            name: volumeName,
+            path: "/",
+            totalBytes: totalBytes,
+            availableBytes: freeBytes,
+            usedPercent: usedPercent,
+            severity: severityName(for: bootSeverity(usedPercent)),
+            isLocal: true
+        )]
+        for drive in drives {
+            rows.append(CompanionDriveRow(
+                id: drive.path,
+                name: drive.name,
+                path: drive.path,
+                totalBytes: drive.totalBytes.map { UInt64(max(0, $0)) },
+                availableBytes: drive.availableBytes.map { UInt64(max(0, $0)) },
+                usedPercent: drive.usedPercent,
+                severity: severityName(for: drive.severity),
+                isLocal: false
+            ))
+        }
+        return rows
+    }
+
+    /// The host's largest directories, with the same short status line the
+    /// Mac's own rows show.  The Mac keeps that line in a tooltip now; the
+    /// phone shows it under the row, which is what the old layout did.
+    private static func directoryRows(_ directories: [DirectoryUsageRow]) -> [CompanionDirectoryRow] {
+        directories.compactMap { row in
+            guard let bytes = row.bytes, !row.isUnavailable else { return nil }
+            let name = row.title == "Derived Data" ? row.title : displayPath(row.displayPath)
+            return CompanionDirectoryRow(
+                id: row.displayPath,
+                name: name,
+                path: row.path,
+                bytes: UInt64(max(0, bytes)),
+                bytesText: HogFormat.memory(UInt64(max(0, bytes))),
+                detail: row.statusLine
+            )
+        }
+    }
+
+    /// The same shortening the Mac's own rows use: the home directory
+    /// becomes "~" and "/private/tmp" becomes "/tmp".
+    private static func displayPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
+        return path == "/private/tmp" ? "/tmp" : path
+    }
+
+    /// The severity of a mounted drive, in the words the snapshot uses.
+    private static func severityName(for severity: MountedDriveUsage.Severity) -> String {
+        switch severity {
+        case .normal: return "normal"
+        case .warning: return "warning"
+        case .critical: return "critical"
+        case .unavailable: return "unavailable"
+        }
+    }
+
+    /// The boot volume's severity, on the same thresholds a mounted drive uses:
+    /// 95% used is critical and 85% is a warning.
+    private static func bootSeverity(_ usedPercent: Double) -> MountedDriveUsage.Severity {
+        if usedPercent >= 95 { return .critical }
+        if usedPercent >= 85 { return .warning }
+        return .normal
     }
 
     private static func displayedCPU(_ perCore: Double, scale: CpuScale, coreCount: Int) -> Double {

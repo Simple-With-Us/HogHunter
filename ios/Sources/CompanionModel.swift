@@ -656,6 +656,9 @@ final class CompanionModel {
             if let value = update.alertsEnabled { settings.alertsEnabled = value }
             if let value = update.alertThresholdPercent { settings.alertThresholdPercent = value }
             if let value = update.alertSustainedMinutes { settings.alertSustainedMinutes = value }
+            if let value = update.appearance { settings.appearance = value }
+            if let value = update.backgroundRefreshInterval { settings.backgroundRefreshInterval = value }
+            if let value = update.menuBarLabelMode { settings.menuBarLabelMode = value }
             if let url = update.webhookURL {
                 settings.webhookConfigured = !url.isEmpty
                 settings.webhookHost = url.isEmpty ? nil : URL(string: url)?.host
@@ -788,6 +791,88 @@ final class CompanionModel {
             let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
+    }
+
+    /// Counts the sort requests the phone has sent.  Two taps can overlap,
+    /// so each request carries the generation it was made in and a reply for
+    /// an older one is dropped: the Mac never ends on a sort the person has
+    /// already moved past.
+    private var sortGeneration: Int = 0
+    /// The sort request in flight, so a newer one cancels it instead of
+    /// racing it to the Mac.
+    private var sortTask: Task<Void, Never>?
+
+    /// Sets the Mac's list sort and the direction the list runs in, so the
+    /// phone's list and the Mac's list agree about which app is on top.
+    ///
+    /// A newer request cancels the one before it and takes the sort with it,
+    /// so the last tap is the sort the Mac ends on.
+    func switchSort(_ sort: String, ascending: Bool) async {
+        // The generation moves first, so the request being cancelled already
+        // counts as superseded and cannot report itself as a failure.
+        sortGeneration += 1
+        let generation = sortGeneration
+        sortTask?.cancel()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performSort(sort, ascending: ascending, generation: generation)
+        }
+        sortTask = task
+        await task.value
+    }
+
+    /// One sort request.  The generation is checked before the request and
+    /// after the reply, so a superseded request never reaches the Mac, never
+    /// becomes an error the dashboard shows, and never touches the snapshot.
+    private func performSort(_ sort: String, ascending: Bool, generation: Int) async {
+        guard generation == sortGeneration else { return }
+        if isDemoMode {
+            var settings = snapshot?.settings
+            settings?.sort = sort
+            settings?.sortAscending = ascending
+            snapshot?.settings = settings
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            controlError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        do {
+            // Checked again right before the request: a newer request has
+            // taken the sort, so this one never reaches the Mac.
+            guard generation == sortGeneration else { return }
+            let res = try await CompanionConnection.triggerViewUpdate(
+                endpoint: endpoint,
+                token: saved.token,
+                sort: sort,
+                sortAscending: ascending,
+                useTLS: isUsingTLS(for: saved)
+            )
+            // A newer request owns the sort now, so this reply is dropped.
+            guard generation == sortGeneration else { return }
+            if res.status != "ok" {
+                controlError = res.message ?? "The Mac did not accept that change."
+            }
+            await refresh()
+            guard generation == sortGeneration else { return }
+            // The Mac's reply names the sort it is now using, and it applies
+            // the change after it answers, so the reply is the newer word on
+            // the sort than the snapshot that was fetched just now.
+            applyMacSort(res.sort, ascending: res.sortAscending)
+        } catch {
+            guard generation == sortGeneration else { return }
+            controlError = Self.describe(error)
+            await refresh()
+        }
+    }
+
+    /// Records the sort the Mac says it is now using, so the phone's list
+    /// agrees with the Mac before the next snapshot arrives.
+    private func applyMacSort(_ sort: String, ascending: Bool) {
+        var settings = snapshot?.settings
+        settings?.sort = sort
+        settings?.sortAscending = ascending
+        snapshot?.settings = settings
     }
 
     /// Runs one edit on the Mac and refreshes.  A failure lands in
@@ -989,6 +1074,10 @@ final class CompanionModel {
         WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 
+    /// Counts the fetches the phone has made, so the newest snapshot is the
+    /// one on screen and a slow older fetch cannot undo it.
+    private var refreshGeneration: Int = 0
+
     func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             if didBrowse, let saved, saved.remoteHost == nil, discovered.first(where: { $0.id == saved.peerID }) == nil {
@@ -1000,8 +1089,15 @@ final class CompanionModel {
             return
         }
         if case .code = phase { return }
+        // Counts fetches, so a slower older fetch cannot write an older
+        // snapshot over a newer one.
+        refreshGeneration += 1
+        let generation = refreshGeneration
         do {
             let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
+            // A newer fetch already brought a newer snapshot: this one is
+            // older, so it does not go on screen.
+            guard generation == refreshGeneration else { return }
             pairingDismissed = false
             codeFailure = nil
             snapshot = fetched

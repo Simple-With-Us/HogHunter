@@ -11,6 +11,25 @@ enum CompanionSort: String, CaseIterable, Identifiable {
     case cpu = "CPU %"
     case memory = "Memory"
     var id: String { rawValue }
+
+    /// The name the Mac uses for this sort.  The Mac takes "CPU" or "Memory",
+    /// so the phone sends that and not its own label.
+    var macValue: String {
+        switch self {
+        case .cpu: return "CPU"
+        case .memory: return "Memory"
+        }
+    }
+
+    /// The sort the Mac reports, as one of the phone's own choices.  Nil when
+    /// the Mac named a sort this app does not know.
+    init?(macValue: String) {
+        switch macValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "cpu": self = .cpu
+        case "memory": self = .memory
+        default: return nil
+        }
+    }
 }
 
 enum CompanionNetworkSort: String, CaseIterable, Identifiable {
@@ -426,6 +445,9 @@ struct DashboardView: View {
     @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
+    /// Counts the sort requests this view has sent, so a reply for an older
+    /// one cannot put a sort the Mac has already left back on the list.
+    @State private var sortRequestGeneration: Int = 0
     @State private var networkSortOrder: CompanionNetworkSort = .connections
     @State private var appStorageSortOrder: CompanionAppStorageSort = .total
     @State private var showCleanConfirm = false
@@ -537,6 +559,55 @@ struct DashboardView: View {
             }
         })
         return sortAscending ? sorted.reversed() : sorted
+    }
+
+    /// Sends the phone's sort to the Mac, so the two lists agree about which
+    /// app is on top.  The Mac's opt-in governs: without it the phone still
+    /// sorts its own list and the Mac keeps the sort it has.
+    ///
+    /// The list is changed before the Mac answers, so a refused or failed
+    /// change has to be undone.  Each request takes a number, and only the
+    /// newest one may undo the change: an older answer must not put a sort
+    /// the Mac has already left back on the list.
+    private func sendSort(_ order: CompanionSort, ascending: Bool) {
+        guard canEdit else { return }
+        sortRequestGeneration += 1
+        let generation = sortRequestGeneration
+        Task {
+            await model.switchSort(order.macValue, ascending: ascending)
+            guard generation == sortRequestGeneration else { return }
+            fallBackToMacSort()
+        }
+    }
+
+    /// Falls back to the sort the Mac took.  `switchSort` refreshes before it
+    /// returns, so the model's snapshot is the Mac's answer: a refused or
+    /// failed change reverts instead of leaving the list sorted a way the
+    /// Mac did not take.  Read through the model (a reference, always
+    /// current), not this view's snapshot (a value, fixed when tapped).
+    ///
+    /// Only the newest request gets here, so a slow answer cannot undo a
+    /// sort the person has made since.
+    private func fallBackToMacSort() {
+        guard let settings = model.snapshot?.settings else { return }
+        if let macSort = CompanionSort(macValue: settings.sort), macSort != sortOrder {
+            sortOrder = macSort
+        }
+        if settings.sortAscending != sortAscending {
+            sortAscending = settings.sortAscending
+        }
+    }
+
+    /// Takes the sort the Mac holds, so the phone shows what the Mac shows.
+    /// A sort changed on the Mac reaches the phone here.
+    private func syncSortFromMac() {
+        guard let settings = snapshot.settings else { return }
+        if let macSort = CompanionSort(macValue: settings.sort), macSort != sortOrder {
+            sortOrder = macSort
+        }
+        if settings.sortAscending != sortAscending {
+            sortAscending = settings.sortAscending
+        }
     }
 
     private var sortedNetworkRows: [CompanionNetworkRow] {
@@ -735,9 +806,18 @@ struct DashboardView: View {
         } message: {
             Text(model.controlError ?? "")
         }
-        .onAppear { consumeCleanRequest() }
+        .onAppear {
+            consumeCleanRequest()
+            syncSortFromMac()
+        }
         .onChange(of: model.showCleanDialogRequested) { _, _ in
             consumeCleanRequest()
+        }
+        .onChange(of: snapshot.settings?.sort) { _, _ in
+            syncSortFromMac()
+        }
+        .onChange(of: snapshot.settings?.sortAscending) { _, _ in
+            syncSortFromMac()
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -1090,19 +1170,28 @@ struct DashboardView: View {
             HStack(spacing: 8) {
                 Text(snapshot.grouping == "Processes" ? "Busy Processes" : "Busy Apps")
                 Spacer()
-                Picker("Sort", selection: $sortOrder) {
+                Picker("Sort", selection: Binding(
+                    get: { sortOrder },
+                    set: { next in
+                        // A new sort starts at the top again, the way the Mac
+                        // does it.  The setter runs only when the person taps,
+                        // so taking the Mac's sort never resets the direction.
+                        sortOrder = next
+                        sortAscending = false
+                        sendSort(next, ascending: false)
+                    }
+                )) {
                     ForEach(CompanionSort.allCases) { sort in
                         Text(sort.rawValue).tag(sort)
                     }
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 150)
-                .onChange(of: sortOrder) {
-                    sortAscending = false
-                }
 
                 Button {
-                    sortAscending.toggle()
+                    let next = !sortAscending
+                    sortAscending = next
+                    sendSort(sortOrder, ascending: next)
                 } label: {
                     Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
                         .font(.caption.weight(.bold))
@@ -1174,6 +1263,38 @@ struct DashboardView: View {
             } else {
                 Text("Disk telemetry will update with next sample.")
                     .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        // The drives the Mac has mounted, with where each one is mounted.
+        // The old Mac layout showed the mount path and the new dashboard does
+        // not, so the phone shows it here.
+        if let drives = snapshot.storage?.drives, !drives.isEmpty {
+            Section {
+                ForEach(drives) { drive in
+                    macDriveRow(drive)
+                }
+            } header: {
+                Text("Mounted Drives")
+            } footer: {
+                Text("Every drive mounted on \(snapshot.hostName), with the path it is mounted at.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        // The Mac's largest folders, with the status line its own rows show.
+        if let directories = snapshot.storage?.topDirectories, !directories.isEmpty {
+            Section {
+                ForEach(directories) { directory in
+                    macDirectoryRow(directory)
+                }
+            } header: {
+                Text("Top Directories")
+            } footer: {
+                Text("The largest folders on \(snapshot.hostName).")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
@@ -1661,6 +1782,84 @@ struct DashboardView: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(app.name), total \(app.totalText), bundle \(app.bundleText), hidden \(app.hiddenText)\(app.isHiddenHeavy ? ", flagged: hidden exceeds five times bundle and over two hundred megabytes" : "")")
+    }
+
+    /// One mounted drive: its name, where it is mounted, and how full it is.
+    /// The mount path is the point of the row, so it is shown under the name
+    /// rather than hidden in a tooltip.
+    @ViewBuilder
+    private func macDriveRow(_ drive: CompanionDriveRow) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(drive.name, systemImage: drive.isLocal ? "internaldrive" : "externaldrive")
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                Spacer()
+                Text(drive.usedPercent.map { String(format: "%.0f%% used", $0) } ?? "unavailable")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(driveSeverityColor(drive.severity))
+            }
+
+            if let percent = drive.usedPercent {
+                ProgressView(value: min(max(percent / 100.0, 0), 1.0))
+                    .tint(driveSeverityColor(drive.severity))
+            }
+
+            Text(drive.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(drive.name), mounted at \(drive.path), \(drive.usedPercent.map { String(format: "%.0f percent used", $0) } ?? "capacity unavailable")")
+    }
+
+    /// The Mac's own colours for a drive: green while there is room, orange
+    /// while it fills up, red when it is nearly full, and grey when the Mac
+    /// could not read the capacity.
+    private func driveSeverityColor(_ severity: String) -> Color {
+        switch severity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "normal": return .green
+        case "warning": return .orange
+        case "critical": return .red
+        default: return .secondary
+        }
+    }
+
+    /// One of the Mac's largest directories: its name, where it is, how big it
+    /// is, and the short status line the Mac shows under its own row.
+    @ViewBuilder
+    private func macDirectoryRow(_ directory: CompanionDirectoryRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(directory.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                // The Mac formatted this, so the phone shows it as it is.
+                Text(directory.bytesText)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+
+            Text(directory.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if !directory.detail.isEmpty {
+                Text(directory.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(directory.name), \(directory.bytesText), \(directory.path)\(directory.detail.isEmpty ? "" : ", \(directory.detail)")")
     }
 
     static let relativeTimeFormatter: RelativeDateTimeFormatter = {
