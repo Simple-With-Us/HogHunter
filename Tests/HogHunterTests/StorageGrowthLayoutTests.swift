@@ -60,7 +60,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
                      "/root/.config/muse", "/root/.minimax", "/root/.minimax-code",
                      "/root/.npm", "/root/.cache"]
         let toolNames = ["Claude Code", "Codex", "Muse", "MiniMax Code", "Fleet CLI", "Fleet Listener",
-                         "Fleet Recall", "Shellular", "Docker", "Caddy", "PostgreSQL", "Redis"]
+                         "Fleet Recall", "Shellular", "Docker", "PostgreSQL", "Redis"]
         let states: [VPSToolStatus.State] = [.running, .stopped, .absent, .unknown]
         let snapshot = VPSStatusSnapshot(
             generatedAt: ISO8601DateFormatter().string(from: now), host: "fleet-hetzner-nbg1",
