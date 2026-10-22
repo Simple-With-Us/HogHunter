@@ -273,6 +273,43 @@ final class MaintainStore: ObservableObject {
         }
     }
 
+    /// Runs one named step and nothing else.
+    ///
+    /// The server scope of the panel is display-only, so the owner had no way to
+    /// run the one step that acts on a remote host.  This calls the CLI's
+    /// `--run-step`, which takes the same housekeeper lock the scheduled tick
+    /// takes, so a step can never run over a tick.
+    ///
+    /// The step's own on/off toggle still governs it: the CLI refuses a step
+    /// that is off, so the panel enables the step first and the owner sees the
+    /// same switch the Mac's Maintenance tab has.
+    @discardableResult
+    func runStep(_ stepId: String) -> Task<Void, Never>? {
+        guard !isRunningNow else { return nil }
+        isRunningNow = true
+        lastError = nil
+        let launcher = self.launcher
+        return Task { [weak self] in
+            let outcome: Result<Bool, Error>
+            do {
+                outcome = .success(try await launcher(["--run-step", stepId]))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self else { return }
+            switch outcome {
+            case .success(true):
+                break
+            case .success(false):
+                self.lastError = "That step did not finish cleanly.\u{00A0} Check Logs for details."
+            case .failure(let error):
+                self.lastError = error.localizedDescription
+            }
+            self.isRunningNow = false
+            self.refresh()
+        }
+    }
+
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
         let launcher = self.launcher

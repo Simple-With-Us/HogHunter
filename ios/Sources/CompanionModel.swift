@@ -656,6 +656,9 @@ final class CompanionModel {
             if let value = update.alertsEnabled { settings.alertsEnabled = value }
             if let value = update.alertThresholdPercent { settings.alertThresholdPercent = value }
             if let value = update.alertSustainedMinutes { settings.alertSustainedMinutes = value }
+            if let value = update.appearance { settings.appearance = value }
+            if let value = update.backgroundRefreshInterval { settings.backgroundRefreshInterval = value }
+            if let value = update.menuBarLabelMode { settings.menuBarLabelMode = value }
             if let url = update.webhookURL {
                 settings.webhookConfigured = !url.isEmpty
                 settings.webhookHost = url.isEmpty ? nil : URL(string: url)?.host
@@ -786,6 +789,22 @@ final class CompanionModel {
         }
         await sendControl { endpoint, token, useTLS in
             let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale, useTLS: useTLS)
+            return (res.status == "ok", res.message)
+        }
+    }
+
+    /// Sets the Mac's list sort and the direction the list runs in, so the
+    /// phone's list and the Mac's list agree about which app is on top.
+    func switchSort(_ sort: String, ascending: Bool) async {
+        if isDemoMode {
+            var settings = snapshot?.settings
+            settings?.sort = sort
+            settings?.sortAscending = ascending
+            snapshot?.settings = settings
+            return
+        }
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, sort: sort, sortAscending: ascending, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }

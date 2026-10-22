@@ -272,6 +272,12 @@ struct CompanionViewUpdateRequest: Codable, Equatable, Sendable {
     var window: String? = nil
     var grouping: String? = nil
     var cpuScale: String? = nil
+    /// The Mac's list sort: "CPU" or "Memory".  The phone sorted its own list
+    /// locally and the Mac sorted its own, so the two could disagree about
+    /// which app was on top.  The phone now sets the Mac's sort instead.
+    var sort: String? = nil
+    /// True when the list runs from least to most.
+    var sortAscending: Bool? = nil
 }
 
 /// Response returned after updating view settings on the Mac.
@@ -280,7 +286,12 @@ struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
     var window: String
     var grouping: String
     var cpuScale: String
+    /// The sort the Mac is now using, and the direction.
+    var sort: String = "CPU"
+    var sortAscending: Bool = false
     var message: String?
+    /// Why the change was refused, when it was.
+    var error: String? = nil
 }
 
 /// The values the Mac accepts for the settings a phone may change.  Shared so
@@ -289,6 +300,13 @@ struct CompanionViewUpdateResponse: Codable, Equatable, Sendable {
 enum CompanionSettingsLimits {
     /// The same choices as Settings > General > Refresh Every on the Mac.
     static let refreshIntervals: [Double] = [2, 3, 5, 10, 15]
+    /// The same choices as Settings > General > Background Refresh (When
+    /// Closed) on the Mac.
+    static let backgroundRefreshIntervals: [Double] = [5, 10, 15, 30]
+    /// The Mac's appearance choices, in the names the Mac uses.
+    static let appearances: [String] = ["System", "Light", "Dark"]
+    /// The Mac's menu bar label choices, in the names the Mac uses.
+    static let menuBarLabelModes: [String] = ["Machine CPU", "Top Hog", "Live Sparkline"]
     /// Per-core percent, the scale the alert compares against.
     static let alertThresholdRange: ClosedRange<Double> = 100...1000
     static let alertThresholdStep: Double = 50
@@ -336,6 +354,17 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     var webhookStatus: String? = nil
     /// True when macOS has refused Hog Hunter permission to notify.
     var notificationsDenied: Bool? = nil
+    /// The Mac's appearance: "System", "Light" or "Dark".
+    var appearance: String = "System"
+    /// The refresh cadence the Mac uses while its panel is closed, in seconds.
+    var backgroundRefreshInterval: Double = 10
+    /// What the Mac's menu bar shows: "Machine CPU", "Top Hog" or
+    /// "Live Sparkline".
+    var menuBarLabelMode: String = "Machine CPU"
+    /// The Mac's list sort: "CPU" or "Memory".
+    var sort: String = "CPU"
+    /// True when the Mac's list runs from least to most.
+    var sortAscending: Bool = false
 }
 
 /// A change to the settings above.  Every field is optional; only the ones
@@ -349,10 +378,18 @@ struct CompanionSettingsUpdateRequest: Codable, Equatable, Sendable {
     /// Sends one test message to the webhook the Mac holds after the other
     /// fields are applied.
     var testWebhook: Bool? = nil
+    /// The Mac's appearance: "System", "Light" or "Dark".
+    var appearance: String? = nil
+    /// The refresh cadence the Mac uses while its panel is closed, in seconds.
+    var backgroundRefreshInterval: Double? = nil
+    /// What the Mac's menu bar shows: "Machine CPU", "Top Hog" or
+    /// "Live Sparkline".
+    var menuBarLabelMode: String? = nil
 
     var isEmpty: Bool {
         refreshInterval == nil && alertsEnabled == nil && alertThresholdPercent == nil
             && alertSustainedMinutes == nil && webhookURL == nil && testWebhook != true
+            && appearance == nil && backgroundRefreshInterval == nil && menuBarLabelMode == nil
     }
 }
 
@@ -741,6 +778,51 @@ struct CompanionStorageSummary: Codable, Equatable {
     /// When `topApps` was last refreshed on the host.  The phone uses this for
     /// a "Scanned 2 min ago" caption.
     var topAppsScannedAt: Date? = nil
+    /// The drives mounted on the host, with the path each one is mounted at.
+    /// The Mac's own storage screen shows the same list.  Optional because the
+    /// host may not have collected it yet.
+    var drives: [CompanionDriveRow]? = nil
+    /// The host's largest directories, with the same short status line the
+    /// Mac's rows show.  Optional for the same reason.
+    var topDirectories: [CompanionDirectoryRow]? = nil
+}
+
+/// One mounted drive, as the host sees it.
+///
+/// The mount path is the point of this row: the old Mac layout listed the
+/// drives with where they were mounted, and the new dashboard shows only
+/// capacity cards.
+struct CompanionDriveRow: Codable, Equatable, Identifiable, Sendable {
+    /// The mount path, which is also the row's identity.
+    var id: String
+    var name: String
+    /// Where the drive is mounted, for example "/Volumes/External".
+    var path: String
+    var totalBytes: UInt64? = nil
+    var availableBytes: UInt64? = nil
+    /// How full the drive is, 0 to 100.  Absent when the host cannot read it.
+    var usedPercent: Double? = nil
+    /// "normal", "warning", "critical" or "unavailable".
+    var severity: String = "unavailable"
+    /// True for a drive on the boot volume.
+    var isLocal: Bool = true
+}
+
+/// One of the host's largest directories, with the status line the Mac's own
+/// row shows under it.
+struct CompanionDirectoryRow: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+    /// The full path, which the Mac's rows show too.
+    var path: String
+    var bytes: UInt64
+    /// The size, already formatted for display ("12 GB").  The phone shows it
+    /// as it is rather than re-doing the scale rules.
+    var bytesText: String
+    /// A short status line, such as "Safe to clean."  The Mac's rows used to
+    /// show this under the name and now keep it in a tooltip; the phone shows
+    /// it inline, which is what the old layout did.
+    var detail: String
 }
 
 /// One row of the Mac pane's App Storage list, packaged for the phone.  All

@@ -40,6 +40,8 @@ struct MacSettingsView: View {
                 }
                 if let settings = snapshot.settings {
                     refreshSection(settings)
+                    displaySection(settings)
+                    appearanceSection(settings)
                     alertsSection(settings)
                     webhookSection(settings)
                     Section {
@@ -107,6 +109,57 @@ struct MacSettingsView: View {
             Text("Sampling")
         } footer: {
             Text("How often \(snapshot.hostName) samples processes.\u{00A0} A shorter interval is more current and uses a little more CPU.")
+        }
+    }
+
+    /// The Mac's own display settings: the cadence it samples at while its
+    /// panel is closed, and what its menu bar shows.
+    private func displaySection(_ settings: CompanionSettingsSummary) -> some View {
+        Section {
+            Picker("Background Refresh (When Closed)", selection: Binding(
+                get: { settings.backgroundRefreshInterval },
+                set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(backgroundRefreshInterval: next)) } }
+            )) {
+                ForEach(backgroundRefreshChoices(including: settings.backgroundRefreshInterval), id: \.self) { seconds in
+                    Text("\(Int(seconds)) Seconds").tag(seconds)
+                }
+            }
+            .disabled(!canEdit || model.isApplyingSettings)
+
+            Picker("Menu Bar Shows", selection: Binding(
+                get: { settings.menuBarLabelMode },
+                set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(menuBarLabelMode: next)) } }
+            )) {
+                ForEach(CompanionSettingsLimits.menuBarLabelModes, id: \.self) { mode in
+                    Text(mode).tag(mode)
+                }
+            }
+            .disabled(!canEdit || model.isApplyingSettings)
+        } header: {
+            Text("Mac Display")
+        } footer: {
+            Text("The background refresh is how often \(snapshot.hostName) samples while its panel is closed.\u{00A0} The menu bar setting is what the Mac shows in the menu bar.")
+        }
+    }
+
+    /// The Mac's appearance.  This iPhone follows it, so the two never look
+    /// like different apps.
+    private func appearanceSection(_ settings: CompanionSettingsSummary) -> some View {
+        Section {
+            Picker("Theme", selection: Binding(
+                get: { settings.appearance },
+                set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(appearance: next)) } }
+            )) {
+                ForEach(CompanionSettingsLimits.appearances, id: \.self) { choice in
+                    Text(choice).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!canEdit || model.isApplyingSettings)
+        } header: {
+            Text("Appearance")
+        } footer: {
+            Text("System follows the Mac's own setting.\u{00A0} Light and Dark pin it either way, on the Mac and on this iPhone.")
         }
     }
 
@@ -292,6 +345,14 @@ struct MacSettingsView: View {
     /// The Mac's own choices, plus the current value when something else set it.
     private func refreshChoices(including current: Double) -> [Double] {
         var choices = CompanionSettingsLimits.refreshIntervals
+        if !choices.contains(current) { choices.append(current); choices.sort() }
+        return choices
+    }
+
+    /// The Mac's own background choices, plus the current value when
+    /// something else set it.
+    private func backgroundRefreshChoices(including current: Double) -> [Double] {
+        var choices = CompanionSettingsLimits.backgroundRefreshIntervals
         if !choices.contains(current) { choices.append(current); choices.sort() }
         return choices
     }

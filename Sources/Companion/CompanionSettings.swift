@@ -17,6 +17,12 @@ enum CompanionSettingsValidator {
         /// Nil leaves the webhook alone.  Empty clears it.
         var webhookURL: String?
         var testWebhook: Bool
+        /// The Mac's appearance: System, Light or Dark.
+        var appearance: AppearanceChoice?
+        /// The refresh cadence the Mac uses while its panel is closed.
+        var backgroundRefreshInterval: Double?
+        /// What the Mac's menu bar shows.
+        var menuBarLabelMode: MenuBarLabelMode?
     }
 
     static func validate(_ request: CompanionSettingsUpdateRequest) -> Result<Validated, CompanionSettingsRejection> {
@@ -56,7 +62,39 @@ enum CompanionSettingsValidator {
             case .failure(let rejection): return .failure(rejection)
             }
         }
+        if let raw = request.appearance {
+            guard let choice = Self.appearance(from: raw) else {
+                return .failure(.init("The appearance must be System, Light or Dark."))
+            }
+            validated.appearance = choice
+        }
+        if let interval = request.backgroundRefreshInterval {
+            guard CompanionSettingsLimits.backgroundRefreshIntervals.contains(interval) else {
+                return .failure(.init("The background refresh interval must be 5, 10, 15 or 30 seconds."))
+            }
+            validated.backgroundRefreshInterval = interval
+        }
+        if let raw = request.menuBarLabelMode {
+            guard let mode = Self.menuBarLabelMode(from: raw) else {
+                return .failure(.init("The menu bar must show Machine CPU, Top Hog or Live Sparkline."))
+            }
+            validated.menuBarLabelMode = mode
+        }
         return .success(validated)
+    }
+
+    /// The Mac's appearance, from the name the phone sent.  The phone's
+    /// picker offers the Mac's own names, but the router receives bytes, and
+    /// a hand-built request can spell them any way it likes.
+    static func appearance(from raw: String) -> AppearanceChoice? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AppearanceChoice.allCases.first { $0.rawValue.caseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
+    /// The Mac's menu bar label mode, from the name the phone sent.
+    static func menuBarLabelMode(from raw: String) -> MenuBarLabelMode? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return MenuBarLabelMode.allCases.first { $0.rawValue.caseInsensitiveCompare(trimmed) == .orderedSame }
     }
 
     /// Empty clears the webhook.  Anything else must be an https URL with a
@@ -99,7 +137,12 @@ extension CompanionSnapshotBuilder {
         alertSustainedMinutes: Int,
         webhookURL: String,
         webhookStatus: String?,
-        notificationsDenied: Bool
+        notificationsDenied: Bool,
+        appearance: AppearanceChoice = .system,
+        backgroundRefreshInterval: Double = 10,
+        menuBarLabelMode: MenuBarLabelMode = .machinePercent,
+        sort: HogSort = .cpu,
+        sortAscending: Bool = false
     ) -> CompanionSettingsSummary {
         let trimmed = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let configured = !trimmed.isEmpty
@@ -115,7 +158,12 @@ extension CompanionSnapshotBuilder {
             webhookConfigured: configured,
             webhookHost: configured ? URL(string: trimmed)?.host.map(maskedWebhookHost) : nil,
             webhookStatus: status,
-            notificationsDenied: notificationsDenied
+            notificationsDenied: notificationsDenied,
+            appearance: appearance.rawValue,
+            backgroundRefreshInterval: backgroundRefreshInterval,
+            menuBarLabelMode: menuBarLabelMode.rawValue,
+            sort: sort.rawValue,
+            sortAscending: sortAscending
         )
     }
 
@@ -158,6 +206,18 @@ extension CpuScale {
         let lower = name.lowercased()
         if lower.contains("machine") || lower.contains("share") { return .machineShare }
         if lower.contains("core") { return .perCore }
+        return nil
+    }
+}
+
+extension HogSort {
+    /// The sort a phone's name for it means.  The Mac's own names are "CPU"
+    /// and "Memory"; the phone's picker offers them, and a hand-built
+    /// request can spell them any way it likes.
+    static func fromPhone(_ name: String) -> HogSort? {
+        let lower = name.lowercased()
+        if lower.contains("memory") || lower.contains("ram") { return .memory }
+        if lower.contains("cpu") { return .cpu }
         return nil
     }
 }

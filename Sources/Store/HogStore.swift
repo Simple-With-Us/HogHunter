@@ -1685,6 +1685,20 @@ final class HogStore: ObservableObject {
         return (200, data)
     }
 
+    /// A view change the Mac will not take, answered the way the settings
+    /// route answers one: the reason, in words the phone can show.
+    private static func rejectedViewUpdate(_ message: String) -> (status: Int, body: Data) {
+        let resp = CompanionViewUpdateResponse(
+            status: "rejected",
+            window: "",
+            grouping: "",
+            cpuScale: "",
+            message: nil,
+            error: message
+        )
+        return (400, (try? JSONEncoder().encode(resp)) ?? Data())
+    }
+
     private func performRemoteViewUpdate(_ req: CompanionViewUpdateRequest) -> (status: Int, body: Data) {
         var targetWindow: TimeWindow?
         if let win = req.window {
@@ -1708,11 +1722,26 @@ final class HogStore: ObservableObject {
 
         let targetCpuScale: CpuScale? = req.cpuScale.flatMap { CpuScale.fromPhone($0) }
 
+        // A sort the Mac does not recognise is refused rather than ignored.
+        // A phone that was told "ok" would show its own sort while the Mac
+        // kept a different one, which is the disagreement this route exists
+        // to remove.
+        var targetSort: HogSort?
+        if let raw = req.sort {
+            guard let parsed = HogSort.fromPhone(raw) else {
+                return Self.rejectedViewUpdate("The sort must be CPU or Memory.")
+            }
+            targetSort = parsed
+        }
+        let targetSortAscending: Bool? = req.sortAscending
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if let targetWindow { self.window = targetWindow }
             if let targetGrouping { self.grouping = targetGrouping }
             if let targetCpuScale { self.cpuScale = targetCpuScale }
+            if let targetSort { self.sort = targetSort }
+            if let targetSortAscending { self.sortAscending = targetSortAscending }
             self.publishCompanion()
         }
 
@@ -1721,6 +1750,8 @@ final class HogStore: ObservableObject {
             window: targetWindow?.rawValue ?? req.window ?? "now",
             grouping: targetGrouping?.rawValue ?? req.grouping ?? "apps",
             cpuScale: targetCpuScale?.rawValue ?? req.cpuScale ?? "machineShare",
+            sort: targetSort?.rawValue ?? req.sort ?? "CPU",
+            sortAscending: targetSortAscending ?? false,
             message: "View updated."
         )
         let data = (try? JSONEncoder().encode(resp)) ?? Data("{}".utf8)
@@ -1767,6 +1798,9 @@ final class HogStore: ObservableObject {
         if let threshold = validated.alertThresholdPercent, threshold != alertThresholdPercent { alertThresholdPercent = threshold }
         if let minutes = validated.alertSustainedMinutes, minutes != alertSustainedMinutes { alertSustainedMinutes = minutes }
         if let webhook = validated.webhookURL, webhook != alertWebhookURL { alertWebhookURL = webhook }
+        if let choice = validated.appearance, choice != appearance { appearance = choice }
+        if let interval = validated.backgroundRefreshInterval, interval != backgroundRefreshInterval { backgroundRefreshInterval = interval }
+        if let mode = validated.menuBarLabelMode, mode != menuBarLabelMode { menuBarLabelMode = mode }
         if validated.testWebhook { alerts.sendTestWebhook(to: alertWebhookURL) }
         publishCompanion()
     }
@@ -2378,6 +2412,10 @@ final class HogStore: ObservableObject {
             scale: cpuScale,
             pulse: pulse,
             rows: rows,
+            storage: CompanionSnapshotBuilder.currentStorageSummary(
+                drives: MountedDriveStore.shared.rows,
+                directories: directoryUsage.rows
+            ),
             network: networkScan.rows,
             networkNote: networkScan.note,
             cleanProgress: activeCleanProgress,
@@ -2393,7 +2431,12 @@ final class HogStore: ObservableObject {
                 alertSustainedMinutes: alertSustainedMinutes,
                 webhookURL: alertWebhookURL,
                 webhookStatus: alerts.lastWebhookStatus,
-                notificationsDenied: alerts.authorizationDenied
+                notificationsDenied: alerts.authorizationDenied,
+                appearance: appearance,
+                backgroundRefreshInterval: backgroundRefreshInterval,
+                menuBarLabelMode: menuBarLabelMode,
+                sort: sort,
+                sortAscending: sortAscending
             ),
             remoteMaintainAllowed: allowRemoteMaintain,
             maintain: maintainStatusForPhone()

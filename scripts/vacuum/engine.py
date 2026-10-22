@@ -217,24 +217,11 @@ class VacuumEngine:
                         )
                         self._emit_partial(record, dry_run=dry_run)
                         continue
-                    self._planned_retire_plan = None
-                    if step_id == "janitor_worktree_retire":
-                        try:
-                            keep_regex(self.cfg)  # an invalid keep list fails the step before the doctor runs
-                            self._planned_retire_plan = plan_retire_worktrees(
-                                self.cfg,
-                                self.home,
-                                self._runner,
-                                report=lambda: self._lane_report(write=not dry_run),
-                                clock=self._clock,
-                                dry_run=dry_run,
-                            )
-                        except Exception as exc:  # noqa: BLE001 — bad operator config must not kill the tick
-                            record.steps.append(
-                                StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200])
-                            )
-                            self._emit_partial(record, dry_run=dry_run)
-                            continue
+                    failure = self._plan_step(step_id, dry_run)
+                    if failure is not None:
+                        record.steps.append(failure)
+                        self._emit_partial(record, dry_run=dry_run)
+                        continue
                     result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
                     record.steps.append(result)
                     self._emit_partial(record, dry_run=dry_run)
@@ -248,6 +235,93 @@ class VacuumEngine:
             self._planned_retire_plan = None
             self._lane_report_cache = None
         return record
+
+    def run_single_step(
+        self,
+        step_id: str,
+        pressure: bool = False,
+        band: str = "cheap",
+        dry_run: bool = False,
+    ) -> RunRecord:
+        """Run exactly one step, under the housekeeper lock, and record it like any other run.
+
+        The id names the step to run; the catalog decides whether it is a step at all, and the step's own
+        toggle decides whether it runs.  A step that is off is reported as skipped rather than quietly
+        ignored, so a manual run never works around the switch the owner set, and the record exits 2 so a
+        caller sees the refusal.  The heavy lane steps keep the load guard the tick has: under extreme host
+        load they are skipped, never pushed through.
+
+        The record is a manual run: it is not a cadence, so it carries no cadence of its own and the
+        scheduler clock is left alone by the caller.  A dry run plans only and deletes nothing.
+        """
+        record = RunRecord(
+            run_id=uuid.uuid4().hex[:12],
+            trigger=TriggerKind.MANUAL,
+            started_at=time.time(),
+            band=band,
+            pressure=pressure,
+        )
+        meta = STEP_CATALOG.get(step_id, {})
+        title = str(meta.get("title", step_id))
+        self._planned_retire_plan = None
+        self._lane_report_cache = None
+        try:
+            with HousekeeperLock(self.lock_path):
+                if not step_enabled(self.cfg, step_id):
+                    record.steps.append(
+                        StepResult(step_id, title, StepStatus.SKIPPED, reason="step is off")
+                    )
+                    record.finish(2, summary="skipped; step is off")
+                    return record
+                sample = sample_mac()
+                mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
+                if mode == "hard" and step_id in _HEAVY_LANE_STEPS:
+                    record.steps.append(
+                        StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
+                    )
+                    record.finish()
+                    return record
+                failure = self._plan_step(step_id, dry_run)
+                if failure is not None:
+                    record.steps.append(failure)
+                    record.finish()
+                    return record
+                result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
+                record.steps.append(result)
+                record.finish()
+        except LockHeld as exc:
+            record.steps.append(
+                StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
+            )
+            record.finish(0, summary="skipped; peer holds lock")
+        finally:
+            self._planned_retire_plan = None
+            self._lane_report_cache = None
+        return record
+
+    def _plan_step(self, step_id: str, dry_run: bool) -> Optional[StepResult]:
+        """Prepare the work a step needs before it runs.
+
+        Returns a failed StepResult when the planning itself fails (an invalid keep list, for example), so
+        the step fails on its own terms instead of the run dying, and None when the step can go ahead."""
+        self._planned_retire_plan = None
+        if step_id != "janitor_worktree_retire":
+            return None
+        try:
+            keep_regex(self.cfg)  # an invalid keep list fails the step before the doctor runs
+            self._planned_retire_plan = plan_retire_worktrees(
+                self.cfg,
+                self.home,
+                self._runner,
+                report=lambda: self._lane_report(write=not dry_run),
+                clock=self._clock,
+                dry_run=dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 — bad operator config must not kill the tick
+            meta = STEP_CATALOG.get(step_id, {})
+            title = str(meta.get("title", step_id))
+            return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200])
+        return None
 
     def run_watch_tick(
         self, rw_state: dict[str, Any], prev_free: Optional[float], dry_run: bool = False

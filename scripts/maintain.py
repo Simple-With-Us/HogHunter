@@ -8,7 +8,8 @@ backward-compatible alias for installed launchd jobs and shims.
 Usage:
   maintain.py --tick scheduler          # every 5 min from launchd
   maintain.py --run-now full|janitor|watch
-  maintain.py --dry-run [--tick scheduler | --run-now full|janitor|watch|pressure]
+  maintain.py --run-step STEP_ID         # run exactly one step, by id
+  maintain.py --dry-run [--tick scheduler | --run-now full|janitor|watch|pressure | --run-step STEP_ID]
                                         # plan only: prints JSON, deletes and records nothing
   maintain.py --status [--json]
   maintain.py --check-alerts
@@ -138,6 +139,11 @@ def _build_parser(quiet: bool = False) -> _MaintainParser:
         ),
     )
     parser.add_argument("--run-now", choices=["watch", "janitor", "full", "pressure"], help="Run one cadence immediately")
+    parser.add_argument(
+        "--run-step",
+        metavar="STEP_ID",
+        help="Run exactly one step, by id.  The step's own toggle decides whether it runs.",
+    )
     parser.add_argument("--status", action="store_true", help="Print health and last run summary")
     parser.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON (with --status)")
     parser.add_argument("--check-alerts", action="store_true", help="Evaluate alerts and notify")
@@ -210,7 +216,7 @@ if _tick_timeout is not None:
     _start_tick_watchdog(_tick_timeout)
 
 from vacuum.alerts import NO_NOTIFY_ENV, evaluate_alerts, notify_macos  # noqa: E402
-from vacuum.config import STEP_CATALOG, load_config  # noqa: E402
+from vacuum.config import STEP_CATALOG, load_config, step_enabled  # noqa: E402
 from vacuum.engine import VacuumEngine  # noqa: E402
 from vacuum.models import TriggerKind  # noqa: E402
 from vacuum.scheduler import build_status, run_scheduler_tick, run_skipped_for_lock  # noqa: E402
@@ -261,14 +267,52 @@ def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_single_step(store: VacuumStore, args: argparse.Namespace) -> int:
+    """Run exactly one step, by id, and write the run the way --run-now writes it.
+
+    A dry run plans only: it prints the plan and writes nothing -- no history, no status, no scheduler
+    state.  A real run appends the record to history and publishes the status, and it never touches the
+    scheduler clock: a manual step is not a cadence, so it must not make one look like it has already run.
+    """
+    engine = VacuumEngine(store.cfg, store.home)
+    record = engine.run_single_step(str(args.run_step), dry_run=args.dry_run)
+    if args.dry_run:
+        os.environ[NO_NOTIFY_ENV] = "1"
+        print(json.dumps({"dry_run": True, "plan": engine.plan, "records": [record.as_dict()]}, indent=2))
+        return 0
+    store.append_run(record)
+    status = build_status(store, store.cfg)
+    store.publish_status(status)
+    if args.as_json:
+        print(json.dumps(record.as_dict(), indent=2))
+    else:
+        print(record.summary or f"run {record.run_id} exit={record.exit_code}")
+    return record.exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.run_step and args.run_now:
+        parser.error("--run-step and --run-now cannot be combined")
+
     if args.dry_run and (args.set_step or args.set_config or args.set_coolify_host or args.status or args.check_alerts):
-        parser.error("--dry-run only combines with --tick or --run-now")
+        parser.error("--dry-run only combines with --tick, --run-now or --run-step")
+
+    if args.run_step and args.run_step not in STEP_CATALOG:
+        # Refused before the store is opened, so an unknown step leaves nothing behind at all.
+        print(f"Unknown maintain step: {args.run_step}", file=sys.stderr)
+        return 2
 
     store = VacuumStore.open()
+
+    if args.run_step and not step_enabled(store.cfg, args.run_step):
+        # The toggle is the one on/off control for a step, so an explicit run must not work around it.
+        title = str(STEP_CATALOG[str(args.run_step)].get("title", args.run_step))
+        print(f"{title} is off. Turn it on first.", file=sys.stderr)
+        return 2
+
     bootstrap_registry(store.home, REPO_ROOT, store.cfg)
 
     if args.set_coolify_host is not None:
@@ -306,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
         store.save_config_value(key, val)
         print(f"config {key} -> {val}")
         return 0
+
+    if args.run_step:
+        return _run_single_step(store, args)
 
     if args.dry_run:
         return _dry_run(store, args)

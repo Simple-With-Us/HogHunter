@@ -7,6 +7,10 @@ struct SizeUsageRow: View {
     let percentChange: Double?
     var unavailable = false
     var fontSize: CGFloat = 11
+    /// The short status line shown beside the size.  The prior layout showed it
+    /// in the row; the redesigned panel moved it into the tooltip, which meant a
+    /// directory that was still being measured looked like a finished one.
+    var detail: String? = nil
 
     private let gap = "\u{00A0} "
 
@@ -37,6 +41,13 @@ struct SizeUsageRow: View {
                     .monospacedDigit()
                     .fixedSize()
             }
+            if let detail {
+                Text(gap + detail)
+                    .font(.system(size: max(8, fontSize - 1)))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
             Spacer(minLength: 0)
         }
         .font(.system(size: fontSize))
@@ -63,13 +74,25 @@ struct CodingDirectoriesView: View {
             }
             ForEach(store.rows) { row in
                 SizeUsageRow(name: row.title == "Derived Data" ? row.title : displayPath(row.displayPath), bytes: row.bytes,
-                             percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10)
+                             percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10,
+                             detail: status(row))
                     .help(detail(row))
                     .accessibilityHint(detail(row))
             }
         }
         .padding(9)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    /// The one-line status the row shows beside the size.
+    private func status(_ row: DirectoryUsageRow) -> String {
+        if row.scanStartedAt != nil, row.progressEntries > 0 {
+            return "\(HogFormat.memory(UInt64(max(0, row.progressBytes)))) scanned · \(row.progressEntries) entries · \(row.statusText.lowercased())"
+        }
+        if row.statusText == "Complete", let sampledAt = row.sampledAt {
+            return "walk began " + timestamp(sampledAt)
+        }
+        return row.statusText
     }
 
     private func detail(_ row: DirectoryUsageRow) -> String {
