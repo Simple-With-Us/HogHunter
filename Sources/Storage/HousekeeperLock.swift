@@ -39,6 +39,25 @@ import Darwin
 /// file inside the lock directory, because `mac-auto-cleanup.sh` releases the
 /// lock with a plain `rmdir`, and `rmdir` refuses a directory with anything
 /// in it.
+///
+/// The mutation guard
+/// ------------------
+/// The owner file makes a *dead* holder recoverable.  The guard is what makes
+/// a *racing* holder impossible.  The same housekeeper protocol is written in
+/// four places -- this file, `scripts/vacuum/lock.py`, and AFC's
+/// `mac-auto-cleanup.sh` and `mac-resource-watch.py` -- so all four hold the
+/// SAME guard: a plain file beside the lock directory, named
+/// `.housekeeper.lock.guard`, taken with an exclusive `flock`.
+///
+/// The guard is held across the whole critical section: the ownership check,
+/// the stale takeover, the removal, the `mkdir`, the owner-file publication,
+/// and every release path.  Two reclaimers that both decide to take a stale
+/// lock over cannot interleave inside it, and a release cannot slip between
+/// its own ownership check and its removal.
+///
+/// The guard file is NEVER deleted.  Deleting it would split the flock: two
+/// processes could each hold a different inode and both believe they hold the
+/// guard.
 final class HousekeeperLock {
     /// Where the lock lives when nothing else is injected.
     static let defaultPath = "~/.claude-disk-janitor/.housekeeper.lock"
@@ -59,10 +78,22 @@ final class HousekeeperLock {
         case heldByPeer
     }
 
+    /// The device and inode of a directory.
+    ///
+    /// Two paths with the same identity are the same directory, so the
+    /// identity tells the lock this process took from a lock a new holder
+    /// has put in its place.
+    struct FileIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+    }
+
     private let path: URL
     private let staleInterval: TimeInterval
     private let fileManager: FileManager
     private var ownsLock = false
+    /// The identity of the lock directory this process created.
+    private var lockIdentityAtAcquire: FileIdentity?
 
     init(path: URL = HousekeeperLock.defaultPathURL,
          staleMinutes: Double = HousekeeperLock.defaultStaleMinutes,
@@ -76,10 +107,19 @@ final class HousekeeperLock {
     ///
     /// It has to be a sibling, not a file inside the lock directory, because
     /// `mac-auto-cleanup.sh` releases the lock with a plain `rmdir` and
-    /// `rmdir` refuses a directory that has anything in it.
+    /// `rmdir` refuses a directory with anything in it.
     var ownerPath: URL {
         path.deletingLastPathComponent()
             .appendingPathComponent(path.lastPathComponent + ".owner")
+    }
+
+    /// The mutation guard that sits beside the lock directory.
+    ///
+    /// It is a sibling for the same reason the owner file is one, and it is
+    /// the same file the Python lock and AFC's scripts take.
+    var guardPath: URL {
+        path.deletingLastPathComponent()
+            .appendingPathComponent(path.lastPathComponent + ".guard")
     }
 
     /// True when this process is already the lock owner.
@@ -112,9 +152,17 @@ final class HousekeeperLock {
             return .acquired
         }
 
+        // The guard is held across the whole critical section: the
+        // ownership check, the stale takeover, the removal, the `mkdir` and
+        // the owner-file publication.  Two reclaimers that both decide to
+        // take the same stale lock over cannot interleave inside it.
+        let guardHandle = HousekeeperLock.acquireGuard(at: guardPath)
+        defer { HousekeeperLock.releaseGuard(guardHandle) }
+
         do {
             try createLockDirectory()
             ownsLock = true
+            lockIdentityAtAcquire = identity(at: path)
             writeOwnerFile()
             return .acquired
         } catch {
@@ -125,6 +173,7 @@ final class HousekeeperLock {
             do {
                 try createLockDirectory()
                 ownsLock = true
+                lockIdentityAtAcquire = identity(at: path)
                 writeOwnerFile()
                 return .acquired
             } catch {
@@ -140,12 +189,104 @@ final class HousekeeperLock {
     func release() {
         guard ownsLock else { return }
         ownsLock = false
-        removeOwnerFile()
-        removeIfEmpty()
+        // The guard is held across the ownership check and the removal, so
+        // a takeover cannot slip between them and lose its lock.
+        let guardHandle = HousekeeperLock.acquireGuard(at: guardPath)
+        defer { HousekeeperLock.releaseGuard(guardHandle) }
+        // The lock DIRECTORY goes first and the owner file second.  The
+        // other order strands the lock: if the directory removal fails
+        // after the owner file is gone, the lock is there with nobody
+        // owning it, and nothing can take it over until the whole stale
+        // window has passed.
+        if removeLockDirectory() {
+            removeOwnerFile()
+        }
     }
 
     deinit {
         release()
+    }
+
+    // MARK: - The mutation guard
+
+    /// One process's handle on the mutation guard of one lock.
+    private final class GuardHandle {
+        let key: String
+        let fd: Int32
+        /// The process that opened the descriptor.
+        ///
+        /// A forked child inherits the table, and the descriptors in it
+        /// belong to the parent.  The child has to open its own, or it
+        /// would take the parent's guard without ever asking for it.
+        let pid: pid_t
+        var depth: Int
+
+        init(key: String, fd: Int32, pid: pid_t) {
+            self.key = key
+            self.fd = fd
+            self.pid = pid
+            self.depth = 0
+        }
+    }
+
+    /// The guards this process holds, by path.
+    ///
+    /// The handle is kept rather than reopened, because `flock` belongs to
+    /// the open file description: a second descriptor on the same file is a
+    /// second lock, and taking it while this process already holds the first
+    /// would deadlock the process against itself.
+    private static var guardHandles: [String: GuardHandle] = [:]
+    private static let guardTable = NSLock()
+
+    /// Take the mutation guard for a lock.
+    ///
+    /// The guard is re-entrant inside one process: taking it again while
+    /// this process already holds it does not block, and it is let go only
+    /// when the last holder releases it.  Nothing that needs the guard is
+    /// ever waited for while the guard is held, so it cannot deadlock.
+    private static func acquireGuard(at guardPath: URL) -> GuardHandle? {
+        #if canImport(Darwin)
+        let key = guardPath.path
+        guardTable.lock()
+        defer { guardTable.unlock() }
+        if let existing = guardHandles[key], existing.pid == getpid() {
+            existing.depth += 1
+            return existing
+        }
+        try? FileManager.default.createDirectory(at: guardPath.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        // The guard file is never deleted.  Deleting it would split the
+        // flock, and two processes could each hold a different inode and
+        // both believe they hold the guard.
+        let fd = open(guardPath.path, O_RDWR | O_CREAT, 0o600)
+        guard fd >= 0 else { return nil }
+        guard flock(fd, LOCK_EX) == 0 else {
+            close(fd)
+            return nil
+        }
+        let handle = GuardHandle(key: key, fd: fd, pid: getpid())
+        handle.depth = 1
+        guardHandles[key] = handle
+        return handle
+        #else
+        return nil
+        #endif
+    }
+
+    /// Let the guard go, and close the descriptor when nobody holds it.
+    private static func releaseGuard(_ handle: GuardHandle?) {
+        #if canImport(Darwin)
+        guard let handle else { return }
+        guard handle.pid == getpid() else { return }
+        guardTable.lock()
+        defer { guardTable.unlock() }
+        handle.depth -= 1
+        guard handle.depth <= 0 else { return }
+        handle.depth = 0
+        _ = flock(handle.fd, LOCK_UN)
+        guardHandles.removeValue(forKey: handle.key)
+        close(handle.fd)
+        #endif
     }
 
     // MARK: - Internals
@@ -157,6 +298,24 @@ final class HousekeeperLock {
         try fileManager.createDirectory(at: path.deletingLastPathComponent(),
                                         withIntermediateDirectories: true)
         try fileManager.createDirectory(at: path, withIntermediateDirectories: false)
+    }
+
+    /// The device and inode of a path, when it can be read.
+    private func identity(at url: URL) -> FileIdentity? {
+        #if canImport(Darwin)
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return nil }
+        return FileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+        #else
+        return nil
+        #endif
+    }
+
+    /// True when the directory at a path is the lock this process took.
+    private func isOurLock(at url: URL) -> Bool {
+        guard let ours = lockIdentityAtAcquire else { return true }
+        guard let theirs = identity(at: url) else { return false }
+        return theirs == ours
     }
 
     /// True when the lock is older than the stale window.
@@ -194,8 +353,11 @@ final class HousekeeperLock {
         // decides the race and the file is only removed when it still names
         // the dead holder we found.
         let deadOwnerPid = ownerPid()
+        // The moved-aside name is derived from the lock path, so it works
+        // for any lock path and not only for the production one.
         let aside = path.deletingLastPathComponent()
-            .appendingPathComponent(".housekeeper.lock.stale-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("\(path.lastPathComponent).stale-\(UUID().uuidString)",
+                                     isDirectory: true)
         do {
             try fileManager.moveItem(at: path, to: aside)
         } catch {
@@ -223,17 +385,50 @@ final class HousekeeperLock {
         // Only the stale directory is gone, and only when it is empty, as the
         // Python side's `rmdir` would.
         if let contents = try? fileManager.contentsOfDirectory(atPath: aside.path), contents.isEmpty {
+            try? fileManager.removeItem(at: aside)
             // The owner file belongs to the holder we just moved aside.  It is
             // removed only when it still names that same pid, so a new
-            // holder's own file is never taken away.
-            if let deadOwnerPid, currentOwnerPid() == deadOwnerPid {
-                removeOwnerFile()
+            // holder's own file is never taken away.  It goes after the
+            // directory, because a lock with no owner file is a lock that
+            // nothing can take over until the whole stale window has passed.
+            if let deadOwnerPid {
+                removeOwnerFile(naming: deadOwnerPid)
             }
-            try? fileManager.removeItem(at: aside)
         } else {
             putBack(aside)
             return false
         }
+        return true
+    }
+
+    /// Remove the lock directory, but only when it is still the one this
+    /// process took.
+    ///
+    /// The directory is moved aside first, because a check and a removal are
+    /// two steps and a takeover can slip between them: the check says "this
+    /// is the lock I took", a new holder replaces the path with its own
+    /// lock, and the removal then takes the NEW holder's lock away while
+    /// that holder goes on believing it holds the lock.  Moving the
+    /// directory aside is one decision, and what lands there is whatever
+    /// was at the path, so it goes back untouched when it turns out not to
+    /// be ours.
+    ///
+    /// The Python side uses `rmdir`, which also refuses a non-empty
+    /// directory.  Matching that matters: the lock is a marker, and a
+    /// directory with contents in it is not the marker we made.
+    private func removeLockDirectory() -> Bool {
+        let aside = path.deletingLastPathComponent()
+            .appendingPathComponent("\(path.lastPathComponent).release-\(UUID().uuidString)",
+                                     isDirectory: true)
+        guard HousekeeperLock.moveExclusive(path, aside) else { return false }
+        let contents = (try? fileManager.contentsOfDirectory(atPath: aside.path)) ?? []
+        guard contents.isEmpty, isOurLock(at: aside) else {
+            // Not ours, or not the empty marker we made: put it back exactly
+            // as it was.
+            HousekeeperLock.moveExclusive(aside, path)
+            return false
+        }
+        try? fileManager.removeItem(at: aside)
         return true
     }
 
@@ -242,9 +437,9 @@ final class HousekeeperLock {
     /// The move refuses when the path is already taken, and that is the case
     /// to leave alone: a third caller created a lock in the instant the path
     /// was empty, and putting this one back would mean replacing theirs.  So
-    /// a failed put-back changes nothing.  The moved directory stays beside the
-    /// lock under its `.stale-` name and is never deleted, because it may be
-    /// a live peer's lock.
+    /// a failed put-back changes nothing.  The moved directory stays beside
+    /// the lock under its `.stale-` name and is never deleted, because it
+    /// may be a live peer's lock.
     ///
     /// The refusal has to be atomic.  `FileManager.moveItem` checks that the
     /// destination is free and then renames, so a peer that takes the path in
@@ -367,20 +562,27 @@ final class HousekeeperLock {
         try? data.write(to: ownerPath, options: .atomic)
     }
 
-    /// Remove the owner file.
+    /// Remove the owner file, but only when it is this process's own.
+    ///
+    /// A lock that was taken over while this one was still running names the
+    /// new holder now, and deleting that file takes away the new holder's
+    /// identity.  A file that names no readable pid belongs to nobody, so it
+    /// goes.
     private func removeOwnerFile() {
-        guard fileManager.fileExists(atPath: ownerPath.path) else { return }
+        guard let pid = ownerPid() else {
+            try? fileManager.removeItem(at: ownerPath)
+            return
+        }
+        guard pid == getpid() else { return }
         try? fileManager.removeItem(at: ownerPath)
     }
 
-    /// Remove the lock directory, but only when it is empty.
+    /// Remove the owner file, but only when it names a given pid.
     ///
-    /// The Python side uses `rmdir`, which also refuses a non-empty
-    /// directory.  Matching that matters: the lock is a marker, and a
-    /// directory with contents in it is not the marker we made.
-    private func removeIfEmpty() {
-        guard let contents = try? fileManager.contentsOfDirectory(atPath: path.path),
-              contents.isEmpty else { return }
-        try? fileManager.removeItem(at: path)
+    /// This is the takeover's rule: the file belongs to the holder that was
+    /// moved aside, and it goes only while it still names that holder.
+    private func removeOwnerFile(naming pid: Int32) {
+        guard currentOwnerPid() == pid else { return }
+        try? fileManager.removeItem(at: ownerPath)
     }
 }

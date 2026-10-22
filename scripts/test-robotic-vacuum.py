@@ -1787,6 +1787,31 @@ class TestPartialRunRecord(unittest.TestCase):
             status = build_status(self.store, self.cfg, now=time.time())
         self.assertIsNone(status["partial_run"])
 
+    def test_a_partial_older_than_a_completed_run_is_ignored(self):
+        # A run that finishes through a path that never clears the partial
+        # copy (the CLI's --run-now) must not be overwritten by a killed tick
+        # that came before it.
+        import dataclasses
+
+        killed, _hits, _cleaned = self.run_watch()
+        self.store.write_partial_run(killed)
+        later = dataclasses.replace(killed, run_id="later-run", started_at=killed.started_at + 60)
+        self.store.append_run(later)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertIsNone(status["partial_run"])
+
+    def test_a_partial_newer_than_every_completed_run_is_kept(self):
+        import dataclasses
+
+        done, _hits, _cleaned = self.run_watch()
+        self.store.append_run(done)
+        killed = dataclasses.replace(done, run_id="killed-run", started_at=done.started_at + 60)
+        self.store.write_partial_run(killed)
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertEqual(status["partial_run"]["run_id"], "killed-run")
+
 
 class TestTickBudget(unittest.TestCase):
     """The reclaim budget has to fit inside the tick the watchdog kills.
@@ -2129,6 +2154,351 @@ class TestHousekeeperLock(unittest.TestCase):
         with HousekeeperLock(self.lock_path):
             self.assertTrue(self.lock_path.is_dir(), "the dead owner's fresh lock was taken over")
 
+    def test_an_owner_file_with_an_unreadable_pid_does_not_break_the_acquire(self):
+        # The owner file is read by a peer that wants to know whether the
+        # holder is still alive.  A pid that cannot be read is no owner at
+        # all, and reading it must not raise out of the lock.
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(json.dumps({"pid": "not-a-pid"}))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_file_with_an_unreadable_pid_does_not_break_the_release(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        lock = HousekeeperLock(self.lock_path)
+        lock.__enter__()
+        owner_path_for(self.lock_path).write_text(json.dumps({"pid": None}))
+        lock.__exit__(None, None, None)
+        self.assertFalse(self.lock_path.exists())
+
+    def test_the_owner_file_is_published_with_a_replace(self):
+        # The owner file is published with a replace rather than written in
+        # place, so a reader never sees half of it.
+        from vacuum import lock as lock_module
+
+        owner = lock_module.owner_path_for(self.lock_path)
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        calls = []
+        real_replace = lock_module.os.replace
+
+        def spy(src, dst, *args, **kwargs):
+            calls.append((str(src), str(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        lock_module.os.replace = spy
+        try:
+            lock_module._write_owner(owner, self.lock_path)
+        finally:
+            lock_module.os.replace = real_replace
+
+        self.assertTrue(calls, "the owner file is published with a replace")
+        src, dst = calls[-1]
+        self.assertEqual(dst, str(owner))
+        self.assertEqual(Path(src).parent, owner.parent, "the temp file is beside the owner file")
+        self.assertFalse(Path(src).exists(), "the temp file is gone")
+        self.assertEqual(json.loads(owner.read_text())["pid"], os.getpid())
+
+    def test_a_failed_owner_publish_leaves_the_owner_file_untouched(self):
+        from vacuum import lock as lock_module
+
+        owner = lock_module.owner_path_for(self.lock_path)
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        owner.write_text(json.dumps({"pid": 1, "host": "keep-me"}))
+
+        real_replace = lock_module.os.replace
+
+        def boom(src, dst, *args, **kwargs):
+            raise OSError("publish failed")
+
+        lock_module.os.replace = boom
+        try:
+            lock_module._write_owner(owner, self.lock_path)
+        finally:
+            lock_module.os.replace = real_replace
+
+        self.assertEqual(
+            json.loads(owner.read_text()).get("host"),
+            "keep-me",
+            "a failed publish must leave the owner file exactly as it was",
+        )
+
+    def test_a_lock_held_on_another_host_is_not_taken_over_at_once(self):
+        # A pid only means something on the machine that owns it, so a lock
+        # held on another host may only be taken over once the stale window
+        # has passed.
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(
+            json.dumps({"pid": 999999, "host": "some-other-machine"})
+        )
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_lock_whose_owner_is_gone_on_this_host_is_still_taken_over_at_once(self):
+        import socket
+
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(
+            json.dumps({"pid": 999999, "host": socket.gethostname()})
+        )
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir(), "a dead holder on this host is taken over")
+
+    def test_a_failed_removal_leaves_the_owner_file_so_the_lock_is_still_recoverable(self):
+        # The lock directory goes first and the owner file second.  The
+        # other order strands the lock: a removal that fails after the
+        # owner file is gone leaves a lock that nobody owns and that
+        # nothing can take over until the whole stale window has passed.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            (self.lock_path / "leftover.txt").write_text("not ours")
+
+        # The lock directory has something in it, so it cannot be removed.
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertTrue(
+            owner_path_for(self.lock_path).is_file(),
+            "a lock that could not be removed keeps its owner file",
+        )
+
+    def test_a_takeover_that_replaces_the_canonical_lock_between_the_check_and_the_removal_keeps_the_new_holders_lock(self):
+        # The check and the removal are two steps, and a takeover can slip
+        # between them: the check says "this is the lock I took", a new
+        # holder replaces the path with its own lock, and the removal then
+        # takes the NEW holder's lock away while that holder goes on
+        # believing it holds the lock.
+        from vacuum import lock as lock_module
+
+        lock = lock_module.HousekeeperLock(self.lock_path)
+        lock.__enter__()
+
+        real_rmdir = lock_module.os.rmdir
+        injected = {"done": False}
+
+        def spy(path):
+            if not injected["done"]:
+                injected["done"] = True
+                # The takeover: a new holder replaces the canonical lock
+                # with its own, right here in the window.
+                self.lock_path.mkdir(parents=True, exist_ok=True)
+                lock_module.owner_path_for(self.lock_path).write_text(
+                    json.dumps({"pid": 999999})
+                )
+            return real_rmdir(path)
+
+        lock_module.os.rmdir = spy
+        try:
+            lock.__exit__(None, None, None)
+        finally:
+            lock_module.os.rmdir = real_rmdir
+
+        self.assertTrue(
+            self.lock_path.is_dir(),
+            "the new holder's lock must not be lost by the release",
+        )
+        owner = lock_module.owner_path_for(self.lock_path)
+        self.assertTrue(owner.is_file(), "the new holder's owner file must survive too")
+        self.assertEqual(json.loads(owner.read_text())["pid"], 999999)
+
+
+# A contender that tries to take the housekeeper lock the way a peer does.
+# It writes a marker first, so the parent knows it is running, and it
+# reports whether it got the lock.  It never releases the lock it took: the
+# question is whether the lock survived the race.
+CONTENDER_SCRIPT = """
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+from vacuum.lock import HousekeeperLock, LockHeld
+lock_path = Path(sys.argv[1])
+report = Path(sys.argv[2])
+Path(sys.argv[4]).write_text("started")
+result = {"acquired": False, "error": None}
+try:
+    lock = HousekeeperLock(lock_path)
+    lock.__enter__()
+    result["acquired"] = True
+except LockHeld as exc:
+    result["error"] = str(exc)
+except Exception as exc:
+    result["error"] = repr(exc)
+report.write_text(json.dumps(result))
+os._exit(0)
+"""
+
+# A process that takes the mutation guard and holds it for a while, the way
+# the shell side does while it is clearing the lock.
+GUARD_HOLDER_SCRIPT = """
+import fcntl, os, sys, time
+path = sys.argv[1]
+ready = sys.argv[2]
+seconds = float(sys.argv[3])
+fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(ready, "w").write("held")
+time.sleep(seconds)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+
+
+class TestHousekeeperLockGuard(unittest.TestCase):
+    """The mutation guard that every writer of the housekeeper protocol shares.
+
+    The same guard is taken by HogHunter's Python lock and Swift lock, and
+    by AFC's `mac-auto-cleanup.sh` and `mac-resource-watch.py`.  It is a
+    plain file beside the lock directory, held with an exclusive `flock`
+    over the whole critical section, and it is never deleted.
+
+    The tests here use a REAL second process, because the whole point of
+    the guard is that it works across processes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.tmp.name) / ".housekeeper.lock"
+        self.guard_path = self.lock_path.with_name(self.lock_path.name + ".guard")
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+
+    def tearDown(self):
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+        self.tmp.cleanup()
+
+    def _child_env(self) -> dict:
+        env = dict(os.environ)
+        env.pop("HOUSEKEEPER_LOCK_OWNER", None)
+        return env
+
+    def test_the_guard_is_a_sibling_file_beside_the_lock(self):
+        from vacuum.lock import HousekeeperLock
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.guard_path.is_file(), "the guard is a plain file")
+            self.assertFalse(self.guard_path.is_dir(), "the guard is not a directory")
+            self.assertEqual(self.guard_path.parent, self.lock_path.parent)
+            self.assertEqual(self.guard_path.name, self.lock_path.name + ".guard")
+            self.assertEqual(
+                list(self.lock_path.iterdir()),
+                [],
+                "the guard is a sibling, never inside the lock",
+            )
+
+    def test_the_guard_file_is_never_deleted(self):
+        from vacuum.lock import HousekeeperLock
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.guard_path.is_file())
+        self.assertTrue(
+            self.guard_path.is_file(),
+            "the guard file is never deleted: deleting it would split the flock",
+        )
+
+    def test_a_contender_cannot_publish_an_owner_file_while_the_guard_is_held(self):
+        # The guard is the cross-process mutex for the whole housekeeper
+        # protocol.  A contender that tries to take the lock while another
+        # process holds the guard has to wait, and it must not publish an
+        # owner file while it waits.
+        import fcntl
+
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.guard_path.parent.mkdir(parents=True, exist_ok=True)
+        report = Path(self.tmp.name) / "contender.json"
+        started = Path(self.tmp.name) / "contender.started"
+        fd = os.open(str(self.guard_path), os.O_RDWR | os.O_CREAT, 0o600)
+        child = None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    CONTENDER_SCRIPT,
+                    str(self.lock_path),
+                    str(report),
+                    str(REPO / "scripts"),
+                    str(started),
+                ],
+                env=self._child_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.time() + 30
+            while time.time() < deadline and not started.exists():
+                time.sleep(0.02)
+            self.assertTrue(started.exists(), "the contender started")
+            # Give the contender time to reach the guard.
+            time.sleep(0.5)
+            self.assertFalse(
+                owner_path_for(self.lock_path).exists(),
+                "a contender must not publish an owner file while the guard is held",
+            )
+            self.assertFalse(report.exists(), "a contender must wait for the guard")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        if child is not None:
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
+        self.assertTrue(
+            report.exists(),
+            "the contender goes through once the guard is free",
+        )
+        data = json.loads(report.read_text())
+        self.assertTrue(data["acquired"], data)
+
+    def test_the_release_waits_for_a_guard_another_process_holds(self):
+        # The release holds the guard across its ownership check and its
+        # removal, so a peer that holds the guard holds the release up.
+        from vacuum.lock import HousekeeperLock
+
+        self.guard_path.parent.mkdir(parents=True, exist_ok=True)
+        # The lock is taken first, so the only thing the release has to wait
+        # for is the guard.
+        lock = HousekeeperLock(self.lock_path)
+        lock.__enter__()
+        ready = Path(self.tmp.name) / "holder.ready"
+        holder = subprocess.Popen(
+            [sys.executable, "-c", GUARD_HOLDER_SCRIPT, str(self.guard_path), str(ready), "2"],
+            env=self._child_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline and not ready.exists():
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "the other process holds the guard")
+
+            started = time.time()
+            lock.__exit__(None, None, None)
+            elapsed = time.time() - started
+        finally:
+            try:
+                holder.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=10)
+        self.assertGreaterEqual(
+            elapsed,
+            1.0,
+            "the release must wait for the guard another process holds",
+        )
+
 
 class TestCadenceSelection(unittest.TestCase):
     """One cadence per tick.
@@ -2242,6 +2612,301 @@ class TestCadenceSelection(unittest.TestCase):
             result = run_dry_tick(store, now=now)
             self.assertEqual(len(result["selected"]), 1, result["selected"])
             self.assertEqual(len(result["records"]), 1, "the dry run plans one cadence, like the real tick")
+
+
+class TestCadenceOccupancy(unittest.TestCase):
+    """One cadence per tick, and what that means for the cadences it leaves behind.
+
+    A tick runs at most one cadence.  The other due cadences wait their
+    turn, and a cadence that is waiting is not a cadence that has failed:
+    the alert layer must not send an overdue banner for it, and the status
+    must not call it overdue either.  The two surfaces read the same fact,
+    so they must not disagree about it.
+    """
+
+    INTERVALS = {"watch": 300, "janitor": 1800, "full": 14400}
+
+    def _store(self, td: str) -> "VacuumStore":
+        home = Path(td)
+        data = home / "rv"
+        data.mkdir(parents=True)
+        cfg = load_config(home=home)
+        cfg["data_dir"] = str(data)
+        cfg["intervals_seconds"] = dict(self.INTERVALS)
+        cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+        return VacuumStore(cfg, home=home)
+
+    def _watch_run(self, store: VacuumStore, ended_at: float, failed: bool = False) -> None:
+        """A finished watch run, the way the history keeps it."""
+        step = StepResult(
+            "resource_sample",
+            "Resource sample",
+            StepStatus.FAILED if failed else StepStatus.RAN,
+            reason="no answer" if failed else "",
+        )
+        record = RunRecord(
+            run_id="watch-1",
+            trigger=TriggerKind.WATCH,
+            started_at=ended_at - 1,
+            ended_at=ended_at,
+            steps=[step],
+        )
+        if failed:
+            record.exit_code = 1
+            record.outcome = RunOutcome.FAILED.value
+        store.append_run(record)
+
+    def _scenario(self, store: VacuumStore, now: float, watch_failed: bool = False) -> None:
+        """A watch cadence that is overdue, and a janitor that occupies the tick.
+
+        The watch last ran well over its own interval ago, so it is
+        overdue by the rule the alert layer uses, and it is due now.  The
+        janitor is due as well and more overdue, so it is the cadence that
+        takes the tick and the watch is the one that waits.
+        """
+        self._watch_run(store, ended_at=now - 1000, failed=watch_failed)
+        store.touch_scheduler("last_watch", now - 1000)
+        store.touch_scheduler("last_janitor", now - 3600)
+        store.touch_scheduler("last_full", now)
+
+    def _tick(self, store: VacuumStore, now: float):
+        """Run one tick with the engine stubbed out, and return the result."""
+        from vacuum.scheduler import run_scheduler_tick
+
+        def fake_run(self, trigger, band="cheap", dry_run=False):
+            record = RunRecord(run_id="tick-1", trigger=trigger, started_at=now, ended_at=now)
+            record.steps = [StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED)]
+            return record
+
+        with patch("vacuum.engine.VacuumEngine.run", fake_run):
+            with patch("vacuum.alerts.notify_macos") as notify:
+                with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                    result = run_scheduler_tick(store, now=now)
+        return result, notify
+
+    def _messages(self, notify) -> list:
+        return [call.args[1] for call in notify.call_args_list]
+
+    # MARK: - The alert layer
+
+    def test_a_cadence_another_cadence_occupied_is_not_reported_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            _result, notify = self._tick(store, now)
+            messages = self._messages(notify)
+            self.assertFalse(
+                any("pressure check" in m for m in messages),
+                f"a cadence that waited its turn must not be reported overdue: {messages}",
+            )
+
+    def test_a_cadence_whose_last_run_failed_is_still_reported_overdue(self):
+        # A cadence that broke is not a cadence that waited.  The banner has
+        # to keep saying so.
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now, watch_failed=True)
+            _result, notify = self._tick(store, now)
+            messages = self._messages(notify)
+            self.assertTrue(
+                any("pressure check" in m for m in messages),
+                f"a cadence whose last run failed must still be reported: {messages}",
+            )
+
+    # MARK: - The status the panel reads
+
+    def test_the_status_does_not_call_a_skipped_cadence_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            result, _notify = self._tick(store, now)
+            status = result["status"]
+            self.assertNotEqual(
+                status["health"],
+                "overdue",
+                "the panel must not call a waiting cadence overdue while the banner stays quiet",
+            )
+
+    def test_the_status_publishes_a_next_run_that_is_not_in_the_past(self):
+        # The published next run must never be a time that has gone by: the
+        # panel shows it, and a time in the past reads as "this never runs".
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            result, _notify = self._tick(store, now)
+            status = result["status"]
+            self.assertGreater(
+                float(status["next_run_at"]["watch"]),
+                now,
+                "the published next run of a waiting cadence must not be in the past",
+            )
+
+    def test_the_status_still_calls_a_failed_cadence_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now, watch_failed=True)
+            result, _notify = self._tick(store, now)
+            status = result["status"]
+            self.assertEqual(
+                status["health"],
+                "overdue",
+                "a cadence whose last run failed must still be reported overdue",
+            )
+
+    def test_the_status_records_the_cadence_that_occupied_the_tick(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            result, _notify = self._tick(store, now)
+            occupancy = result["status"]["tick_occupancy"]
+            self.assertEqual(occupancy["occupied"], "janitor", occupancy)
+            self.assertIn("watch", occupancy["skipped"], occupancy)
+            self.assertIn("occupied the tick", occupancy["skipped"]["watch"], occupancy)
+
+
+class TestOccupancyClaimFallback(unittest.TestCase):
+    """A reader that joined no tick still has to see the same truth.
+
+    The tick hands the occupancy to the surfaces it builds.  Every other
+    reader -- the status command, and a manual run that publishes a status
+    afterwards -- has to learn it from the store, and it has to learn the
+    same thing, or the panel and the banner disagree about the same fact.
+    The claim expires, because a scheduler that stopped ticking is a
+    different thing from a cadence that is waiting its turn.
+    """
+
+    INTERVALS = {"watch": 300, "janitor": 1800, "full": 14400}
+
+    def _store(self, td: str) -> "VacuumStore":
+        home = Path(td)
+        data = home / "rv"
+        data.mkdir(parents=True)
+        cfg = load_config(home=home)
+        cfg["data_dir"] = str(data)
+        cfg["intervals_seconds"] = dict(self.INTERVALS)
+        cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+        return VacuumStore(cfg, home=home)
+
+    def _watch_run(self, store: VacuumStore, ended_at: float) -> None:
+        step = StepResult("resource_sample", "Resource sample", StepStatus.RAN)
+        record = RunRecord(
+            run_id="watch-1",
+            trigger=TriggerKind.WATCH,
+            started_at=ended_at - 1,
+            ended_at=ended_at,
+            steps=[step],
+        )
+        store.append_run(record)
+
+    def _scenario(self, store: VacuumStore, now: float) -> None:
+        """A watch cadence that is overdue, and a janitor that occupies the tick."""
+        self._watch_run(store, ended_at=now - 1000)
+        store.touch_scheduler("last_watch", now - 1000)
+        store.touch_scheduler("last_janitor", now - 3600)
+        store.touch_scheduler("last_full", now)
+
+    def _tick(self, store: VacuumStore, now: float):
+        from vacuum.scheduler import run_scheduler_tick
+
+        def fake_run(self, trigger, band="cheap", dry_run=False):
+            record = RunRecord(run_id="tick-1", trigger=trigger, started_at=now, ended_at=now)
+            record.steps = [StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED)]
+            return record
+
+        with patch("vacuum.engine.VacuumEngine.run", fake_run):
+            with patch("vacuum.alerts.notify_macos"):
+                with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                    return run_scheduler_tick(store, now=now)
+
+    def test_a_reader_that_joined_no_tick_does_not_call_a_waiting_cadence_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            status = build_status(store, store.cfg)
+            self.assertNotEqual(
+                status["health"],
+                "overdue",
+                "a reader that joined no tick must not call a waiting cadence overdue",
+            )
+
+    def test_a_reader_that_joined_no_tick_publishes_a_next_run_that_is_not_in_the_past(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            status = build_status(store, store.cfg)
+            self.assertGreater(
+                float(status["next_run_at"]["watch"]),
+                now,
+                "the published next run of a waiting cadence must not be in the past",
+            )
+
+    def test_an_expired_claim_brings_the_overdue_report_back(self):
+        # A claim that a cadence was waiting only stays believable while a
+        # tick could still arrive to service it.  Once it expires, the
+        # cadence reads overdue again, because that is what a scheduler that
+        # stopped ticking looks like.
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            occupancy = dict(store.scheduler_state().get("tick_occupancy") or {})
+            occupancy["at"] = now - 100000
+            store.merge_scheduler_state({"tick_occupancy": occupancy})
+            status = build_status(store, store.cfg)
+            self.assertEqual(
+                status["health"],
+                "overdue",
+                "an expired claim must not keep a cadence quiet forever",
+            )
+
+    def test_the_alert_reader_agrees_with_the_status_reader(self):
+        # The alert reader builds its view the way the command line does,
+        # from the claim in the store, and it has to reach the same answer
+        # the status reader reaches.
+        from vacuum.scheduler import current_occupancy, occupancy_view
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            view = occupancy_view(store, current_occupancy(store, store.cfg))
+            with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                decisions = evaluate_alerts(view, store.cfg)
+            messages = [d.message for d in decisions if d.should_notify]
+            self.assertFalse(
+                any("pressure check" in m for m in messages),
+                f"a cadence that waited its turn must not raise a banner: {messages}",
+            )
+
+    def test_a_fresh_claim_outlives_a_tick_that_ran_late(self):
+        # The claim survives two tick periods, so a tick that ran late does
+        # not make a waiting cadence look overdue.
+        from vacuum.scheduler import current_occupancy, occupancy_claim_lifetime
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            occupancy = dict(store.scheduler_state().get("tick_occupancy") or {})
+            occupancy["at"] = now - (occupancy_claim_lifetime(store.cfg) - 1)
+            store.merge_scheduler_state({"tick_occupancy": occupancy})
+            self.assertIsNotNone(
+                current_occupancy(store, store.cfg),
+                "a claim inside its lifetime must still be believable",
+            )
 
 
 def load_tests(loader, tests, pattern):

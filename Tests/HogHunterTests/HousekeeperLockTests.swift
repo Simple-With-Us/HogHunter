@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import HogHunter
 
 /// Covers the Swift side of the housekeeper lock.
@@ -348,5 +349,203 @@ final class HousekeeperLockTests: XCTestCase {
                       "the put-back must move onto a free path")
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path))
+    }
+
+    // MARK: - The release
+
+    func testReleaseDoesNotRemoveTheNewHoldersOwnerFile() {
+        // The lock was taken over while this one was still running, so the
+        // owner file names the new holder now.  Deleting it takes away the
+        // new holder's identity and leaves it holding a lock that nobody
+        // owns.
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired)
+
+        writeOwner(pid: 999_999)
+        lock.release()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ownerPath.path),
+                      "the new holder's owner file must not be removed")
+    }
+
+    func testAFailedRemovalLeavesTheOwnerFileSoTheLockIsStillRecoverable() {
+        // The lock directory goes first and the owner file second.  The
+        // other order strands the lock: a removal that fails after the
+        // owner file is gone leaves a lock that nobody owns and that
+        // nothing can take over until the whole stale window has passed.
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired)
+        let inside = lockPath.appendingPathComponent("leftover.txt")
+        FileManager.default.createFile(atPath: inside.path, contents: Data("busy".utf8))
+
+        lock.release()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path),
+                      "a lock with contents in it is not removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ownerPath.path),
+                      "a lock that could not be removed keeps its owner file")
+    }
+
+    func testTheStaleAsideNameIsDerivedFromTheLockPath() {
+        // The moved-aside name has to follow the lock path, or the copy
+        // lands beside the lock under a name that belongs to no lock.
+        let custom = root.appendingPathComponent("custom.lock", isDirectory: true)
+        try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+        let old = Date().addingTimeInterval(-(HousekeeperLock.defaultStaleMinutes + 5) * 60)
+        try? FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: custom.path)
+
+        let recorder = HousekeeperRecordingFileManager()
+        let lock = HousekeeperLock(path: custom, fileManager: recorder)
+        XCTAssertEqual(lock.acquire(), .acquired)
+
+        let asides = recorder.movedDestinations.filter { $0.lastPathComponent.contains(".stale-") }
+        XCTAssertEqual(asides.count, 1,
+                       String(describing: recorder.movedDestinations.map(\.lastPathComponent)))
+        XCTAssertTrue(asides[0].lastPathComponent.hasPrefix("custom.lock.stale-"),
+                      asides[0].lastPathComponent)
+        XCTAssertFalse(asides[0].lastPathComponent.contains(".housekeeper.lock"),
+                       asides[0].lastPathComponent)
+        lock.release()
+    }
+
+    // MARK: - The mutation guard
+
+    /// The guard is the cross-process mutex for the whole housekeeper
+    /// protocol.  The same file is taken by HogHunter's Python lock and by
+    /// AFC's shell scripts, so the tests here use a REAL second process:
+    /// the point of the guard is that it works across processes.
+
+    private var guardURL: URL {
+        lockPath.deletingLastPathComponent()
+            .appendingPathComponent(lockPath.lastPathComponent + ".guard")
+    }
+
+    func testTheGuardIsASiblingFileBesideTheLock() {
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired)
+
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: guardURL.path, isDirectory: &isDirectory))
+        XCTAssertFalse(isDirectory.boolValue, "the guard is a plain file")
+        XCTAssertEqual(guardURL.deletingLastPathComponent().path, lockPath.deletingLastPathComponent().path)
+        XCTAssertEqual(guardURL.lastPathComponent, lockPath.lastPathComponent + ".guard")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
+
+        lock.release()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: guardURL.path),
+                      "the guard file is never deleted: deleting it would split the flock")
+    }
+
+    /// A child process that takes the mutation guard and holds it.
+    ///
+    /// The child is a real second process, because the whole point of the
+    /// guard is that it works across processes.  Python is the interpreter
+    /// this repository already depends on, and the guard is a plain file
+    /// with an exclusive `flock` on it, which is all the child needs.
+    private func guardHolder(seconds: Double, ready: URL) throws -> Process {
+        guard let interpreter = HousekeeperLockTests.python3Path() else {
+            throw XCTSkip("no python3 on this host to run the second process with")
+        }
+        let script = """
+        import fcntl, os, sys, time
+        fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        open(sys.argv[2], "w").write("held")
+        time.sleep(float(sys.argv[3]))
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: interpreter)
+        process.arguments = ["-c", script, guardURL.path, ready.path, String(seconds)]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        return process
+    }
+
+    /// The python3 on this host, when there is one.
+    static func python3Path() -> String? {
+        let searchPath = ProcessInfo.processInfo.environment["PATH"]
+            ?? "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+        for directory in searchPath.split(separator: ":") {
+            let candidate = URL(fileURLWithPath: String(directory))
+                .appendingPathComponent("python3")
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate.path
+            }
+        }
+        return nil
+    }
+
+    func testTheAcquireWaitsForAGuardAnotherProcessHolds() throws {
+        // The acquire holds the guard across the ownership check, the
+        // stale takeover, the removal, the `mkdir` and the owner-file
+        // publication, so a peer that holds the guard holds the acquire up
+        // and no owner file is published while it waits.
+        let ready = root.appendingPathComponent("holder.ready")
+        let holder = try guardHolder(seconds: 2, ready: ready)
+        defer { holder.terminate() }
+
+        let deadline = Date().addingTimeInterval(30)
+        while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path),
+                      "the other process holds the guard")
+
+        let lock = HousekeeperLock(path: lockPath)
+        let started = Date()
+        XCTAssertEqual(lock.acquire(), .acquired)
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertGreaterThan(elapsed, 1.0,
+                             "the acquire must wait for the guard another process holds")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ownerPath.path))
+        lock.release()
+    }
+
+    func testTheReleaseWaitsForAGuardAnotherProcessHolds() throws {
+        // The release holds the guard across its ownership check and its
+        // removal, so a peer that holds the guard holds the release up.
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired)
+
+        let ready = root.appendingPathComponent("holder.ready")
+        let holder = try guardHolder(seconds: 2, ready: ready)
+        defer { holder.terminate() }
+
+        let deadline = Date().addingTimeInterval(30)
+        while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path),
+                      "the other process holds the guard")
+
+        let started = Date()
+        lock.release()
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertGreaterThan(elapsed, 1.0,
+                             "the release must wait for the guard another process holds")
+    }
+}
+
+/// A file manager that records what the lock did to the disk.
+///
+/// The lock takes a file manager so a test can see the moves it makes
+/// without changing how the lock behaves.
+final class HousekeeperRecordingFileManager: FileManager {
+    var movedDestinations: [URL] = []
+    var removedURLs: [URL] = []
+
+    override func moveItem(at src: URL, to dst: URL) throws {
+        movedDestinations.append(dst)
+        try super.moveItem(at: src, to: dst)
+    }
+
+    override func removeItem(at URL: URL) throws {
+        removedURLs.append(URL)
+        try super.removeItem(at: URL)
     }
 }
