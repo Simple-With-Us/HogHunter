@@ -164,8 +164,39 @@ The mark has to be laid out at its true size in the page.  An SVG carries its ow
 ```bash
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
+# browser_running() says whether the browser is still running.  A browser
+# that has exited but has not been reaped yet is a zombie, and a zombie
+# still answers kill -0, so the liveness probe asks for the process state
+# as well: a render that finished in two seconds must never look like a
+# deadline timeout, because that wastes a second deadline on the retry and
+# can fail every size of a rebuild that was working.
+# Only a state that was actually read ends the wait, though.  A ps that is
+# missing, restricted, or too old to understand the stat= form prints
+# nothing and fails, and a probe that cannot tell a live browser from a dead
+# one must not guess: reading that empty answer as "exited" kills a browser
+# that is working about a second after it starts, fails every size of the
+# rebuild, and leaves the operator holding "render failed" and no hint that
+# the recipe killed the browser itself.  So an unreadable state counts as
+# still running, and kill -0 stays the authoritative "the pid is really
+# gone" test, which ends the wait on the next iteration once the process
+# really has been reaped.
+browser_running() {  # $1 pid
+  kill -0 "$1" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$1" 2>/dev/null)" || return 0
+  # ps pads its answer on some systems, so the state is read as its first word
+  set -f; set -- $state; set +f
+  case "$1" in
+    Z*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
-  tmp="$(mktemp -d)"
+  tmp="$(mktemp -d)" || tmp=""
+  if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+    echo "render failed: no temporary directory for $1 at $2 px" >&2
+    return 1
+  fi
   sed "s/width=\"1024\" height=\"1024\"/width=\"$2\" height=\"$2\"/" "$1" > "$tmp/mark.svg"
   printf '<!doctype html><html><head><style>html,body{margin:0;padding:0;background:transparent}svg{display:block}</style></head><body>%s</body></html>' \
     "$(cat "$tmp/mark.svg")" > "$tmp/r.html"
@@ -173,48 +204,123 @@ render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
   # runs under a 90 second deadline and gets one retry.  Each attempt gets its
   # own profile directory, because a killed Chrome leaves a stale singleton
   # lock behind and a retry that reuses that profile can hang the same way.
+  # Chrome writes into the temporary directory and the render is published onto
+  # its target only after it has been verified, so a failed attempt can
+  # neither delete the file already sitting on the target nor leave a
+  # truncated one behind.  The publish is staged inside the target's own
+  # directory and then renamed onto it, because a move across filesystems is
+  # a copy and a unlink, and an interrupted copy truncates the file it is
+  # writing over.  Chrome's own output goes to a file as well, and a Chrome
+  # killed at the deadline has its helper processes killed with it: those
+  # helpers hold the pipe open, which hangs a caller that is reading the
+  # output of the block, and they keep burning CPU for the rest of the run,
+  # which makes the next render likelier to hang as well.
   status=1
   for attempt in 1 2; do
-    # clear the target before every attempt, so a file left by an earlier run
-    # can never satisfy the size check below
-    rm -f "$3"
+    out="$tmp/out.png"
+    rm -f "$out"
     "$CHROME" --headless=new --disable-gpu --no-sandbox --force-device-scale-factor=1 \
       ${4:+--default-background-color=00000000} \
-      --virtual-time-budget=1500 --screenshot="$3" --window-size="$2,$2" \
-      --user-data-dir="$tmp/profile-$attempt" "file://$tmp/r.html" &
+      --virtual-time-budget=1500 --screenshot="$out" --window-size="$2,$2" \
+      --user-data-dir="$tmp/profile-$attempt" "file://$tmp/r.html" \
+      > "$tmp/chrome.log" 2>&1 &
     pid=$!
     # date-based deadline: works under any POSIX sh, not only bash (SECONDS
     # is bash-only and silently unset under dash)
     deadline=$(( $(date +%s) + 90 ))
-    while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+    while browser_running "$pid" && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+    # a browser that is still running here has reached the deadline, so the
+    # attempt is a failure whatever it goes on to write, and its helper
+    # processes go with it: they hold the pipe open and they keep burning
+    # CPU for the rest of the run.  The descendants are killed while the
+    # browser is still alive, because a browser that is killed first hands
+    # them to init and they are no longer its children.
+    timed_out=0
+    if browser_running "$pid"; then
+      timed_out=1
+      pkill -9 -P "$pid" 2>/dev/null
+    fi
     kill -9 "$pid" 2>/dev/null
+    # any process that still holds the profile goes with it, whether or not
+    # it is a child of the browser; the pattern names the profile path
+    # rather than the switch, so a helper that carries the profile in some
+    # other argument is caught as well
+    pkill -9 -f "$tmp/profile-$attempt" 2>/dev/null
     if wait "$pid"; then status=0; else status=$?; fi
-    [ "$status" -eq 0 ] && [ -s "$3" ] && break
+    # a browser that was still running at the deadline never finished, so the
+    # attempt fails even if it goes on to exit zero after its helpers die
+    [ "$timed_out" -eq 1 ] && status=1
+    if [ "$status" -eq 0 ] && [ -s "$out" ]; then
+      # publish atomically: stage the file inside the target's own directory
+      # and rename it onto the target, so an interrupted copy can never
+      # truncate the file that is already there
+      staged="$(dirname "$3")/.$(basename "$3").render.$$"
+      if cp "$out" "$staged" && mv -f "$staged" "$3"; then
+        rm -rf "$tmp"
+        return 0
+      fi
+      rm -f "$staged"
+      echo "render failed: cannot publish $out onto $3" >&2
+      # the log says why the publish failed, and the verified render is kept
+      # at a path of its own, because the temporary directory holds a Chrome
+      # profile and is not left behind.  The name comes from mktemp, so it
+      # is unique and it is created exclusively: a symlink planted under a
+      # predictable name in a shared temporary directory is never written
+      # through.
+      if [ -s "$tmp/chrome.log" ]; then cat "$tmp/chrome.log" >&2; fi
+      keep="$(mktemp "${TMPDIR:-/tmp}/hoghunter-favicon-failed-$(basename "$3").XXXXXX" 2>/dev/null)" || keep=""
+      if [ -n "$keep" ] && cp "$out" "$keep" 2>/dev/null; then
+        echo "render failed: the verified render is kept at $keep" >&2
+      else
+        echo "render failed: the verified render could NOT be kept" >&2
+      fi
+      rm -rf "$tmp"
+      return 1
+    fi
     # a killed attempt can leave a truncated file behind, so clear it before
-    # the retry and again on the way out
-    rm -f "$3"
+    # the retry
+    rm -f "$out"
   done
+  # the log says why the render failed, so it is printed before the temporary
+  # directory goes away
+  if [ -s "$tmp/chrome.log" ]; then cat "$tmp/chrome.log" >&2; fi
   rm -rf "$tmp"
-  # a failed render has to stop the recipe, and it must not leave a stale or
-  # partial PNG behind for the ICO pack step to pick up and desync from the
-  # sources
-  [ "$status" -eq 0 ] && [ -s "$3" ] || { rm -f "$3"; return 1; }
+  echo "render failed: $1 at $2 px" >&2
+  return 1
 }
 
 rebuild_favicons() {
   # return, not exit: this block is meant to be pasted into an interactive
   # shell, and a failed render must not kill that shell and its session
-  render Brand/HogHunter-Favicon-16.svg 16 Brand/favicon-16.png || return 1
-  render Brand/HogHunter-Favicon-32.svg 32 Brand/favicon-32.png || return 1
-  render Brand/HogHunter-Favicon-32.svg 48 Brand/favicon-48.png || return 1
-  render Brand/HogHunter-Favicon-32.svg 64 Brand/favicon-64.png || return 1
-  render Brand/HogHunter-Favicon-Tile.svg 32 Brand/favicon-tile-32.png transparent || return 1
-  render Brand/HogHunter-Favicon-Tile.svg 64 Brand/favicon-tile-64.png transparent || return 1
+  # Every size is rendered into a staging directory next to the tracked PNGs,
+  # and the tracked PNGs are published only once all six renders have
+  # succeeded, so a rebuild that fails halfway leaves the tracked set exactly
+  # as it was instead of a mixture of old and new files.
+  stage="Brand/.favicon-stage.$$"
+  rm -rf "$stage"
+  mkdir -p "$stage" || { echo "render failed: cannot create the staging directory $stage" >&2; return 1; }
+  render Brand/HogHunter-Favicon-16.svg 16 "$stage/favicon-16.png" || { rm -rf "$stage"; return 1; }
+  render Brand/HogHunter-Favicon-32.svg 32 "$stage/favicon-32.png" || { rm -rf "$stage"; return 1; }
+  render Brand/HogHunter-Favicon-32.svg 48 "$stage/favicon-48.png" || { rm -rf "$stage"; return 1; }
+  render Brand/HogHunter-Favicon-32.svg 64 "$stage/favicon-64.png" || { rm -rf "$stage"; return 1; }
+  render Brand/HogHunter-Favicon-Tile.svg 32 "$stage/favicon-tile-32.png" transparent || { rm -rf "$stage"; return 1; }
+  render Brand/HogHunter-Favicon-Tile.svg 64 "$stage/favicon-tile-64.png" transparent || { rm -rf "$stage"; return 1; }
+  # every render succeeded, so the set can be published; each publish is a
+  # rename inside Brand, which is atomic
+  for name in favicon-16.png favicon-32.png favicon-48.png favicon-64.png favicon-tile-32.png favicon-tile-64.png; do
+    if ! mv -f "$stage/$name" "Brand/$name"; then
+      echo "render failed: cannot publish $stage/$name onto Brand/$name" >&2
+      rm -rf "$stage"
+      return 1
+    fi
+  done
+  rm -rf "$stage"
+  return 0
 }
 rebuild_favicons
 ```
 
-Four details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed at the deadline leaves that same stale lock behind, so a retry that reuses the profile can hang exactly the way the first attempt did.  A headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above gives each attempt a 90 second deadline and one retry on a clean profile, and it returns non-zero when both attempts fail or when the PNG is missing, so a failed render stops the recipe instead of leaving a stale file behind for the ICO pack step to pick up.  The deadline is 90 seconds and not 30 because a healthy render is not quick: the slowest single healthy render measured 24 seconds on this machine, so 90 seconds covers that worst case with margin, while a 30 second deadline was killing healthy renders and the recipe failed at the 64 px render with no PNG to show for it.  The roughly 220 seconds a full pass takes is an end-to-end figure for all six renders including profile setup, poll sleeps, and retry attempts, not six back-to-back 24 second renders.  A failed attempt also deletes its own output, and every attempt clears the target before Chrome starts, so a render killed at the deadline cannot leave a truncated PNG behind for the pack step to find and a PNG left by an earlier run cannot pass the size check.  The old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
+Eleven details are load bearing.  Chrome composites a headless screenshot onto white by default, so the tile renders need `--default-background-color=00000000` or their transparent corners come out white.  Every render needs its own `--user-data-dir`, and so does every attempt inside one render: sharing one profile across renders makes Chrome hang on a stale singleton lock, and a Chrome killed at the deadline leaves that same stale lock behind, so a retry that reuses that profile can hang exactly the way the first attempt did.  A headless render is not always reliable: `--headless=new` sometimes hangs and never writes the file, so the recipe above gives each attempt a 90 second deadline and one retry on a clean profile, and it returns non-zero when both attempts fail or when the PNG is missing.  The deadline comes from `date +%s` and not from bash's `SECONDS`, so the block runs under a POSIX `sh` as well as under bash: with `SECONDS` the poll loop fails its first comparison in a POSIX shell, kills Chrome straight away, and the recipe can never produce a PNG.  Chrome writes into a temporary directory and the render is published onto its target only after it has been verified, so a failed attempt can neither delete the file already sitting on the target nor leave a truncated one behind, and a file left by an earlier run can never satisfy the size check, because the check is made against the temporary file and never against the target.  The publish is staged inside the target's own directory and then renamed onto it, because `mv` across filesystems is a copy and a unlink: an interrupted copy truncates the file it is writing over, which is the very thing the temporary file was there to prevent.  Every size is rendered into a staging directory next to the tracked PNGs, and the tracked PNGs are published only once all six renders have succeeded, so a rebuild that fails halfway leaves the tracked set exactly as it was rather than a mixture of old and new files, and the `.ico` still carries the pixels of the PNGs it was packed from.  Every `cp` and every `mv` has its status checked, so a publish that fails is reported and stops the rebuild instead of leaving the run green with stale assets, and the verified render is kept at a path of its own, at a name `mktemp` makes unique and exclusive, so a symlink planted under a predictable name in a shared temporary directory is never written through, while the temporary directory, which holds a Chrome profile, is not left behind.  Chrome's own output goes to a file in the temporary directory rather than to the caller's stdout, a Chrome killed at the deadline has its helper processes killed with it, and that log is printed to stderr before the temporary directory is removed, so a failed render says why it failed instead of only that it failed.  The temporary directory is checked before any path is derived from it, because an empty one would turn the render's output into a path at the root of the filesystem.  The renders sit inside a function that returns rather than exiting, so a failed render stops the rebuild and names itself on stderr without closing the shell the block was pasted into, while a script running the block still exits non-zero.  The deadline is 90 seconds and not 30 because a healthy render is not quick and the spread is wide: a single attempt has measured between 2 and 33 seconds on this machine, and a run that completed all six renders has measured between about 17 and 129 seconds end to end, so a 30 second deadline was cutting healthy attempts short and the recipe failed at the 64 px render with no PNG to show for it.  The deadline has a job of its own too: across five timed runs one attempt hung for the full 90 seconds and was killed, the retry failed as well, and the recipe exited 1.  The deadline bounds a hung render rather than a slow one: on a heavily loaded machine a healthy render can take longer than ninety seconds, and the recipe then stops with the tracked set untouched.  An attempt that is still running when the deadline arrives is a failure whatever it goes on to write, and its helper processes are killed with it while it is still alive, because a browser that is killed first hands them to init and they are no longer its children.  The liveness probe asks for the process state as well, because a browser that has exited but has not been reaped yet is a zombie and a zombie still answers `kill -0`, so a render that finished in two seconds is never mistaken for a timeout and never spends a second deadline on the retry.  The old `--headless=old` mode will not screenshot a 16 by 16 window at all, it hangs and never writes the file either.
 
 The pixels do not depend on which of those routes you take.  Every one of the six shipped PNGs has been reproduced by the recipe above, pixel for pixel.  The shipped files themselves were rendered by laying the mark out at its true size inside a 256 by 256 window and cropping the corner back, because that is the window size old headless will accept.
 
@@ -226,6 +332,8 @@ magick -type TrueColorAlpha \
   Brand/favicon-64.png \
   Brand/favicon.ico
 ```
+
+Pack the `.ico` only after a rebuild that exited zero: a rebuild that failed leaves the tracked PNGs exactly as they were, and packing those would ship an `.ico` older than the artwork.
 
 ImageMagick is also a shorter way to render the marks, and it is what the older entries in this file were built with.  It writes to `im-*.png` on purpose: these are an alternative to the Chrome renders above, not a replacement for them, and a different output path is what keeps them from overwriting the shipped files and desyncing the `.ico`:
 
