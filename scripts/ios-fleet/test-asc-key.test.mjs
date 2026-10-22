@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { generateKeyPairSync } from "node:crypto";
+import { createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -229,6 +229,24 @@ function jwtKeyId(authorization) {
   return JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString()).kid;
 }
 
+// Whether the request was signed with a given key.  Reading the JWT header
+// only proves the kid the client CLAIMS;  the environment handoff is proved
+// by the signature itself.  The answer is a boolean, so a credential value
+// is never compared in the shell.
+function signedWith(authorization, key) {
+  const token = String(authorization || "").replace(/^Bearer /, "");
+  if (!token) return false;
+  const [header, payload, signature] = token.split(".");
+  const verifier = createVerify("SHA256");
+  verifier.update(`${header}.${payload}`);
+  verifier.end();
+  try {
+    return verifier.verify({ key, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "base64url"));
+  } catch {
+    return false;
+  }
+}
+
 test("the client reports the ASC_KEY_P8 environment source", async () => {
   const server = await localServer();
   try {
@@ -298,7 +316,7 @@ test("the key never reaches argv, and the child's environment carries it", async
     server.releaseAll();
     const result = await app.done;
     assert.equal(result.code, 0, `the client failed: ${result.stderr}`);
-    assert.ok(server.seen.some((entry) => jwtKeyId(entry.authorization) === "SYNTHETICKEYID1"),
+    assert.ok(server.seen.some((entry) => signedWith(entry.authorization, keyPem)),
       "the request was not signed with the key from the environment");
   } finally {
     server.releaseAll();

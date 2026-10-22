@@ -47,7 +47,11 @@ function base64url(input) {
 function maskedPreview(value) {
   const text = String(value ?? "");
   if (text.length === 0) return "(empty)";
-  if (text.length <= 12) return `[${text.length} chars, withheld]`;
+  //  Withheld unless the value is comfortably longer than the twelve
+  //  characters a preview discloses:  a 13-character rejected credential
+  //  would otherwise be reported as 12 of its 13 characters, which is the
+  //  mask becoming the secret.
+  if (text.length <= 24) return `[${text.length} chars, withheld]`;
   return `${text.slice(0, 8)}...${text.slice(-4)}`;
 }
 
@@ -127,7 +131,12 @@ function resolveCredential() {
   const keyId = String(process.env.APPLE_API_KEY_ID || "").trim();
   const issuerId = String(process.env.APPLE_API_ISSUER_ID || "").trim();
   if (keyId && issuerId && process.env.APPLE_API_KEY_P8_BASE64) {
-    const pem = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
+    //  The decoded key is parsed with the same validator the ASC_KEY_P8
+    //  branch uses:  an envelope passes decodeP8 even when the key inside
+    //  is truncated, and that key would reach the signer and come back as
+    //  a stack trace instead of this credential error.
+    const decoded = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
+    const pem = decoded ? normalizePrivateKey(decoded) : null;
     if (!pem) return {
       error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key"
         + `; preview: ${maskedPreview(process.env.APPLE_API_KEY_P8_BASE64)}`
@@ -138,13 +147,21 @@ function resolveCredential() {
   // 2) The same secret as a plain environment variable.  This is the form
   //    fleet-secrets hands out, and the form the shell layer uses when it
   //    hands a staged key to this client.
+  let deferredEnvError = null;
   if (envKeyId && envIssuer && envKeyPem) {
     const pem = normalizePrivateKey(envKeyPem);
-    if (!pem) return {
-      error: "ASC_KEY_P8 is set but is not a PEM private key"
-        + `; preview: ${maskedPreview(envKeyPem)}`
-    };
-    return { keyId: envKeyId, issuerId: envIssuer, privateKeyPem: pem, source: "ASC_KEY_P8 environment" };
+    if (!pem) {
+      //  An invalid ambient key is ignored, the way the shell layer ignores
+      //  it and falls back to Infisical:  the vault still resolves below,
+      //  and the rejection - with its masked preview - is only the answer
+      //  when nothing else yields a credential.
+      deferredEnvError = {
+        error: "ASC_KEY_P8 is set but is not a PEM private key"
+          + `; preview: ${maskedPreview(envKeyPem)}`
+      };
+    } else {
+      return { keyId: envKeyId, issuerId: envIssuer, privateKeyPem: pem, source: "ASC_KEY_P8 environment" };
+    }
   }
 
   // 3) No file is read here (AFC-359, and AFC-459):  a path on disk is not an
@@ -175,7 +192,7 @@ function resolveCredential() {
     }
   }
 
-  return { error: null };
+  return deferredEnvError || { error: null };
 }
 
 function signJwt({ keyId, issuerId, privateKeyPem }) {

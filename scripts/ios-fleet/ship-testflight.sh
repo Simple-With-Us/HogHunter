@@ -225,11 +225,17 @@ key_preview() {
     printf '%s' "(empty)"
     return 0
   fi
-  if [[ "$n" -le 12 ]]; then
+  if [[ "$n" -le 24 ]]; then
+    #  Withheld unless the value is comfortably longer than the twelve
+    #  characters a preview discloses:  a 13-character rejected credential
+    #  would otherwise be logged as 12 of its 13 characters, which is the
+    #  mask becoming the secret.
     printf '[%d chars, withheld]' "$n"
     return 0
   fi
-  printf '%s...%s' "${v:0:8}" "${v: -4}"
+  #  The offset is computed arithmetically:  ${v: -4} needs bash 4.2 and this
+  #  script targets Apple bash 3.2, where it is a bad substitution.
+  printf '%s...%s' "${v:0:8}" "${v:$((${#v}-4))}"
 }
 
 load_secrets() {
@@ -294,11 +300,6 @@ load_secrets() {
       log "ASC credentials missing: set ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (or APPLE_API_KEY_ID, APPLE_API_ISSUER_ID and APPLE_API_KEY_P8_BASE64) in the environment, or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc"
       return 0
     fi
-    if [[ ! "$kid" =~ ^[A-Za-z0-9]+$ ]]; then
-      #  The key id names a file below, so it may not carry a path.
-      log "ASC_KEY_ID has an unexpected shape; not staging the key"
-      return 0
-    fi
     if [[ "$kid" == "$fkid" ]]; then
       p8="$(fs_get ASC_KEY_P8 /asc)" || p8=""
     else
@@ -317,6 +318,13 @@ load_secrets() {
   # environment for the node client, which never reads a file.  The file is
   # written from the credential that was just resolved, so it is never read
   # back as a credential.
+  #  The key id names a file below, so it may not carry a path.  The guard
+  #  stands after every source - the hosted trio, the environment and the
+  #  vault - because an id from any of them reaches the same file name.
+  if [[ ! "$kid" =~ ^[A-Za-z0-9]+$ ]]; then
+    log "ASC_KEY_ID has an unexpected shape; not staging the key"
+    return 0
+  fi
   if [[ -z "$ASC_TMP_DIR" ]]; then
     ASC_TMP_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/asc-key.XXXXXX")"
   fi

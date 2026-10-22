@@ -115,8 +115,10 @@ grep -q '^key_preview()' "$funcs" || fail "key_preview not found in ship-testfli
 preview_of() {
   bash -c 'source "'"$funcs"'"; key_preview "$1"' _ "$1"
 }
-[[ "$(preview_of "not a private key at all")" == "not a pr... all" ]] \
+[[ "$(preview_of "not a private key at all, not even close")" == "not a pr...lose" ]] \
   || fail "key_preview did not mask the first eight and last four characters"
+[[ "$(preview_of "not a private key at all")" == "[24 chars, withheld]" ]] \
+  || fail "key_preview did not withhold a value barely longer than the preview"
 [[ "$(preview_of "short")" == "[5 chars, withheld]" ]] \
   || fail "key_preview did not withhold a short value"
 [[ "$(preview_of "")" == "(empty)" ]] \
@@ -273,16 +275,16 @@ done
 # rejection is reported with a MASKED PREVIEW, never with the key itself.
 : > "$FAKE_LOG"
 : > "$ASC_TEST_LOG"
-ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at all" bash -c '
+ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at all, not even close" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
   load_secrets
   [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
   [[ -z "${ASC_KEY_P8:-}" ]]
 ' || fail "an ASC_KEY_P8 that is not a key was adopted"
-grep -q "preview: not a pr\.\.\. all" "$ASC_TEST_LOG" \
+grep -q "preview: not a pr\.\.\.lose" "$ASC_TEST_LOG" \
   || fail "the rejected key was reported without a masked preview"
-if grep -q "not a private key at all" "$ASC_TEST_LOG"; then
+if grep -q "not a private key at all, not even close" "$ASC_TEST_LOG"; then
   fail "the rejected key was reported whole"
 fi
 

@@ -203,19 +203,36 @@ test("the APPLE_API_* trio wins over ASC_KEY_P8 in the environment", async () =>
   assert.ok(!signedWith(r.jwt, otherPem), "the ASC_KEY_P8 key signed the request");
 });
 
+test("an invalid ambient ASC_KEY_P8 falls back to Infisical", async () => {
+  //  The shell layer ignores a malformed ambient key and resolves from the
+  //  vault;  the client behaves the same way, so a stale value in an
+  //  operator's shell cannot abort a run the vault could have served.
+  const r = await run({
+    ASC_KEY_ID: "ASCKEY0001",
+    ASC_ISSUER_ID: "issuer-from-asc",
+    ASC_KEY_P8: "not a private key at all, not even close"
+  });
+  assert.equal(r.code, 0);
+  assert.equal(r.kid, "ASCKEY0001");
+  assert.ok(signedWith(r.jwt, ascPem),
+    "the request was not signed with the vault key after the ambient key was rejected");
+});
+
 test("an ASC_KEY_P8 that is not a PEM private key is a credential error, not a stack trace", async () => {
   const r = await run({
     ASC_KEY_ID: "ENVKEY0001",
     ASC_ISSUER_ID: "env-issuer",
-    ASC_KEY_P8: "not a private key at all"
+    ASC_KEY_P8: "not a private key at all, not even close"
   });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /ASC_KEY_P8 is set but is not a PEM private key/);
   //  The rejection carries a MASKED PREVIEW -- the first eight and the last
-  //  four characters -- and never the key itself.
-  assert.match(r.stderr, /preview: not a pr\.\.\. all/,
+  //  four characters -- and never the key itself.  A value barely longer
+  //  than the twelve characters a preview discloses is withheld whole, so
+  //  the preview can never become the secret.
+  assert.match(r.stderr, /preview: not a pr\.\.\.lose/,
     "the rejected key was reported without a masked preview");
-  assert.ok(!r.stderr.includes("not a private key at all"),
+  assert.ok(!r.stderr.includes("not a private key at all, not even close"),
     "the rejected key was reported whole");
   assert.equal(r.kid, null);
 });

@@ -296,12 +296,14 @@ jobs:
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
 
           # The hosted form of the credential:  the key id, the issuer and the
-          # key as base64.  Base64 is one line, so the runner's environment
-          # file stays well formed and the raw PEM never enters GITHUB_ENV.
-          # The shell layer and the client both read the trio from the
-          # environment, because a path on disk is not an approved credential
-          # source (AFC-459).
-          key_b64="$(printf '%s' "$key_material" | base64)"
+          # key as base64.  `base64` wraps its output at 76 columns, and a
+          # multi-line blob would leak every line after the first unmasked
+          # (add-mask is parsed per line) and break the environment file, so
+          # the value is flattened to one line and the raw PEM never enters
+          # GITHUB_ENV.  The shell layer and the client both read the trio
+          # from the environment, because a path on disk is not an approved
+          # credential source (AFC-459).
+          key_b64="$(printf '%s' "$key_material" | base64 | tr -d '\n')"
           printf '::add-mask::%s\n' "${key_b64//'%'/'%25'}"
           printf 'APPLE_API_KEY_P8_BASE64=%s\n' "$key_b64" >> "$GITHUB_ENV"
 

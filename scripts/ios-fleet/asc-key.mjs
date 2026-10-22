@@ -34,7 +34,7 @@
  * handoff keeps the key out of the places a process listing is read for (the
  * command line) and out of every log, and it does not claim more than that.
  */
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
 
 // Normalizes a PEM private key and refuses anything that is not one.
@@ -69,6 +69,10 @@ export function writePrivateKeyFile(keyPath, value) {
   if (!pem) return { error: "the value is not a PEM private key" };
   try {
     writeFileSync(keyPath, pem, { mode: 0o600 });
+    //  The mode on creation is not enough:  the staged path is reused (a
+    //  pre-set ASC_TMP_DIR), and an existing file keeps its old
+    //  permissions, so the owner-only mode is enforced after every write.
+    chmodSync(keyPath, 0o600);
   } catch {
     return { error: `the key file ${keyPath} could not be written` };
   }
