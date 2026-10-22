@@ -16,7 +16,9 @@ needed — the Devices view aggregates per device.
 Status: spec + scaffold on branch `feature/linux-companion`.  Host process
 listing, lane scanning, the safety policy, and the Docker-socket client are
 implemented.  Prune-apply, kill paths, and cgroup limit-setting are wired
-through the safety policy but marked clearly in code.
+through the safety policy but marked clearly in code.  The auth token store
+(pairing-minted `hh1_` tokens, hash-only storage) is still stubbed —
+nothing here is deployable until that's real.
 
 ## 1. Goals
 
@@ -35,9 +37,9 @@ through the safety policy but marked clearly in code.
   control surface for agents over SSH — no HogHunter UI required.
 - Lane drift visibility: report which fleet lane checkouts have changes not
   in GitHub, in the same shape the Mac app reports.
-- Infisical for secrets: the Linux daemon takes its API token from Infisical
-  (via Coolify env) — no enroll flow.  The Mac app gains Infisical as an auth
-  option too, alongside a repaired pairing flow.
+- Pairing-based auth, no Infisical: new devices pair over Tailscale with
+  approval via `hh-agent pair` on the host.  Infisical deferred entirely
+  (Jay's call 2026-10-21) — no enroll flow, no pre-shared secrets.
 - Devices, not hosts: the UI concept is a device.  The Devices view lists
   every connected device, each reachable over SSH or the companion HTTP API,
   with per-device settings.
@@ -114,18 +116,18 @@ This is not a limitation to work around; it is the design.  Consequences:
   Never on shared or customer infrastructure.
 - The HTTP listener binds to the Tailscale IP (and loopback) only — never
   `0.0.0.0` on a public interface.  All callers present a Bearer token.
-- Auth, Linux daemon: Infisical only — no pairing-code enroll flow.  The
-  daemon reads its API token from the `HH_AGENT_API_TOKEN` env var, which
-  Coolify injects from Infisical (the same sync Jay already uses for app
-  env).  Token format follows the Mac convention (`hh1_` prefix); the
-  daemon stores only a SHA-256 hash for comparison.  `POST /v1/enroll` is
-  not implemented on the daemon.
-- Auth, Mac app (future work): Infisical becomes an auth option alongside
-  the pairing flow — Jay's call 2026-10-21, unless it proves difficult.
-  Reuse the existing InfisicalClient; if the integration fights back,
-  pairing alone suffices since pairing works again after the iOS app
-  update.  Per this repo's AGENTS.md, the Mac app owns the Infisical read
-  and the iOS app never touches Infisical.
+- Auth, Linux daemon: pairing, not Infisical (deferred per Jay 2026-10-21).
+  The daemon starts with no tokens and no secrets at deploy time.  A new
+  device sends `POST /v1/pair-request` over Tailscale; someone with shell
+  on the host approves via `hh-agent pair`, which mints a per-device
+  `hh1_` token (192 bits, same convention as the Mac app).  The daemon
+  stores only a SHA-256 hash per token; revoking a token cuts off that
+  device only.  The Unix socket (mode 660, `hh-agent` group) is the local
+  auth — the CLI itself needs no token.
+- Auth, Mac app: unchanged — the existing pairing flow stands (working
+  again since the iOS app update, 2026-10-21).  The Infisical-as-an-option
+  idea is deferred, not rejected; revisit if pairing ever becomes a
+  problem again.
 - Pairing approval on headless hosts: there is no GUI popup on a server,
   so pairing requests are approved through the CLI — the headless
   equivalent of the Mac's pairing popup.  A new device (the Mac's Devices
@@ -147,7 +149,7 @@ This is not a limitation to work around; it is the design.  Consequences:
 | `POST /v1/containers/{id}/limit` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/prune` | a device's own token | Allow Remote Disk Pruning | tailnet |
 | `POST /v1/pair-request` (new device asks to pair) | none — tailnet only, rate-limited | none | tailnet |
-| `GET /v1/pair-requests` (list pending) | the admin (Infisical) token | none | tailnet |
+| `GET /v1/pair-requests` (list pending) | any valid device token | none | tailnet |
 
   Each device confirms every destructive action in its own UI; the daemon
   re-checks the safety policy (§8) per action.
@@ -200,8 +202,9 @@ Writes (all require explicit confirmation semantics; see §8):
   Tailnet-only, no credential, rate-limited.  Creates a 15-minute pending
   pairing request and returns its id.  Approval happens only via the CLI
   (`hh-agent pair`); there is no HTTP approval route.
-- `GET /v1/pair-requests` — requires the admin (Infisical) token; lists
-  pending requests for CLI-driven approval.
+- `GET /v1/pair-requests` — requires any valid device token; lists
+  pending requests (so the Mac UI can show "waiting for approval");
+  approval itself is CLI-only.
 
 Every write returns `{"ok": true, ...}` or
 `{"ok": false, "error": "<reason>", "refused_by": "safety-policy"|...}`.
@@ -396,20 +399,20 @@ Only the real advantages, no marketing:
 - The agent's own container gets resource limits in Coolify
   (e.g. 0.5 CPU, 256 MB) so the watchdog cannot become the problem.
 - Env: `HH_AGENT_PORT` (default 24241), `HH_AGENT_LANE_ROOTS`
-  (comma-separated), `HH_AGENT_API_TOKEN` (injected by Coolify from
-  Infisical — the daemon's only auth source; never in the image or repo).
+  (comma-separated).  No secrets at deploy time — auth is pairing-based
+  (§5); tokens are minted on CLI approval and stored hashed on the named
+  volume.
 - Tailscale: the Coolify host is already on the tailnet; the daemon binds
   the host's Tailscale IP.  No exposure outside the tailnet.
 
 ## 12. Decisions (Jay, 2026-10-21)
 
-1. Auth: the Linux daemon's own credential is Infisical-only (token via
-   Coolify env from Infisical).  New devices (Mac Devices view, iPhone)
-   pair over Tailscale with approval via `hh-agent pair` on the host —
-   the headless equivalent of the Mac popup — minting per-device revocable
-   tokens.  The Mac app gains Infisical as an auth option alongside
-   pairing, unless that proves difficult (reuse InfisicalClient; pairing
-   alone suffices since it works again after the iOS app update).
+1. Auth: pairing as described — Infisical deferred entirely (Jay
+   2026-10-21: "no need for infisical, defer that").  New devices request
+   pairing over Tailscale; approval via `hh-agent pair` on the host mints
+   per-device revocable tokens.  No enroll flow, no pre-shared secrets at
+   deploy.  The Mac app keeps its existing pairing flow (working again
+   since the iOS app update).
 2. Prune scope: Docker objects by default; host-level temp (`/tmp`,
    journals) is an explicit opt-in (`--host-temp` / `"host-temp"`).
 3. Devices: the UI concept is Devices, not Hosts.  The Devices view lists
