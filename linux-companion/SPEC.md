@@ -43,6 +43,11 @@ through the safety policy but marked clearly in code.
   with per-device settings.
 - iOS as a device: the iPhone app optionally reports its own CPU/RAM/storage
   so the Mac's Devices view can show it.
+- Everything is toggleable with suggested defaults: every capability —
+  process/container monitoring, each prune target, process kill, container
+  stop/kill, live limits, lane scanning — can be turned off individually.
+  Defaults keep visibility on and destructive actions behind explicit
+  opt-ins.
 
 ## 2. Non-goals
 
@@ -116,11 +121,22 @@ This is not a limitation to work around; it is the design.  Consequences:
   daemon stores only a SHA-256 hash for comparison.  `POST /v1/enroll` is
   not implemented on the daemon.
 - Auth, Mac app (future work): Infisical becomes an auth option alongside
-  the pairing flow — Jay's call 2026-10-21.  Pairing works again since the
-  iOS app update, so no repair is currently needed; Infisical is the
-  alternative for when pairing is unavailable.  Per this repo's AGENTS.md,
-  the Mac app owns the Infisical read and the iOS app never touches
-  Infisical.
+  the pairing flow — Jay's call 2026-10-21, unless it proves difficult.
+  Reuse the existing InfisicalClient; if the integration fights back,
+  pairing alone suffices since pairing works again after the iOS app
+  update.  Per this repo's AGENTS.md, the Mac app owns the Infisical read
+  and the iOS app never touches Infisical.
+- Pairing approval on headless hosts: there is no GUI popup on a server,
+  so pairing requests are approved through the CLI — the headless
+  equivalent of the Mac's pairing popup.  A new device (the Mac's Devices
+  view, a phone) requests pairing over Tailscale with its device name;
+  the daemon holds the request for 15 minutes and every `hh-agent`
+  invocation prints a one-line notice while requests are pending.
+  `hh-agent pair` lists them and approves/denies interactively
+  (`--approve <id>` / `--deny <id>` for scripts).  Approval mints a
+  per-device `hh1_` token; the daemon stores only its SHA-256 hash, and
+  revoking it cuts off that device only.  There is deliberately no HTTP
+  approval route — approval requires shell on the host.
 - Destructive routes sit behind explicit opt-ins, off by default, following
   the repo's route-table convention (`AGENTS.md`):
 
@@ -130,7 +146,8 @@ This is not a limitation to work around; it is the design.  Consequences:
 | `POST /v1/processes/{pid}/kill`, `POST /v1/containers/{id}/stop|kill` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/containers/{id}/limit` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/prune` | a device's own token | Allow Remote Disk Pruning | tailnet |
-| `POST /v1/enroll` | not implemented on the daemon (Infisical only) | — | — |
+| `POST /v1/pair-request` (new device asks to pair) | none — tailnet only, rate-limited | none | tailnet |
+| `GET /v1/pair-requests` (list pending) | the admin (Infisical) token | none | tailnet |
 
   Each device confirms every destructive action in its own UI; the daemon
   re-checks the safety policy (§8) per action.
@@ -179,6 +196,12 @@ Writes (all require explicit confirmation semantics; see §8):
   `/v1/containers/{id}/kill`.
 - `POST /v1/containers/{id}/limit` — body `{"memory": "2g", "cpus": 1.5}`.
   Live-updates cgroup limits via the Docker API; no container restart.
+- `POST /v1/pair-request` — body `{"device_name": "Jay's Mac"}`.
+  Tailnet-only, no credential, rate-limited.  Creates a 15-minute pending
+  pairing request and returns its id.  Approval happens only via the CLI
+  (`hh-agent pair`); there is no HTTP approval route.
+- `GET /v1/pair-requests` — requires the admin (Infisical) token; lists
+  pending requests for CLI-driven approval.
 
 Every write returns `{"ok": true, ...}` or
 `{"ok": false, "error": "<reason>", "refused_by": "safety-policy"|...}`.
@@ -218,6 +241,13 @@ hh-agent limit <container> [--memory 2g] [--cpus 1.5] [--json]
 
 hh-agent lanes [--json]
   Lane drift scan per the shared schema (§9).  Works without the daemon.
+
+hh-agent pair [--approve <id>] [--deny <id>] [--json]
+  List pending pairing requests: device name, tailnet identity, age.
+  Interactive approve/deny; flags for scripts.  Every hh-agent invocation
+  prints a one-line notice while requests are pending, so approval is
+  never missed.  This is the headless equivalent of the Mac's pairing
+  popup — approval mints a per-device token, revokable on its own.
 
 hh-agent serve [--http 127.0.0.1:24241] [--socket /run/hh-agent.sock]
   Run the daemon.
@@ -373,10 +403,13 @@ Only the real advantages, no marketing:
 
 ## 12. Decisions (Jay, 2026-10-21)
 
-1. Auth: the Linux daemon is Infisical-only (token via Coolify env from
-   Infisical; no enroll flow).  The Mac app gains Infisical as an auth
-   option alongside pairing — pairing works again since the iOS app update
-   (2026-10-21), but Infisical stays as the alternative.
+1. Auth: the Linux daemon's own credential is Infisical-only (token via
+   Coolify env from Infisical).  New devices (Mac Devices view, iPhone)
+   pair over Tailscale with approval via `hh-agent pair` on the host —
+   the headless equivalent of the Mac popup — minting per-device revocable
+   tokens.  The Mac app gains Infisical as an auth option alongside
+   pairing, unless that proves difficult (reuse InfisicalClient; pairing
+   alone suffices since it works again after the iOS app update).
 2. Prune scope: Docker objects by default; host-level temp (`/tmp`,
    journals) is an explicit opt-in (`--host-temp` / `"host-temp"`).
 3. Devices: the UI concept is Devices, not Hosts.  The Devices view lists
@@ -386,6 +419,9 @@ Only the real advantages, no marketing:
 4. iOS as a device: the iPhone app optionally reports its own CPU/RAM/
    storage so the Mac's Devices view can show it (iOS app work; spec the
    payload alongside the existing snapshot).
+5. Everything toggleable: every capability — monitoring, each prune
+   target, kill/stop, live limits, lane scanning — ships with a suggested
+   default and can be turned off individually.
 
 Open: legacy `/root/vps-storage-status.json` bridge — keep the SSH-script
 path working in parallel, or cut the Devices view to HTTP immediately?
