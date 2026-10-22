@@ -294,11 +294,6 @@ load_secrets() {
       log "ASC credentials missing: set ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (or APPLE_API_KEY_ID, APPLE_API_ISSUER_ID and APPLE_API_KEY_P8_BASE64) in the environment, or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc"
       return 0
     fi
-    if [[ ! "$kid" =~ ^[A-Za-z0-9]+$ ]]; then
-      #  The key id names a file below, so it may not carry a path.
-      log "ASC_KEY_ID has an unexpected shape; not staging the key"
-      return 0
-    fi
     if [[ "$kid" == "$fkid" ]]; then
       p8="$(fs_get ASC_KEY_P8 /asc)" || p8=""
     else
@@ -311,6 +306,16 @@ load_secrets() {
     fi
     key_pem="$p8"
     p8=""
+  fi
+
+  #  The key id names a file below, so it may not carry a path.  The guard
+  #  sits here, and not inside the resolution step, because the key id can
+  #  come from the environment -- the hosted APPLE_API_KEY_ID or an ambient
+  #  ASC_KEY_ID -- and an env-derived id never passed the check that used to
+  #  live in the vault-only branch.
+  if [[ ! "$kid" =~ ^[A-Za-z0-9]+$ ]]; then
+    log "ASC_KEY_ID has an unexpected shape; not staging the key"
+    return 0
   fi
 
   # The key has to be in a mode-600 file for altool and Xcode, and in the

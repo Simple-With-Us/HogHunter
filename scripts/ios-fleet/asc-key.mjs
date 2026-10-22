@@ -34,7 +34,7 @@
  * handoff keeps the key out of the places a process listing is read for (the
  * command line) and out of every log, and it does not claim more than that.
  */
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
 
 // Normalizes a PEM private key and refuses anything that is not one.
@@ -64,11 +64,19 @@ export function normalizePrivateKey(value) {
 // file is a staging copy for the Apple tools that need a key on disk, and it
 // is never read back as a credential:  the credential comes from the
 // environment or from fleet-secrets.
+//
+// The mode is enforced AFTER the write as well as at creation:  writeFileSync
+// applies its mode option only when it creates the file, so reusing a path
+// that already exists would otherwise keep the permissions the file already
+// had.  The staged path is reused inside one run (the shell layer stages the
+// key once for the archive step and again for altool), so a file left behind
+// with a looser mode would otherwise hold the private key world-readable.
 export function writePrivateKeyFile(keyPath, value) {
   const pem = normalizePrivateKey(value);
   if (!pem) return { error: "the value is not a PEM private key" };
   try {
     writeFileSync(keyPath, pem, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
   } catch {
     return { error: `the key file ${keyPath} could not be written` };
   }

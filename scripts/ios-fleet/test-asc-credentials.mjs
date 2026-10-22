@@ -220,4 +220,26 @@ test("an ASC_KEY_P8 that is not a PEM private key is a credential error, not a s
   assert.equal(r.kid, null);
 });
 
+test("a corrupt APPLE_API_* key is a credential error, not a signer stack trace", async () => {
+  //  The envelope is not a key:  a truncated or corrupted base64 blob
+  //  decodes to something that carries "-----BEGIN " and still fails to
+  //  parse.  It has to be a credential error like the ASC_KEY_P8 side of the
+  //  handoff, and it has to be reported with a masked preview.
+  const corrupt = "-----BEGIN PRIVATE KEY-----\nnot base64 at all\n-----END PRIVATE KEY-----\n"; // gitleaks:allow
+  const r = await run({
+    APPLE_API_KEY_ID: "APPLEKEY001",
+    APPLE_API_ISSUER_ID: "apple-issuer",
+    APPLE_API_KEY_P8_BASE64: Buffer.from(corrupt, "utf8").toString("base64")
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /APPLE_API_KEY_P8_BASE64 decoded to a value that is not a PEM private key/);
+  assert.match(r.stderr, /preview: /,
+    "the rejected key was reported without a masked preview");
+  assert.ok(!r.stderr.includes("not base64 at all"),
+    "the rejected key was reported whole");
+  assert.doesNotMatch(r.stderr, /at .*\.mjs:\d+/,
+    "the failure came back as a stack trace instead of a credential error");
+  assert.equal(r.kid, null);
+});
+
 test.after(() => rmSync(root, { recursive: true, force: true }));

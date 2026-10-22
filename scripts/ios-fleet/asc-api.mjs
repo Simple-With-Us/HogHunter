@@ -127,9 +127,19 @@ function resolveCredential() {
   const keyId = String(process.env.APPLE_API_KEY_ID || "").trim();
   const issuerId = String(process.env.APPLE_API_ISSUER_ID || "").trim();
   if (keyId && issuerId && process.env.APPLE_API_KEY_P8_BASE64) {
-    const pem = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
-    if (!pem) return {
+    const decoded = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
+    if (!decoded) return {
       error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key"
+        + `; preview: ${maskedPreview(process.env.APPLE_API_KEY_P8_BASE64)}`
+    };
+    //  The envelope is not enough:  a truncated or corrupted key carries
+    //  "-----BEGIN " and still fails to parse.  Parse it with the same
+    //  parser the ASC_KEY_P8 path uses, so both sides of the handoff
+    //  accept exactly the same keys and a corrupt key is a credential
+    //  error rather than a signer stack trace.
+    const pem = normalizePrivateKey(decoded);
+    if (!pem) return {
+      error: "APPLE_API_KEY_P8_BASE64 decoded to a value that is not a PEM private key"
         + `; preview: ${maskedPreview(process.env.APPLE_API_KEY_P8_BASE64)}`
     };
     return { keyId, issuerId, privateKeyPem: pem, source: "APPLE_API_* environment (base64 p8)" };

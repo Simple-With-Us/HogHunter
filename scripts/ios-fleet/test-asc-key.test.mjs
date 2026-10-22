@@ -116,6 +116,22 @@ test("the command line writes a key to a file only its owner can read", async ()
   assert.equal(readFileSync(path, "utf8").trim(), keyPem.trim());
 });
 
+test("the mode is enforced when the staged file already exists", async () => {
+  //  writeFileSync applies its mode option only when it creates the file, so
+  //  a file that is already there keeps the permissions it had.  The staged
+  //  path is reused inside a run -- the shell layer stages the key once for
+  //  the archive step and again for altool -- so a file left behind with a
+  //  looser mode would otherwise hold the private key in the clear.
+  const path = join(root, "existing.p8");
+  writeFileSync(path, keyPem);
+  chmodSync(path, 0o644);
+  const result = await run(["write", path], keyPem);
+  assert.equal(result.code, 0, `the write failed: ${result.stderr}`);
+  assert.equal(statSync(path).mode & 0o777, 0o600,
+    "an existing key file kept a permissive mode");
+  assert.equal(readFileSync(path, "utf8").trim(), keyPem.trim());
+});
+
 test("the command line refuses to write a value that is not a key", async () => {
   const path = join(root, "refused.p8");
   const result = await run(["write", path], "not a private key");

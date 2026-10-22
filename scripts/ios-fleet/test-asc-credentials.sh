@@ -383,6 +383,48 @@ env -u ASC_KEY_P8 ASC_KEY_ID=TILDE00001 ASC_ISSUER_ID=tilde-issuer bash -c '
   [[ "$(expand_tilde "/abs/k.p8")" == "/abs/k.p8" ]]
 ' || fail "expand_tilde"
 
+# 2k. A key id that carries a path is refused, whoever named it.  The key id
+#     ends up in a file name, so a shape that can point outside the staging
+#     directory must never reach the write.  The guard used to live in the
+#     vault-only branch, so an env-derived id skipped it entirely.
+: > "$FAKE_LOG"
+: > "$ASC_TEST_LOG"
+mkdir -p "${tmp}/ascdir/AuthKey_x"
+env -u ASC_KEY_PATH -u ASC_KEY_P8 \
+  ASC_KEY_ID='x/../../escaped' ASC_ISSUER_ID=any-issuer \
+  ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  export ASC_TMP_DIR="'"$tmp"'/ascdir"
+  load_secrets
+  [[ "$AUTH_MODE" == none ]]
+' || fail "a key id that names a path was adopted"
+grep -q "unexpected shape" "$ASC_TEST_LOG" \
+  || fail "a key id that names a path was not reported"
+[[ ! -e "${tmp}/escaped.p8" ]] \
+  || fail "a key id wrote outside the staging directory"
+
+# 2l. The hosted base64 handoff is ONE line.  The runners are Linux, where
+#     GNU base64 wraps its output at 76 columns, so the blob has to have its
+#     newlines stripped:  the runner parses ::add-mask:: one line at a time,
+#     and the env-file format wants one line per variable.  A wrapped blob
+#     would leave most of the key unmasked in the job log and put an invalid
+#     entry in GITHUB_ENV.
+#
+#     The wrapping is simulated here, because the BSD base64 on a developer
+#     Mac does not wrap at all:  the test has to hold on the platform where
+#     the blob actually wraps.
+workflow="${here}/../../.github/workflows/ios-testflight.yml"
+grep -Fq "base64 | tr -d '\n'" "$workflow" \
+  || fail "the hosted base64 handoff does not strip the newlines base64 adds"
+wrapped_blob="$(base64 < "${tmp}/other.p8" | fold -w 76)"
+wrapped_lines="$(printf '%s\n' "$wrapped_blob" | wc -l | tr -d ' ')"
+[[ "$wrapped_lines" -gt 1 ]] \
+  || fail "the wrapping simulation did not produce a multi-line blob"
+handoff_lines="$(printf '%s' "$wrapped_blob" | tr -d '\n' | wc -l | tr -d ' ')"
+[[ "$handoff_lines" == 0 ]] \
+  || fail "the stripped base64 handoff is not a single line"
+
 # 3. The credential never travels in a command argument.  The secret reaches
 # the child through the environment, so its own argv must not carry it.
 argv="$(ASC_KEY_ID=ENVKEY0005 ASC_ISSUER_ID=env-issuer ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
