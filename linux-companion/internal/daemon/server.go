@@ -1,10 +1,16 @@
 // Package daemon is the hh-agent HTTP server: host/container reads and
-// guarded writes.  Routes are wired; destructive handlers consult the
-// safety policy and the audit log.  Implemented (auth: token check stubbed
-// to "any non-empty bearer" until the enroll/token store lands).
+// guarded writes.  Auth is pairing-based (SPEC.md §5): device tokens are
+// minted on CLI approval of a pairing request and stored as SHA-256 hashes
+// only; raw tokens are never persisted or logged.  The local Unix socket is
+// trusted without a token — socket file permissions are the auth — while the
+// Tailscale HTTP listener requires a Bearer token on every route except
+// /v1/health, /v1/version, and POST /v1/pair-request (tailnet-only,
+// rate-limited).  Pairing approval routes live under /v1/admin/* and answer
+// only on the Unix socket: there is deliberately no HTTP approval route.
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -15,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/audit"
+	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/auth"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/docker"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/host"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/lanes"
@@ -30,26 +37,40 @@ type Config struct {
 	SocketPath string
 	DockerSock string
 	LaneRoots  []string
+	// StateDir holds the token store (devices.json, pair-requests.json).
+	// Empty means auth.DefaultDir() (/var/lib/hh-agent, or HH_AGENT_STATE_DIR).
+	StateDir string
 }
 
 // Server holds daemon state.
 type Server struct {
-	cfg    Config
-	docker *docker.Client
-	mux    *http.ServeMux
+	cfg         Config
+	docker      *docker.Client
+	mux         *http.ServeMux
+	tokens      *auth.Store
+	startedAt   time.Time
+	pairLimiter *auth.RateLimiter
 }
 
-// New builds the server.  Auth is STUBBED: any non-empty Bearer token is
-// accepted on reads; writes additionally require the token to be non-empty.
-// The enroll/token store (hh1_ tokens, SHA-256 hashes, pairing code) is
-// specified in SPEC.md §5 and not yet implemented.
-func New(cfg Config) *Server {
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+// New builds the server.  It opens (or creates) the token store; raw tokens
+// are never stored, only their SHA-256 hashes.
+func New(cfg Config) (*Server, error) {
+	tokens, err := auth.Open(cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		cfg:         cfg,
+		mux:         http.NewServeMux(),
+		tokens:      tokens,
+		startedAt:   time.Now(),
+		pairLimiter: auth.NewRateLimiter(5, time.Hour),
+	}
 	if cfg.DockerSock != "" {
 		s.docker = docker.New(cfg.DockerSock)
 	}
 	s.routes()
-	return s
+	return s, nil
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -62,22 +83,51 @@ func errJSON(w http.ResponseWriter, code int, reason string) {
 	writeJSON(w, code, map[string]any{"ok": false, "error": reason})
 }
 
-// authed extracts the bearer token; empty means unauthenticated.
-// STUB: accepts any non-empty token.  Replace with the token store.
-func authed(r *http.Request) (string, bool) {
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
-		return "", false
+// trustKey marks requests that arrived over the local Unix socket, where
+// socket file permissions are the auth and no bearer token is needed.
+type trustKey struct{}
+
+func isTrusted(r *http.Request) bool {
+	v, _ := r.Context().Value(trustKey{}).(bool)
+	return v
+}
+
+// requireAuth enforces Bearer-token auth on the HTTP listener.  On the
+// trusted Unix socket it passes through without a token.  The third
+// argument to next is the actor identity: a device id, or "local" for the
+// socket path.  Raw tokens are never exposed to handlers (and so can never
+// reach the audit log).
+func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if isTrusted(r) {
+			next(w, r, "local")
+			return
+		}
+		d, ok := s.tokens.VerifyBearer(r.Header.Get("Authorization"))
+		if !ok {
+			errJSON(w, 401, "bearer token required")
+			return
+		}
+		next(w, r, d.DeviceID)
 	}
-	tok := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	return tok, tok != ""
+}
+
+// requireTrusted refuses the route unless it arrived over the Unix socket.
+// Pairing approval/denial/revocation have no HTTP route by design —
+// approval requires shell on the host.
+func (s *Server) requireTrusted(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isTrusted(r) {
+			errJSON(w, 403, "this route is only available on the local Unix socket")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) routes() {
 	m := s.mux
-	m.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"ok": true, "version": Version})
-	})
+	m.HandleFunc("/v1/health", s.handleHealth)
 	m.HandleFunc("/v1/version", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"version": Version})
 	})
@@ -89,17 +139,164 @@ func (s *Server) routes() {
 	m.HandleFunc("/v1/storage", s.requireAuth(s.handleStorage))
 	m.HandleFunc("/v1/prune", s.requireAuth(s.handlePrune))
 	m.HandleFunc("/v1/lanes", s.requireAuth(s.handleLanes))
+	// Pairing: request is tailnet-only, unauthenticated, rate-limited.
+	m.HandleFunc("/v1/pair-request", s.handlePairRequest)
+	// Pending-request list for any valid device token (Mac UI: "waiting").
+	m.HandleFunc("/v1/pair-requests", s.requireAuth(s.handlePairRequests))
+	// Admin: Unix-socket only.  No HTTP approval route, by design.
+	m.HandleFunc("/v1/admin/pair-requests", s.requireTrusted(s.handleAdminPairRequests))
+	m.HandleFunc("/v1/admin/pair-requests/", s.requireTrusted(s.handleAdminPairRequestAction))
+	m.HandleFunc("/v1/admin/devices", s.requireTrusted(s.handleAdminDevices))
+	m.HandleFunc("/v1/admin/devices/", s.requireTrusted(s.handleAdminDeviceAction))
 }
 
-func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tok, ok := authed(r)
-		if !ok {
-			errJSON(w, 401, "bearer token required")
+// handleHealth is the cheap, unauthenticated liveness endpoint (Muster
+// collector contract, SPEC.md §13).  It must never block on Docker or git:
+// version + uptime only, no sensitive fields.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" && r.Method != "HEAD" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"status":   "ok",
+		"version":  Version,
+		"uptime_s": int64(time.Since(s.startedAt).Seconds()),
+	})
+}
+
+// handlePairRequest creates a pending pairing request.  No credential:
+// the tailnet-only bind plus rate limiting are the protection.  The body
+// carries only a device name.
+func (s *Server) handlePairRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	ip := auth.ClientIP(r.RemoteAddr)
+	if !s.pairLimiter.Allow(ip) {
+		w.Header().Set("Retry-After", "60")
+		errJSON(w, 429, "too many pairing requests; try again later")
+		return
+	}
+	var body struct {
+		DeviceName string `json:"device_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errJSON(w, 400, "bad body")
+		return
+	}
+	p, err := s.tokens.RequestPairing(body.DeviceName, r.RemoteAddr)
+	if err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "request_id": p.RequestID, "expires_at": p.ExpiresAt,
+	})
+}
+
+// handlePairRequests lists pending requests for any valid device token, so
+// the Mac Devices view can show "waiting for approval".
+func (s *Server) handlePairRequests(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != "GET" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "requests": s.tokens.PendingRequests()})
+}
+
+func (s *Server) handleAdminPairRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "requests": s.tokens.PendingRequests()})
+}
+
+func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "devices": s.tokens.ListDevices()})
+}
+
+// handleAdminPairRequestAction approves or denies one pending request.
+// Approval mints a per-device hh1_ token; this response is the only time
+// the raw token ever appears.  It is never logged or persisted.
+func (s *Server) handleAdminPairRequestAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/admin/pair-requests/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 {
+		errJSON(w, 404, "not found")
+		return
+	}
+	id, action := parts[0], parts[1]
+	switch action {
+	case "approve":
+		p, err := s.tokens.TakeRequest(id)
+		if err != nil {
+			errJSON(w, 404, err.Error())
 			return
 		}
-		next(w, r, tok)
+		token, err := auth.MintToken()
+		if err != nil {
+			errJSON(w, 500, "could not mint token")
+			return
+		}
+		d, err := s.tokens.AddDevice(p.DeviceName, token)
+		if err != nil {
+			errJSON(w, 500, "could not store device")
+			return
+		}
+		// Actor and detail carry no secret: the raw token is not logged.
+		_ = audit.Log("local", "pair-approve", "device:"+d.DeviceID, "name="+p.DeviceName, "ok")
+		writeJSON(w, 200, map[string]any{
+			"ok": true, "device_id": d.DeviceID,
+			"device_name": d.DeviceName, "token": token,
+		})
+	case "deny":
+		p, err := s.tokens.TakeRequest(id)
+		if err != nil {
+			errJSON(w, 404, err.Error())
+			return
+		}
+		_ = audit.Log("local", "pair-deny", "request:"+p.RequestID, "name="+p.DeviceName, "ok")
+		writeJSON(w, 200, map[string]any{"ok": true, "request_id": p.RequestID})
+	default:
+		errJSON(w, 404, "not found")
 	}
+}
+
+// handleAdminDeviceAction revokes a device; its token stops working
+// immediately.
+func (s *Server) handleAdminDeviceAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/admin/devices/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 {
+		errJSON(w, 404, "not found")
+		return
+	}
+	id, action := parts[0], parts[1]
+	if action != "revoke" {
+		errJSON(w, 404, "not found")
+		return
+	}
+	if err := s.tokens.Revoke(id); err != nil {
+		errJSON(w, 404, err.Error())
+		return
+	}
+	_ = audit.Log("local", "pair-revoke", "device:"+id, "", "ok")
+	writeJSON(w, 200, map[string]any{"ok": true, "device_id": id, "revoked": true})
 }
 
 func (s *Server) needDocker(w http.ResponseWriter) bool {
@@ -385,8 +582,8 @@ func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request, actor strin
 		}
 		writeJSON(w, 200, map[string]any{
 			"ok": true, "dry_run": true,
-			"targets": body.Targets,
-			"note":    "dry-run: totals below are current reclaimable state; nothing was deleted",
+			"targets":    body.Targets,
+			"note":       "dry-run: totals below are current reclaimable state; nothing was deleted",
 			"disk_usage": df,
 		})
 		return
@@ -453,11 +650,20 @@ func parseBytes(s string) (int64, error) {
 	return n * mult, nil
 }
 
+// withTrust marks requests by listener: the Unix socket is trusted (socket
+// permissions are the auth); the HTTP listener is not.
+func (s *Server) withTrust(trusted bool, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), trustKey{}, trusted)))
+	})
+}
+
 // Serve starts the HTTP listener and the Unix-socket listener.
 func (s *Server) Serve() error {
 	errCh := make(chan error, 2)
 	go func() {
-		errCh <- http.ListenAndServe(s.cfg.HTTPAddr, s.mux)
+		srv := &http.Server{Addr: s.cfg.HTTPAddr, Handler: s.withTrust(false, s.mux)}
+		errCh <- srv.ListenAndServe()
 	}()
 	go func() {
 		os.Remove(s.cfg.SocketPath)
@@ -467,7 +673,8 @@ func (s *Server) Serve() error {
 			return
 		}
 		os.Chmod(s.cfg.SocketPath, 0660)
-		errCh <- http.Serve(l, s.mux)
+		srv := &http.Server{Handler: s.withTrust(true, s.mux)}
+		errCh <- srv.Serve(l)
 	}()
 	return <-errCh
 }

@@ -157,6 +157,7 @@ func usage() {
   hh-agent kill <container|pid> [--yes] [--json]
   hh-agent limit <container> [--memory 2g] [--cpus 1.5] [--json]
   hh-agent lanes [--json]
+  hh-agent pair [--approve <id> | --deny <id> | --revoke <device-id>] [--json]
 
 Exit codes: 0 ok · 1 error · 2 usage · 3 refused or daemon unavailable.`)
 }
@@ -166,6 +167,9 @@ func main() {
 		usage()
 		os.Exit(exitUsage)
 	}
+	// Headless pairing nudge: every invocation prints a one-line notice
+	// while pairing requests are pending, so approval is never missed.
+	pendingNotice()
 	var code int
 	switch os.Args[1] {
 	case "serve":
@@ -188,6 +192,8 @@ func main() {
 		code = cmdLimit(os.Args[2:])
 	case "lanes":
 		code = cmdLanes(os.Args[2:])
+	case "pair":
+		code = cmdPair(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 		usage()
@@ -205,12 +211,17 @@ func cmdServe(args []string) int {
 	if r := os.Getenv("HH_AGENT_LANE_ROOTS"); r != "" {
 		roots = strings.Split(r, ",")
 	}
-	srv := daemon.New(daemon.Config{
+	srv, err := daemon.New(daemon.Config{
 		HTTPAddr:   *httpAddr,
 		SocketPath: *sock,
 		DockerSock: docker.SocketPath(),
 		LaneRoots:  roots,
+		StateDir:   os.Getenv("HH_AGENT_STATE_DIR"),
 	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "serve:", err)
+		return exitError
+	}
 	fmt.Fprintf(os.Stderr, "hh-agent %s listening on %s and %s\n", daemon.Version, *httpAddr, *sock)
 	if err := srv.Serve(); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
@@ -290,11 +301,11 @@ func cmdContainers(args []string) int {
 	var resp struct {
 		OK         bool `json:"ok"`
 		Containers []struct {
-			ID     string  `json:"id"`
-			Name   string  `json:"name"`
-			Image  string  `json:"image"`
-			State  string  `json:"state"`
-			Stats  struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Image string `json:"image"`
+			State string `json:"state"`
+			Stats struct {
 				CPUPercent float64 `json:"cpu_percent"`
 				MemUsage   uint64  `json:"mem_usage"`
 				MemLimit   uint64  `json:"mem_limit"`
@@ -500,4 +511,184 @@ func printLanes(data []byte) {
 		_ = up
 		fmt.Printf("%-8s %-5d %-5d %-24s %s\n", l.Verdict, l.Ahead, l.Behind, l.Branch, l.Path)
 	}
+}
+
+// pendingNotice prints a one-line stderr notice when pairing requests are
+// waiting, so no request is missed.  Silent when the daemon is down or
+// when nothing is pending.
+func pendingNotice() {
+	data, ok := daemonGet("/v1/admin/pair-requests")
+	if !ok {
+		return
+	}
+	var resp struct {
+		OK       bool `json:"ok"`
+		Requests []struct {
+			RequestID string `json:"request_id"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || !resp.OK {
+		return
+	}
+	if n := len(resp.Requests); n > 0 {
+		plural := ""
+		if n > 1 {
+			plural = "s"
+		}
+		fmt.Fprintf(os.Stderr, "hh-agent: %d pairing request%s pending — run `hh-agent pair` to review\n", n, plural)
+	}
+}
+
+type pairRequest struct {
+	RequestID   string `json:"request_id"`
+	DeviceName  string `json:"device_name"`
+	RemoteAddr  string `json:"remote_addr"`
+	RequestedAt string `json:"requested_at"`
+	ExpiresAt   string `json:"expires_at"`
+}
+
+// pairFetch lists pending pairing requests from the daemon.
+func pairFetch() ([]pairRequest, int) {
+	data, ok := daemonGet("/v1/admin/pair-requests")
+	if !ok {
+		fmt.Fprintln(os.Stderr, "daemon unavailable")
+		return nil, exitRefused
+	}
+	var resp struct {
+		OK       bool          `json:"ok"`
+		Error    string        `json:"error"`
+		Requests []pairRequest `json:"requests"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || !resp.OK {
+		fmt.Fprintln(os.Stderr, "pair: bad daemon response")
+		return nil, exitError
+	}
+	return resp.Requests, exitOK
+}
+
+func cmdPair(args []string) int {
+	fs := flag.NewFlagSet("pair", flag.ExitOnError)
+	approve := fs.String("approve", "", "approve pairing request id")
+	deny := fs.String("deny", "", "deny pairing request id")
+	revoke := fs.String("revoke", "", "revoke device id")
+	asJSON := fs.Bool("json", false, "JSON output")
+	_ = fs.Parse(args)
+	switch {
+	case *approve != "":
+		return pairApprove(*approve, *asJSON)
+	case *deny != "":
+		return pairDeny(*deny, *asJSON)
+	case *revoke != "":
+		return pairRevoke(*revoke, *asJSON)
+	default:
+		return pairInteractive(*asJSON)
+	}
+}
+
+func pairInteractive(asJSON bool) int {
+	reqs, code := pairFetch()
+	if code != exitOK {
+		return code
+	}
+	if asJSON {
+		printJSON(map[string]any{"ok": true, "requests": reqs})
+		return exitOK
+	}
+	if len(reqs) == 0 {
+		fmt.Println("no pending pairing requests")
+		return exitOK
+	}
+	printPairTable(reqs)
+	if !isTTY() {
+		return exitOK
+	}
+	fmt.Fprint(os.Stderr, "approve which request id? (empty to quit): ")
+	var id string
+	fmt.Scanln(&id)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return exitOK
+	}
+	return pairApprove(id, false)
+}
+
+func printPairTable(reqs []pairRequest) {
+	fmt.Printf("%-20s %-24s %-16s %s\n", "REQUEST", "DEVICE", "FROM", "EXPIRES")
+	for _, r := range reqs {
+		fmt.Printf("%-20s %-24s %-16s %s\n", r.RequestID, r.DeviceName, r.RemoteAddr, r.ExpiresAt)
+	}
+}
+
+// pairApprove approves one request and prints the minted device token
+// exactly once — the only time the raw token appears.  It is never logged.
+func pairApprove(id string, asJSON bool) int {
+	data, ok := daemonPost("/v1/admin/pair-requests/"+id+"/approve", nil)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "daemon unavailable")
+		return exitRefused
+	}
+	var resp struct {
+		OK         bool   `json:"ok"`
+		Error      string `json:"error"`
+		DeviceID   string `json:"device_id"`
+		DeviceName string `json:"device_name"`
+		Token      string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || !resp.OK {
+		fmt.Fprintf(os.Stderr, "approve %s: %s\n", id, resp.Error)
+		return exitRefused
+	}
+	if asJSON {
+		printJSON(resp)
+		return exitOK
+	}
+	fmt.Printf("Approved %q as device %s.\n", resp.DeviceName, resp.DeviceID)
+	fmt.Println("Device token — shown once, store it now:")
+	fmt.Println(resp.Token)
+	return exitOK
+}
+
+func pairDeny(id string, asJSON bool) int {
+	data, ok := daemonPost("/v1/admin/pair-requests/"+id+"/deny", nil)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "daemon unavailable")
+		return exitRefused
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || !resp.OK {
+		fmt.Fprintf(os.Stderr, "deny %s: %s\n", id, resp.Error)
+		return exitRefused
+	}
+	if asJSON {
+		printJSON(resp)
+		return exitOK
+	}
+	fmt.Printf("Denied pairing request %s.\n", id)
+	return exitOK
+}
+
+// pairRevoke cuts off one device; its token stops working immediately.
+func pairRevoke(deviceID string, asJSON bool) int {
+	data, ok := daemonPost("/v1/admin/devices/"+deviceID+"/revoke", nil)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "daemon unavailable")
+		return exitRefused
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || !resp.OK {
+		fmt.Fprintf(os.Stderr, "revoke %s: %s\n", deviceID, resp.Error)
+		return exitRefused
+	}
+	if asJSON {
+		printJSON(resp)
+		return exitOK
+	}
+	fmt.Printf("Revoked device %s.\n", deviceID)
+	return exitOK
 }

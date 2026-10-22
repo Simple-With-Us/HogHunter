@@ -17,8 +17,8 @@ Status: spec + scaffold on branch `feature/linux-companion`.  Host process
 listing, lane scanning, the safety policy, and the Docker-socket client are
 implemented.  Prune-apply, kill paths, and cgroup limit-setting are wired
 through the safety policy but marked clearly in code.  The auth token store
-(pairing-minted `hh1_` tokens, hash-only storage) is still stubbed —
-nothing here is deployable until that's real.
+(pairing-minted `hh1_` tokens, hash-only storage, CLI approval) is
+implemented (2026-10-21).
 
 ## 1. Goals
 
@@ -150,6 +150,10 @@ This is not a limitation to work around; it is the design.  Consequences:
 | `POST /v1/prune` | a device's own token | Allow Remote Disk Pruning | tailnet |
 | `POST /v1/pair-request` (new device asks to pair) | none — tailnet only, rate-limited | none | tailnet |
 | `GET /v1/pair-requests` (list pending) | any valid device token | none | tailnet |
+| `GET /v1/health`, `GET /v1/version` | none — unauthenticated, minimal | none | tailnet or loopback |
+| `GET /v1/admin/pair-requests`, `GET /v1/admin/devices`,
+  `POST /v1/admin/pair-requests/{id}/approve|deny`,
+  `POST /v1/admin/devices/{id}/revoke` | Unix socket only — 403 over HTTP | none | local socket |
 
   Each device confirms every destructive action in its own UI; the daemon
   re-checks the safety policy (§8) per action.
@@ -163,11 +167,16 @@ This is not a limitation to work around; it is the design.  Consequences:
 ## 6. HTTP API (daemon)
 
 Base: `http://<tailscale-ip>:24241/v1`.  JSON everywhere.  Auth: Bearer
-token, except `/v1/health` and `/v1/version` which are unauthenticated.
+token, except `GET /v1/health` and `GET /v1/version` (unauthenticated,
+minimal — see §13) and `POST /v1/pair-request` (unauthenticated,
+tailnet-only, rate-limited).
 
 Reads:
 
-- `GET /v1/health` → `{"ok": true, "version": "0.1.0"}`
+- `GET /v1/health` → `{"status": "ok", "version": "0.1.0", "uptime_s": 123}`.
+  Unauthenticated by design: tailnet-only bind, no sensitive fields, and
+  the handler is cheap — it never touches Docker or git (§13).
+- `GET /v1/version` → `{"version": "0.1.0"}` (unauthenticated).
 - `GET /v1/snapshot` → host overview: hostname, uptime, loadavg, cpu
   (model, count, usage %), memory, swap, disks (per device: total/used/
   avail), PSI (cpu/memory/io pressure, when the kernel exposes it).
@@ -428,3 +437,21 @@ Only the real advantages, no marketing:
 
 Open: legacy `/root/vps-storage-status.json` bridge — keep the SSH-script
 path working in parallel, or cut the Devices view to HTTP immediately?
+
+## 13. Muster collector contract (2026-10-21)
+
+Muster (the fleet-admin Mac app) monitors hh-agent hosts the same way it
+monitors anything else: it polls one cheap endpoint per device.
+
+- Muster polls `GET /v1/health` over Tailscale for each configured
+  hh-agent host and shows running / not-running per device in its fleet
+  view.  Each device is independently addressable (per the §12 Devices
+  decision — no primary, no aggregation on the daemon).
+- Trust posture: health is unauthenticated, exactly like
+  `POST /v1/pair-request` — the listener binds the Tailscale IP (and
+  loopback) only, the payload is minimal (`status`, `version`,
+  `uptime_s`), and the handler is deliberately cheap: no Docker socket,
+  no git, no subprocess.  It is safe to poll on Muster's fleet interval.
+- Explicitly not this slice: full `GET /v1/snapshot` polling with a
+  device token (Muster would need its own paired token per device) —
+  a later slice, if wanted.  This one is running/not-running only.
