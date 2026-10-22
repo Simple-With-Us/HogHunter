@@ -279,7 +279,10 @@ class VacuumEngine:
                     record.steps.append(
                         StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
                     )
-                    record.finish()
+                    # Nothing ran, so this is not a successful run:  the exit code is how the
+                    # caller learns that the step it asked for was refused, the same way the
+                    # "step is off" refusal above reports itself.
+                    record.finish(2, summary="skipped; host under extreme load")
                     return record
                 failure = self._plan_step(step_id, dry_run)
                 if failure is not None:

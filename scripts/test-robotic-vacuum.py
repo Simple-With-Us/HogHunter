@@ -2050,6 +2050,45 @@ class TestRunSingleStep(_RunStepCase):
         self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
         self.assertEqual(record.exit_code, 2)
 
+    def test_a_heavy_step_skipped_under_extreme_load_is_not_a_successful_run(self) -> None:
+        """Nothing ran, so the run is not a success:  the exit code has to say so.
+
+        A heavy step is refused when the host is under extreme load, and the refusal is
+        a skip rather than a failure.  The run still ends with an exit code of zero,
+        which is how `maintain.py --run-step` told the owner that nothing had run.
+        """
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        self.cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch("vacuum.engine.janitor_pressure_mode", return_value="hard"):
+                with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                    record = engine.run_single_step("janitor_worktree_retire")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+        self.assertNotEqual(record.exit_code, 0)
+        self.assertIn("host under extreme load", record.summary)
+
+    def test_the_cli_reports_a_load_skipped_step_as_a_failure(self) -> None:
+        """`--run-step` hands back the run's exit code, so a load skip must not read as success."""
+        import maintain
+        from vacuum.engine import VacuumEngine
+
+        self.cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(maintain.VacuumStore, "open", return_value=self.store):
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch("vacuum.script_registry.bootstrap_registry"):
+                    with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+                            with patch("vacuum.engine.janitor_pressure_mode", return_value="hard"):
+                                with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                        code = maintain.main(["--run-step", "janitor_worktree_retire"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.dispatched, [])
+
     def test_a_peer_holding_the_lock_is_reported_as_skipped(self) -> None:
         from vacuum.engine import VacuumEngine
 
