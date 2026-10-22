@@ -170,9 +170,25 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # as well: a render that finished in two seconds must never look like a
 # deadline timeout, because that wastes a second deadline on the retry and
 # can fail every size of a rebuild that was working.
+# Only a state that was actually read ends the wait, though.  A ps that is
+# missing, restricted, or too old to understand the stat= form prints
+# nothing and fails, and a probe that cannot tell a live browser from a dead
+# one must not guess: reading that empty answer as "exited" kills a browser
+# that is working about a second after it starts, fails every size of the
+# rebuild, and leaves the operator holding "render failed" and no hint that
+# the recipe killed the browser itself.  So an unreadable state counts as
+# still running, and kill -0 stays the authoritative "the pid is really
+# gone" test, which ends the wait on the next iteration once the process
+# really has been reaped.
 browser_running() {  # $1 pid
   kill -0 "$1" 2>/dev/null || return 1
-  ps -o stat= -p "$1" 2>/dev/null | grep -qv '^Z'
+  state="$(ps -o stat= -p "$1" 2>/dev/null)" || return 0
+  # ps pads its answer on some systems, so the state is read as its first word
+  set -f; set -- $state; set +f
+  case "$1" in
+    Z*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 render() {  # $1 svg  $2 px  $3 out  [$4 transparent background]
