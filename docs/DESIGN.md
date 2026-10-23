@@ -228,7 +228,7 @@ FROM per_ts, win GROUP BY k ORDER BY <avg_cpu | avg_mem> DESC LIMIT 40
 
 ## Copy rules
 
-Two ASCII spaces between sentences in every user-facing string.  Buttons, headings and titles in Title Case.  Status text in sentence case.  Times in Central Time when shown.
+A real U+00A0 plus a normal space between sentences in every user-facing string (owner ruling 2026-10-23), written `"\u{00A0} "` in Swift string literals.  Buttons, headings and titles in Title Case.  Status text in sentence case.  Times in Central Time when shown.
 
 ## Out of scope for 1.1
 

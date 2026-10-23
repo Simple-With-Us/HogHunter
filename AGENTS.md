@@ -92,8 +92,10 @@ Tests: `Tests/HogHunterTests/{HousekeeperLockTests,KeepSentinelTests,CleanRegime
 Theme default is **system** — the fleet-wide owner ruling of 2026-09-19 in
 `/Users/jay/apps/FLEET-UI-COPY.md` supersedes this repo's earlier "Light
 default".  Only the no-stored-preference fallback changed; a user who picked
-Light or Dark stays on it.  Title Case chrome.  Body sentence case with two
-ASCII spaces.
+Light or Dark stays on it.  Title Case chrome.  Body sentence case with a
+real U+00A0 plus a normal space between sentences (owner ruling 2026-10-23;  in
+Swift string literals `"\u{00A0} "`), never the `&nbsp;` entity and never two
+plain ASCII spaces.
 
 ## Bundle identifiers
 

@@ -77,4 +77,4 @@ Apache License 2.0.  See [LICENSE](LICENSE) for details.
 
 ## Notes
 
-Theme follows the system by default; Light and Dark are available in Settings.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.
+Theme follows the system by default; Light and Dark are available in Settings.  Headings and buttons are Title Case.  Body copy is sentence case with a real U+00A0 plus a normal space between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.
