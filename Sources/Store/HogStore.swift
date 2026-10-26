@@ -98,7 +98,7 @@ final class HogStore: ObservableObject {
     }
     @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist(); syncViewStateMirror() } }
-    @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
+    @Published var menuBarLabelMode: MenuBarLabelMode = .historyBars { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 5 {
         didSet {
             persist()
@@ -1120,7 +1120,7 @@ final class HogStore: ObservableObject {
 
     var menuBarLabel: String {
         switch menuBarLabelMode {
-        case .machinePercent, .sparkline:
+        case .historyBars, .machinePercent, .sparkline:
             return machinePercentLabel
         case .topHogName:
             guard let top = menuBarTopHog else { return machinePercentLabel }
@@ -1131,6 +1131,8 @@ final class HogStore: ObservableObject {
 
     var menuBarHelp: String {
         switch menuBarLabelMode {
+        case .historyBars:
+            return "Last 14 minutes CPU history and live load across all \(pulse.coreCount) cores."
         case .machinePercent:
             return machinePercentHelp
         case .sparkline:
@@ -1152,7 +1154,7 @@ final class HogStore: ObservableObject {
     /// as the value would say the same sentence twice and the number never.
     var menuBarAccessibilityValue: String {
         switch menuBarLabelMode {
-        case .machinePercent, .sparkline:
+        case .historyBars, .machinePercent, .sparkline:
             return machinePercentLabel
         case .topHogName:
             guard let top = menuBarTopHog else { return machinePercentLabel }

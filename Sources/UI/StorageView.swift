@@ -22,7 +22,17 @@ struct StorageView: View {
     /// Owned by `HogStore`, which the iPhone route also uses, so the Mac and
     /// the phone cannot start a second run over each other.
     @ObservedObject private var maintainStore: MaintainStore
-    @State private var selectedTab: StorageTab = .diskCleaner
+    @State private var internalTab: StorageTab = .diskCleaner
+    private let externalTab: Binding<StorageTab>?
+
+    private var activeTabBinding: Binding<StorageTab> {
+        externalTab ?? $internalTab
+    }
+
+    private var activeTab: StorageTab {
+        activeTabBinding.wrappedValue
+    }
+
     @State private var sortOrder: StorageSort = .total
     @State private var sortAscending: Bool = false
     @State private var filter: StorageFilter = .all
@@ -32,21 +42,24 @@ struct StorageView: View {
     private let isTabActive: Bool
     private let includesMaintenance: Bool
     private let autoScanCleaner: Bool
+    private let showModePicker: Bool
 
     /// `initialTab` is the mode the view opens on.  The app always takes the
     /// default; a layout test opens the Maintain mode directly instead of
     /// clicking the segmented control.
-    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true) {
+    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, externalTab: Binding<StorageTab>? = nil, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true, showModePicker: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
         // The same mode the cleaner view honours on appear: with it off, a tier
         // or exclusion change must not start a walk either.
         _cleanerStore = StateObject(wrappedValue: DiskCleanerStore(manualScanOnly: !autoScanCleaner))
-        _selectedTab = State(initialValue: initialTab)
+        _internalTab = State(initialValue: initialTab)
+        self.externalTab = externalTab
         self.maintainStore = maintainStore
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
         self.includesMaintenance = includesMaintenance
         self.autoScanCleaner = autoScanCleaner
+        self.showModePicker = showModePicker
     }
 
     var body: some View {
@@ -54,7 +67,7 @@ struct StorageView: View {
             header
                 .padding(.top, embeddedInPanel ? 0 : 4)
 
-            switch selectedTab {
+            switch activeTab {
             case .appStorage:
                 statusRow
                 list
@@ -73,7 +86,7 @@ struct StorageView: View {
                 WindowActivator.front()
             }
             if isTabActive {
-                if selectedTab == .appStorage, case .idle = store.state {
+                if activeTab == .appStorage, case .idle = store.state {
                     store.refresh()
                 }
                 startRefreshTimer()
@@ -81,7 +94,7 @@ struct StorageView: View {
         }
         .onChange(of: isTabActive) { active in
             if active {
-                if selectedTab == .appStorage, case .idle = store.state {
+                if activeTab == .appStorage, case .idle = store.state {
                     store.refresh()
                 }
                 startRefreshTimer()
@@ -90,7 +103,7 @@ struct StorageView: View {
                 refreshTask = nil
             }
         }
-        .onChange(of: selectedTab) { newTab in
+        .onChange(of: activeTab) { newTab in
             if isTabActive, newTab == .appStorage, case .idle = store.state {
                 store.refresh()
             }
@@ -108,19 +121,21 @@ struct StorageView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            Picker("Mode", selection: $selectedTab) {
-                Text("Clean").tag(StorageTab.diskCleaner)
-                if includesMaintenance { Text("Maintain").tag(StorageTab.maintain) }
-                Text("Apps").tag(StorageTab.appStorage)
+            if showModePicker {
+                Picker("Mode", selection: activeTabBinding) {
+                    Text("Clean").tag(StorageTab.diskCleaner)
+                    if includesMaintenance { Text("Maintain").tag(StorageTab.maintain) }
+                    Text("Apps").tag(StorageTab.appStorage)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 210)
+                .disabled(cleanerStore.isCleaning)
+
+                Spacer(minLength: 8)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 210)
-            .disabled(cleanerStore.isCleaning)
 
-            Spacer(minLength: 8)
-
-            switch selectedTab {
+            switch activeTab {
             case .diskCleaner:
                 cleanerHeaderControls
             case .maintain:
@@ -155,6 +170,10 @@ struct StorageView: View {
                         .fill(cleanerStore.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
                 )
                 .foregroundStyle(cleanerStore.selectedTier == .extreme ? Color.orange : Color.blue)
+
+            if !showModePicker {
+                Spacer(minLength: 8)
+            }
         }
     }
 
@@ -166,6 +185,10 @@ struct StorageView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
             .disabled(maintainStore.isRunningNow)
+
+            if !showModePicker {
+                Spacer(minLength: 8)
+            }
         }
     }
 
@@ -178,6 +201,10 @@ struct StorageView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
+
+            if !showModePicker {
+                Spacer(minLength: 8)
+            }
 
             HStack(spacing: 4) {
                 Text("Sort:")
@@ -378,7 +405,7 @@ struct StorageView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                 if Task.isCancelled { return }
-                if isTabActive && selectedTab == .appStorage {
+                if isTabActive && activeTab == .appStorage {
                     store.refresh()
                 }
             }

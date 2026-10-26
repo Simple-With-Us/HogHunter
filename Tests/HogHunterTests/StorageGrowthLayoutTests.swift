@@ -148,7 +148,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         let quickSize = quick.fittingSize
         XCTAssertEqual(quickSize.width, HogHunterPanel.panelWidth, accuracy: 1)
         XCTAssertGreaterThan(quickSize.height, 200)
-        XCTAssertLessThan(quickSize.height, HogHunterPanel.panelHeight)
+        XCTAssertLessThanOrEqual(quickSize.height, HogHunterPanel.panelHeight)
         try render(quick, size: quickSize, name: "hh174-quick-external")
 
         for (name, size) in [

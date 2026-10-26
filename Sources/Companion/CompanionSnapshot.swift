@@ -324,7 +324,7 @@ enum CompanionSettingsLimits {
     /// The Mac's appearance choices, in the names the Mac uses.
     static let appearances: [String] = ["System", "Light", "Dark"]
     /// The Mac's menu bar label choices, in the names the Mac uses.
-    static let menuBarLabelModes: [String] = ["Machine CPU", "Top Hog", "Live Sparkline"]
+    static let menuBarLabelModes: [String] = ["History Bars & %", "Machine CPU", "Top Hog", "Live Sparkline"]
     /// Per-core percent, the scale the alert compares against.
     static let alertThresholdRange: ClosedRange<Double> = 100...1000
     static let alertThresholdStep: Double = 50
@@ -376,9 +376,9 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     var appearance: String = "System"
     /// The refresh cadence the Mac uses while its panel is closed, in seconds.
     var backgroundRefreshInterval: Double = 10
-    /// What the Mac's menu bar shows: "Machine CPU", "Top Hog" or
+    /// What the Mac's menu bar shows: "History Bars & %", "Machine CPU", "Top Hog" or
     /// "Live Sparkline".
-    var menuBarLabelMode: String = "Machine CPU"
+    var menuBarLabelMode: String = "History Bars & %"
     /// The Mac's list sort: "CPU" or "Memory".
     var sort: String = "CPU"
     /// True when the Mac's list runs from least to most.
@@ -407,7 +407,7 @@ extension CompanionSettingsSummary {
         notificationsDenied = try container.decodeIfPresent(Bool.self, forKey: .notificationsDenied)
         appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "System"
         backgroundRefreshInterval = try container.decodeIfPresent(Double.self, forKey: .backgroundRefreshInterval) ?? 10
-        menuBarLabelMode = try container.decodeIfPresent(String.self, forKey: .menuBarLabelMode) ?? "Machine CPU"
+        menuBarLabelMode = try container.decodeIfPresent(String.self, forKey: .menuBarLabelMode) ?? "History Bars & %"
         sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
         sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? false
         resolvedAppearance = try container.decodeIfPresent(String.self, forKey: .resolvedAppearance) ?? "Light"
