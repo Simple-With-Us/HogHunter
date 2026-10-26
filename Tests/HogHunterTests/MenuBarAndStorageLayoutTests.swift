@@ -44,15 +44,42 @@ final class MenuBarAndStorageLayoutTests: XCTestCase {
     }
 
     @MainActor
+    private func makeIsolatedMaintainStore() -> MaintainStore {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hoghunter-menubar-storage-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return MaintainStore(supportDirectory: directory, repoRoot: directory, launcher: { _ in true })
+    }
+
+    @MainActor
+    private func makeIsolatedHogStore() -> HogStore {
+        let maintain = makeIsolatedMaintainStore()
+        let suite = "hh-menubar-storage-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let historyURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("history-\(UUID().uuidString).sqlite")
+        addTeardownBlock { try? FileManager.default.removeItem(at: historyURL) }
+        return HogStore(
+            historyURL: historyURL,
+            defaults: defaults,
+            infisical: IsolatedInfisical.make(),
+            maintain: maintain,
+            startImmediately: false
+        )
+    }
+
+    @MainActor
     func testHogStoreDefaultsToHistoryBars() {
-        let store = HogStore(startImmediately: false)
+        let store = makeIsolatedHogStore()
         XCTAssertEqual(store.menuBarLabelMode, .historyBars)
         XCTAssertTrue(store.menuBarHelp.contains("Last 14 minutes CPU history"))
     }
 
     @MainActor
     func testStorageViewInitializesWithShowModePickerFalse() {
-        let maintain = MaintainStore()
+        let maintain = makeIsolatedMaintainStore()
         let view = StorageView(
             runningBundleIds: { [] },
             maintainStore: maintain,
@@ -68,7 +95,7 @@ final class MenuBarAndStorageLayoutTests: XCTestCase {
 
     @MainActor
     func testStorageViewWithExternalTabBinding() {
-        let maintain = MaintainStore()
+        let maintain = makeIsolatedMaintainStore()
         var tab: StorageTab = .appStorage
         let binding = Binding<StorageTab>(
             get: { tab },
