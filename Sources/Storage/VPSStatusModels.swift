@@ -84,7 +84,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
 
     var fleetExtraDevice: VPSDevice? {
         devices["fleet_extra"] ?? devices["fleet-extra"] ?? devices["extra"] ?? devices.values.first {
-            $0.mount == "/mnt/fleet-extra" || $0.mount.hasPrefix("/mnt/fleet-extra")
+            $0.mount == "/mnt/fleet-extra" || $0.mount.hasPrefix("/mnt/fleet-extra/")
         }
     }
 

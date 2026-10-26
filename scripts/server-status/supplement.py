@@ -147,10 +147,10 @@ def directory_bytes(path, run=subprocess.run):
         return None
 
 
-def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs):
+def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount):
     result = dict(snapshot)
     devices = dict(snapshot.get('devices', {}))
-    if extra_volume and extra_volume.exists():
+    if extra_volume and ismount_func(str(extra_volume)):
         try:
             st = statvfs_func(str(extra_volume))
             free = st.f_bavail * st.f_frsize

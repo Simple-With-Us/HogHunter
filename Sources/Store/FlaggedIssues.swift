@@ -187,7 +187,7 @@ enum FlaggedIssueEvaluator {
         // External drives
         for drive in externalDrives {
             let usedPct = drive.usedPercent ?? 0
-            let avail = drive.availableBytes ?? 0
+            guard let avail = drive.availableBytes else { continue }
             if (avail < 5 * 1024 * 1024 * 1024 && avail > 0) || usedPct >= 95 {
                 issues.append(FlaggedIssue(
                     id: "mac.drive.\(drive.id).critical",
@@ -221,8 +221,8 @@ enum FlaggedIssueEvaluator {
             ))
         }
 
-        // Heavy runaway processes
-        let topHogs = macStore.rows.prefix(3)
+        // Heavy runaway processes (evaluated by highest CPU regardless of current view sort)
+        let topHogs = macStore.rows.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(3)
         for hog in topHogs where hog.cpuPercent >= 200.0 {
             issues.append(FlaggedIssue(
                 id: "mac.cpu.hog.\(hog.id)",
@@ -231,7 +231,7 @@ enum FlaggedIssueEvaluator {
                 priority: hog.cpuPercent >= 300.0 ? .critical : .high,
                 host: .mac,
                 category: .cpu,
-                actionTitle: "Quit"
+                actionTitle: hog.canQuit ? "Quit" : nil
             ))
         }
 
@@ -270,7 +270,7 @@ enum FlaggedIssueEvaluator {
 
         // MARK: - Server Issues
         if vpsConfigured {
-            if let vpsError, !vpsError.isEmpty, vpsSnapshot == nil {
+            if let vpsError, !vpsError.isEmpty {
                 issues.append(FlaggedIssue(
                     id: "server.unreachable",
                     title: "Remote Server Unreadable",

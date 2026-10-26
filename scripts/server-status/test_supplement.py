@@ -50,12 +50,24 @@ class SupplementTests(unittest.TestCase):
                           devices={'root': {'mount': '/', 'free_bytes': 123}})
             output = module.supplement(source, Path('/fixture'), lambda _: None, ([], True),
                                        lambda _: None, lambda _: 'unknown',
-                                       extra_volume=extra_path, statvfs_func=lambda _: MockStatVFS())
+                                       extra_volume=extra_path, statvfs_func=lambda _: MockStatVFS(),
+                                       ismount_func=lambda _: True)
             self.assertIn('fleet_extra', output['devices'])
             dev = output['devices']['fleet_extra']
             self.assertEqual(dev['mount'], str(extra_path))
             self.assertEqual(dev['free_bytes'], 100_000_000 * 4096)
             self.assertIn('GB disk: extra volume', dev['note'])
+
+    def test_fleet_extra_volume_ignored_when_unmounted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            extra_path = Path(directory) / 'mnt' / 'fleet-extra'
+            extra_path.mkdir(parents=True)
+            source = dict(generated_at='2026-01-01T00:00:00Z', host='fixture',
+                          devices={'root': {'mount': '/', 'free_bytes': 123}})
+            output = module.supplement(source, Path('/fixture'), lambda _: None, ([], True),
+                                       lambda _: None, lambda _: 'unknown',
+                                       extra_volume=extra_path, ismount_func=lambda _: False)
+            self.assertNotIn('fleet_extra', output['devices'])
 
     def test_failed_measurement_does_not_retimestamp_old_size(self):
         source = {'largest_dirs': [{'path': '/fixture/Code', 'bytes': 999}]}

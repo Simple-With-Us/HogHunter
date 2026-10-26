@@ -791,7 +791,7 @@ struct HogHunterPanel: View {
                         name: "Server (Root /)",
                         icon: "server.rack",
                         freeBytes: UInt64(max(0, root.freeBytes)),
-                        usedFraction: root.usedFraction ?? 0.5
+                        usedFraction: root.usedFraction
                     )
                 }
 
@@ -801,7 +801,7 @@ struct HogHunterPanel: View {
                         name: "Server (/mnt/fleet-extra)",
                         icon: "externaldrive.connected.to.line.below",
                         freeBytes: UInt64(max(0, extra.freeBytes)),
-                        usedFraction: extra.usedFraction ?? 0.5
+                        usedFraction: extra.usedFraction
                     )
                 }
             }
@@ -810,7 +810,7 @@ struct HogHunterPanel: View {
         }
     }
 
-    private func quickStorageRow(name: String, icon: String, freeBytes: UInt64, usedFraction: Double) -> some View {
+    private func quickStorageRow(name: String, icon: String, freeBytes: UInt64, usedFraction: Double?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Image(systemName: icon)
@@ -820,17 +820,25 @@ struct HogHunterPanel: View {
                     .font(.system(size: 9, weight: .medium))
                     .lineLimit(1)
                 Spacer()
-                Text("\(HogFormat.memory(freeBytes)) free (\(Int(usedFraction * 100))%)")
-                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Severity.forDisk(usedFraction).color)
+                if let fraction = usedFraction {
+                    Text("\(HogFormat.memory(freeBytes)) free (\(Int(fraction * 100))%)")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Severity.forDisk(fraction).color)
+                } else {
+                    Text("\(HogFormat.memory(freeBytes)) free")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(Color(nsColor: .separatorColor).opacity(0.3))
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Severity.forDisk(usedFraction).color)
-                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(usedFraction))))
+                    if let fraction = usedFraction {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Severity.forDisk(fraction).color)
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(fraction))))
+                    }
                 }
             }
             .frame(height: 3.5)
