@@ -149,22 +149,30 @@ struct HogHunterApp: App {
             HogHunterPanel(isQuickView: true)
                 .environmentObject(store)
         } label: {
-            HStack(spacing: 5) {
-                Image("HogProfile")
-                    .renderingMode(.original)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 15)
-                if store.menuBarLabelMode == .sparkline {
-                    CpuSparklineView(samples: store.recentCpuPercents)
+            if store.menuBarLabelMode == .historyBars {
+                MenuBarCpuBarsView(history: store.cpuMinuteHistory, cpuPercent: store.pulse.cpuPercent)
+                    .help(store.menuBarHelp)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Hog Hunter")
+                    .accessibilityValue(store.menuBarAccessibilityValue)
+            } else {
+                HStack(spacing: 5) {
+                    Image("HogProfile")
+                        .renderingMode(.original)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 18, height: 15)
+                    if store.menuBarLabelMode == .sparkline {
+                        CpuSparklineView(samples: store.recentCpuPercents)
+                    }
+                    Text(store.menuBarLabel)
+                        .monospacedDigit()
                 }
-                Text(store.menuBarLabel)
-                    .monospacedDigit()
+                .help(store.menuBarHelp)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Hog Hunter")
+                .accessibilityValue(store.menuBarAccessibilityValue)
             }
-            .help(store.menuBarHelp)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Hog Hunter")
-            .accessibilityValue(store.menuBarAccessibilityValue)
         }
         .menuBarExtraStyle(.window)
         .commands { commands }

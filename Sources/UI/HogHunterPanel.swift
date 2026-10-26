@@ -27,11 +27,20 @@ struct HogHunterPanel: View {
     @Environment(\.openSettings) private var openSettings
     @State private var selectedTab: PanelTab = .overview
     @AppStorage("dashboardHostScope") private var hostScopeRawValue = HostScope.mac.rawValue
+    enum StorageSubTab: String, CaseIterable, Identifiable {
+        case apps = "Installed Apps"
+        case clean = "Disk Cleaner"
+        case drives = "Drives & Folders"
+
+        var id: String { rawValue }
+    }
+
     @ObservedObject private var mountedDrives: MountedDriveStore
     @State private var driveReadAttempted = false
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
+    @State private var storageSubTab: StorageSubTab = .apps
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
     private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
@@ -101,18 +110,46 @@ struct HogHunterPanel: View {
                         }
                     }
                     if hasVisitedStorage || selectedTab == .storage {
-                        GeometryReader { stage in
-                            VStack(alignment: .leading, spacing: 10) {
-                                capacityCards
-                                mountedDriveList
-                                ScrollView { CodingDirectoriesView(store: directoryUsage) }
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: min(260, max(200, stage.size.height * 0.4)))
+                        VStack(alignment: .leading, spacing: 12) {
+                            capacityCards
+
+                            Picker("Storage Section", selection: $storageSubTab) {
+                                ForEach(StorageSubTab.allCases) { tab in
+                                    Text(tab.rawValue).tag(tab)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+
+                            switch storageSubTab {
+                            case .apps:
                                 StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
                                             maintainStore: store.maintain, embeddedInPanel: true,
-                                            isTabActive: selectedTab == .storage && hostScope == .mac,
-                                            includesMaintenance: false, autoScanCleaner: false)
-                                    .frame(maxHeight: .infinity)
+                                            isTabActive: selectedTab == .storage && hostScope == .mac && storageSubTab == .apps,
+                                            initialTab: .appStorage,
+                                            includesMaintenance: false, autoScanCleaner: false,
+                                            showModePicker: false)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            case .clean:
+                                StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
+                                            maintainStore: store.maintain, embeddedInPanel: true,
+                                            isTabActive: selectedTab == .storage && hostScope == .mac && storageSubTab == .clean,
+                                            initialTab: .diskCleaner,
+                                            includesMaintenance: false, autoScanCleaner: true,
+                                            showModePicker: false)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            case .drives:
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 14) {
+                                        mountedDriveList
+                                        Divider()
+                                        CodingDirectoriesView(store: directoryUsage)
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                         }
                         .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
@@ -396,7 +433,7 @@ struct HogHunterPanel: View {
                 }
                 .padding(.trailing, 2)
             }
-            .frame(maxHeight: 390)
+            .frame(maxHeight: 520)
 
             Divider()
 
@@ -421,7 +458,7 @@ struct HogHunterPanel: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 14)
         .padding(.top, 18)
-        .frame(width: Self.panelWidth)
+        .frame(width: Self.panelWidth, height: Self.panelHeight)
         .background(
             DockedPanelShape(beakX: beakX, isDocked: true)
                 .fill(Color(nsColor: .windowBackgroundColor))

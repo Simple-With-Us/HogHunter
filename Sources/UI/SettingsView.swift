@@ -151,7 +151,7 @@ private struct GeneralSettingsTab: View {
 
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
     @AppStorage(HogStore.Key.backgroundRefreshInterval) private var backgroundRefreshInterval: Double = 10
-    @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
+    @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.historyBars.rawValue
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
     var body: some View {

@@ -76,7 +76,7 @@ enum CompanionSettingsValidator {
         }
         if let raw = request.menuBarLabelMode {
             guard let mode = Self.menuBarLabelMode(from: raw) else {
-                return .failure(.init("The menu bar must show Machine CPU, Top Hog or Live Sparkline."))
+                return .failure(.init("The menu bar must show History Bars & %, Machine CPU, Top Hog or Live Sparkline."))
             }
             validated.menuBarLabelMode = mode
         }

@@ -32,11 +32,12 @@ struct StorageView: View {
     private let isTabActive: Bool
     private let includesMaintenance: Bool
     private let autoScanCleaner: Bool
+    private let showModePicker: Bool
 
     /// `initialTab` is the mode the view opens on.  The app always takes the
     /// default; a layout test opens the Maintain mode directly instead of
     /// clicking the segmented control.
-    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true) {
+    init(runningBundleIds: @escaping () -> Set<String>, maintainStore: MaintainStore, embeddedInPanel: Bool = false, isTabActive: Bool = true, initialTab: StorageTab = .diskCleaner, includesMaintenance: Bool = true, autoScanCleaner: Bool = true, showModePicker: Bool = true) {
         _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
         // The same mode the cleaner view honours on appear: with it off, a tier
         // or exclusion change must not start a walk either.
@@ -47,6 +48,7 @@ struct StorageView: View {
         self.isTabActive = isTabActive
         self.includesMaintenance = includesMaintenance
         self.autoScanCleaner = autoScanCleaner
+        self.showModePicker = showModePicker
     }
 
     var body: some View {
@@ -108,17 +110,19 @@ struct StorageView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            Picker("Mode", selection: $selectedTab) {
-                Text("Clean").tag(StorageTab.diskCleaner)
-                if includesMaintenance { Text("Maintain").tag(StorageTab.maintain) }
-                Text("Apps").tag(StorageTab.appStorage)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 210)
-            .disabled(cleanerStore.isCleaning)
+            if showModePicker {
+                Picker("Mode", selection: $selectedTab) {
+                    Text("Clean").tag(StorageTab.diskCleaner)
+                    if includesMaintenance { Text("Maintain").tag(StorageTab.maintain) }
+                    Text("Apps").tag(StorageTab.appStorage)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 210)
+                .disabled(cleanerStore.isCleaning)
 
-            Spacer(minLength: 8)
+                Spacer(minLength: 8)
+            }
 
             switch selectedTab {
             case .diskCleaner:
@@ -155,6 +159,10 @@ struct StorageView: View {
                         .fill(cleanerStore.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
                 )
                 .foregroundStyle(cleanerStore.selectedTier == .extreme ? Color.orange : Color.blue)
+
+            if !showModePicker {
+                Spacer(minLength: 8)
+            }
         }
     }
 
@@ -166,6 +174,10 @@ struct StorageView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
             .disabled(maintainStore.isRunningNow)
+
+            if !showModePicker {
+                Spacer(minLength: 8)
+            }
         }
     }
 
@@ -178,6 +190,10 @@ struct StorageView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
+
+            if !showModePicker {
+                Spacer(minLength: 8)
+            }
 
             HStack(spacing: 4) {
                 Text("Sort:")

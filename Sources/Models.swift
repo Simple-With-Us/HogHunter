@@ -57,6 +57,7 @@ enum CpuScale: String, CaseIterable, Identifiable {
 }
 
 enum MenuBarLabelMode: String, CaseIterable, Identifiable {
+    case historyBars = "History Bars & %"
     case machinePercent = "Machine CPU"
     case topHogName = "Top Hog"
     case sparkline = "Live Sparkline"
