@@ -586,7 +586,13 @@ project_marketing_seq() {
 asc_next_dotted_build() {
   local version="$1" plat="${2:-}" out rc
   command -v "$ASC_NODE" >/dev/null 2>&1 || return 1
-  load_secrets >/dev/null || return 1
+  # Read-only query: the node client resolves the credential itself, so no key
+  # file is staged here. load_secrets must not run in this path: callers use
+  # $(...), which would strand its ASC_TMP_DIR outside the parent's cleanup.
+  if ! asc_credential_source_present; then
+    logerr "asc-dotted-build: no ASC_* in env and no fleet-secrets; cannot verify against App Store Connect"
+    return 1
+  fi
   set +e
   out=$(asc_client next-dotted-build "$BUNDLE_ID" "$version" "$plat")
   rc=$?
@@ -598,7 +604,13 @@ asc_next_dotted_build() {
 asc_released_store_version() {
   local plat="${1:-}" out rc
   command -v "$ASC_NODE" >/dev/null 2>&1 || return 1
-  load_secrets >/dev/null || return 1
+  # Read-only query: the node client resolves the credential itself, so no key
+  # file is staged here. load_secrets must not run in this path: callers use
+  # $(...), which would strand its ASC_TMP_DIR outside the parent's cleanup.
+  if ! asc_credential_source_present; then
+    logerr "asc-store-version: no ASC_* in env and no fleet-secrets; cannot verify against App Store Connect"
+    return 1
+  fi
   set +e
   out=$(asc_client released-store-version "$BUNDLE_ID" "$plat" 2>/dev/null)
   rc=$?
