@@ -155,6 +155,16 @@ struct HogHunterApp: App {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Hog Hunter")
                     .accessibilityValue(store.menuBarAccessibilityValue)
+            } else if store.menuBarLabelMode == .sparkline {
+                HStack(spacing: 4) {
+                    Image(nsImage: CpuSparklineView.makeHogAndSparklineImage(samples: store.recentCpuPercents))
+                    Text(store.menuBarLabel)
+                        .monospacedDigit()
+                }
+                .help(store.menuBarHelp)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Hog Hunter")
+                .accessibilityValue(store.menuBarAccessibilityValue)
             } else {
                 HStack(spacing: 5) {
                     Image("HogProfile")
@@ -162,9 +172,6 @@ struct HogHunterApp: App {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 18, height: 15)
-                    if store.menuBarLabelMode == .sparkline {
-                        CpuSparklineView(samples: store.recentCpuPercents)
-                    }
                     Text(store.menuBarLabel)
                         .monospacedDigit()
                 }
