@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import subprocess
 import tempfile
 import unittest
@@ -24,16 +25,24 @@ def write_process(root, pid, comm, start_time, ppid=1, ticks=0):
 
 
 class ControlTests(unittest.TestCase):
+    """The owner allowlist is the account this test runs as, so the tests
+    describe the same rules on any machine and under any user."""
+
+    @property
+    def owners(self):
+        return module.ALLOWED_OWNERS + (pwd.getpwuid(os.getuid()).pw_name,)
+
     def test_a_kernel_thread_is_never_offered(self):
         """Kernel threads have no executable and cannot be signalled."""
         with tempfile.TemporaryDirectory() as directory:
             proc = Path(directory)
             path = write_process(proc, 30, 'kworker/0:0H-kblockd', start_time=1)
             (path / 'exe').unlink()
-            rows = module.list_targets(proc=proc)
+            rows = module.list_targets(proc=proc, owners=self.owners)
             self.assertNotIn(30, [row['pid'] for row in rows['processes']])
             outcome = module.stop_process(30, 1, proc=proc, kill=lambda *a: None,
-                                         ancestors=set(), container_lookup=lambda pid: None)
+                                         ancestors=set(), container_lookup=lambda pid: None,
+                                         owners=self.owners)
             self.assertFalse(outcome['ok'])
             self.assertIn('kernel thread', outcome['reason'])
 
@@ -48,7 +57,8 @@ class ControlTests(unittest.TestCase):
             proc = Path(directory)
             write_process(proc, 4242, 'next-server', start_time=999)
             outcome = module.stop_process(4242, 111, proc=proc, kill=lambda *a: None,
-                                         ancestors=set(), container_lookup=lambda pid: None)
+                                         ancestors=set(), container_lookup=lambda pid: None,
+                                         owners=self.owners)
             self.assertFalse(outcome['ok'])
             self.assertIn('changed since', outcome['reason'])
 
@@ -58,7 +68,8 @@ class ControlTests(unittest.TestCase):
             write_process(proc, 4242, 'next-server', start_time=999)
             seen = []
             outcome = module.stop_process(4242, 999, proc=proc, kill=lambda pid, sig: seen.append((pid, sig)),
-                                         ancestors=set(), container_lookup=lambda pid: None)
+                                         ancestors=set(), container_lookup=lambda pid: None,
+                                         owners=self.owners)
             self.assertTrue(outcome['ok'], outcome)
             self.assertEqual(seen[0][0], 4242)
             self.assertEqual(seen[0][1], module.signal.SIGTERM)
@@ -69,7 +80,8 @@ class ControlTests(unittest.TestCase):
             write_process(proc, 4242, 'next-server', start_time=999)
             seen = []
             module.stop_process(4242, 999, force=True, proc=proc, kill=lambda pid, sig: seen.append(sig),
-                                ancestors=set(), container_lookup=lambda pid: None)
+                                ancestors=set(), container_lookup=lambda pid: None,
+                                owners=self.owners)
             self.assertEqual(seen[0], module.signal.SIGKILL)
 
     def test_infrastructure_is_never_stopped(self):
@@ -77,7 +89,8 @@ class ControlTests(unittest.TestCase):
             proc = Path(directory)
             write_process(proc, 5, 'dockerd', start_time=1)
             outcome = module.stop_process(5, 1, proc=proc, kill=lambda *a: None,
-                                         ancestors=set(), container_lookup=lambda pid: None)
+                                         ancestors=set(), container_lookup=lambda pid: None,
+                                         owners=self.owners)
             self.assertFalse(outcome['ok'])
             self.assertIn('keeps the host running', outcome['reason'])
 
@@ -95,7 +108,7 @@ class ControlTests(unittest.TestCase):
             proc = Path(directory)
             write_process(proc, 42, 'next-server', start_time=555)
             write_process(proc, 43, 'dockerd', start_time=556)
-            rows = module.list_targets(proc=proc)
+            rows = module.list_targets(proc=proc, owners=self.owners)
             pids = {row['pid'] for row in rows['processes']}
             self.assertIn(42, pids)
             self.assertNotIn(43, pids)  # Infrastructure is not offered.

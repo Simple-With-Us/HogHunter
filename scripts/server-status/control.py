@@ -170,7 +170,7 @@ def coolify_containers(run=subprocess.run):
     return rows
 
 
-def list_targets(proc=Path('/proc'), identities=None, run=subprocess.run):
+def list_targets(proc=Path('/proc'), identities=None, run=subprocess.run, owners=ALLOWED_OWNERS):
     """The processes and workloads this host is willing to act on."""
     if identities is None:
         identities = container_identities(run)
@@ -184,7 +184,7 @@ def list_targets(proc=Path('/proc'), identities=None, run=subprocess.run):
             continue
         owner = owner_of(pid, proc)
         container = container_of(pid, identities, proc)
-        if owner not in ALLOWED_OWNERS and container is None:
+        if owner not in owners and container is None:
             continue
         if fields['comm'] in PROTECTED_NAMES and container is None:
             continue
@@ -201,7 +201,7 @@ def list_targets(proc=Path('/proc'), identities=None, run=subprocess.run):
     return {'processes': rows, 'containers': coolify_containers()}
 
 
-def stop_process(pid, start_time, force=False, proc=Path('/proc'), kill=None, ancestors=None, container_lookup=None, identities=None):
+def stop_process(pid, start_time, force=False, proc=Path('/proc'), kill=None, ancestors=None, container_lookup=None, identities=None, owners=ALLOWED_OWNERS):
     """Stop one process, if it is still the one the caller named."""
     if pid <= 1:
         return {'ok': False, 'reason': 'refusing to signal pid 1'}
@@ -214,7 +214,7 @@ def stop_process(pid, start_time, force=False, proc=Path('/proc'), kill=None, an
         return {'ok': False, 'reason': 'refusing to stop this session'}
     owner = owner_of(pid, proc)
     container = container_lookup(pid) if container_lookup is not None else container_of(pid, identities, proc)
-    if owner not in ALLOWED_OWNERS and container is None:
+    if owner not in owners and container is None:
         return {'ok': False, 'reason': f'owned by {owner or "another user"}'}
     if fields['comm'] in PROTECTED_NAMES and container is None:
         return {'ok': False, 'reason': f'{fields["comm"]} keeps the host running'}
