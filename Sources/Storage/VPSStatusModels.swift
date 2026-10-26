@@ -82,6 +82,12 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         devices["root"]
     }
 
+    var fleetExtraDevice: VPSDevice? {
+        devices["fleet_extra"] ?? devices["fleet-extra"] ?? devices["extra"] ?? devices.values.first {
+            $0.mount == "/mnt/fleet-extra" || $0.mount.hasPrefix("/mnt/fleet-extra")
+        }
+    }
+
     var tmpDevice: VPSDevice? {
         devices["tmp"]
     }
@@ -101,6 +107,8 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         var memorySeverity: Severity?
         var diskText: String?
         var diskSeverity: Severity?
+        var extraDiskText: String?
+        var extraDiskSeverity: Severity?
     }
 
     /// The headline, or nil when the snapshot carries nothing worth showing.
@@ -110,6 +118,8 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         let memoryText = memory.map { String(format: "%.0f%%", $0.usedPercentage) }
         let diskFraction = rootDevice?.usedFraction
         let diskText = diskFraction.map { String(format: "%.0f%% used", $0 * 100) }
+        let extraFraction = fleetExtraDevice?.usedFraction
+        let extraText = extraFraction.map { String(format: "%.0f%% used", $0 * 100) }
         return Headline(
             host: host,
             cpuText: cpuText,
@@ -117,7 +127,9 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
             memoryText: memoryText,
             memorySeverity: memory?.severity,
             diskText: diskText,
-            diskSeverity: diskFraction.map { Severity.forDisk($0) }
+            diskSeverity: diskFraction.map { Severity.forDisk($0) },
+            extraDiskText: extraText,
+            extraDiskSeverity: extraFraction.map { Severity.forDisk($0) }
         )
     }
 }
@@ -139,17 +151,26 @@ struct VPSDevice: Codable, Equatable, Sendable {
         self.note = note
     }
 
-    /// Attempts to parse total capacity from note (e.g., "301GB disk: ...")
+    /// Attempts to parse total capacity from note (e.g., "301GB disk: ...", "1TB disk: ...")
     var estimatedTotalBytes: Int64? {
         guard let note else { return nil }
-        if let match = note.range(of: #"(\d+)\s*GB"#, options: .regularExpression) {
+        if let match = note.range(of: #"(\d+)\s*(?:GB|TB)"#, options: [.regularExpression, .caseInsensitive]) {
             let str = String(note[match])
             let digits = str.filter { $0.isNumber }
-            if let gb = Int64(digits) {
-                return gb * 1_073_741_824
+            if let num = Int64(digits) {
+                if str.uppercased().contains("TB") {
+                    return num * 1_099_511_627_776
+                } else {
+                    return num * 1_073_741_824
+                }
             }
         }
         return nil
+    }
+
+    var usedBytes: Int64? {
+        guard let total = estimatedTotalBytes, total > 0 else { return nil }
+        return max(0, total - freeBytes)
     }
 
     var usedFraction: Double? {

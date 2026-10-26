@@ -357,196 +357,530 @@ struct HogHunterPanel: View {
         }
     }
 
-    /// The menu bar window has two sizes.  Quick is the glanceable strip:
-    /// the numbers and the busy apps, read at a glance.  Summary is the same
-    /// readings with the history, the meters and the volume cards, which
-    /// makes the window grow a long way.
-    private enum QuickViewMode: String, CaseIterable, Identifiable {
-        case quick = "Quick"
-        case summary = "Summary"
-        var id: String { rawValue }
-    }
-
-    /// Which size the menu bar window is showing.
-    @State private var quickMode: QuickViewMode = .quick
     /// True while the pointer is over the activity list, which opens it up.
     @State private var activityHovered = false
 
+    /// Consolidated drop-down menu bar window.  Combines system alerts/flagged issues,
+    /// graphical CPU meters, RAM usage, storage of all kinds (Mac internal/external and
+    /// Server root / fleet-extra), and active hogs in a single high-density view.
     private var quickView: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text("Hog Hunter").font(.headline)
+        VStack(alignment: .leading, spacing: 9) {
+            // Header
+            HStack(spacing: 6) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 16, height: 14)
+                Text("Hog Hunter")
+                    .font(.system(size: 13, weight: .semibold))
+                if store.isStale {
+                    Text("Sampling behind")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
-                if store.isStale { Text("Sampling behind").foregroundStyle(.orange) }
                 settingsMenu
             }
-            quickModeToggle
-            if quickMode == .summary {
-                quickSummary
-            } else {
-                quickGlance
+
+            // Area for prioritized flagged issues / system alerts
+            flaggedIssuesSection
+
+            // Scrollable consolidated telemetry
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 9) {
+                    cpuSection
+                    ramSection
+                    storageSection
+                    activitySection
+                }
+                .padding(.trailing, 2)
+            }
+            .frame(maxHeight: 390)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Button("Open Dashboard") {
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Spacer()
+
+                Button("Clean…") {
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .font(.system(size: 11))
-        .padding(16)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .padding(.top, 18)
         .frame(width: Self.panelWidth)
-        .background(DockedPanelShape(beakX: beakX, isDocked: true)
-            .fill(Color(nsColor: .windowBackgroundColor)))
+        .background(
+            DockedPanelShape(beakX: beakX, isDocked: true)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            DockedPanelShape(beakX: beakX, isDocked: true)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1)
+        )
         .background(MenuBarAnchorFinder { x in beakX = x })
     }
 
-    /// Quick or Summary, at the top of the menu bar window.
-    private var quickModeToggle: some View {
-        HStack(spacing: 4) {
-            ForEach(QuickViewMode.allCases) { mode in
-                Button {
-                    quickMode = mode
-                } label: {
-                    Text(mode.rawValue)
-                        .font(.system(size: 10, weight: quickMode == mode ? .semibold : .regular))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 3)
-                        .background(quickMode == mode ? Color.accentColor.opacity(0.16) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 5))
+    // MARK: - Flagged Issues Section
+
+    private var flaggedIssuesSection: some View {
+        let issues = store.flaggedIssues
+        return Group {
+            if issues.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 11))
+                    Text("All Systems Calm")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("0 alerts")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(quickMode == mode ? [.isSelected] : [])
-                .accessibilityLabel(mode.rawValue)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.green.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.green.opacity(0.25), lineWidth: 1)
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Image(systemName: issues.first?.priority.systemImage ?? "exclamationmark.triangle.fill")
+                            .foregroundStyle(issues.first?.priority.color ?? .orange)
+                            .font(.system(size: 11))
+                        Text("Flagged Issues")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer()
+                        Text("\(issues.count) \(issues.count == 1 ? "alert" : "alerts")")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Show top 2 to 5 prioritized issues
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(issues.prefix(3))) { issue in
+                            flaggedIssueRow(issue)
+                        }
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke((issues.first?.priority.color ?? Color.secondary).opacity(0.35), lineWidth: 1)
+                )
             }
         }
     }
 
-    /// The glanceable strip: the numbers, the volumes, and the busy apps.
-    private var quickGlance: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text("CPU").fontWeight(.medium)
+    private func flaggedIssueRow(_ issue: FlaggedIssue) -> some View {
+        HStack(alignment: .top, spacing: 5) {
+            Text(issue.priority.badgeText)
+                .font(.system(size: 8, weight: .bold))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1.5)
+                .background(issue.priority.color.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
+                .foregroundStyle(issue.priority.color)
+
+            HStack(spacing: 2) {
+                Image(systemName: issue.host.systemImage)
+                    .font(.system(size: 8))
+                Text(issue.host.rawValue)
+                    .font(.system(size: 8.5, weight: .medium))
+            }
+            .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(issue.title)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .lineLimit(1)
+                Text(issue.message)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 4)
+
+            if let action = issue.actionTitle {
+                Button(action) {
+                    handleIssueAction(issue)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .font(.system(size: 8.5))
+            }
+        }
+    }
+
+    private func handleIssueAction(_ issue: FlaggedIssue) {
+        switch issue.actionTitle {
+        case "Clean":
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        case "Retry":
+            store.maintain.vpsStore.fetch(force: true)
+        case "Quit":
+            if let hog = store.rows.first(where: { "mac.cpu.hog.\($0.id)" == issue.id }) {
+                pendingQuit = hog
+            }
+        default:
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        }
+    }
+
+    // MARK: - CPU Section (Mac & Server with Graphical Representations)
+
+    private var cpuSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                Text("CPU")
+                    .font(.system(size: 10.5, weight: .semibold))
                 Spacer()
-                Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
             }
-            HStack {
-                Text("Memory").fontWeight(.medium)
+
+            // Mac CPU
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Image(systemName: "laptopcomputer")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text("Mac")
+                        .font(.system(size: 9.5, weight: .medium))
+                    Spacer()
+                    Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(store.pulse.cpuPercent >= 80 ? .red : (store.pulse.cpuPercent >= 50 ? .orange : .primary))
+                }
+
+                // Graphical sparkline representation
+                CpuSparklineView(samples: store.recentCpuPercents)
+                    .frame(height: 18)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 3))
+
+                HStack {
+                    Text("\(store.pulse.coreCount) cores · \(HogFormat.percent(store.pulse.cpuPercent / 100)) total")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let topHog = store.rows.first {
+                        Text("Top: \(topHog.name) (\(HogFormat.cpu(topHog.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount)))")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(5)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+
+            // Server CPU (if configured)
+            if !store.maintain.vpsStore.configuredHost.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .lineLimit(1)
+                        Spacer()
+                        if let cpu = store.maintain.vpsStore.snapshot?.cpu {
+                            Text(String(format: "%.0f%%", cpu.pct))
+                                .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(cpu.severity.color)
+                        } else {
+                            Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let cpu = store.maintain.vpsStore.snapshot?.cpu {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(cpu.severity.color)
+                                    .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(cpu.pct / 100.0))))
+                            }
+                        }
+                        .frame(height: 4)
+
+                        HStack {
+                            Text("\(cpu.cores) cores · Load \(String(format: "%.2f", cpu.load1))")
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if let source = cpu.source {
+                                Text(source)
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    } else if store.maintain.vpsStore.isLoading {
+                        Text("Connecting to server…")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(5)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
+    // MARK: - RAM Usage Section (Mac & Server)
+
+    private var ramSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "memorychip")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                Text("RAM Usage")
+                    .font(.system(size: 10.5, weight: .semibold))
                 Spacer()
-                Text(store.memorySizeCaption)
             }
-            HStack {
-                Text("Internal Storage").fontWeight(.medium)
-                Spacer(minLength: 6)
-                Text(quickInternalText)
-                    .lineLimit(1)
+
+            // Mac RAM
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Image(systemName: "laptopcomputer")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text("Mac")
+                        .font(.system(size: 9.5, weight: .medium))
+                    Spacer()
+                    Text(store.memorySizeCaption)
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                    Text(store.pulse.pressure.label)
+                        .font(.system(size: 8, weight: .bold))
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Severity.forPressure(store.pulse.pressure).color.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
+                        .foregroundStyle(Severity.forPressure(store.pulse.pressure).color)
+                }
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Severity.forPressure(store.pulse.pressure).color)
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(store.pulse.memoryPercent / 100.0))))
+                    }
+                }
+                .frame(height: 4)
+
+                if store.pulse.swapUsedBytes > 0 {
+                    HStack {
+                        Text("Swap: \(HogFormat.memory(store.pulse.swapUsedBytes))")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
             }
-            HStack {
-                Text("External").fontWeight(.medium)
-                Spacer(minLength: 6)
-                Text(quickExternalText)
-                    .foregroundStyle(quickExternalColor)
-                    .lineLimit(1)
+            .padding(5)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+
+            // Server RAM (if configured)
+            if !store.maintain.vpsStore.configuredHost.isEmpty,
+               let mem = store.maintain.vpsStore.snapshot?.memory {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text("Server")
+                            .font(.system(size: 9.5, weight: .medium))
+                        Spacer()
+                        Text(String(format: "%.0f%% (%@ / %@)", mem.usedPercentage, HogFormat.memory(UInt64(max(0, mem.usedBytes))), HogFormat.memory(UInt64(max(0, mem.totalBytes)))))
+                            .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(mem.severity.color)
+                    }
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(mem.severity.color)
+                                .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(mem.usedPercentage / 100.0))))
+                        }
+                    }
+                    .frame(height: 4)
+
+                    if let swap = store.maintain.vpsStore.snapshot?.swap {
+                        HStack {
+                            Text("Swap: \(String(format: "%.0f%%", swap.usedPercentage)) (\(HogFormat.memory(UInt64(max(0, swap.usedBytes)))))")
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+                }
+                .padding(5)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             }
-            HStack {
-                Text("Time Machine").fontWeight(.medium)
-                Spacer(minLength: 6)
-                Text(quickTimeMachineText)
-                    .foregroundStyle(quickTimeMachineColor)
-                    .lineLimit(1)
-            }
-            Divider()
-            quickActivityList
-            if !store.maintain.vpsStore.configuredHost.isEmpty {
-                quickServerButton
-            }
-            openDashboardButton
         }
     }
 
-    /// The long form: the history, the meters, the volumes and the busy apps.
-    private var quickSummary: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            cpuHistoryCard
-            Meter(title: "Memory", value: store.pulse.memoryPercent,
-                  caption: store.memorySizeCaption,
-                  severity: Severity.forPressure(store.pulse.pressure),
-                  accessibilityDetail: store.memoryCaption)
-            pillRow(memoryPills + thermalPills)
-            capacityCards
-            Divider()
-            Text("Top Activity").font(.system(size: 11, weight: .semibold))
-            quickActivityList
-            if !store.maintain.vpsStore.configuredHost.isEmpty {
-                quickServerButton
-            }
-            openDashboardButton
-        }
-    }
+    // MARK: - Storage Section (Mac Internal/External & Server Root/Fleet-Extra)
 
-    /// The busy apps.  Three rows to glance at, and hovering the list opens
-    /// it up to more of them with room to scroll, so the same window can be
-    /// read when a glance is not enough.  Each row carries the CPU it is
-    /// using and the memory it is holding.
-    private var quickActivityList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
-                    HogActivityRow(
-                        name: row.name,
-                        cpuText: HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
-                                               coreCount: store.pulse.coreCount),
-                        memoryText: HogFormat.memory(row.memoryBytes)
+    private var storageSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                Text("Storage (All Volumes)")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                // Mac Internal Boot Drive
+                if let disk = store.diskSpace {
+                    quickStorageRow(
+                        name: "Mac (Internal /)",
+                        icon: "laptopcomputer",
+                        freeBytes: disk.freeBytes,
+                        usedFraction: disk.usedFraction
                     )
+                }
+
+                // Mac External Drives
+                ForEach(externalDrives.prefix(2)) { drive in
+                    quickStorageRow(
+                        name: "Mac (\(drive.name))",
+                        icon: "externaldrive",
+                        freeBytes: UInt64(max(0, drive.availableBytes ?? 0)),
+                        usedFraction: (drive.usedPercent ?? 0) / 100.0
+                    )
+                }
+
+                // Server Root /
+                if let root = store.maintain.vpsStore.snapshot?.rootDevice {
+                    quickStorageRow(
+                        name: "Server (Root /)",
+                        icon: "server.rack",
+                        freeBytes: UInt64(max(0, root.freeBytes)),
+                        usedFraction: root.usedFraction ?? 0.5
+                    )
+                }
+
+                // Server Fleet Extra /mnt/fleet-extra
+                if let extra = store.maintain.vpsStore.snapshot?.fleetExtraDevice {
+                    quickStorageRow(
+                        name: "Server (/mnt/fleet-extra)",
+                        icon: "externaldrive.connected.to.line.below",
+                        freeBytes: UInt64(max(0, extra.freeBytes)),
+                        usedFraction: extra.usedFraction ?? 0.5
+                    )
+                }
+            }
+            .padding(5)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func quickStorageRow(name: String, icon: String, freeBytes: UInt64, usedFraction: Double) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+                Text(name)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+                Spacer()
+                Text("\(HogFormat.memory(freeBytes)) free (\(Int(usedFraction * 100))%)")
+                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Severity.forDisk(usedFraction).color)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Severity.forDisk(usedFraction).color)
+                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(usedFraction))))
+                }
+            }
+            .frame(height: 3.5)
+        }
+    }
+
+    // MARK: - Activity Section
+
+    private var activitySection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Top Activity")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Spacer()
+                Text("\(store.rows.count) processes")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
+                    HStack(spacing: 6) {
+                        Text(row.name)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .lineLimit(1)
+                        Spacer()
+                        Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
+                            .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
+                        Text(HogFormat.memory(row.memoryBytes))
+                            .font(.system(size: 9).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if store.rows.isEmpty {
                     Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                        .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 }
             }
-        }
-        .frame(height: quickActivityHeight)
-        .onHover { inside in
-            withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
-        }
-    }
-
-    /// How many activity rows the list shows: three until the pointer is over
-    /// it, then more, with the rest a scroll away.
-    private var activityRowLimit: Int {
-        activityHovered ? 8 : 3
-    }
-
-    private var quickActivityHeight: CGFloat {
-        let visible = min(activityRowLimit, max(store.rows.count, 1))
-        return CGFloat(visible) * 15 + 4
-    }
-
-    /// The server's headline, which opens the dashboard on the server scope.
-    private var quickServerButton: some View {
-        Button {
-            hostScope = .server
-            DetachedWindowManager.shared.openDetachedWindow(store: store)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Server").fontWeight(.semibold)
-                if let snapshot = store.maintain.vpsStore.snapshot {
-                    Text(snapshot.host).lineLimit(1)
-                    HStack {
-                        Text("CPU \(snapshot.headline?.cpuText ?? "—")")
-                        Text("RAM \(snapshot.headline?.memoryText ?? "—")")
-                        Spacer()
-                        Text(snapshot.relativeTimeString())
-                    }
-                    .foregroundStyle(.secondary)
-                } else {
-                    Text("No readings yet").foregroundStyle(.secondary)
-                }
+            .padding(5)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .onHover { inside in
+                withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
             }
         }
-        .buttonStyle(.plain)
     }
 
-    private var openDashboardButton: some View {
-        Button("Open Dashboard") {
-            DetachedWindowManager.shared.openDetachedWindow(store: store)
-        }
-        .buttonStyle(.borderedProminent)
-        .frame(maxWidth: .infinity)
+    private var activityRowLimit: Int {
+        activityHovered ? 6 : 3
     }
 
     /// One wording for every volume: how much of it is spoken for, and how
@@ -785,10 +1119,9 @@ struct HogHunterPanel: View {
 
     /// The menu-bar quick view has a fixed width and a content-fitting height.
     static let panelWidth: CGFloat = 360
-    /// The maximum expected quick-view height, including an optional server
-    /// summary.  The Summary mode of the menu bar window is taller than this
-    /// on purpose and is not measured against it.
-    static let panelHeight: CGFloat = 470
+    /// The maximum expected quick-view height for the consolidated menu bar
+    /// window with graphical CPU meters, RAM, storage of all kinds and alerts.
+    static let panelHeight: CGFloat = 640
     static let dashboardWidth: CGFloat = 900
     static let dashboardHeight: CGFloat = 700
     static let dashboardMinimumWidth: CGFloat = 860
@@ -1318,6 +1651,13 @@ final class MenuBarAnchorView: NSView {
         }
         guard let window = self.window else { return }
 
+        // Configure window transparency so the triangular beak and rounded
+        // corners are transparent outside the DockedPanelShape, connecting
+        // seamlessly to the menu bar status button like CodeCaps.
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+
         moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window,
@@ -1354,6 +1694,9 @@ final class MenuBarAnchorView: NSView {
 
     func resolveAnchor() {
         guard let window = self.window, window.frame.width > 0 else { return }
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
         let winW = window.frame.width
         let anchor = Self.findStatusItemMidX()
 

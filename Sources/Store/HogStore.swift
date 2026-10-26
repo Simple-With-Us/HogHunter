@@ -992,6 +992,17 @@ final class HogStore: ObservableObject {
         "\(HogFormat.percent(pulse.cpuPercent / 100)) of all \(pulse.coreCount) cores"
     }
 
+    /// Current prioritized health and resource issues across Mac and configured remote server.
+    var flaggedIssues: [FlaggedIssue] {
+        FlaggedIssueEvaluator.evaluate(
+            macStore: self,
+            vpsSnapshot: maintain.vpsStore.snapshot,
+            vpsError: maintain.vpsStore.errorMessage,
+            vpsConfigured: !maintain.vpsStore.configuredHost.isEmpty,
+            externalDrives: MountedDriveStore.shared.rows
+        )
+    }
+
     /// Just the two numbers: "13.3 of 16 GB".
     var memorySizeCaption: String {
         "\(gigabytes(pulse.memoryUsedBytes)) of \(gigabytes(pulse.totalMemoryBytes)) GB"
@@ -1397,6 +1408,7 @@ final class HogStore: ObservableObject {
 
     func setLoadingSettingsForTest(_ value: Bool) { loadingSettings = value }
     func setSampleInFlightForTest(_ value: Bool) { sampleInFlight.value = value }
+    func setDiskSpaceForTest(_ space: DiskSpace?) { diskSpace = space }
     func persistForTest() { persist() }
 
     #if DEBUG
