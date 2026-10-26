@@ -28,6 +28,10 @@ enum VPSResourceSection: String {
     var showsDirectories: Bool { self == .all || self == .storage }
     /// Whether this section shows the tool states.
     var showsTools: Bool { self == .all || self == .maintenance }
+    /// Whether this section shows the Coolify workloads the server runs.
+    var showsCoolify: Bool { self == .all || self == .activity }
+    /// Whether this section shows the server's own processes.
+    var showsProcesses: Bool { self == .all || self == .activity }
 }
 
 /// Remote VPS resource-usage card showing CPU, RAM (including swap),
@@ -37,6 +41,12 @@ struct VPSResourceCardView: View {
     @Environment(\.openSettings) private var openSettings
     /// Which part of the snapshot this card shows.
     var section: VPSResourceSection = .all
+    /// The one action the owner can take on the server from here.
+    @StateObject private var control = ServerControl()
+    /// The process waiting for a confirmation.
+    @State private var pendingProcess: VPSProcess?
+    /// The workload waiting for a confirmation.
+    @State private var pendingContainer: VPSCoolifyResource?
 
     var body: some View {
         GroupBox {
@@ -54,6 +64,51 @@ struct VPSResourceCardView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
+        }
+        .confirmationDialog(
+            "Stop \(pendingProcess?.name ?? "this process") on the server?",
+            isPresented: Binding(
+                get: { pendingProcess != nil },
+                set: { if !$0 { pendingProcess = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Stop it", role: .destructive) {
+                guard let process = pendingProcess else { return }
+                pendingProcess = nil
+                Task { await control.stop(process: process, host: store.configuredHost) }
+            }
+            Button("Cancel", role: .cancel) { pendingProcess = nil }
+        } message: {
+            Text("The server stops it by its process identity, so a process that has changed since the reading is left alone.")
+        }
+        .confirmationDialog(
+            "Stop \(pendingContainer?.name ?? "this workload") on the server?",
+            isPresented: Binding(
+                get: { pendingContainer != nil },
+                set: { if !$0 { pendingContainer = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Stop it", role: .destructive) {
+                guard let container = pendingContainer else { return }
+                pendingContainer = nil
+                Task { await control.stopContainer(named: container.name, host: store.configuredHost) }
+            }
+            Button("Cancel", role: .cancel) { pendingContainer = nil }
+        } message: {
+            Text("Coolify will restart a workload it is set to keep alive.")
+        }
+        .overlay(alignment: .bottomLeading) {
+            if let outcome = control.lastOutcome {
+                Text(outcome.message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                    .padding(4)
+            }
         }
     }
 
@@ -160,6 +215,14 @@ struct VPSResourceCardView: View {
             let dbs = section.showsDatabases ? (snapshot.appDbs ?? [:]) : [:]
             let tools = section.showsTools ? (snapshot.toolStatuses ?? []) : []
             let dirs = section.showsDirectories ? (snapshot.largestDirs ?? []) : []
+            let workloads = section.showsCoolify ? (snapshot.coolify ?? []) : []
+            let processes = section.showsProcesses ? (snapshot.processes ?? []) : []
+            if !processes.isEmpty {
+                processesView(processes)
+            }
+            if !workloads.isEmpty {
+                coolifyView(workloads)
+            }
             if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
                 HStack(alignment: .top, spacing: 16) {
                     supportingReadings(dbs: dbs, tools: tools)
@@ -318,6 +381,15 @@ struct VPSResourceCardView: View {
                             Text(toolStatusLabel(tool.state))
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
+                            // An unknown state is only useful when it says
+                            // why it is unknown.  The reason is short enough
+                            // to read in place and long enough to act on.
+                            if tool.state == .unknown, let reason = tool.reason, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(2)
+                            }
                         }
                         if tool.state == .running, tool.count > 1 {
                             Text("\(tool.count)")
@@ -326,10 +398,98 @@ struct VPSResourceCardView: View {
                         }
                     }
                     .font(.system(size: 11))
-                    .help("\(tool.name): \(toolStatusLabel(tool.state))")
+                    .help("\(tool.name): \(toolStatusLabel(tool.state))\(tool.reason.map { " — \($0)" } ?? "")")
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("\(tool.name), \(toolStatusLabel(tool.state))")
-                    .accessibilityValue(tool.state == .running && tool.count > 1 ? "\(tool.count) processes" : "")
+                    .accessibilityValue(tool.state == .running && tool.count > 1 ? "\(tool.count) processes" : (tool.reason ?? ""))
+                }
+            }
+        }
+    }
+
+    /// The Coolify workloads this host runs, and how each is doing.
+    private func coolifyView(_ resources: [VPSCoolifyResource]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Coolify Workloads")
+                .font(.system(size: 11, weight: .semibold))
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(resources) { resource in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(resource.isHealthy ? Color.green : Color.orange)
+                            .frame(width: 6, height: 6)
+                        Text(resource.name)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        Text(resource.type)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 4)
+                        if let cpu = resource.cpuPercent {
+                            Text(String(format: "%.0f%%", cpu))
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        }
+                        if let memory = resource.memoryBytes {
+                            Text(HogFormat.memory(UInt64(max(0, memory))))
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Stop") { pendingContainer = resource }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .font(.system(size: 9))
+                            .help("Stop this workload on the server")
+                    }
+                    .help("\(resource.name): \(resource.status)")
+                }
+            }
+        }
+    }
+
+    /// The server's own processes, and the one action the owner can take on
+    /// them.  The server stops a process by its identity, so a process that
+    /// changed since the reading is refused rather than signalled.
+    private func processesView(_ processes: [VPSProcess]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text("Top Processes")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("\(processes.count) processes")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(processes.prefix(12)) { process in
+                    HStack(spacing: 8) {
+                        Text(process.name)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        if let container = process.container, !container.isEmpty {
+                            Text(container)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        Text(String(format: "%.0f%%", process.cpuPercent))
+                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        if let memory = process.memoryBytes {
+                            Text(HogFormat.memory(UInt64(max(0, memory))))
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Stop") { pendingProcess = process }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .font(.system(size: 9))
+                            .help("Stop this process on the server")
+                    }
+                }
+                if processes.isEmpty {
+                    Text("No processes in the server's latest reading.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
         }

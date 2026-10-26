@@ -14,6 +14,10 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     let toolStatuses: [VPSToolStatus]?
     let databaseSamples: [VPSSizeSample]?
     let directorySamples: [VPSSizeSample]?
+    /// The server's busiest processes, as its own collector saw them.
+    let processes: [VPSProcess]?
+    /// The Coolify workloads the server runs.
+    let coolify: [VPSCoolifyResource]?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -27,6 +31,8 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         case toolStatuses = "tool_statuses"
         case databaseSamples = "database_samples"
         case directorySamples = "directory_samples"
+        case processes
+        case coolify
     }
 
     init(
@@ -40,7 +46,9 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         largestDirs: [VPSDirectory]? = nil,
         toolStatuses: [VPSToolStatus]? = nil,
         databaseSamples: [VPSSizeSample]? = nil,
-        directorySamples: [VPSSizeSample]? = nil
+        directorySamples: [VPSSizeSample]? = nil,
+        processes: [VPSProcess]? = nil,
+        coolify: [VPSCoolifyResource]? = nil
     ) {
         self.generatedAt = generatedAt
         self.host = host
@@ -53,6 +61,8 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         self.toolStatuses = toolStatuses
         self.databaseSamples = databaseSamples
         self.directorySamples = directorySamples
+        self.processes = processes
+        self.coolify = coolify
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {
@@ -279,6 +289,79 @@ struct VPSToolStatus: Codable, Equatable, Sendable, Identifiable {
     let name: String
     let state: State
     let count: Int
+    /// Why the state is what it is, in words the owner can act on.  An
+    /// "unknown" without a reason is a dot nobody can do anything about.
+    let reason: String?
+
+    init(id: String, name: String, state: State, count: Int, reason: String? = nil) {
+        self.id = id
+        self.name = name
+        self.state = state
+        self.count = count
+        self.reason = reason
+    }
+}
+
+/// One process on the server, as the server's own collector saw it.
+///
+/// The collector reads executable identity and the kernel's tick counters
+/// only: it never reads command arguments, environment variables or
+/// credential files, so the name here is the process's name and nothing more.
+struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
+    let pid: Int
+    let name: String
+    /// When the process started, in the kernel's own clock.  A pid on its own
+    /// can be reused; a pid with its start time identifies one process.
+    let startTime: Int64?
+    /// The unix account the process runs as.
+    let owner: String?
+    /// The Coolify workload it belongs to, when it belongs to one.
+    let container: String?
+    /// The share of one core the process was using.
+    let cpuPercent: Double
+    let memoryBytes: Int64?
+
+    var id: Int { pid }
+
+    enum CodingKeys: String, CodingKey {
+        case pid, name, owner, container
+        case startTime = "start_time"
+        case cpuPercent = "cpu_percent"
+        case memoryBytes = "memory_bytes"
+    }
+
+    /// The group the owner thinks in: a Coolify workload, an account, or
+    /// something else running on the host.
+    var group: String {
+        if let container, !container.isEmpty { return container }
+        return owner ?? "unknown"
+    }
+}
+
+/// One Coolify workload on the server.
+struct VPSCoolifyResource: Codable, Equatable, Sendable, Identifiable {
+    let uuid: String
+    let name: String
+    let type: String
+    let status: String
+    let cpuPercent: Double?
+    let memoryBytes: Int64?
+    let image: String?
+    let startedAt: String?
+
+    var id: String { uuid.isEmpty ? name : uuid }
+
+    enum CodingKeys: String, CodingKey {
+        case uuid, name, type, status, image
+        case cpuPercent = "cpu_percent"
+        case memoryBytes = "memory_bytes"
+        case startedAt = "started_at"
+    }
+
+    /// Whether the workload is the one thing that is wrong.
+    var isHealthy: Bool {
+        status == "running"
+    }
 }
 
 /// Existing server observations retain their original Unix timestamps.

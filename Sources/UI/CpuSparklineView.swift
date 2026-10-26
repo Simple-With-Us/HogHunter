@@ -3,7 +3,10 @@ import SwiftUI
 /// Micro-sparkline tracking recent machine CPU pressure for the macOS menu bar and header.
 struct CpuSparklineView: View {
     let samples: [Double]
-    var width: CGFloat = 36
+    /// A fixed width, for the menu bar item.  `nil` lets the graph take the
+    /// width it is offered, so a graph in a panel is never a small graph in a
+    /// large space.
+    var width: CGFloat?
     var height: CGFloat = 14
 
     var body: some View {
@@ -43,7 +46,7 @@ struct CpuSparklineView: View {
             } else if latest >= 60 {
                 color = Color(red: 0.80, green: 0.52, blue: 0.10)
             } else {
-                color = Color.primary.opacity(0.85)
+                color = .primary.opacity(0.85)
             }
 
             context.fill(areaPath, with: .color(color.opacity(0.18)))
@@ -55,7 +58,9 @@ struct CpuSparklineView: View {
             let dotRect = CGRect(x: lastX - 2, y: lastY - 2, width: 4, height: 4)
             context.fill(Path(ellipseIn: dotRect), with: .color(color))
         }
-        .frame(width: width, height: height)
+        .frame(height: height)
+        .frame(width: width)
+        .frame(maxWidth: width == nil ? .infinity : nil)
     }
 
     private func yCoordinate(for percent: Double, height: CGFloat) -> CGFloat {

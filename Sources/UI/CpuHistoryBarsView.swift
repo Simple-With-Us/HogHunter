@@ -2,6 +2,9 @@ import SwiftUI
 
 struct CpuHistoryBarsView: View {
     let history: CpuMinuteHistory
+    /// The height of the graph.  It fills the width it is given, so the same
+    /// view serves a wide dashboard card and a half-width panel column.
+    var height: CGFloat = 30
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
@@ -17,7 +20,7 @@ struct CpuHistoryBarsView: View {
                 .frame(height: geometry.size.height, alignment: .bottom)
             }
         }
-        .frame(height: 30)
+        .frame(height: height)
         .accessibilityLabel("CPU over the last 30 minutes")
         .help("Last 30 minutes.  Each bar is one minute's average; empty minutes have no reading.")
     }
