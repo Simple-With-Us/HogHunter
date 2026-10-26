@@ -98,6 +98,7 @@ struct VPSStatusStripView: View {
         if let cpu = headline.cpuText { parts.append("CPU \(cpu)") }
         if let memory = headline.memoryText { parts.append("RAM \(memory)") }
         if let disk = headline.diskText { parts.append("disk \(disk)") }
+        if let extra = headline.extraDiskText { parts.append("fleet-extra \(extra)") }
         return parts.joined(separator: ", ")
     }
 
@@ -109,6 +110,9 @@ struct VPSStatusStripView: View {
                 metric("CPU", headline.cpuText, headline.cpuSeverity)
                 metric("RAM", headline.memoryText, headline.memorySeverity)
                 metric("Disk", headline.diskText, headline.diskSeverity)
+                if let extra = headline.extraDiskText {
+                    metric("Extra", extra, headline.extraDiskSeverity)
+                }
             }
         }
     }

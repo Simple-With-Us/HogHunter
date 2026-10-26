@@ -147,8 +147,25 @@ def directory_bytes(path, run=subprocess.run):
         return None
 
 
-def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state):
+def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount):
     result = dict(snapshot)
+    devices = dict(snapshot.get('devices', {}))
+    if extra_volume and ismount_func(str(extra_volume)):
+        try:
+            st = statvfs_func(str(extra_volume))
+            free = st.f_bavail * st.f_frsize
+            total = st.f_blocks * st.f_frsize
+            if total > 0:
+                total_gb = int(round(total / (1024**3)))
+                if 'fleet_extra' not in devices and 'fleet-extra' not in devices:
+                    devices['fleet_extra'] = {
+                        'mount': str(extra_volume),
+                        'free_bytes': free,
+                        'note': f"{total_gb}GB disk: extra volume {extra_volume}"
+                    }
+        except OSError:
+            pass
+    result['devices'] = devices
     directories = {row['path']: row for row in snapshot.get('largest_dirs', [])}
     for relative in DIRECTORIES:
         path = home / relative

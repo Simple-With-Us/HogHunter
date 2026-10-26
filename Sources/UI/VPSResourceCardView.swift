@@ -143,6 +143,9 @@ struct VPSResourceCardView: View {
                 if section.showsHeadline, let cpu = snapshot.cpu { cpuBox(cpu) }
                 if section.showsHeadline, let mem = snapshot.memory { memoryBox(mem) }
                 if section.showsDevices, let root = snapshot.rootDevice { deviceBox(root, title: "Disk (/)") }
+                if section.showsDevices, let fleetExtra = snapshot.fleetExtraDevice {
+                    deviceBox(fleetExtra, title: "Fleet Extra (/mnt/fleet-extra)", tooltip: fleetExtra.note)
+                }
                 if section.showsHeadline, let swap = snapshot.swap { swapBox(swap) }
                 if section.showsDevices, let tmp = snapshot.tmpDevice {
                     deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)

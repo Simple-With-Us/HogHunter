@@ -112,6 +112,31 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertEqual(shm?.estimatedTotalBytes, 16 * 1024 * 1024 * 1024)
         XCTAssertNotNil(shm?.usedFraction)
 
+        // Fleet Extra Device
+        let extraSnapJSON = """
+        {
+          "generated_at": "2026-10-25T12:00:00Z",
+          "host": "fleet-hetzner-nbg1",
+          "devices": {
+            "root": {
+              "mount": "/",
+              "free_bytes": 50000000000,
+              "note": "300GB disk: root"
+            },
+            "fleet_extra": {
+              "mount": "/mnt/fleet-extra",
+              "free_bytes": 450000000000,
+              "note": "1TB disk: extra volume /mnt/fleet-extra"
+            }
+          }
+        }
+        """.data(using: .utf8)!
+        let extraSnap = try JSONDecoder().decode(VPSStatusSnapshot.self, from: extraSnapJSON)
+        XCTAssertNotNil(extraSnap.fleetExtraDevice)
+        XCTAssertEqual(extraSnap.fleetExtraDevice?.mount, "/mnt/fleet-extra")
+        XCTAssertEqual(extraSnap.fleetExtraDevice?.estimatedTotalBytes, 1 * 1024 * 1024 * 1024 * 1024)
+        XCTAssertNotNil(extraSnap.headline?.extraDiskText)
+
         // Databases
         XCTAssertEqual(snapshot.appDbs?["st_app_db"], 19904122112)
         XCTAssertEqual(snapshot.appDbs?["ct_db"], 4736902136)
