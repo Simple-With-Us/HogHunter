@@ -311,10 +311,9 @@ struct HogHunterPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
             case .activity:
-                // The card below carries the server's overall CPU and memory,
-                // so the message says only what the snapshot cannot answer:
-                // the per-process detail.
-                Text("Remote per-process detail is unavailable; the server's overall CPU and memory are shown below.")
+                // The card below carries the server's CPU and memory, the
+                // processes it is running and the workloads they belong to.
+                Text("The server's busiest processes, and the Coolify workloads they belong to.")
                     .foregroundStyle(.secondary)
             case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
