@@ -120,6 +120,11 @@ struct HogHunterPanel: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
+                            // A clean in flight lives in the Disk Cleaner view's
+                            // store, so switching sub-tabs mid-clean would destroy
+                            // it and cancel the clean while the companion snapshot
+                            // still reports cleaning.  The picker waits instead.
+                            .disabled(store.activeCleanProgress?.isCleaning == true)
 
                             switch storageSubTab {
                             case .apps:
