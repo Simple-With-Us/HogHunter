@@ -65,4 +65,26 @@ final class MenuBarAndStorageLayoutTests: XCTestCase {
         )
         XCTAssertNotNil(view)
     }
+
+    @MainActor
+    func testStorageViewWithExternalTabBinding() {
+        let maintain = MaintainStore()
+        var tab: StorageTab = .appStorage
+        let binding = Binding<StorageTab>(
+            get: { tab },
+            set: { tab = $0 }
+        )
+        let view = StorageView(
+            runningBundleIds: { [] },
+            maintainStore: maintain,
+            embeddedInPanel: true,
+            isTabActive: true,
+            externalTab: binding,
+            initialTab: .appStorage,
+            includesMaintenance: false,
+            autoScanCleaner: false,
+            showModePicker: false
+        )
+        XCTAssertNotNil(view)
+    }
 }

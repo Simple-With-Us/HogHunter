@@ -41,6 +41,20 @@ struct HogHunterPanel: View {
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
     @State private var storageSubTab: StorageSubTab = .apps
+    private var storageViewTabBinding: Binding<StorageTab> {
+        Binding(
+            get: {
+                storageSubTab == .clean ? .diskCleaner : .appStorage
+            },
+            set: { newTab in
+                if newTab == .diskCleaner {
+                    storageSubTab = .clean
+                } else if newTab == .appStorage {
+                    storageSubTab = .apps
+                }
+            }
+        )
+    }
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
     private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
@@ -126,36 +140,32 @@ struct HogHunterPanel: View {
                             // still reports cleaning.  The picker waits instead.
                             .disabled(store.activeCleanProgress?.isCleaning == true)
 
-                            switch storageSubTab {
-                            case .apps:
+                            ZStack {
                                 StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
                                             maintainStore: store.maintain, embeddedInPanel: true,
-                                            isTabActive: selectedTab == .storage && hostScope == .mac && storageSubTab == .apps,
+                                            isTabActive: selectedTab == .storage && hostScope == .mac && storageSubTab != .drives,
+                                            externalTab: storageViewTabBinding,
                                             initialTab: .appStorage,
-                                            includesMaintenance: false, autoScanCleaner: false,
-                                            showModePicker: false)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                            case .clean:
-                                StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
-                                            maintainStore: store.maintain, embeddedInPanel: true,
-                                            isTabActive: selectedTab == .storage && hostScope == .mac && storageSubTab == .clean,
-                                            initialTab: .diskCleaner,
                                             includesMaintenance: false, autoScanCleaner: true,
                                             showModePicker: false)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .opacity(storageSubTab == .drives ? 0 : 1)
+                                    .allowsHitTesting(storageSubTab != .drives)
+                                    .accessibilityHidden(storageSubTab == .drives)
 
-                            case .drives:
-                                ScrollView {
-                                    VStack(alignment: .leading, spacing: 14) {
-                                        mountedDriveList
-                                        Divider()
-                                        CodingDirectoriesView(store: directoryUsage)
+                                if storageSubTab == .drives {
+                                    ScrollView {
+                                        VStack(alignment: .leading, spacing: 14) {
+                                            mountedDriveList
+                                            Divider()
+                                            CodingDirectoriesView(store: directoryUsage)
+                                        }
+                                        .padding(.vertical, 4)
                                     }
-                                    .padding(.vertical, 4)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 }
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage && hostScope == .mac)
