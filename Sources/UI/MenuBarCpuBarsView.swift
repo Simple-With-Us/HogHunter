@@ -10,25 +10,23 @@ struct MenuBarCpuBarsView: View {
     let cpuPercent: Double
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { timeline in
-            VStack(alignment: .center, spacing: 1) {
-                Text(String(format: "%.0f%%", min(999, max(0, cpuPercent))))
-                    .font(.system(size: 8.5, weight: .bold).monospacedDigit())
-                    .foregroundStyle(textColor(for: cpuPercent))
-                    .lineLimit(1)
+        VStack(alignment: .center, spacing: 1) {
+            Text(String(format: "%.0f%%", min(999, max(0, cpuPercent))))
+                .font(.system(size: 8.5, weight: .bold).monospacedDigit())
+                .foregroundStyle(textColor(for: cpuPercent))
+                .lineLimit(1)
 
-                HStack(alignment: .bottom, spacing: 1) {
-                    let recentBars = history.bars(at: timeline.date).suffix(14)
-                    ForEach(Array(recentBars.enumerated()), id: \.offset) { _, value in
-                        RoundedRectangle(cornerRadius: 0.5)
-                            .fill(barColor(for: value))
-                            .frame(width: 1.5, height: barHeight(for: value))
-                    }
+            HStack(alignment: .bottom, spacing: 1) {
+                let recentBars = history.bars(at: Date()).suffix(14)
+                ForEach(Array(recentBars.enumerated()), id: \.offset) { _, value in
+                    RoundedRectangle(cornerRadius: 0.5)
+                        .fill(barColor(for: value))
+                        .frame(width: 1.5, height: barHeight(for: value))
                 }
-                .frame(height: 8.5, alignment: .bottom)
             }
-            .frame(width: 36, height: 20)
+            .frame(height: 8.5, alignment: .bottom)
         }
+        .frame(width: 36, height: 20)
     }
 
     private func textColor(for percent: Double) -> Color {
