@@ -19,15 +19,17 @@ jobs:
 
       - name: Check manual release scripts without signing credentials
         run: |
-          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/ios-fleet/scheduled-ship-gate.sh scripts/ios-fleet/test-scheduled-ship-gate.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh scripts/mac-release-build.sh scripts/make_appcast.sh
+          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/ios-fleet/scheduled-ship-gate.sh scripts/ios-fleet/test-scheduled-ship-gate.sh scripts/ios-fleet/version-number.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh scripts/mac-release-build.sh scripts/make_appcast.sh
           node --check scripts/ios-fleet/asc-api.mjs
           node --check scripts/ios-fleet/asc-key.mjs
           node --check scripts/ios-fleet/version-plan.mjs
+          node --check scripts/ios-fleet/version-number.mjs
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/ios-fleet/test-asc-credentials.sh
           node --test scripts/ios-fleet/test-asc-key.test.mjs
           node --test scripts/ios-fleet/test-asc-credentials.mjs
           node --test scripts/ios-fleet/version-plan.test.mjs
+          node --test scripts/ios-fleet/version-number.test.mjs
           node --test scripts/infisical-fetch.node-test.mjs scripts/infisical-fetch-expand.node-test.mjs
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py

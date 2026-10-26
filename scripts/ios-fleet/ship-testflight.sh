@@ -6,10 +6,10 @@
 #
 # Options:
 #   --repo-root PATH   Repo root (default: cwd)
-#   --build N          Force CURRENT_PROJECT_VERSION (exact; default: the repo
-#                      commit count, raised above the App Store Connect floor)
-#   --version X.Y.Z    Force MARKETING_VERSION (exact; default: the next patch
-#                      on the app's train)
+#   --build N          Force CURRENT_PROJECT_VERSION (exact; default: the
+#                      version itself, so the pair is one number)
+#   --version X.Y.Z    Force MARKETING_VERSION (exact; default: the next
+#                      number on the app's train)
 #   --export-only      Build IPA only; do not upload
 #   --upload-only IPA  Skip archive; upload an existing IPA via ASC API key
 #   --dry-run          Print plan and exit
@@ -21,32 +21,43 @@
 #                           (dangerous: the marketing version and the build
 #                           number are then planned from unverified state)
 #
-# Version numbering (owner directive 2026-10-24, AFC-517 / CT-2444; replaces
-# the 1.0.<commit_count> scheme unified in #2801 on 2026-10-18):
-#   MARKETING_VERSION       = <prefix>.<P+1>
-#       <prefix> is the train from marketingVersionDefault (1.0).  P is the
-#       highest patch already used on that train in App Store Connect, counting
-#       BOTH the App Store versions (appStoreVersions.versionString) AND the
-#       TestFlight trains (preReleaseVersions.version) for the app's platform.
-#       A TestFlight train that holds a build named after its own patch (the
-#       "1.0.2358 (2358)" drift trains) is IGNORED, so those uploads no longer
-#       push the version forward.  App Store versions are never ignored.
-#   CURRENT_PROJECT_VERSION = the repo commit count (git rev-list --count
-#       HEAD), raised when needed so that it is strictly greater than every
-#       build already in the TARGET marketing train (old 12-digit UTC stamps
-#       included:  Apple requires build numbers to grow inside one train) and
-#       than the app's highest plain-integer build below 1000000000 on that
-#       platform.  On macOS EVERY build counts, because macOS build numbers
-#       have to grow across all trains.
-#   The two numbers are INDEPENDENT:  the build number never names the
-#   marketing version, and the marketing version never names the build.  The
-#   only coupling is a safety rule:  a ship must never look like "1.0.N (N)",
-#   so a build that happens to equal the patch number moves one up.
-#   --version X.Y.Z is an exact marketing override and --build N an exact build
-#   override.  With --version only the build is still automatic (the commit
-#   count, floored against that train);  with --build only the marketing
-#   version is still the automatic next patch.
-#   App Store Connect renders "<marketing> (<build>)", e.g. "1.0.237 (2360)".
+# Version numbering (owner directive 2026-10-26, HH-191; replaces the
+# 2026-10-24 scheme and the 1.0.<commit_count> scheme of 2026-10-18):
+#   ONE NUMBER, and it is a version string:
+#       MARKETING_VERSION (CFBundleShortVersionString)
+#         = CURRENT_PROJECT_VERSION (CFBundleVersion)
+#         = <train>.<N>
+#   The two fields carry the SAME string, so App Store Connect shows
+#   "0.1.1 (0.1.1)" and the pair describes one number.  There is no second
+#   number anywhere:  not the repository commit count (retired), not a
+#   timestamp (retired), not a bare integer beside the version.
+#   <train> is the major.minor the app's numbers live on:  "0.1" for Hog
+#   Hunter and the other apps that are not on the App Store, "1.1" for
+#   Congress.Trade, whose past numbers already used the 1.0 train.
+#   N is one past what the train already holds, so a number is never reused.
+#   The train holds:
+#       - the committed record (project.yml MARKETING_VERSION):  the version
+#         the last update shipped.  Both ship paths read it, so the Mac app
+#         and the iPhone app of one update carry the same number.
+#       - the App Store Connect state (this path only):  the highest patch
+#         already used on that train, counting BOTH the App Store versions
+#         (appStoreVersions.versionString) AND the TestFlight trains
+#         (preReleaseVersions.version) for the app's platform.  A TestFlight
+#         train that holds a build named after its own patch (the retired
+#         "1.0.2358 (2358)" drift trains) is IGNORED, so those uploads do not
+#         push the version forward.  App Store versions are never ignored.
+#   The Mac path (scripts/install.sh) has no App Store Connect access and
+#   sees only the committed record, so the two paths agree whenever the
+#   record is current.  When App Store Connect already holds the next patch,
+#   this path takes the higher number and the Mac path is one behind until
+#   the record catches up.
+#   --version X.Y.Z is an exact marketing override and --build N an exact
+#   build override.  Without an override the build number IS the version.
+#   The ship gate still runs BEFORE any version is resolved, and a checkout
+#   with no readable git history fails loudly:  there is no timestamp
+#   fallback and no guess.
+#
+#   See docs/rollouts/2026-10-26-version-scheme-one-number.md.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS HOLDING BACK AUTOMATIC SHIPPING: THE MIN-INTERVAL RATE LIMIT
@@ -516,67 +527,40 @@ link_private_key() {
 }
 
 # ---------------------------------------------------------------------------
-# THE VERSION NUMBERS (owner directive 2026-10-24, AFC-517 / CT-2444)
+# THE VERSION NUMBERS (owner directive 2026-10-26, HH-191)
 # ---------------------------------------------------------------------------
 # The rule itself is in the header comment above; this is where it is applied.
-# The readable, unit-tested copy of it is scripts/ios-fleet/version-plan.mjs.
+# The readable, unit-tested copy of it is scripts/ios-fleet/version-plan.mjs
+# (pure), and the I/O around it -- reading and writing the committed record in
+# project.yml -- is scripts/ios-fleet/version-number.mjs behind the thin
+# scripts/ios-fleet/version-number.sh entry point.
 #
-# MARKETING_VERSION (CFBundleShortVersionString) is <prefix>.<P+1>:
-#   <prefix> is the train from marketingVersionDefault, and P is the highest
-#   patch App Store Connect already holds on that train (App Store versions
-#   AND TestFlight trains, drift trains ignored).  The marketing version is
-#   the next patch, so it never collides with an existing one.
+# ONE NUMBER, a version string:
+#   MARKETING_VERSION (CFBundleShortVersionString)
+#     = CURRENT_PROJECT_VERSION (CFBundleVersion)
+#     = <train>.<N>
 #
-# CURRENT_PROJECT_VERSION (CFBundleVersion) is the repo commit count:
-#   - it names the EXACT commit a build came from, so a TestFlight or Sparkle
-#     build can be traced to source without a second lookup
-#   - it is monotonic by construction, so it can never regress
-#   - it is raised above the App Store Connect floor when it has to be (a
-#     shallow checkout understates the count, and the retired UTC stamps are
-#     still higher than a fresh commit count)
+# <train> is the major.minor the app's numbers live on.  It comes from the
+# committed record (project.yml), which is the version the last update
+# shipped.  The Mac path reads the same record, which is how one update
+# carries one number on both platforms.
 #
-# The two numbers are independent.  The build number is NEVER derived from
-# the marketing version, and the marketing version is never derived from the
-# build number:  that is what stopped App Store Connect from showing
-# "1.0.2358 (2358)".
+# N is one past what the train already holds:
+#   - the committed record (the patch of MARKETING_VERSION), and
+#   - what App Store Connect already holds on that train (this path only):
+#     the App Store versions AND the TestFlight trains, drift trains ignored.
+# The number is never the repository commit count and never a timestamp.
 #
-# App Store Connect is the only record that shipping advances, so it is the
-# only record that can answer "which patches does this train hold?" and
-# "which build numbers are taken?".  The local build-seq counter
-# (~.cache/ios-fleet/build-seq-<app>.txt) and the MARKETING_VERSION in
-# project.pbxproj are NOT sources any more:  the counter is never written,
-# and the project file is only read to print the agreement NOTICE.
-
-# Highest N in MARKETING_VERSION = <prefix>.N across the project's build
-# configurations. 0 when the file is unreadable or holds no on-train value.
+# The build number IS the version string, so the pair describes one number:
+# "0.1.1 (0.1.1)".  The only way to get two numbers again is an explicit
+# --build, and that is logged loudly.
 #
-# NOT A SEQUENCING INPUT.  project.pbxproj does not feed the marketing
-# version or the build number any more (AFC-517); this only backs the
-# agreement NOTICE below, so a stale value in the project file is visible
-# instead of silently steering a ship.
-project_marketing_seq() {
-  local proj_file="$1" prefix="$2" quiet="${3:-}" best=0 v n off_train=""
-  if [[ ! -f "$proj_file" ]]; then
-    printf '0'
-    return 0
-  fi
-  while IFS= read -r v; do
-    [[ -n "$v" ]] || continue
-    n="${v#${prefix}.}"
-    if [[ "$n" =~ ^[0-9]+$ && "$n" != "$v" ]]; then
-      [[ "$n" -gt "$best" ]] && best="$n"
-    else
-      off_train="$v"
-    fi
-  done < <(grep -o 'MARKETING_VERSION = [^;]*;' "$proj_file" \
-             | sed 's/MARKETING_VERSION = //; s/;$//' | sort -u)
-  if [[ -n "$off_train" && -z "$quiet" ]]; then
-    logerr "WARNING: project.pbxproj has MARKETING_VERSION=${off_train}, which is not on the ${prefix}.N train."
-    logerr "WARNING: that value is ignored for sequencing. If you meant to start a new train,"
-    logerr "WARNING: update marketingVersionDefault for '${APP_KEY}' in ${APPS_JSON}."
-  fi
-  printf '%s' "$best"
-}
+# App Store Connect is the only record that shipping advances on Apple's
+# side, so it is the only record that can answer "which patches does this
+# train hold?".  The local build-seq counter
+# (~.cache/ios-fleet/build-seq-<app>.txt) is NOT a source:  the counter is
+# never written.  project.pbxproj is the generated copy of project.yml, so
+# the committed record is what both ship paths read.
 
 # The highest patch already used on the <prefix> train in App Store Connect
 # (App Store versions AND TestFlight trains, drift trains ignored).
@@ -614,11 +598,13 @@ asc_latest_marketing_patch() {
 # stamps still hold the floor up) plus the app's plain-integer builds below
 # 1000000000 (EVERY build on macOS, where build numbers grow across trains).
 #
-# Prints "<floor> <train> <app>" on stdout -- the three numbers the version
-# plan log line names.  Returns 1 (and prints nothing) when ASC cannot be
-# consulted.
+# Prints "<floor> <train> <app> <train_builds>" on stdout -- the numbers the
+# version plan log line names, plus how many builds the target train holds.
+# The count is what the in-train guard uses:  the build number IS the version,
+# so the target train has to be empty for the build to be the highest one in
+# it.  Returns 1 (and prints nothing) when ASC cannot be consulted.
 asc_build_floor() {
-  local version="$1" plat="${2:-}" out rc err train app errfile
+  local version="$1" plat="${2:-}" out rc err train app builds errfile
   if ! command -v "$ASC_NODE" >/dev/null 2>&1; then
     logerr "asc-floor: node not on PATH; cannot verify against App Store Connect"
     return 1
@@ -662,7 +648,25 @@ asc_build_floor() {
   # can name them; fall back to the combined floor when they are missing.
   train="$(printf '%s' "$err" | sed -n 's/.*[^a-z]train=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
   app="$(printf '%s' "$err" | sed -n 's/.*[^a-z]app=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
-  printf '%s %s %s' "$out" "${train:-$out}" "${app:-$out}"
+  builds="$(printf '%s' "$err" | sed -n 's/.*[^a-z]train_builds=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+  printf '%s %s %s %s' "$out" "${train:-$out}" "${app:-$out}" "${builds:-0}"
+}
+
+# THE ONE NUMBER (owner directive 2026-10-26, HH-191).
+#
+# The committed version record in project.yml is the single source of truth
+# both ship paths read:  scripts/install.sh (the Mac path) and this script
+# (the iOS path) both go through it, so one update carries one number on both
+# platforms.  The rules that pick the number are pure and live in
+# version-plan.mjs; version-number.mjs reads and writes the record.
+#
+#   version_number record        -> "<version> <build>"
+#   version_number next [--known N] [--write]
+#                                -> "<version> <build>"
+#   version_number write <version>
+#                                -> "<version> <build>"
+version_number() {
+  bash "${FLEET_DIR}/version-number.sh" --root "$REPO_ROOT" "$@"
 }
 
 # The major.minor train a marketing version belongs to: "2.0.123" -> "2.0",
@@ -962,7 +966,10 @@ if _proj_dir="$(resolve_project "$REPO_ROOT" "$PROJECT_REL" "$PROJECT_REL_ALT" 2
   PBXPROJ="${_proj_dir}/project.pbxproj"
 fi
 
-MARKETING_PREFIX="$(marketing_prefix)"
+# The train the app's numbers live on, per apps.json.  The committed record
+# is the source of truth; the two have to agree, and the resolution below
+# says so when they do not.
+DEFAULT_TRAIN="$(marketing_prefix)"
 
 # The App Store Connect platform key.  "macOS" in apps.json is MAC_OS there.
 ASC_PLATFORM="IOS"
@@ -974,11 +981,11 @@ fi
 # line so the log answers "where did that build number come from?" without
 # anyone reading the script.
 PLAN_ASC_PATCH="n/a"
-PLAN_TARGET_PATCH=""
 PLAN_FLOOR="n/a"
 PLAN_TRAIN_FLOOR="n/a"
 PLAN_APP_FLOOR="n/a"
-PLAN_COMMIT_COUNT="n/a"
+PLAN_TRAIN_BUILDS="n/a"
+PLAN_RECORD="n/a"
 PLAN_READY=0
 
 if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
@@ -994,30 +1001,36 @@ if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
 else
   PLAN_READY=1
 
-  # The repo commit count:  the build number names the exact commit a build
-  # came from, so it is the starting point for CFBundleVersion.  It is not
-  # enough on its own -- the App Store Connect floor below raises it when it
-  # has to be -- but it is never invented:  a checkout with no readable git
-  # history cannot be numbered at all.
-  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || true)"
-  if [[ "$COMMIT_COUNT" =~ ^[0-9]+$ ]]; then
-    PLAN_COMMIT_COUNT="$COMMIT_COUNT"
+  # ---- the committed record -----------------------------------------------
+  # The record in project.yml is the version the last update shipped, and it
+  # is what BOTH ship paths read, so one update carries one number on the Mac
+  # app and the iPhone app.  It comes through version-number.sh, which also
+  # refuses a checkout with no readable git history:  there is no timestamp
+  # fallback and no guess.
+  RECORD_LINE="$(version_number record)" \
+    || die "could not read the committed version record from ${REPO_ROOT}/project.yml.
+  The record is the version the last update shipped:  MARKETING_VERSION and
+  CURRENT_PROJECT_VERSION, the same string.  Fix the record and re-run."
+  read -r RECORD_VERSION RECORD_BUILD <<< "$RECORD_LINE"
+  PLAN_RECORD="$RECORD_VERSION"
+  RECORD_TRAIN="$(version_prefix "$RECORD_VERSION")"
+  [[ -n "$RECORD_TRAIN" ]] || die "the committed version record is not a version string: ${RECORD_VERSION}"
+  if [[ -n "$DEFAULT_TRAIN" && "$DEFAULT_TRAIN" != "$RECORD_TRAIN" ]]; then
+    logerr "WARNING: the committed record is on the ${RECORD_TRAIN} train, but apps.json says ${DEFAULT_TRAIN}."
+    logerr "WARNING: the record wins (it is the committed source of truth).  Update marketingVersionDefault"
+    logerr "WARNING: for '${APP_KEY}' in ${APPS_JSON} so the two agree."
   fi
 
-  # ---- the marketing version ---------------------------------------------
-  # --version is an exact override.  Otherwise the version is the next patch
-  # on the default train, and P comes from App Store Connect.
+  # ---- the number ---------------------------------------------------------
+  # --version is an exact override.  Otherwise the number is one past what
+  # the train already holds:  the committed record, and what App Store
+  # Connect holds on that train.
   if [[ -n "$FORCE_VERSION" ]]; then
     MARKETING="$FORCE_VERSION"
-    # The patch the operator pinned, on its own train ("2.0.5" -> 5).
-    _pinned="${FORCE_VERSION##*.}"
-    if [[ "$_pinned" =~ ^[0-9]+$ ]]; then
-      PLAN_ASC_PATCH="pinned"
-      PLAN_TARGET_PATCH="$_pinned"
-    fi
+    PLAN_ASC_PATCH="pinned"
   else
     set +e
-    _patch="$(asc_latest_marketing_patch "$MARKETING_PREFIX" "$ASC_PLATFORM")"
+    _patch="$(asc_latest_marketing_patch "$RECORD_TRAIN" "$ASC_PLATFORM")"
     _rc=$?
     if [[ $_rc -eq 4 ]]; then
       die "App Store Connect rejected the API key (HTTP 401/403) while reading the next marketing version.
@@ -1028,118 +1041,120 @@ else
     if [[ $_rc -ne 0 || ! "$_patch" =~ ^[0-9]+$ ]]; then
       if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
         die "cannot determine the next marketing version.
-  App Store Connect could not be consulted.  The marketing version is the next
-  patch on the ${MARKETING_PREFIX} train, and App Store Connect is the only
-  record of which patches that train already holds:  guessing would ship a
-  version that already exists (or skip one that does not).
+  App Store Connect could not be consulted.  The number is one past what the
+  ${RECORD_TRAIN} train already holds, and App Store Connect is the only record
+  of the patches that train holds:  guessing would ship a version that already
+  exists (or skip one that does not).
   Fix one of these, then re-run:
     1) restore ASC access: check ASC_* in env or Infisical /asc (fleet-secrets doctor) and that 'node' is on PATH, then
-       run: node ${FLEET_DIR}/asc-api.mjs latest-marketing-patch ${BUNDLE_ID} ${MARKETING_PREFIX} ${ASC_PLATFORM}
+       run: node ${FLEET_DIR}/asc-api.mjs latest-marketing-patch ${BUNDLE_ID} ${RECORD_TRAIN} ${ASC_PLATFORM}
      2) or pin the version explicitly:  --version <X.Y.Z>
         --version is honoured exactly, so the marketing version no longer needs
-        App Store Connect.  The build number is still automatic:  the repo
-        commit count, raised above the floor of that train.
+        App Store Connect.  The build number is still the version.
     3) or, only if you are certain, re-run with --allow-unverified-seq"
       fi
       logerr "WARNING: --allow-unverified-seq set; the marketing version is planned from an UNVERIFIED patch (P=0)"
       _patch=0
     fi
     PLAN_ASC_PATCH="$_patch"
-    PLAN_TARGET_PATCH="$((_patch + 1))"
-    MARKETING="${MARKETING_PREFIX}.${PLAN_TARGET_PATCH}"
-  fi
 
-  # ---- the build number ---------------------------------------------------
-  if [[ -n "$FORCE_BUILD" ]]; then
-    # An explicit --build is honoured exactly, and it does NOT move the
-    # marketing version:  the two numbers are independent.
-    BUILD_NUM="$FORCE_BUILD"
-    # An explicit --build is honoured exactly, but never as the retired
-    # "1.0.N (N)" pair (AFC-517):  refuse rather than silently change it.
-    if [[ -n "$PLAN_TARGET_PATCH" && "$BUILD_NUM" == "$PLAN_TARGET_PATCH" ]]; then
-      die "--build ${BUILD_NUM} equals the patch of ${MARKETING}, which would ship ${MARKETING} (${BUILD_NUM}): the 1.0.N (N) form the owner retired (AFC-517).  Pass a different --build."
+    # The recorded version is usable when it is ahead of everything the train
+    # holds:  that is how this path picks up the number the Mac path already
+    # chose, so one update carries one number on both platforms.
+    _recorded_patch="${RECORD_VERSION##*.}"
+    if [[ "$_recorded_patch" =~ ^[0-9]+$ && "$_recorded_patch" -gt "$_patch" ]]; then
+      MARKETING="$RECORD_VERSION"
+      log "version: the committed record (${RECORD_VERSION}) is ahead of the ${RECORD_TRAIN} train (patch ${_patch}); shipping it"
+    else
+      MARKETING="$(version_number next --known "$_patch" | awk '{print $1}')"
+      [[ -n "$MARKETING" ]] || die "could not resolve the next number from the committed record ${RECORD_VERSION}"
     fi
-    log "version: operator override (--build/--version); the local build-seq counter is not consulted"
-  else
-    [[ "$PLAN_COMMIT_COUNT" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; CFBundleVersion is the repo commit count and UTC timestamps are retired"
 
-    # The floor:  every build already in the TARGET train, plus the app's own
-    # plain-integer builds.  It is per-train, so it is read from the train
-    # this run actually ships to -- reading 1.0's floor for a 2.0 ship is what
-    # produced stale builds like "2.0 (build 202510190002)".
-    set +e
-    _floor_line="$(asc_build_floor "$MARKETING" "$ASC_PLATFORM")"
-    _rc=$?
-    if [[ $_rc -eq 4 ]]; then
-      die "App Store Connect rejected the API key (HTTP 401/403) while reading the build floor.
-  Fix the key (ASC_* in env or Infisical /asc; fleet-secrets doctor) and re-run.
-  --allow-unverified-seq does not cover a rejected credential:  the upload would fail with it too."
-    fi
-    set -e
-    if [[ $_rc -ne 0 || -z "$_floor_line" ]]; then
-      if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
-        die "cannot determine the build floor for ${MARKETING}.
-  App Store Connect could not be consulted.  The build number must be greater
-  than every build already in that train and greater than the app's own
-  builds, and App Store Connect is the only record of them:  a build number
-  that is not greater is rejected as a duplicate.
+    # ---- the in-train guard ------------------------------------------------
+    # The build number IS the version, so it has to be the highest build in its
+    # own marketing train:  the target train must hold no build.  When it does,
+    # the number moves on, because a build number has to strictly increase
+    # inside a version train.
+    _guard=0
+    while :; do
+      set +e
+      _floor_line="$(asc_build_floor "$MARKETING" "$ASC_PLATFORM")"
+      _rc=$?
+      set -e
+      if [[ $_rc -ne 0 || -z "$_floor_line" ]]; then
+        if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
+          die "cannot read the build state of the ${MARKETING} train.
+  App Store Connect could not be consulted.  The build number is the version, so
+  it must be the highest build in its own train, and App Store Connect is the
+  only record of the builds that train holds.
   Fix one of these, then re-run:
     1) restore ASC access: check ASC_* in env or Infisical /asc (fleet-secrets doctor) and that 'node' is on PATH, then
        run: node ${FLEET_DIR}/asc-api.mjs build-floor ${BUNDLE_ID} ${MARKETING} ${ASC_PLATFORM}
-     2) or pass the build number explicitly:  --build <N>
-        --build is honoured exactly:  CFBundleVersion becomes N.  It must be
-        greater than every build already in that train.  --build does NOT move
-        the marketing version any more:  the two numbers are independent.
-     3) or, only if you are certain this train is empty, re-run with --allow-unverified-seq"
+     2) or, only if you are certain this train is empty, re-run with --allow-unverified-seq"
+        fi
+        logerr "WARNING: --allow-unverified-seq set; the build state of the ${MARKETING} train is UNVERIFIED"
+        break
       fi
-      logerr "WARNING: --allow-unverified-seq set; the build floor is UNVERIFIED (0)"
-      _floor_line="0 0 0"
-    fi
-    # "<floor> <train> <app>":  the two parts of the floor, and the result.
-    PLAN_FLOOR="$(printf '%s' "$_floor_line" | awk '{print $1}')"
-    PLAN_TRAIN_FLOOR="$(printf '%s' "$_floor_line" | awk '{print $2}')"
-    PLAN_APP_FLOOR="$(printf '%s' "$_floor_line" | awk '{print $3}')"
-    [[ "$PLAN_FLOOR" =~ ^[0-9]+$ ]] || PLAN_FLOOR=0
-    [[ "$PLAN_TRAIN_FLOOR" =~ ^[0-9]+$ ]] || PLAN_TRAIN_FLOOR=0
-    [[ "$PLAN_APP_FLOOR" =~ ^[0-9]+$ ]] || PLAN_APP_FLOOR=0
+      # "<floor> <train> <app> <train_builds>"
+      PLAN_FLOOR="$(printf '%s' "$_floor_line" | awk '{print $1}')"
+      PLAN_TRAIN_FLOOR="$(printf '%s' "$_floor_line" | awk '{print $2}')"
+      PLAN_APP_FLOOR="$(printf '%s' "$_floor_line" | awk '{print $3}')"
+      PLAN_TRAIN_BUILDS="$(printf '%s' "$_floor_line" | awk '{print $4}')"
+      [[ "$PLAN_FLOOR" =~ ^[0-9]+$ ]] || PLAN_FLOOR=0
+      [[ "$PLAN_TRAIN_FLOOR" =~ ^[0-9]+$ ]] || PLAN_TRAIN_FLOOR=0
+      [[ "$PLAN_APP_FLOOR" =~ ^[0-9]+$ ]] || PLAN_APP_FLOOR=0
+      [[ "$PLAN_TRAIN_BUILDS" =~ ^[0-9]+$ ]] || PLAN_TRAIN_BUILDS=0
+      [[ "$PLAN_TRAIN_BUILDS" -eq 0 ]] && break
+      _guard=$((_guard + 1))
+      [[ "$_guard" -le 20 ]] || die "the ${RECORD_TRAIN} train still holds builds after 20 attempts; give up and look at App Store Connect by hand."
+      _next="$(version_number next --known "${MARKETING##*.}" | awk '{print $1}')"
+      log "version: the ${MARKETING} train already holds ${PLAN_TRAIN_BUILDS} build(s); taking ${_next} instead"
+      MARKETING="$_next"
+    done
+  fi
 
-    # Strictly-increasing guard:  ASC rejects a repeated (version, build)
-    # pair, so never ship at or below the known floor.  The guard fires when
-    # the floor is at or above the commit count -- because App Store Connect
-    # already holds it, or because a shallow checkout understates the commit
-    # count -- so the log line names the floor rather than asserting the
-    # commit count was shipped.
-    BUILD_NUM="$PLAN_COMMIT_COUNT"
-    if [[ "$BUILD_NUM" -le "$PLAN_FLOOR" ]]; then
-      BUILD_NUM="$((PLAN_FLOOR + 1))"
-      log "build: floor ${PLAN_FLOOR} is at or above the commit count ${PLAN_COMMIT_COUNT}; using ${BUILD_NUM} instead"
+  # ---- the build number ---------------------------------------------------
+  # The one-number rule:  the build number IS the version string, so the pair
+  # describes one number ("0.1.1 (0.1.1)").  An explicit --build is honoured
+  # exactly, and it is the only way to get two different numbers again, so it
+  # is logged loudly.
+  if [[ -n "$FORCE_BUILD" ]]; then
+    BUILD_NUM="$FORCE_BUILD"
+    if [[ "$BUILD_NUM" != "$MARKETING" ]]; then
+      log "WARNING: --build ${BUILD_NUM} differs from the version ${MARKETING}:  that is two numbers again."
+      log "WARNING: the owner ruling (HH-191) is one number:  the build number equals the version."
     fi
-    # A ship must never look like "1.0.N (N)":  if the build number happens
-    # to be the patch number of the marketing version, move it one up.
-    if [[ -n "$PLAN_TARGET_PATCH" && "$BUILD_NUM" -eq "$PLAN_TARGET_PATCH" ]]; then
-      _bumped="$((BUILD_NUM + 1))"
-      log "build: ${BUILD_NUM} equals the patch number; using ${_bumped} so the ship does not read ${MARKETING} (${BUILD_NUM})"
-      BUILD_NUM="$_bumped"
-    fi
+    log "version: operator override (--build/--version); the local build-seq counter is not consulted"
+  else
+    BUILD_NUM="$MARKETING"
   fi
 fi
 
-# The project file and the shipped version must never disagree silently. The
-# version above is passed on the xcodebuild command line and overrides whatever
-# project.pbxproj says, so a stale value there is invisible without this check.
-# The project file is NOT a sequencing input any more (AFC-517):  this only
-# reports the disagreement.
-PROJECT_SEQ_NOW="$(project_marketing_seq "$PBXPROJ" "$MARKETING_PREFIX" quiet)"
+# The two ship paths must agree, and this says whether they do.
+#
+# The Mac path (scripts/install.sh) reads the same committed record and cannot
+# see App Store Connect, so it takes the number one past the record.  This
+# path took the number one past what the train holds.  When the shipped
+# number is the record, or the one right after it, both platforms carry the
+# same number for this update.  When it is further ahead, the record is
+# behind and the NOTICE says what to do about it.
 if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
   : # no version was resolved for --upload-only; nothing to compare against
-elif [[ -z "$PBXPROJ" ]]; then
-  log "project version: .xcodeproj not resolvable yet; skipping agreement check"
-elif [[ "${MARKETING_PREFIX}.${PROJECT_SEQ_NOW}" != "$MARKETING" ]]; then
-  log "NOTICE: project.pbxproj says MARKETING_VERSION=${MARKETING_PREFIX}.${PROJECT_SEQ_NOW}, shipping ${MARKETING}."
-  log "NOTICE: the shipped value wins (passed to xcodebuild). To record it in the repo,"
-  log "NOTICE: add --sync-project-version to the next REAL ship, then commit"
-  log "NOTICE: clients/ios/*.xcodeproj/project.pbxproj. Syncing from a --dry-run would"
-  log "NOTICE: write a number the next real ship then exceeds, re-creating this gap."
+elif [[ -n "$PLAN_RECORD" && "$PLAN_RECORD" != "n/a" ]]; then
+  _rec_patch="${PLAN_RECORD##*.}"
+  _ship_patch="${MARKETING##*.}"
+  if [[ "$_rec_patch" =~ ^[0-9]+$ && "$_ship_patch" =~ ^[0-9]+$ ]]; then
+    if [[ "$_ship_patch" == "$_rec_patch" ]]; then
+      log "agreement: the committed record is ${PLAN_RECORD}; this ship carries that number, so the Mac app and the iPhone app are on one number"
+    elif [[ "$_ship_patch" == "$((_rec_patch + 1))" ]]; then
+      log "agreement: the Mac app takes the next number from the committed record (${PLAN_RECORD}), which is this one"
+    else
+      log "NOTICE: the committed record is ${PLAN_RECORD} and this ship carries ${MARKETING}."
+      log "NOTICE: App Store Connect already holds a higher patch on the ${RECORD_TRAIN} train, so the Mac app"
+      log "NOTICE: (which reads the record only) would take a lower number.  To carry one number on both"
+      log "NOTICE: platforms, update the committed record in project.yml to ${MARKETING} and commit it."
+    fi
+  fi
 fi
 
 # Write the resolved version into project.pbxproj so the repo records what
@@ -1177,7 +1192,7 @@ log "bundleId=${BUNDLE_ID}"
 log "scheme=${SCHEME}"
 log "repo=${REPO_ROOT}"
 if [[ "$PLAN_READY" -eq 1 ]]; then
-  log "version plan: asc_patch=${PLAN_ASC_PATCH} -> marketing=${MARKETING}; build floors: train=${PLAN_TRAIN_FLOOR} app=${PLAN_APP_FLOOR} commit_count=${PLAN_COMMIT_COUNT} -> build=${BUILD_NUM}"
+  log "version plan: record=${PLAN_RECORD} asc_patch=${PLAN_ASC_PATCH} -> version=${MARKETING}; train builds=${PLAN_TRAIN_BUILDS} -> build=${BUILD_NUM} (one number)"
 fi
 log "marketing=${MARKETING} build=${BUILD_NUM}"
 log "App Store Connect will show this as: ${MARKETING} (${BUILD_NUM})"

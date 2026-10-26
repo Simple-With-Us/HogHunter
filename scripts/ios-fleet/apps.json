@@ -9,8 +9,8 @@
       "scheme": "HogHunterIOS",
       "projectRel": "HogHunter.xcodeproj",
       "xcodegenDir": ".",
-      "marketingVersionDefault": "1.0.0",
-      "notes": "Hog Hunter iPhone companion for the macOS menu bar utility.  Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios.  The Xcode project is generated from project.yml (xcodegen at the repo root) and is not committed.  Version numbering (AFC-517, owner directive 2026-10-24):  the marketing version is the next patch on the 1.0 train (P comes from App Store Connect, drift trains ignored) and the build number is the repo commit count, raised above the App Store Connect floor;  the two numbers are independent, and UTC build stamps are retired."
+      "marketingVersionDefault": "0.1.0",
+      "notes": "Hog Hunter iPhone companion for the macOS menu bar utility.  Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios.  The Xcode project is generated from project.yml (xcodegen at the repo root) and is not committed.  Version numbering (HH-191, owner directive 2026-10-26):  ONE NUMBER, and it is a version string -- MARKETING_VERSION and CURRENT_PROJECT_VERSION carry the same string (0.1.1 (0.1.1)).  The number is one past what the 0.1 train already holds (the committed record in project.yml, plus what App Store Connect holds, drift trains ignored);  the commit-count build number and UTC build stamps are retired."
     }
   }
 }

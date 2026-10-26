@@ -11,8 +11,13 @@
  *                        1.0.2353 [2353]   <- drift train (build "2353")
  *                        1.0.2358 [2358]   <- drift train (build "2358")
  *
- * so the next marketing version is 1.0.237 -- the drift trains must not push
- * it to 1.0.2359.
+ * so the next free patch on that train was 1.0.237 -- the drift trains must
+ * not push it to 1.0.2359.
+ *
+ * Owner directive 2026-10-26 (HH-191):  ONE NUMBER, and it is a version
+ * string.  The version and the build number carry the same string ("0.1.1
+ * (0.1.1)"), the number is one past what the train holds, and the repository
+ * commit count and every timestamp are retired.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -21,10 +26,15 @@ import {
   buildFloor,
   isDriftTrain,
   latestMarketingPatch,
+  nextMarketingPatch,
+  nextVersion,
   ownPatch,
   parsePatch,
-  planVersion,
-  nextMarketingPatch
+  parseVersionParts,
+  planIosUpdate,
+  planMacUpdate,
+  planShip,
+  versionTrain
 } from "./version-plan.mjs";
 
 const CONGRESS_APP_STORE_VERSIONS = ["1.0.235"];
@@ -121,148 +131,112 @@ test("buildFloor ignores dotted and non-numeric build values", () => {
   assert.equal(floor, 42);
 });
 
-test("planVersion picks the next patch on the train (real Congress.Trade data)", () => {
-  const ascPatch = latestMarketingPatch({
-    prefix: "1.0",
-    appStoreVersions: CONGRESS_APP_STORE_VERSIONS,
-    trains: CONGRESS_TRAINS
-  });
-  assert.equal(ascPatch, 236);
-
-  const floor = buildFloor({
-    trainBuilds: [],                       // the new train is empty
-    appBuilds: ["2353", "2358", "202610180036"],
-    platform: "IOS"
-  });
-  assert.equal(floor, 2358);
-
-  const plan = planVersion({
-    prefix: "1.0",
-    ascPatch,
-    commitCount: 2360,
-    floor
-  });
-  assert.equal(plan.marketing, "1.0.237");
-  assert.equal(plan.build, "2360");
+test("parseVersionParts reads the three parts of a version string", () => {
+  assert.deepEqual(parseVersionParts("0.1.1"), { major: 0, minor: 1, patch: 1 });
+  assert.deepEqual(parseVersionParts("1.1.2"), { major: 1, minor: 1, patch: 2 });
+  assert.equal(parseVersionParts("1.0"), null);
+  assert.equal(parseVersionParts("x.y.z"), null);
+  assert.equal(parseVersionParts("1.0.1.2"), null);
+  assert.equal(parseVersionParts(""), null);
 });
 
-test("planVersion raises the build above the floor of the forced train", () => {
-  const floor = buildFloor({
-    trainBuilds: ["202610180036"],
-    appBuilds: [],
-    platform: "IOS"
-  });
-  assert.equal(floor, 202610180036);
-
-  const plan = planVersion({
-    prefix: "1.0",
-    ascPatch: 236,
-    forcedVersion: "1.0.236",
-    commitCount: 2360,
-    floor
-  });
-  assert.equal(plan.marketing, "1.0.236");
-  assert.equal(plan.build, "202610180037");
+test("versionTrain names the train a version lives on", () => {
+  assert.equal(versionTrain("0.1.1"), "0.1");
+  assert.equal(versionTrain("1.1.2"), "1.1");
+  assert.equal(versionTrain("1.0"), null);
 });
 
-test("planVersion never ships 1.0.N (N)", () => {
-  // The commit count happens to be the patch number of the next marketing
-  // version:  the build moves one up so the pair cannot read "1.0.237 (237)".
-  const plan = planVersion({
-    prefix: "1.0",
-    ascPatch: 236,
-    commitCount: 237,
-    floor: 0
-  });
-  assert.equal(plan.marketing, "1.0.237");
-  assert.equal(plan.build, "238");
-
-  // Same rule for an explicit --version.
-  const forced = planVersion({
-    prefix: "1.0",
-    ascPatch: 236,
-    forcedVersion: "1.0.236",
-    commitCount: 236,
-    floor: 0
-  });
-  assert.equal(forced.marketing, "1.0.236");
-  assert.equal(forced.build, "237");
+test("nextVersion is one past the committed record", () => {
+  assert.equal(nextVersion({ recorded: "0.1.0" }), "0.1.1");
+  assert.equal(nextVersion({ recorded: "0.1.7" }), "0.1.8");
 });
 
-test("planVersion keeps the macOS floor (build numbers grow across trains)", () => {
-  const floor = buildFloor({
-    trainBuilds: [],
-    appBuilds: ["2358", "202610180036"],
-    platform: "MAC_OS"
-  });
-  assert.equal(floor, 202610180036);
-
-  const plan = planVersion({
-    prefix: "1.0",
-    ascPatch: 236,
-    commitCount: 2360,
-    floor
-  });
-  assert.equal(plan.marketing, "1.0.237");
-  assert.equal(plan.build, "202610180037");
+test("nextVersion never reuses a number the train already holds", () => {
+  // The train holds 1.1.1 and the record is behind it:  the number moves on.
+  assert.equal(nextVersion({ recorded: "1.1.0", known: 1 }), "1.1.2");
+  assert.equal(nextVersion({ recorded: "1.1.1", known: 1 }), "1.1.2");
+  assert.equal(nextVersion({ recorded: "1.1.5", known: 1 }), "1.1.6");
 });
 
-test("planVersion honours an exact --build override", () => {
-  const plan = planVersion({
-    prefix: "1.0",
-    ascPatch: 236,
-    forcedBuild: "999",
-    commitCount: 2360,
-    floor: 202610180036
-  });
-  assert.equal(plan.marketing, "1.0.237");
+test("nextVersion refuses a record that is not a version string", () => {
+  assert.throws(() => nextVersion({ recorded: "152" }), /not a version string/);
+  assert.throws(() => nextVersion({ recorded: "" }), /not a version string/);
+  assert.throws(() => nextVersion({ recorded: undefined }), /not a version string/);
+});
+
+test("planShip: the build number IS the version", () => {
+  const plan = planShip({ recorded: "0.1.0", known: 0 });
+  assert.equal(plan.version, "0.1.1");
+  assert.equal(plan.build, "0.1.1");
+});
+
+test("planShip: the version is exactly <major>.<minor>.<patch>", () => {
+  const plan = planShip({ recorded: "1.1.1", known: 1 });
+  assert.match(plan.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(plan.version, "1.1.2");
+  assert.match(plan.build, /^\d+\.\d+\.\d+$/);
+  assert.equal(plan.build, plan.version);
+});
+
+test("planShip: no commit count and no timestamp ever reaches the pair", () => {
+  // The old scheme produced "1.0.237 (2360)" and "1.0.2358 (2358)":  a bare
+  // integer beside the version, and a 12-digit UTC stamp.  Neither can
+  // happen now:  the build number is the version string.
+  const plan = planShip({ recorded: "0.1.0", known: 0 });
+  assert.doesNotMatch(plan.build, /^\d+$/);
+  assert.doesNotMatch(plan.build, /^\d{12}$/);
+  assert.doesNotMatch(plan.build, /2026/);
+  assert.equal(plan.build, plan.version);
+});
+
+test("planShip honours an exact --version override", () => {
+  const plan = planShip({ recorded: "0.1.0", known: 0, forcedVersion: "2.0.5" });
+  assert.equal(plan.version, "2.0.5");
+  assert.equal(plan.build, "2.0.5");
+});
+
+test("planShip honours an exact --build override", () => {
+  const plan = planShip({ recorded: "0.1.0", known: 0, forcedBuild: "999" });
+  assert.equal(plan.version, "0.1.1");
   assert.equal(plan.build, "999");
 });
 
-test("planVersion honours an exact --version override", () => {
-  const plan = planVersion({
-    prefix: "1.0",
-    ascPatch: 236,
-    forcedVersion: "2.0.5",
-    commitCount: 2360,
-    floor: 0
-  });
-  assert.equal(plan.marketing, "2.0.5");
-  assert.equal(plan.build, "2360");
+test("planShip refuses a version that is not a version string", () => {
+  assert.throws(() => planShip({ recorded: "0.1.0", forcedVersion: "1.2" }), /not a version string/);
 });
 
-test("planVersion with no App Store Connect state plans 1.0.1", () => {
-  const plan = planVersion({ prefix: "1.0", ascPatch: 0, commitCount: 7, floor: 0 });
-  assert.equal(plan.marketing, "1.0.1");
-  assert.equal(plan.build, "7");
+test("planMacUpdate takes the number one past the committed record", () => {
+  const plan = planMacUpdate({ recorded: "0.1.0" });
+  assert.equal(plan.version, "0.1.1");
+  assert.equal(plan.build, "0.1.1");
 });
 
-test("nextMarketingPatch skips a patch a drift train already holds (Kody, AFC-517)", () => {
-  const trains = [
-    { version: "1.0.235", builds: ["202610110355"] },
-    { version: "1.0.236", builds: ["236"] },        // drift train on the next patch
-    { version: "1.0.237", builds: ["237", "2400"] } // drift train we already shipped into
-  ];
-  assert.equal(latestMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }), 235);
-  assert.equal(nextMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }), 238);
+test("planIosUpdate takes the next free number when the train holds the record", () => {
+  // The record is what the last update shipped and App Store Connect holds
+  // it too, so the next number is one past it.
+  const plan = planIosUpdate({ recorded: "0.1.0", known: 0, recordedTrainEmpty: false });
+  assert.equal(plan.version, "0.1.1");
+  assert.equal(plan.build, "0.1.1");
 });
 
-test("nextMarketingPatch is latest + 1 when nothing is in the way", () => {
-  assert.equal(
-    nextMarketingPatch({
-      prefix: "1.0",
-      appStoreVersions: ["1.0.235"],
-      trains: [{ version: "1.0.236", builds: ["202610180036"] }, { version: "1.0.2358", builds: ["2358"] }]
-    }),
-    237
-  );
+test("planIosUpdate ships the recorded number when it is ahead of the train", () => {
+  // The Mac path already chose this number and recorded it:  this path ships
+  // the same one, so one update carries one number on both platforms.
+  const plan = planIosUpdate({ recorded: "0.1.1", known: 0, recordedTrainEmpty: true });
+  assert.equal(plan.version, "0.1.1");
+  assert.equal(plan.build, "0.1.1");
 });
 
-test("planVersion refuses a forced build that recreates 1.0.N (N) (Kody, AFC-517)", () => {
-  assert.throws(() => planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "237", commitCount: 10, floor: 0 }));
-  assert.throws(() => planVersion({ prefix: "1.0", forcedVersion: "1.0.236", forcedBuild: "236", commitCount: 10, floor: 0 }));
-  assert.deepEqual(
-    planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "999", commitCount: 10, floor: 0 }),
-    { marketing: "1.0.237", build: "999" }
-  );
+test("planIosUpdate never ships a recorded number whose train already holds a build", () => {
+  const plan = planIosUpdate({ recorded: "0.1.1", known: 0, recordedTrainEmpty: false });
+  assert.equal(plan.version, "0.1.2");
+  assert.equal(plan.build, "0.1.2");
+});
+
+test("planIosUpdate takes the number past what App Store Connect holds", () => {
+  // The record is behind the train:  the number moves past what the train
+  // holds, never back onto a number that is already used.
+  const plan = planIosUpdate({ recorded: "0.1.0", known: 4, recordedTrainEmpty: false });
+  assert.equal(plan.version, "0.1.5");
+  assert.equal(plan.build, "0.1.5");
 });

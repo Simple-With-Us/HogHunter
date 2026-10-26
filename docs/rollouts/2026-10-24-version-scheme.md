@@ -1,5 +1,11 @@
 # Version scheme: the next patch and an independent build number (2026-10-24)
 
+> **Superseded on 2026-10-26 by [2026-10-26-version-scheme-one-number.md](2026-10-26-version-scheme-one-number.md).**
+> The owner ruling of 2026-10-26 (HH-191) retires the two-independent-numbers
+> scheme this document describes:  the version and the build number now carry
+> the **same** string (`0.1.1 (0.1.1)`), and the number is one past what the
+> train holds.  This document is kept for the history.
+
 AFC-517, ported from Congress.Trade (CT-2444).  Owner directive 2026-10-24, which replaces the `1.0.<commit_count>` scheme unified in #2801 on 2026-10-18.  Ship tooling only:  no app source, no project file, no workflow change to a ship path.
 
 ## What changed

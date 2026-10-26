@@ -40,12 +40,22 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
-    # RECORD OF WHAT SHIPPED, not the source of truth for what ships next:
-    # the ship script passes both values on the xcodebuild command line, and
-    # reads this one as the build-number FLOOR, so it must stay below the
-    # commit count of any commit that can ship.
-    MARKETING_VERSION: "1.0.152"
-    CURRENT_PROJECT_VERSION: "152"
+    # THE COMMITTED VERSION RECORD (owner directive 2026-10-26, HH-191).
+    #
+    # MARKETING_VERSION and CURRENT_PROJECT_VERSION carry the SAME string:
+    # one number, one version, and the build number IS the version.  There is
+    # no second number anywhere -- not the repository commit count, not a
+    # timestamp.
+    #
+    # The record names the version the last update shipped.  Both ship paths
+    # read it (scripts/install.sh and scripts/ios-fleet/ship-testflight.sh,
+    # through scripts/ios-fleet/version-number.sh) and take the next number
+    # from it, so the Mac app and the iPhone app of one update carry the
+    # same number.
+    #
+    # Hog Hunter's numbers live on the 0.1 train:  0.1.0 now, 0.1.1 next.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "0.1.0"
     CODE_SIGN_STYLE: Automatic
     GENERATE_INFOPLIST_FILE: YES
 
@@ -149,8 +159,8 @@ targets:
         PRODUCT_NAME: HogHunter
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0.152"
-        CURRENT_PROJECT_VERSION: "152"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "0.1.0"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -176,8 +186,8 @@ targets:
         PRODUCT_NAME: HogHunterWidgets
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0.152"
-        CURRENT_PROJECT_VERSION: "152"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "0.1.0"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_FILE: ios/Widgets/Info.plist
         SWIFT_EMIT_LOC_STRINGS: YES

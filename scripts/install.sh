@@ -78,9 +78,17 @@ version_of() {
 echo "Generating the Xcode project."
 xcodegen generate
 
-BUILD_COUNT="$(git rev-list --count HEAD 2>/dev/null || echo "1")"
-MARKETING_VERSION="1.0.${BUILD_COUNT}"
-echo "Building Release version $MARKETING_VERSION (build $BUILD_COUNT)."
+# THE ONE NUMBER (owner directive 2026-10-26, HH-191).
+#
+# The version and the build number are the SAME string, read from the
+# committed record in project.yml:  the version the last update shipped, plus
+# one.  The repository commit count is retired, and so is every timestamp:
+# there is no second number and no fallback.  The iPhone app takes the same
+# number from the same record (scripts/ios-fleet/ship-testflight.sh), so one
+# update carries one number on both platforms.
+VERSION_LINE="$(bash "${REPO_ROOT}/scripts/ios-fleet/version-number.sh" next)"
+read -r MARKETING_VERSION CURRENT_PROJECT_VERSION <<< "$VERSION_LINE"
+echo "Building Release version $MARKETING_VERSION (build $CURRENT_PROJECT_VERSION)."
 # SENTRY_DSN_MACOS wins when both are set (fleet split).  The value is passed
 # as an xcodebuild setting and never printed.  Empty keeps Sentry inert.
 { set +x; } 2>/dev/null
@@ -95,7 +103,7 @@ fi
 unset MAC_SENTRY_DSN
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build \
   MARKETING_VERSION="$MARKETING_VERSION" \
-  CURRENT_PROJECT_VERSION="$BUILD_COUNT" \
+  CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
   ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO CODE_SIGNING_ALLOWED=NO \
   ${SENTRY_DSN_FLAGS[@]+"${SENTRY_DSN_FLAGS[@]}"}
 
@@ -107,8 +115,8 @@ fi
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$INFO_PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $MARKETING_VERSION" "$INFO_PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_COUNT" "$INFO_PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_COUNT" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CURRENT_PROJECT_VERSION" "$INFO_PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $CURRENT_PROJECT_VERSION" "$INFO_PLIST"
 
 # Sparkle auto-update feed and public key for the installed Release bundle.
 #
@@ -235,6 +243,13 @@ if [[ -d "$LEGACY_PATH" && "$LEGACY_PATH" != "$INSTALLED_PATH" ]]; then
     echo "Warning: $LEGACY_PATH exists but its bundle id is not $new_id -- leaving it alone."
   fi
 fi
+
+# Record what shipped.  The committed record in project.yml is the number the
+# next update is measured from, so the next update takes the next number.  The
+# iPhone app reads the same record, which is how one update carries one
+# number on both platforms.  Commit project.yml after this.
+echo "Recording $MARKETING_VERSION in project.yml (the next update takes the next number).  Commit it."
+bash "${REPO_ROOT}/scripts/ios-fleet/version-number.sh" write "$MARKETING_VERSION"
 
 if [[ "$NO_LAUNCH" -eq 0 ]]; then
   echo "Launching Hog Hunter."

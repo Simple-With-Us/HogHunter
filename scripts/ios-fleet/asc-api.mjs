@@ -1670,8 +1670,11 @@ async function main() {
     const trainFloor = buildFloor({ trainBuilds, appBuilds: [], platform });
     const appFloor = buildFloor({ trainBuilds: [], appBuilds, platform });
     // The note is machine-readable:  the shell layer splits it into the two
-    // floors it prints in the version-plan log line.
-    console.error(`build-floor: train=${trainFloor} app=${appFloor} -> floor=${floor}`);
+    // floors it prints in the version-plan log line.  train_builds is how many
+    // builds the target train holds:  under the one-number scheme the build
+    // number IS the version, so the target train has to be empty for the
+    // build to be the highest one in it.
+    console.error(`build-floor: train=${trainFloor} app=${appFloor} -> floor=${floor} train_builds=${trainBuilds.length}`);
     console.log(String(floor));
     process.exit(0);
   }
