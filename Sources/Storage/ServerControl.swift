@@ -138,7 +138,7 @@ enum SSHCommand {
             "-o", "ServerAliveInterval=3",
             "-o", "ServerAliveCountMax=2",
             host,
-        ] + arguments
+        ] + arguments.map(Self.shellQuote)
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -175,6 +175,16 @@ enum SSHCommand {
                     if finished.terminationStatus == 0 {
                         continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
                     } else {
+                        let outText = String(data: outData, encoding: .utf8)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        // The control script answers refusals as JSON on
+                        // stdout and exits non-zero.  That answer belongs to
+                        // the caller, which reports the reason, so hand it
+                        // back instead of failing with the bare exit status.
+                        if !outText.isEmpty, Self.isControlAnswer(outText) {
+                            continuation.resume(returning: outText)
+                            return
+                        }
                         let rawErr = String(data: errData, encoding: .utf8)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         let description = rawErr.isEmpty
@@ -210,5 +220,24 @@ enum SSHCommand {
         } onCancel: {
             if proc.isRunning { proc.terminate() }
         }
+    }
+
+    /// Quote one remote argument for the shell ssh runs on the server: ssh
+    /// joins the remote command with spaces, so a display name carrying
+    /// spaces would otherwise split into several arguments.
+    static func shellQuote(_ argument: String) -> String {
+        if argument.isEmpty { return "''" }
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_+=/:.,@%"))
+        if argument.rangeOfCharacter(from: safe.inverted) == nil { return argument }
+        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Whether stdout is the control script's JSON answer (`{"ok": ...}`),
+    /// rather than stray output around a transport failure.
+    static func isControlAnswer(_ text: String) -> Bool {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["ok"] is Bool else { return false }
+        return true
     }
 }

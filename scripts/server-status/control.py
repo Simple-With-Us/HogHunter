@@ -230,16 +230,24 @@ def stop_process(pid, start_time, force=False, proc=Path('/proc'), kill=None, an
 
 def container_action(name, action, run=subprocess.run):
     """Stop or restart one Coolify workload."""
-    targets = {row['container']: row for row in coolify_containers(run=run)}
+    targets = {}
+    for row in coolify_containers(run=run):
+        targets.setdefault(row['container'], row)
+        # The Mac names the workload by the display name it was shown, so a
+        # workload is reachable by either name.  The Docker name wins when
+        # both are present, and Docker is always told the Docker name: the
+        # display label carries spaces the remote shell would split.
+        targets.setdefault(row['name'], row)
     if name not in targets:
         return {'ok': False, 'reason': 'that workload is not running on this host'}
+    container = targets[name]['container']
     try:
-        result = run(['docker', action, name], capture_output=True, text=True, timeout=60, check=False)
+        result = run(['docker', action, container], capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         return {'ok': False, 'reason': str(error)}
     if result.returncode != 0:
         return {'ok': False, 'reason': (result.stderr or result.stdout or 'docker refused').strip()[:200]}
-    return {'ok': True, 'container': name, 'name': targets[name]['name'], 'action': action}
+    return {'ok': True, 'container': container, 'name': targets[name]['name'], 'action': action}
 
 
 def audit(command, target, outcome):
@@ -290,7 +298,11 @@ def main(argv=None):
         return 2
 
     if args.command == 'stop-process':
-        outcome = stop_process(args.pid, args.start_time, force=args.force)
+        # Container membership exempts a process from the host's ownership
+        # and infrastructure guards, so the identities are looked up here:
+        # without them every process looks like a host process.
+        outcome = stop_process(args.pid, args.start_time, force=args.force,
+                               identities=container_identities())
         target = f'pid={args.pid}'
     else:
         action = 'stop' if args.command == 'stop-container' else 'restart'

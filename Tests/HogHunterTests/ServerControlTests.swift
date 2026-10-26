@@ -82,6 +82,24 @@ final class ServerControlTests: XCTestCase {
         XCTAssertTrue(command.arguments.contains("fleet-infra / um-appworker"))
         XCTAssertTrue(command.arguments.contains("--confirm"))
     }
+
+    func testRemoteArgumentsCarryingSpacesAreQuotedForSSH() {
+        /// ssh joins the remote command with spaces, so a display name would
+        /// otherwise split into several arguments on the server.
+        XCTAssertEqual(SSHCommand.shellQuote("/usr/local/sbin/hoghunter-control"),
+                       "/usr/local/sbin/hoghunter-control")
+        XCTAssertEqual(SSHCommand.shellQuote("--name"), "--name")
+        XCTAssertEqual(SSHCommand.shellQuote("fleet-infra / um-appworker"),
+                       "'fleet-infra / um-appworker'")
+        XCTAssertEqual(SSHCommand.shellQuote(""), "''")
+    }
+
+    func testAControlAnswerOnStdoutIsRecognised() {
+        XCTAssertTrue(SSHCommand.isControlAnswer("{\"ok\":false,\"reason\":\"that workload is not running on this host\"}"))
+        XCTAssertTrue(SSHCommand.isControlAnswer("{\"ok\":true}"))
+        XCTAssertFalse(SSHCommand.isControlAnswer(""))
+        XCTAssertFalse(SSHCommand.isControlAnswer("SSH connection failed"))
+    }
 }
 
 /// Records the command the control path would have run.

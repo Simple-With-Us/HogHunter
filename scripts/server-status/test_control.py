@@ -136,6 +136,68 @@ class ControlTests(unittest.TestCase):
         outcome = module.container_action('not-a-container', 'stop', run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''))
         self.assertFalse(outcome['ok'])
 
+    def test_container_action_matches_the_display_name(self):
+        """The Mac names the workload by the display name it was shown."""
+        stopped = []
+
+        def run(args, **kwargs):
+            if args[1] == 'ps':
+                return subprocess.CompletedProcess(args, 0, 'abc123\n', '')
+            if args[1] == 'inspect':
+                return subprocess.CompletedProcess(args, 0, json.dumps([{
+                    'Name': '/yagelvqux9e8l1kztif7bf2o',
+                    'Config': {'Labels': {'coolify.name': 'yagelvqux9e8l1kztif7bf2o',
+                                          'coolify.projectName': 'fleet-infra',
+                                          'coolify.resourceName': 'um-appworker'}},
+                    'State': {'Status': 'running'}}]), '')
+            if args[1] == 'stop':
+                stopped.append(list(args))
+                return subprocess.CompletedProcess(args, 0, 'yagelvqux9e8l1kztif7bf2o\n', '')
+            return subprocess.CompletedProcess(args, 1, '', '')
+        outcome = module.container_action('fleet-infra / um-appworker', 'stop', run=run)
+        self.assertTrue(outcome['ok'], outcome)
+        # Docker is told the container name, never the display label.
+        self.assertEqual(stopped, [['docker', 'stop', 'yagelvqux9e8l1kztif7bf2o']])
+        self.assertEqual(outcome['container'], 'yagelvqux9e8l1kztif7bf2o')
+
+    def test_main_stop_process_passes_container_identities(self):
+        """main() looks the identities up, so a containerized process is not
+        held to the host's ownership and infrastructure guards."""
+        import io
+        import contextlib
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            path = write_process(proc, 4242, 'next-server', start_time=999)
+            # Belongs to a container, so the host's ownership guard does not
+            # apply no matter which account runs this test.
+            (path / 'cgroup').write_text('0::/docker/abc\n')
+            real_stop = module.stop_process
+            real_identities = module.container_identities
+            real_audit = module.AUDIT_LOG
+            seen = {}
+
+            def recording_stop(pid, start_time, force=False, **kwargs):
+                seen['identities'] = kwargs.get('identities')
+                return real_stop(pid, start_time, force=force, proc=proc,
+                                 kill=lambda *a: None, ancestors=set(),
+                                 identities=kwargs.get('identities'))
+
+            module.stop_process = recording_stop
+            module.container_identities = lambda run=subprocess.run: {'abc': 'box'}
+            module.AUDIT_LOG = Path(directory) / 'audit.log'
+            try:
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    code = module.main(['stop-process', '--pid', '4242',
+                                        '--start-time', '999', '--confirm'])
+            finally:
+                module.stop_process = real_stop
+                module.container_identities = real_identities
+                module.AUDIT_LOG = real_audit
+            self.assertEqual(code, 0, buffer.getvalue())
+            self.assertEqual(seen.get('identities'), {'abc': 'box'})
+            self.assertIn('"ok": true', buffer.getvalue())
+
     def test_the_audit_log_names_what_was_done(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / 'audit.log'
