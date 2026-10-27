@@ -261,6 +261,34 @@ class SupplementTests(unittest.TestCase):
         for runner in (invalid, timeout):
             self.assertEqual(module.shellular_state(Path('/fixture'), runner), 'unknown')
 
+    def test_live_collection_overlaps_the_tick_window_with_the_docker_reads(self):
+        import threading
+        barrier = threading.Barrier(2, timeout=5)
+
+        def processes():
+            barrier.wait()
+            return [{'name': 'fixture'}]
+
+        def coolify():
+            barrier.wait()
+            return {'state': 'fixture'}
+
+        output = module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
+                                   lambda _: None, lambda _: 'unknown', containers=[],
+                                   processes=processes, coolify=coolify, collect_live=True)
+        # A sequential collector would time the barrier out; both results arrive.
+        self.assertEqual(output['processes'], [{'name': 'fixture'}])
+        self.assertEqual(output['coolify'], {'state': 'fixture'})
+
+    def test_live_collection_propagates_a_collector_failure(self):
+        def broken():
+            raise RuntimeError('fixture failure')
+
+        with self.assertRaises(RuntimeError):
+            module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
+                              lambda _: None, lambda _: 'unknown', containers=[],
+                              processes=lambda: [], coolify=broken, collect_live=True)
+
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'snapshot.json'

@@ -5,6 +5,7 @@ Run after the existing watch finishes, under the same scheduler lock.  Directory
 failures omit that measurement; they never become a fictitious zero size.
 """
 import argparse
+import concurrent.futures
 import datetime
 import re
 import json
@@ -507,8 +508,14 @@ def supplement(snapshot, home, measure=directory_bytes, inventory=None, services
                 row['reason'] = f'shellular manager says {state}'
     result['tool_statuses'] = rows
     if collect_live:
-        result['processes'] = top_processes() if processes is None else processes()
-        result['coolify'] = coolify_resources() if coolify is None else coolify()
+        # The CPU tick window sleeps and the docker reads wait on the daemon;
+        # neither needs the other, so they overlap and a slow daemon no longer
+        # adds its time on top of the tick window.  Each keeps its own timeouts.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            processes_future = pool.submit(top_processes if processes is None else processes)
+            coolify_future = pool.submit(coolify_resources if coolify is None else coolify)
+            result['processes'] = processes_future.result()
+            result['coolify'] = coolify_future.result()
     elif processes is not None:
         result['processes'] = processes()
     elif coolify is not None:
