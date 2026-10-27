@@ -120,6 +120,7 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(rows[0]['cpu_percent'], 12.5)
         self.assertEqual(rows[0]['memory_bytes'], int(535.1 * 1024 ** 2))
         self.assertEqual(rows[0]['uuid'], 'yagelvqux9e8l1kztif7bf2o')
+        self.assertEqual(rows[0]['container'], 'yagelvqux9e8l1kztif7bf2o')
 
     def test_coolify_resources_omit_what_they_cannot_measure(self):
         def run(args, **kwargs):

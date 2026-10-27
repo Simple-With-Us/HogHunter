@@ -28,10 +28,10 @@ final class VPSActivityTests: XCTestCase {
          "container": null, "cpu_percent": 3.5, "memory_bytes": null}
       ],
       "coolify": [
-        {"uuid": "yagelvqux9e8l1kztif7bf2o", "name": "fleet-infra / um-appworker", "type": "application",
+        {"uuid": "yagelvqux9e8l1kztif7bf2o", "name": "fleet-infra / um-appworker", "container": "yagelvqux9e8l1kztif7bf2o", "type": "application",
          "status": "running", "cpu_percent": 0.72, "memory_bytes": 566860185,
          "image": "yagelvqux9e8l1kztif7bf2o:5cbd", "started_at": "2026-10-26T06:11:38Z"},
-        {"uuid": "qdrant-ookh0qmlgrbxlwbbe6lolx6g", "name": "trading-analytics-fleet / qdrant-st",
+        {"uuid": "qdrant-ookh0qmlgrbxlwbbe6lolx6g", "name": "trading-analytics-fleet / qdrant-st", "container": "qdrant-ookh0qmlgrbxlwbbe6lolx6g",
          "type": "service", "status": "unhealthy", "cpu_percent": 158.34, "memory_bytes": 3826815860,
          "image": "qdrant/qdrant:v1.19.0", "started_at": "2026-10-03T00:00:00Z"}
       ]
