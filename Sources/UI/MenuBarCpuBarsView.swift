@@ -12,36 +12,40 @@ import SwiftUI
 struct MenuBarCpuBarsView: View {
     let history: CpuMinuteHistory
     let cpuPercent: Double
+    var showPercent: Bool = true
 
     var body: some View {
-        Image(nsImage: Self.makeImage(history: history, cpuPercent: cpuPercent))
+        Image(nsImage: Self.makeImage(history: history, cpuPercent: cpuPercent, showPercent: showPercent))
     }
 
-    static func makeImage(history: CpuMinuteHistory, cpuPercent: Double) -> NSImage {
+    static func makeImage(history: CpuMinuteHistory, cpuPercent: Double, showPercent: Bool = true) -> NSImage {
         let width: CGFloat = 36
         let height: CGFloat = 20
         let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
-            // Draw CPU % on top (y: 9.5 .. 20.0)
-            let percentString = String(format: "%.0f%%", min(999, max(0, cpuPercent)))
-            let textColor = self.textColor(for: cpuPercent)
-            let font = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold)
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.alignment = .center
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: textColor,
-                .paragraphStyle: paragraphStyle
-            ]
-            let textRect = NSRect(x: 0, y: 9.5, width: width, height: 10.5)
-            (percentString as NSString).draw(in: textRect, withAttributes: attrs)
+            if showPercent {
+                // Draw CPU % on top (y: 9.5 .. 20.0)
+                let percentString = String(format: "%.0f%%", min(999, max(0, cpuPercent)))
+                let textColor = self.textColor(for: cpuPercent)
+                let font = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold)
+                let paragraphStyle = NSMutableParagraphStyle()
+                paragraphStyle.alignment = .center
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: textColor,
+                    .paragraphStyle: paragraphStyle
+                ]
+                let textRect = NSRect(x: 0, y: 9.5, width: width, height: 10.5)
+                (percentString as NSString).draw(in: textRect, withAttributes: attrs)
+            }
 
-            // Draw 14 bars on bottom (y: 0.5 .. 9.0)
+            // Draw 14 bars on bottom (y: 0.5 .. 9.0) or centered when percentage is hidden
             let recentBars = Array(history.bars(at: Date()).suffix(14))
             let barWidth: CGFloat = 1.5
             let barSpacing: CGFloat = 1.0
             let totalBarsWidth = CGFloat(recentBars.count) * barWidth + CGFloat(max(0, recentBars.count - 1)) * barSpacing
             let startX = (width - totalBarsWidth) / 2.0
-            let maxBarHeight: CGFloat = 8.5
+            let maxBarHeight: CGFloat = showPercent ? 8.5 : 15.0
+            let baseY: CGFloat = showPercent ? 0.5 : (height - maxBarHeight) / 2.0
 
             for (index, val) in recentBars.enumerated() {
                 let x = startX + CGFloat(index) * (barWidth + barSpacing)
@@ -55,7 +59,7 @@ struct MenuBarCpuBarsView: View {
                     valHeight = 1.5
                     barColor = NSColor.secondaryLabelColor.withAlphaComponent(0.25)
                 }
-                let barRect = NSRect(x: x, y: 0.5, width: barWidth, height: valHeight)
+                let barRect = NSRect(x: x, y: baseY, width: barWidth, height: valHeight)
                 let path = NSBezierPath(roundedRect: barRect, xRadius: 0.5, yRadius: 0.5)
                 barColor.setFill()
                 path.fill()
