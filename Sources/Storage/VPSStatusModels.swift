@@ -342,6 +342,8 @@ struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
 struct VPSCoolifyResource: Codable, Equatable, Sendable, Identifiable {
     let uuid: String
     let name: String
+    /// Docker container name used by stop/restart.  Display uses `name`.
+    let container: String?
     let type: String
     let status: String
     let cpuPercent: Double?
@@ -351,8 +353,14 @@ struct VPSCoolifyResource: Codable, Equatable, Sendable, Identifiable {
 
     var id: String { uuid.isEmpty ? name : uuid }
 
+    /// The identifier the server indexes workloads by.
+    var stopName: String {
+        let trimmed = container?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? name : trimmed
+    }
+
     enum CodingKeys: String, CodingKey {
-        case uuid, name, type, status, image
+        case uuid, name, container, type, status, image
         case cpuPercent = "cpu_percent"
         case memoryBytes = "memory_bytes"
         case startedAt = "started_at"

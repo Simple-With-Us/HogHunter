@@ -448,6 +448,7 @@ def coolify_resources(run=subprocess.run):
         rows.append(dict(
             uuid=labels.get('coolify.applicationUuid') or labels.get('coolify.uuid') or labels['coolify.name'],
             name=name,
+            container=container_name,
             type=labels.get('coolify.type') or 'standalone',
             status=status,
             cpu_percent=cpu,

@@ -93,7 +93,7 @@ struct VPSResourceCardView: View {
             Button("Stop it", role: .destructive) {
                 guard let container = pendingContainer else { return }
                 pendingContainer = nil
-                Task { await control.stopContainer(named: container.name, host: store.configuredHost) }
+                Task { await control.stopContainer(named: container.stopName, host: store.configuredHost) }
             }
             Button("Cancel", role: .cancel) { pendingContainer = nil }
         } message: {
