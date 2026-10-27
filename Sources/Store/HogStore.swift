@@ -99,6 +99,8 @@ final class HogStore: ObservableObject {
     @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist(); syncViewStateMirror() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .historyBars { didSet { persist() } }
+    @Published var showMenuBarIcon: Bool = false { didSet { persist() } }
+    @Published var showMenuBarPercent: Bool = true { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 5 {
         didSet {
             persist()
@@ -281,6 +283,8 @@ final class HogStore: ObservableObject {
         static let sortAscending = "sortAscending"
         static let cpuScale = "cpuScale"
         static let menuBarLabelMode = "menuBarLabelMode"
+        static let showMenuBarIcon = "showMenuBarIcon"
+        static let showMenuBarPercent = "showMenuBarPercent"
         static let infisicalProjectId = "infisicalProjectId"
         static let refreshInterval = "refreshInterval"
         static let backgroundRefreshInterval = "backgroundRefreshInterval"
@@ -1260,6 +1264,12 @@ final class HogStore: ObservableObject {
         if let raw = defaults.string(forKey: Key.menuBarLabelMode), let value = MenuBarLabelMode(rawValue: raw) {
             menuBarLabelMode = value
         }
+        if defaults.object(forKey: Key.showMenuBarIcon) != nil {
+            showMenuBarIcon = defaults.bool(forKey: Key.showMenuBarIcon)
+        }
+        if defaults.object(forKey: Key.showMenuBarPercent) != nil {
+            showMenuBarPercent = defaults.bool(forKey: Key.showMenuBarPercent)
+        }
         if let raw = defaults.string(forKey: Key.appearance), let value = AppearanceChoice(rawValue: raw) {
             appearance = value
         }
@@ -1375,6 +1385,8 @@ final class HogStore: ObservableObject {
         defaults.set(sortAscending, forKey: Key.sortAscending)
         defaults.set(cpuScale.rawValue, forKey: Key.cpuScale)
         defaults.set(menuBarLabelMode.rawValue, forKey: Key.menuBarLabelMode)
+        defaults.set(showMenuBarIcon, forKey: Key.showMenuBarIcon)
+        defaults.set(showMenuBarPercent, forKey: Key.showMenuBarPercent)
         if migratedSettingsReady {
             defaults.set(refreshInterval, forKey: Key.refreshInterval)
             defaults.set(alertThresholdPercent, forKey: Key.alertThresholdPercent)
@@ -1470,6 +1482,14 @@ final class HogStore: ObservableObject {
             if let raw = self.defaults.string(forKey: Key.menuBarLabelMode),
                let value = MenuBarLabelMode(rawValue: raw), value != self.menuBarLabelMode {
                 self.menuBarLabelMode = value
+            }
+            if self.defaults.object(forKey: Key.showMenuBarIcon) != nil {
+                let val = self.defaults.bool(forKey: Key.showMenuBarIcon)
+                if val != self.showMenuBarIcon { self.showMenuBarIcon = val }
+            }
+            if self.defaults.object(forKey: Key.showMenuBarPercent) != nil {
+                let val = self.defaults.bool(forKey: Key.showMenuBarPercent)
+                if val != self.showMenuBarPercent { self.showMenuBarPercent = val }
             }
             if let raw = self.defaults.string(forKey: Key.appearance),
                let value = AppearanceChoice(rawValue: raw), value != self.appearance {

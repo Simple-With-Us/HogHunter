@@ -641,6 +641,7 @@ struct HogHunterPanel: View {
                         .font(.system(size: 8))
                         .foregroundStyle(.secondary)
                     Text("Top: \(topHog.name) (\(HogFormat.cpu(topHog.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount)))")
+
                         .font(.system(size: 8.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

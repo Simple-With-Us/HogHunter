@@ -75,6 +75,8 @@ final class MenuBarAndStorageLayoutTests: XCTestCase {
         let store = makeIsolatedHogStore()
         XCTAssertEqual(store.menuBarLabelMode, .historyBars)
         XCTAssertTrue(store.menuBarHelp.contains("Last 14 minutes CPU history"))
+        XCTAssertFalse(store.showMenuBarIcon)
+        XCTAssertTrue(store.showMenuBarPercent)
     }
 
     @MainActor
@@ -113,5 +115,33 @@ final class MenuBarAndStorageLayoutTests: XCTestCase {
             showModePicker: false
         )
         XCTAssertNotNil(view)
+    }
+
+    func testMenuBarCpuBarsViewMakeImage() {
+        var history = CpuMinuteHistory()
+        history.record(percent: 45.0, at: Date())
+        let image = MenuBarCpuBarsView.makeImage(history: history, cpuPercent: 72.0, showPercent: true)
+        XCTAssertEqual(image.size.width, 36)
+        XCTAssertEqual(image.size.height, 20)
+        XCTAssertFalse(image.isTemplate)
+
+        let imageNoPercent = MenuBarCpuBarsView.makeImage(history: history, cpuPercent: 72.0, showPercent: false)
+        XCTAssertEqual(imageNoPercent.size.width, 36)
+        XCTAssertEqual(imageNoPercent.size.height, 20)
+        XCTAssertFalse(imageNoPercent.isTemplate)
+    }
+
+    func testCpuSparklineViewMakeImage() {
+        let image = CpuSparklineView.makeImage(samples: [10.0, 30.0, 75.0, 90.0])
+        XCTAssertEqual(image.size.width, 36)
+        XCTAssertEqual(image.size.height, 14)
+        XCTAssertFalse(image.isTemplate)
+    }
+
+    func testCpuSparklineViewMakeHogAndSparklineImage() {
+        let image = CpuSparklineView.makeHogAndSparklineImage(samples: [15.0, 45.0, 60.0])
+        XCTAssertEqual(image.size.width, 58)
+        XCTAssertEqual(image.size.height, 16)
+        XCTAssertFalse(image.isTemplate)
     }
 }
