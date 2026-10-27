@@ -152,6 +152,8 @@ private struct GeneralSettingsTab: View {
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
     @AppStorage(HogStore.Key.backgroundRefreshInterval) private var backgroundRefreshInterval: Double = 10
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.historyBars.rawValue
+    @AppStorage(HogStore.Key.showMenuBarIcon) private var showMenuBarIcon: Bool = false
+    @AppStorage(HogStore.Key.showMenuBarPercent) private var showMenuBarPercent: Bool = true
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
     var body: some View {
@@ -178,6 +180,13 @@ private struct GeneralSettingsTab: View {
                 Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
                     ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }
                 }
+
+                Toggle("Show Percentage in Menu Bar", isOn: $showMenuBarPercent)
+                Toggle("Show Hog Icon in Menu Bar", isOn: $showMenuBarIcon)
+                Text("Turn off percentage and icon to show just the sparkline or history bars in the menu bar.\u{00A0} When the icon is off, extra space is saved in crowded menu bars.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Picker("CPU Rows Show", selection: $cpuScale) {
                     ForEach(CpuScale.allCases) {

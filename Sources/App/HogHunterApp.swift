@@ -150,16 +150,26 @@ struct HogHunterApp: App {
                 .environmentObject(store)
         } label: {
             if store.menuBarLabelMode == .historyBars {
-                MenuBarCpuBarsView(history: store.cpuMinuteHistory, cpuPercent: store.pulse.cpuPercent)
-                    .help(store.menuBarHelp)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Hog Hunter")
-                    .accessibilityValue(store.menuBarAccessibilityValue)
+                MenuBarCpuBarsView(
+                    history: store.cpuMinuteHistory,
+                    cpuPercent: store.pulse.cpuPercent,
+                    showPercent: store.showMenuBarPercent
+                )
+                .help(store.menuBarHelp)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Hog Hunter")
+                .accessibilityValue(store.menuBarAccessibilityValue)
             } else if store.menuBarLabelMode == .sparkline {
                 HStack(spacing: 4) {
-                    Image(nsImage: CpuSparklineView.makeHogAndSparklineImage(samples: store.recentCpuPercents))
-                    Text(store.menuBarLabel)
-                        .monospacedDigit()
+                    if store.showMenuBarIcon {
+                        Image(nsImage: CpuSparklineView.makeHogAndSparklineImage(samples: store.recentCpuPercents))
+                    } else {
+                        Image(nsImage: CpuSparklineView.makeImage(samples: store.recentCpuPercents))
+                    }
+                    if store.showMenuBarPercent {
+                        Text(store.menuBarLabel)
+                            .monospacedDigit()
+                    }
                 }
                 .help(store.menuBarHelp)
                 .accessibilityElement(children: .ignore)
@@ -167,13 +177,17 @@ struct HogHunterApp: App {
                 .accessibilityValue(store.menuBarAccessibilityValue)
             } else {
                 HStack(spacing: 5) {
-                    Image("HogProfile")
-                        .renderingMode(.original)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 18, height: 15)
-                    Text(store.menuBarLabel)
-                        .monospacedDigit()
+                    if store.showMenuBarIcon {
+                        Image("HogProfile")
+                            .renderingMode(.original)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 18, height: 15)
+                    }
+                    if store.showMenuBarPercent || !store.showMenuBarIcon {
+                        Text(store.menuBarLabel)
+                            .monospacedDigit()
+                    }
                 }
                 .help(store.menuBarHelp)
                 .accessibilityElement(children: .ignore)

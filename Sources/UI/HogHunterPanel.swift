@@ -629,11 +629,16 @@ struct HogHunterPanel: View {
                         .foregroundStyle(store.pulse.cpuPercent >= 80 ? .red : (store.pulse.cpuPercent >= 50 ? .orange : .primary))
                 }
 
-                // Graphical sparkline representation
-                CpuSparklineView(samples: store.recentCpuPercents)
-                    .frame(height: 18)
-                    .frame(maxWidth: .infinity)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 3))
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Severity.forMachineCpu(store.pulse.cpuPercent).color)
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(min(100.0, max(0.0, store.pulse.cpuPercent)) / 100.0))))
+                    }
+                }
+                .frame(height: 4)
 
                 HStack {
                     Text("\(store.pulse.coreCount) cores · \(HogFormat.percent(store.pulse.cpuPercent / 100)) total")
