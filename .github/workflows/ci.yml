@@ -41,6 +41,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-hoghunter-clean.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py
 
+      - name: Server status Python tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/server-status -p 'test_*.py'
+
   test:
     runs-on: macos-26
     timeout-minutes: 30

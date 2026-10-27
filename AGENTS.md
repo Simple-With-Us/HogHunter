@@ -164,4 +164,72 @@ Coordinate on Zulip (`https://simplewithus.zulipchat.com`), channel `#Work-In-Pr
 
 Listen for peers with the same CLI: `simple-chat inbox` at session start and `simple-chat listen --mentions` under a monitor.  Search fleet recall before re-deriving lessons and record reusable findings at closeout.  Commit and push finished units, open a PR, and merge after required checks pass.  The `gh` path is what works today — the `git-relay` relay and its GR-MCP wrapper are not deployed yet.  Verify releases separately.
 
+### How the tools behave (learned 2026-10-26, seat MM)
+
+The commands above are right, but three details bite on a Linux seat.
+
+- **`simple-board` and `simple-chat`, not `board`.**  `board` is the fleet-cli
+  wrapper and it acts as the *shared* "Fleet" Linear app.  `simple-board` acts
+  as the seat's own app (`MM_LINEAR_CLIENT_ID`, `MM_LINEAR_CLIENT_SECRET`),
+  which is the identity a seat's claims and comments belong to.  Use
+  `simple-board`.
+- **The seat's credentials come from Infisical, and a seat whose Infisical
+  session is not logged in cannot fetch them itself.**  `fleet-secrets get`
+  fails with `fetch-failed` on such a seat.  The working path is the
+  fleet-cli's own bootstrap, which already holds a working token:
+
+  ```bash
+  python3 - <<'PY'
+  import os, runpy, shlex
+  boot = runpy.run_path(os.path.expanduser('~/.local/share/fleet-secrets/linux-entrypoint.py'))
+  env = boot['authenticated_env']; env = env() if callable(env) else env
+  with open('/tmp/fleetenv.sh', 'w') as f:
+      for k, v in env.items():
+          f.write('export %s=%s\n' % (k, shlex.quote(str(v))))
+  os.chmod('/tmp/fleetenv.sh', 0o600)
+  PY
+  source /tmp/fleetenv.sh
+  ```
+
+  Write the values to a file and source it; never echo them into a transcript.
+- **The environment a board write needs.**  `AGENT_SEAT` (this seat: `MM`),
+  `LINEAR_BOARD_WRITES=1`, and `AGENT_SESSION` (or `--session`), or the write
+  is refused.  `simple-board comment` and `simple-board file` also take
+  `--by <SEAT>`; `file` takes `--by` as the reporter.
+
+### The server side of this repo
+
+The server (`fleet-hetzner-nbg1`) is driven from this repository, and the
+pieces live on the host, root-owned:
+
+| Path | What it is |
+|---|---|
+| `/root/vps-storage-watch-with-metrics.sh` | the **one** writer of the snapshot; it runs the watch and then the supplement under the same lock |
+| `/root/vps-storage-watch.sh` | the watch (database growth, device free space, CPU, memory, swap) |
+| `/root/vps-status-supplement.py` | the deployed copy of `scripts/server-status/supplement.py`; it adds the fleet-extra device, the processes, the Coolify workloads and the tool reasons |
+| `/usr/local/sbin/hoghunter-control` | the deployed copy of `scripts/server-status/control.py`; the only way to stop a server process or a Coolify workload |
+
+Rules for that host: **one writer** — never start a second job that writes the
+snapshot.  The collector never reads command arguments, environment variables
+or credential files; a process is identified by its executable name, and a
+tool's state is `unknown` with a reason rather than a guess.  The control
+agent refuses without `--confirm`, keeps the host's own infrastructure out of
+reach, and writes every action to `/var/log/hoghunter-control.log` (root
+only).  Deploy a change with `sudo install -o root -g root -m 0700
+scripts/server-status/supplement.py /root/vps-status-supplement.py` and then
+run the one writer once; never edit a deployed copy in place.
+
+The fleet-extra volume is shared over the tailnet with Samba
+(`/usr/local/bin/smb-tailnet-firewall.sh`, unit `smb-tailnet-firewall.service`):
+port 445 is accepted on `tailscale0` and dropped everywhere else, for IPv4 and
+IPv6, and `smbd` requires the firewall unit so the share is never open before
+the rules are in place.  The SMB password is in `/root/.fleet-extra-smb.pass`
+(root only).  The Mac mounts it as
+`smb://jay@server.boa-roygbiv.ts.net/fleet-extra`.
+
+From the server the Mac is reachable over the tailnet as `ssh mac`
+(`~/.ssh/config`), once the host's public key is in the Mac's
+`~/.ssh/authorized_keys`.
+
+
 The iOS TestFlight workflow, `.github/workflows/ios-testflight.yml`, is active and intended.  It ships the iPhone companion through the fleet script (`scripts/ios-fleet/ship-testflight.sh`, called by `scripts/ios-ship-testflight.sh`) on every merge to `main` that touches the iOS native tree, on an hourly path-gated catch-up, and on manual dispatch, while the repository variable `HH_IOS_TESTFLIGHT_ENABLED` is `true`.  The native tree is `ios/**`, `project.yml`, and the shared Mac files the iPhone targets compile (listed in the workflow and pinned to `project.yml` by `scripts/test-ios-release.py`).  The script picks the marketing version (`1.0.N`, one above App Store Connect's highest), applies the rate gate and the same-HEAD skip, runs ensure-tf-ready, and publishes What to Test; never set `IOS_TF_MIN_INTERVAL_SEC` or `--force-ship` in the workflow.  A dispatch with `upload=false` archives and exports without uploading and may run from a branch.  Leave it enabled; do not hold it for signing credentials.  Owner ruling 2026-10-17: signing and App Store Connect credentials for all apps are in Infisical, project Fleet-OPS, path `/asc`, and the workflow reads the App Store Connect key from there.  `INFISICAL.md` (Build-time signing) lists the key names and how this workflow receives them; names only, never values.  The change is recorded in `docs/rollouts/2026-10-17-ios-auto-ship.md`.  A green run or an upload command does not establish a processed or approved beta: check App Store Connect separately, and keep issue #22 open until the external release is verified.  The original manual-release design is in `docs/rollouts/2026-09-27-ios-manual-release.md`.

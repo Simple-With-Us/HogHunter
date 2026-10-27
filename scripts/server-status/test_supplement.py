@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -32,11 +33,108 @@ class SupplementTests(unittest.TestCase):
     def test_preserves_existing_database_device_and_source_timestamp(self):
         source = dict(generated_at='2026-01-01T00:00:00Z', host='fixture',
                       devices={'root': {'free_bytes': 123}}, app_dbs={'app': 456})
-        output = module.supplement(source, Path('/fixture'), lambda _: 100, ([], True), lambda _: None, lambda _: 'unknown')
+        output = module.supplement(source, Path('/fixture'), lambda _: 100, ([], True), lambda _: None, lambda _: 'unknown',
+                                   ismount_func=lambda _: False)
         for key in source:
             self.assertEqual(output[key], source[key])
         self.assertIn('/fixture/Code', [row['path'] for row in output['largest_dirs']])
         self.assertIn('/fixture/apps/lanes', [row['path'] for row in output['largest_dirs']])
+
+    def test_a_tool_that_is_not_installed_reads_as_absent_even_with_interpreters(self):
+        """Nothing on this host can be running a tool the host does not have."""
+        rows = module.tool_statuses([{'python3'}], True, lambda _: None, installed=lambda _: False)
+        states = {row['id']: row for row in rows}
+        self.assertEqual(states['muse']['state'], 'absent')
+        self.assertIn('not installed', states['muse']['reason'])
+
+    def test_a_container_is_the_honest_identity_for_a_tool_the_process_list_cannot_prove(self):
+        """The recall service runs inside a container, where the process is python."""
+        rows = module.tool_statuses([{'python3'}], True, lambda _: '/fixture/bin', installed=lambda _: True,
+                                    containers={'recall-api-9kqckay6g0cgb4exwls20sry'})
+        states = {row['id']: row for row in rows}
+        self.assertEqual(states['recall']['state'], 'running')
+        self.assertEqual(states['recall']['count'], 1)
+        self.assertIn('container', states['recall']['reason'])
+
+    def test_every_tool_row_carries_a_reason(self):
+        """A dot with no explanation is a dot the owner cannot act on."""
+        rows = module.tool_statuses([{'codex'}], True, lambda _: '/fixture/bin', installed=lambda _: True)
+        for row in rows:
+            self.assertTrue(row['reason'], row['id'])
+
+    def test_the_minimax_seat_is_named_after_its_launcher(self):
+        rows = module.tool_statuses([{'minimax-code'}], True, lambda _: '/fixture/bin', installed=lambda _: True)
+        states = {row['id']: row for row in rows}
+        self.assertEqual(states['minimax']['state'], 'running')
+        self.assertEqual(states['minimax']['count'], 1)
+
+    def test_a_named_service_answers_for_an_interpreted_tool(self):
+        source = dict(generated_at='2026-01-01T00:00:00Z', host='fixture', devices={})
+        output = module.supplement(source, Path('/fixture'), lambda _: None, ([{'python3'}], True),
+                                   lambda unit: 'stopped' if unit.endswith('claude-remote-control.service') else None,
+                                   lambda _: 'unknown')
+        states = {row['id']: row for row in output['tool_statuses']}
+        self.assertEqual(states['claude']['state'], 'stopped')
+        self.assertIn('claude-remote-control.service', states['claude']['reason'])
+
+    def test_top_processes_reports_a_cpu_share_without_reading_arguments(self):
+        """The reading comes from tick counters and executable identity only."""
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            for pid, comm, ticks in ((11, 'next-server', 100), (12, 'python3', 50)):
+                path = proc / str(pid)
+                path.mkdir()
+                (path / 'comm').write_text(comm)
+                (path / 'stat').write_text(f'{pid} ({comm}) S 1 1 0 0 0 0 0 0 0 0 0 {ticks} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0')
+            rows = module.top_processes(proc=proc, limit=5, sleep=lambda _: None, elapsed=1.0,
+                                        run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''))
+            self.assertEqual([row['pid'] for row in rows], [11, 12])
+            self.assertTrue(all(row['name'] for row in rows))
+            self.assertNotIn('args', rows[0])
+            self.assertNotIn('command', rows[0])
+
+    def test_coolify_resources_reads_labels_and_state(self):
+        inspected = [{
+            'Name': '/yagelvqux9e8l1kztif7bf2o',
+            'Config': {'Labels': {'coolify.name': 'yagelvqux9e8l1kztif7bf2o',
+                                  'coolify.type': 'application',
+                                  'coolify.projectName': 'fleet-infra',
+                                  'coolify.resourceName': 'um-appworker',
+                                  'coolify.applicationUuid': 'yagelvqux9e8l1kztif7bf2o'},
+                       'Image': 'yagelvqux9e8l1kztif7bf2o:5cbd'},
+            'State': {'Status': 'running', 'Health': {'Status': 'healthy'}, 'StartedAt': '2026-10-26T06:11:38Z'},
+        }]
+        def run(args, **kwargs):
+            if args[1] == 'ps':
+                return subprocess.CompletedProcess(args, 0, 'abc123\n', '')
+            if args[1] == 'inspect':
+                return subprocess.CompletedProcess(args, 0, json.dumps(inspected), '')
+            if args[1] == 'stats':
+                return subprocess.CompletedProcess(args, 0, 'yagelvqux9e8l1kztif7bf2o\t12.50%\t535.1MiB / 5GiB\n', '')
+            return subprocess.CompletedProcess(args, 1, '', '')
+        rows = module.coolify_resources(run=run)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['name'], 'fleet-infra / um-appworker')
+        self.assertEqual(rows[0]['type'], 'application')
+        self.assertEqual(rows[0]['status'], 'running')
+        self.assertEqual(rows[0]['cpu_percent'], 12.5)
+        self.assertEqual(rows[0]['memory_bytes'], int(535.1 * 1024 ** 2))
+        self.assertEqual(rows[0]['uuid'], 'yagelvqux9e8l1kztif7bf2o')
+        self.assertEqual(rows[0]['container'], 'yagelvqux9e8l1kztif7bf2o')
+
+    def test_coolify_resources_omit_what_they_cannot_measure(self):
+        def run(args, **kwargs):
+            if args[1] == 'ps':
+                return subprocess.CompletedProcess(args, 0, 'abc123\n', '')
+            if args[1] == 'inspect':
+                return subprocess.CompletedProcess(args, 0, json.dumps([{
+                    'Name': '/x', 'Config': {'Labels': {'coolify.name': 'x'}, 'Image': 'i'},
+                    'State': {'Status': 'exited'}}]), '')
+            return subprocess.CompletedProcess(args, 1, '', '')
+        rows = module.coolify_resources(run=run)
+        self.assertEqual(rows[0]['status'], 'exited')
+        self.assertIsNone(rows[0]['cpu_percent'])
+        self.assertIsNone(rows[0]['memory_bytes'])
 
     def test_fleet_extra_volume_monitored_when_mounted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -162,6 +260,34 @@ class SupplementTests(unittest.TestCase):
             raise subprocess.TimeoutExpired('filtered-helper', 3)
         for runner in (invalid, timeout):
             self.assertEqual(module.shellular_state(Path('/fixture'), runner), 'unknown')
+
+    def test_live_collection_overlaps_the_tick_window_with_the_docker_reads(self):
+        import threading
+        barrier = threading.Barrier(2, timeout=5)
+
+        def processes():
+            barrier.wait()
+            return [{'name': 'fixture'}]
+
+        def coolify():
+            barrier.wait()
+            return {'state': 'fixture'}
+
+        output = module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
+                                   lambda _: None, lambda _: 'unknown', containers=[],
+                                   processes=processes, coolify=coolify, collect_live=True)
+        # A sequential collector would time the barrier out; both results arrive.
+        self.assertEqual(output['processes'], [{'name': 'fixture'}])
+        self.assertEqual(output['coolify'], {'state': 'fixture'})
+
+    def test_live_collection_propagates_a_collector_failure(self):
+        def broken():
+            raise RuntimeError('fixture failure')
+
+        with self.assertRaises(RuntimeError):
+            module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
+                              lambda _: None, lambda _: 'unknown', containers=[],
+                              processes=lambda: [], coolify=broken, collect_live=True)
 
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -14,6 +14,11 @@ final class VPSStatusStore: ObservableObject {
     @Published private(set) var lastFetchDate: Date?
     @Published private(set) var configuredHost: String = ""
 
+    /// The server's own CPU history, kept the way the Mac keeps its own: one
+    /// mean per minute.  Without it the server's CPU is a single number with
+    /// no shape, and the two machines cannot be read side by side.
+    @Published private(set) var cpuHistory = CpuMinuteHistory()
+
     private let history: SizeGrowthHistory
     private let fetcher: Fetcher
     private var timer: Timer?
@@ -40,6 +45,7 @@ final class VPSStatusStore: ObservableObject {
         snapshot = nil
         lastFetchDate = nil
         errorMessage = nil
+        cpuHistory = CpuMinuteHistory()
         if !configuredHost.isEmpty {
             startPolling()
             // A new host wants fresh readings now, not in a minute.
@@ -116,6 +122,9 @@ final class VPSStatusStore: ObservableObject {
                 }.value
                 guard !Task.isCancelled, self.configuredHost == host else { return }
                 self.snapshot = snap
+                if let cpu = snap.cpu {
+                    self.cpuHistory.record(percent: cpu.pct, at: Date())
+                }
                 self.errorMessage = nil
                 self.lastFetchDate = Date()
             case .failure(let err):

@@ -208,12 +208,11 @@ struct HogHunterPanel: View {
     /// instead of a gear in the header.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("Hog Hunter")
-                .font(.system(size: 17, weight: .bold))
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
+            // No wordmark here: the window's title bar already says "Hog
+            // Hunter", and the rail starts with the host it is about.
             scopeTabs
                 .padding(.horizontal, 6)
+                .padding(.top, 6)
                 .padding(.bottom, 8)
             ForEach(PanelTab.allCases) { tab in
                 sectionButton(tab)
@@ -312,10 +311,9 @@ struct HogHunterPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
             case .activity:
-                // The card below carries the server's overall CPU and memory,
-                // so the message says only what the snapshot cannot answer:
-                // the per-process detail.
-                Text("Remote per-process detail is unavailable; the server's overall CPU and memory are shown below.")
+                // The card below carries the server's CPU and memory, the
+                // processes it is running and the workloads they belong to.
+                Text("The server's busiest processes, and the Coolify workloads they belong to.")
                     .foregroundStyle(.secondary)
             case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
@@ -377,6 +375,10 @@ struct HogHunterPanel: View {
                       caption: store.memorySizeCaption,
                       severity: Severity.forPressure(store.pulse.pressure),
                       accessibilityDetail: store.memoryCaption)
+                    // The memory meter keeps its size; the CPU graph takes
+                    // the rest of the width, because a graph squeezed into
+                    // half a card is not worth having.
+                    .frame(width: 260)
             }
             .frame(height: 94)
             pillRow(memoryPills + thermalPills)
@@ -401,11 +403,16 @@ struct HogHunterPanel: View {
                 Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
                     .foregroundStyle(.secondary)
             }
+            captions
+            // The server is a separate thing from this Mac's readings, so it
+            // sits at the bottom of the window with a rule above it rather
+            // than tucked under Top Activity as if it were one more row.
             if !store.maintain.vpsStore.configuredHost.isEmpty {
+                Divider()
+                    .padding(.top, 4)
                 Text("Server").font(.headline)
                 serverStrip
             }
-            captions
         }
     }
 
@@ -602,8 +609,14 @@ struct HogHunterPanel: View {
         }
     }
 
-    // MARK: - CPU Section (Mac & Server with Graphical Representations)
+    // MARK: - CPU Section (Mac & Server side by side)
 
+    /// The two machines, side by side, each with its own graph.
+    ///
+    /// They used to stack, and the Mac's graph was a sparkline pinned to 36
+    /// points inside a full-width row, so it read as a small drawing in a
+    /// large space.  Now each machine has half the width and a bar graph
+    /// that fills it, and the two can be read against each other.
     private var cpuSection: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
@@ -615,100 +628,92 @@ struct HogHunterPanel: View {
                 Spacer()
             }
 
-            // Mac CPU
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Image(systemName: "laptopcomputer")
-                        .font(.system(size: 9))
+            HStack(alignment: .top, spacing: 6) {
+                macCPUColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverCPUColumn
+                }
+            }
+
+            if let topHog = store.rows.first {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 8))
                         .foregroundStyle(.secondary)
-                    Text("Mac")
-                        .font(.system(size: 9.5, weight: .medium))
-                    Spacer()
-                    Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
-                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(store.pulse.cpuPercent >= 80 ? .red : (store.pulse.cpuPercent >= 50 ? .orange : .primary))
-                }
+                    Text("Top: \(topHog.name) (\(HogFormat.cpu(topHog.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount)))")
 
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color(nsColor: .separatorColor).opacity(0.3))
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Severity.forMachineCpu(store.pulse.cpuPercent).color)
-                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(min(100.0, max(0.0, store.pulse.cpuPercent)) / 100.0))))
-                    }
-                }
-                .frame(height: 4)
-
-                HStack {
-                    Text("\(store.pulse.coreCount) cores · \(HogFormat.percent(store.pulse.cpuPercent / 100)) total")
                         .font(.system(size: 8.5))
                         .foregroundStyle(.secondary)
-                    Spacer()
-                    if let topHog = store.rows.first {
-                        Text("Top: \(topHog.name) (\(HogFormat.cpu(topHog.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount)))")
-                            .font(.system(size: 8.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
                 }
-            }
-            .padding(5)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-
-            // Server CPU (if configured)
-            if !store.maintain.vpsStore.configuredHost.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Image(systemName: "server.rack")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                        Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
-                            .font(.system(size: 9.5, weight: .medium))
-                            .lineLimit(1)
-                        Spacer()
-                        if let cpu = store.maintain.vpsStore.snapshot?.cpu {
-                            Text(String(format: "%.0f%%", cpu.pct))
-                                .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(cpu.severity.color)
-                        } else {
-                            Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if let cpu = store.maintain.vpsStore.snapshot?.cpu {
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(Color(nsColor: .separatorColor).opacity(0.3))
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(cpu.severity.color)
-                                    .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(cpu.pct / 100.0))))
-                            }
-                        }
-                        .frame(height: 4)
-
-                        HStack {
-                            Text("\(cpu.cores) cores · Load \(String(format: "%.2f", cpu.load1))")
-                                .font(.system(size: 8.5))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            if let source = cpu.source {
-                                Text(source)
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    } else if store.maintain.vpsStore.isLoading {
-                        Text("Connecting to server…")
-                            .font(.system(size: 8.5))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(5)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             }
         }
+    }
+
+    private var macCPUColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Image(systemName: "laptopcomputer")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Mac")
+                    .font(.system(size: 9.5, weight: .medium))
+                Spacer(minLength: 2)
+                Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
+                    .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Severity.forMachineCpu(store.pulse.cpuPercent).color)
+            }
+
+            CpuHistoryBarsView(history: store.cpuMinuteHistory, height: 26)
+
+            Text("\(store.pulse.coreCount) cores · \(HogFormat.percent(store.pulse.cpuPercent / 100)) total")
+                .font(.system(size: 8.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(5)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity)
+    }
+
+    private var serverCPUColumn: some View {
+        let cpu = store.maintain.vpsStore.snapshot?.cpu
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+                if let cpu {
+                    Text(String(format: "%.0f%%", cpu.pct))
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(cpu.severity.color)
+                } else {
+                    Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                }
+            }
+
+            CpuHistoryBarsView(history: store.maintain.vpsStore.cpuHistory, height: 26)
+
+            if let cpu {
+                Text("\(cpu.cores) cores · Load \(String(format: "%.2f", cpu.load1))")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(store.maintain.vpsStore.isLoading ? "Connecting to server…" : "No reading yet")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(5)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - RAM Usage Section (Mac & Server)
@@ -904,36 +909,83 @@ struct HogHunterPanel: View {
 
     // MARK: - Activity Section
 
+    /// Which machine's activity the drop-down lists.
+    enum ActivityScope: String, CaseIterable, Identifiable {
+        case mac = "This Mac"
+        case server = "Server"
+
+        var id: String { rawValue }
+    }
+
+    @State private var activityScope: ActivityScope = .mac
+
+    /// The server's processes, as its own collector saw them.
+    private var serverProcesses: [VPSProcess] {
+        store.maintain.vpsStore.snapshot?.processes ?? []
+    }
+
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Top Activity")
                     .font(.system(size: 10.5, weight: .semibold))
                 Spacer()
-                Text("\(store.rows.count) processes")
+                Text(activityScope == .mac
+                     ? "\(store.rows.count) processes"
+                     : "\(serverProcesses.count) processes")
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
-                    HStack(spacing: 6) {
-                        Text(row.name)
-                            .font(.system(size: 9.5, weight: .medium))
-                            .lineLimit(1)
-                        Spacer()
-                        Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
-                            .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
-                        Text(HogFormat.memory(row.memoryBytes))
-                            .font(.system(size: 9).monospacedDigit())
+                if activityScope == .mac {
+                    ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
+                        HStack(spacing: 6) {
+                            Text(row.name)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .lineLimit(1)
+                            Spacer()
+                            Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
+                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
+                            Text(HogFormat.memory(row.memoryBytes))
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if store.rows.isEmpty {
+                        Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                            .font(.system(size: 9.5))
                             .foregroundStyle(.secondary)
                     }
-                }
-                if store.rows.isEmpty {
-                    Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(serverProcesses.prefix(activityRowLimit)) { process in
+                        HStack(spacing: 6) {
+                            Text(process.name)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .lineLimit(1)
+                            if let container = process.container, !container.isEmpty {
+                                Text(container)
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text(String(format: "%.0f%%", process.cpuPercent))
+                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(process.cpuPercent >= 100 ? .orange : .primary)
+                            Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if serverProcesses.isEmpty {
+                        Text(store.maintain.vpsStore.configuredHost.isEmpty
+                             ? "No server configured."
+                             : "No processes in the server's latest reading.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(5)
@@ -941,6 +993,28 @@ struct HogHunterPanel: View {
             .onHover { inside in
                 withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
             }
+
+            // The toggle sits at the bottom of the list it belongs to: the same
+            // reading, taken from the other machine.
+            HStack(spacing: 4) {
+                ForEach(ActivityScope.allCases) { scope in
+                    Button {
+                        activityScope = scope
+                    } label: {
+                        Text(scope.rawValue)
+                            .font(.system(size: 9, weight: activityScope == scope ? .semibold : .regular))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 3)
+                            .background(activityScope == scope ? Color.accentColor.opacity(0.16) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(activityScope == scope ? [.isSelected] : [])
+                    .accessibilityLabel(scope.rawValue)
+                }
+            }
+            .padding(2)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
         }
     }
 
