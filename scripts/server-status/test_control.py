@@ -160,6 +160,44 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(stopped, [['docker', 'stop', 'yagelvqux9e8l1kztif7bf2o']])
         self.assertEqual(outcome['container'], 'yagelvqux9e8l1kztif7bf2o')
 
+    def test_a_display_name_shared_by_replicas_is_refused(self):
+        """Scaled replicas share a display name: refuse it, act on a Docker name."""
+        stopped = []
+
+        def entry(name):
+            return {'Name': '/' + name,
+                    'Config': {'Labels': {'coolify.name': name,
+                                          'coolify.projectName': 'fleet-infra',
+                                          'coolify.resourceName': 'worker'}},
+                    'State': {'Status': 'running'}}
+
+        def run(args, **kwargs):
+            if args[1] == 'ps':
+                return subprocess.CompletedProcess(args, 0, 'a\nb\n', '')
+            if args[1] == 'inspect':
+                return subprocess.CompletedProcess(args, 0, json.dumps([entry('rep1'), entry('rep2')]), '')
+            if args[1] == 'stop':
+                stopped.append(list(args))
+                return subprocess.CompletedProcess(args, 0, '', '')
+            return subprocess.CompletedProcess(args, 1, '', '')
+        refused = module.container_action('fleet-infra / worker', 'stop', run=run)
+        self.assertFalse(refused['ok'])
+        self.assertEqual(stopped, [])
+        exact = module.container_action('rep2', 'stop', run=run)
+        self.assertTrue(exact['ok'], exact)
+        self.assertEqual(stopped, [['docker', 'stop', 'rep2']])
+
+    def test_the_audit_log_collapses_newlines_in_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'audit.log'
+            original = module.AUDIT_LOG
+            module.AUDIT_LOG = log
+            try:
+                module.audit('stop-container', 'evil\n2026-01-01T00:00:00Z command=forged', 'ok')
+            finally:
+                module.AUDIT_LOG = original
+            self.assertEqual(len(log.read_text().splitlines()), 1)
+
     def test_main_stop_process_passes_container_identities(self):
         """main() looks the identities up, so a containerized process is not
         held to the host's ownership and infrastructure guards."""

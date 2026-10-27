@@ -231,13 +231,21 @@ def stop_process(pid, start_time, force=False, proc=Path('/proc'), kill=None, an
 def container_action(name, action, run=subprocess.run):
     """Stop or restart one Coolify workload."""
     targets = {}
+    display = {}
     for row in coolify_containers(run=run):
         targets.setdefault(row['container'], row)
-        # The Mac names the workload by the display name it was shown, so a
-        # workload is reachable by either name.  The Docker name wins when
-        # both are present, and Docker is always told the Docker name: the
-        # display label carries spaces the remote shell would split.
-        targets.setdefault(row['name'], row)
+        display.setdefault(row['name'], []).append(row)
+    # The Mac names the workload by the display name it was shown, so a
+    # workload is reachable by either name.  The Docker name wins when both
+    # are present, and Docker is always told the Docker name: the display
+    # label carries spaces the remote shell would split.  Scaled replicas
+    # share a display name, so an ambiguous one is refused, never guessed.
+    if name not in targets:
+        matches = display.get(name, [])
+        if len(matches) > 1:
+            return {'ok': False, 'reason': 'that name matches more than one workload; use the container name'}
+        if matches:
+            targets[name] = matches[0]
     if name not in targets:
         return {'ok': False, 'reason': 'that workload is not running on this host'}
     container = targets[name]['container']
@@ -252,6 +260,7 @@ def container_action(name, action, run=subprocess.run):
 
 def audit(command, target, outcome):
     """One line, root-only, naming what was done."""
+    command, target, outcome = (' '.join(str(v).split()) for v in (command, target, outcome))
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     try:
         with open(AUDIT_LOG, 'a', encoding='utf-8') as log:
