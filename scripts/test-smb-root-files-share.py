@@ -337,6 +337,41 @@ class InstallSafetyTests(unittest.TestCase):
         # the grant again rather than only declining to add it.
         self.assertIn('setfacl -R -x "u:${SMB_USER}"', self.source)
 
+    def _function(self, name):
+        """Return the body of one shell function from the script source."""
+        lines = self.source.splitlines()
+        start = None
+        for index, line in enumerate(lines):
+            if line.startswith(name + "() {"):
+                start = index
+                break
+        self.assertIsNotNone(start, name)
+        body = []
+        for line in lines[start:]:
+            body.append(line)
+            if line == "}":
+                break
+        return "\n".join(body)
+
+    def test_the_revoke_covers_every_excluded_name(self):
+        # The key directories are never granted, but the first version of the
+        # script granted them, and a grant left on a private key holds it at
+        # 0640, which OpenSSH then refuses.  The revoke therefore covers every
+        # excluded name, the key directories included.
+        body = self._function("revoke_excluded_grant")
+        self.assertIn('for excluded in "${EXCLUDE_ARRAY[@]}"', body)
+
+    def test_the_revoke_recalculates_the_mask(self):
+        # With -n the mask keeps the value it had, so a granted 0600 file is
+        # still reported as 0640 after the grant is taken back off it, and the
+        # key stays in the state OpenSSH refuses.  Recalculating the mask
+        # restores the file's own mode with the entry.
+        body = self._function("revoke_excluded_grant")
+        commands = [line for line in body.splitlines() if "setfacl" in line]
+        self.assertTrue(commands)
+        for line in commands:
+            self.assertNotIn("-n", line)
+
     def test_the_plan_says_the_grant_is_taken_back(self):
         result = run()
         self.assertEqual(result.returncode, 0, result.stderr)

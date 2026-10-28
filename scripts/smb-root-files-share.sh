@@ -254,9 +254,13 @@ grant_batch() {
   return "$real_failure"
 }
 
-# Take the grant back off the excluded names.   An earlier run of this script
+# Take the grant back off the excluded names.  An earlier run of this script
 # granted them, and a grant is a mode change as well as an access change, so
-# removing the entry restores the file's own mode with it.
+# removing the entry restores the file's own mode with it.  The mask is
+# recalculated on purpose:  with -n the mask keeps its old value and a granted
+# private key stays at 0640, which is the mode OpenSSH refuses.  The key
+# directories are in this list as well, because the first version of this script
+# granted them and this revoke is what repairs that.
 revoke_excluded_grant() {
   local excluded
   local path

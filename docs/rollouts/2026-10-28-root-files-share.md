@@ -118,6 +118,23 @@ authenticate to this share can read root's working files, so the SMB password
 should be treated as a root credential and rotated whenever the tailnet
 membership changes.
 
+## Taking the grant back off
+
+The script takes its own earlier grant back off the excluded names with
+`setfacl -R -x u:jay`, and it does so without `-n`.  Both of those
+details were measured on the host rather than assumed.
+
+**The revoke recalculates the mask on purpose.**  A file that was
+granted and then has its entry removed keeps the mask it had:  with `-n` the
+mask stays `r--` and the file is still reported as 0640, which is the mode
+OpenSSH refuses.  Recalculating the mask restores the file's own mode
+with the entry, so a granted private key comes back to 0600.
+
+**The revoke covers the key directories too.**  They are never
+granted, but the first version of the script granted them, and the revoke is
+what repairs that.  A file that was never granted is untouched by the
+revoke:  its mode stays what it was and no mask entry is left behind.
+
 ## What the review changed
 
 Two review bots read the first version of the script and both found real
@@ -182,9 +199,9 @@ Deploy it with `sudo install -o root -g root -m 0755
 scripts/smb-root-files-share.sh /usr/local/bin/smb-root-files-share.sh`, and
 never edit the deployed copy in place.
 
-Tests: `scripts/test-smb-root-files-share.py`, 36 cases, covering the rendered
+Tests: `scripts/test-smb-root-files-share.py`, 40 cases, covering the rendered
 block, the plan, the refusal paths, the repeated-exclusion behaviour, the
-nested pruning, the unmatched marker and the atomic install.  CI runs
+nested pruning, the unmatched marker, the atomic install and the revoke.  CI runs
 `bash -n` over the script and the test suite on every pull request.
 
 ## Not done here
