@@ -2,11 +2,12 @@
 """Tests for scripts/smb-root-files-share.sh.
 
 The script is the source of truth for the root-files share, so its rendered
-configuration and its refusals are checked here rather than on the server. 
-Nothing in this file touches the server, and no test applies a change.
+configuration and its refusals are checked here rather than on the server.  Nothing
+in this file touches the server, and no test applies a change.
 """
 import os
 import subprocess
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -14,14 +15,27 @@ SCRIPT = os.path.join(HERE, "smb-root-files-share.sh")
 
 
 def run(*args, **kwargs):
+    # The script is invoked through bash rather than directly, so the suite does
+    # not depend on the file carrying its executable bit in the checkout.
     return subprocess.run(
-        [SCRIPT, *args],
+        ["bash", SCRIPT, *args],
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
         **kwargs,
     )
+
+
+def tree(*names):
+    """Build a directory tree and return its path."""
+    root = tempfile.mkdtemp(prefix="smb-share-fixture-")
+    for name in names:
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("x\n")
+    return root
 
 
 class ShareBlockTests(unittest.TestCase):
@@ -58,14 +72,125 @@ class ShareBlockTests(unittest.TestCase):
     def test_block_vetoes_the_key_directories(self):
         self.assertIn("veto files = /.ssh/.gnupg/", self.block)
 
+    def test_block_vetoes_the_samba_password_file(self):
+        # The credential that guards the share does not belong inside the share.
+        self.assertIn(".fleet-extra-smb.pass", self.block)
+
     def test_block_carries_its_markers(self):
         self.assertIn("# BEGIN hoghunter root-files share", self.block)
         self.assertIn("# END hoghunter root-files share", self.block)
 
-    def test_block_has_no_credential(self):
-        lowered = self.block.lower()
-        for word in ("password", "passwd", "secret", "token"):
-            self.assertNotIn(word, lowered)
+    def test_block_carries_no_credential_value(self):
+        # The block may name a credential file in order to keep it out of the
+        # share, but it must never carry a value.
+        for line in self.block.splitlines():
+            if "veto files" in line:
+                self.assertNotIn("=", line.split("veto files", 1)[1].split("=", 1)[1])
+                continue
+            lowered = line.lower()
+            for word in ("password", "passwd", "secret", "token"):
+                self.assertNotIn(word, lowered)
+
+
+class ExclusionTests(unittest.TestCase):
+    """A repeated --exclude must never drop an earlier name."""
+
+    def test_a_second_exclude_appends_to_the_first(self):
+        result = run("--print-config", "--exclude", ".ssh", "--exclude", ".gnupg")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("veto files = /.ssh/.gnupg/", result.stdout)
+
+    def test_a_second_exclude_keeps_the_first_name_out_of_the_grant(self):
+        root = tree(".ssh/id", ".gnupg/secret", "keep/file")
+        result = run("--print-targets", "--source", root, "--exclude", ".ssh", "--exclude", ".gnupg")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(os.path.join(root, ".ssh"), result.stdout)
+        self.assertNotIn(os.path.join(root, ".gnupg"), result.stdout)
+        self.assertIn(os.path.join(root, "keep"), result.stdout)
+
+    def test_the_first_exclude_replaces_the_default_list(self):
+        result = run("--print-config", "--exclude", ".gnupg")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("veto files = /.gnupg/", result.stdout)
+        self.assertNotIn(".ssh", result.stdout)
+
+    def test_the_default_list_is_used_without_any_exclude(self):
+        result = run("--print-config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in (".ssh", ".gnupg", ".fleet-extra-smb.pass"):
+            self.assertIn(name, result.stdout)
+
+    def test_the_credential_files_are_excluded_by_default(self):
+        # Live credentials must not travel over the network, and the share
+        # authenticates as an account that already holds sudo.
+        result = run("--print-config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in (
+            ".coolify-admin-password",
+            ".coolify-api-token",
+            ".ct-r2-weekly-archive.env",
+            ".ct-secrets-export.env",
+            ".fleet-extra-smb.pass",
+            ".secrets",
+            ".zuliprc-bf-monitor",
+        ):
+            self.assertIn(name, result.stdout)
+
+    def test_an_excluded_name_with_whitespace_is_refused(self):
+        result = run("--print-config", "--exclude", "my dir")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("whitespace", result.stderr)
+
+    def test_an_excluded_name_with_a_glob_character_is_refused(self):
+        result = run("--print-config", "--exclude", "*")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("glob", result.stderr)
+
+    def test_an_excluded_name_starting_with_a_dash_is_refused(self):
+        result = run("--print-config", "--exclude", "-rf")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("dash", result.stderr)
+
+
+class TargetTests(unittest.TestCase):
+    """The target list is the single source of truth for the grant."""
+
+    def setUp(self):
+        self.root = tree(
+            ".ssh/id_ed25519",
+            ".gnupg/secret.gpg",
+            "sub/.ssh/nested_key",
+            "sub/keep/file.txt",
+            "plain/f.txt",
+        )
+
+    def test_an_excluded_name_is_pruned_at_every_depth(self):
+        result = run("--print-targets", "--source", self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(os.path.join(self.root, "sub", ".ssh"), result.stdout)
+        self.assertIn(os.path.join(self.root, "sub", "keep", "file.txt"), result.stdout)
+
+    def test_a_symbolic_link_is_never_a_target(self):
+        link = os.path.join(self.root, "plain", "link")
+        os.symlink("/etc/passwd", link)
+        result = run("--print-targets", "--source", self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(link, result.stdout)
+
+    def test_the_plan_prunes_the_same_names_as_the_target_list(self):
+        plan = run("--source", self.root)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        for name in (".ssh", ".gnupg", ".fleet-extra-smb.pass"):
+            self.assertIn("-name " + name, plan.stdout)
+
+    def test_the_plan_never_grants_on_an_excluded_name(self):
+        plan = run("--source", self.root)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        for line in plan.stdout.splitlines():
+            if "setfacl" not in line:
+                continue
+            self.assertNotIn(os.path.join(self.root, ".ssh"), line)
+            self.assertNotIn(os.path.join(self.root, ".gnupg"), line)
 
 
 class PlanTests(unittest.TestCase):
@@ -86,13 +211,6 @@ class PlanTests(unittest.TestCase):
         for line in self.plan.splitlines():
             if "setfacl" in line:
                 self.assertIn("--mask", line)
-
-    def test_plan_never_grants_on_an_excluded_name(self):
-        for line in self.plan.splitlines():
-            if "setfacl" not in line:
-                continue
-            self.assertNotIn("/root/.ssh", line)
-            self.assertNotIn("/root/.gnupg", line)
 
     def test_plan_says_what_it_excludes(self):
         self.assertIn("excluded:   .ssh .gnupg", self.plan)
@@ -133,8 +251,6 @@ class ResultingConfigTests(unittest.TestCase):
         return path
 
     def setUp(self):
-        import tempfile
-
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -175,6 +291,56 @@ class ResultingConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("veto files = /.gnupg/", result.stdout)
         self.assertNotIn(".ssh", result.stdout)
+
+    def test_an_unmatched_begin_marker_is_refused(self):
+        # A half-written block must not take the rest of the configuration with
+        # it, so the run stops instead.
+        original = (
+            "[global]\n"
+            "   workgroup = FLEET\n"
+            "# BEGIN hoghunter root-files share\n"
+            "[root-files]\n"
+            "   path = /somewhere/else\n"
+        )
+        path = self._write(original)
+        result = run("--print-resulting-conf", path)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("unmatched begin marker", result.stderr)
+        self.assertNotIn("[fleet-extra]", result.stdout)
+
+
+class InstallSafetyTests(unittest.TestCase):
+    """The live configuration is never rewritten in place."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(SCRIPT, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def test_the_new_configuration_is_written_beside_the_live_one(self):
+        self.assertIn('mktemp "${SMB_DIR}/', self.source)
+
+    def test_the_new_configuration_is_renamed_into_place(self):
+        self.assertIn('mv -f "$TMP_CONF" "$SMB_CONF"', self.source)
+
+    def test_the_live_configuration_is_never_installed_over_in_place(self):
+        # An install onto the live path rewrites it in place, so an interrupted
+        # run can leave a truncated configuration behind.
+        self.assertNotIn('install -m 0644 -o root -g root "$TMP_CONF" "$SMB_CONF"', self.source)
+        self.assertNotIn('install -m 0644 -o root -g root "$BACKUP" "$SMB_CONF"', self.source)
+
+    def test_the_backup_is_renamed_into_place(self):
+        self.assertIn('mv -f "${BACKUP}.tmp" "$BACKUP"', self.source)
+
+    def test_the_grant_is_taken_back_off_the_excluded_names(self):
+        # An earlier run granted the excluded names, so the script has to remove
+        # the grant again rather than only declining to add it.
+        self.assertIn('setfacl -R -x "u:${SMB_USER}"', self.source)
+
+    def test_the_plan_says_the_grant_is_taken_back(self):
+        result = run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("take the grant back off the excluded names", result.stdout)
 
 
 if __name__ == "__main__":
