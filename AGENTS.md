@@ -235,6 +235,8 @@ the rules are in place.  The SMB password is in `/root/.fleet-extra-smb.pass`
 (root only).  The Mac mounts it as
 `smb://jay@server.boa-roygbiv.ts.net/fleet-extra`.
 
+The server's root home is shared over the tailnet as a second Samba share, `root-files`, pointing at `/root`.  It is provisioned by `scripts/smb-root-files-share.sh`, deployed as `/usr/local/bin/smb-root-files-share.sh`, and the share runs as `jay` over the `fleet` group rather than as `root`:  jay already has passwordless sudo on this host, so a read grant costs no new local capability, while a share as root would put the SSH and GPG private keys on the network.  jay reaches the files through a POSIX ACL grant, and `setfacl --mask` is required for it to take effect on a `0600` file, because setfacl otherwise keeps the old group bits as the ACL mask.  `/root/.ssh` and `/root/.gnupg` are pruned from the grant and vetoed in Samba (`veto files = /.ssh/.gnupg/`), since a named-user ACL on a private key raises the mode OpenSSH reports and OpenSSH then refuses the key.  The share is read only, shows dot files and does not follow wide links.  The script refuses to write anything without both `--apply` and `--confirm`, owns a marked block in `/etc/samba/smb.conf` that it replaces rather than duplicates, and validates the result with `testparm` before installing it.  Deploy it with `sudo install -o root -g root -m 0755 scripts/smb-root-files-share.sh /usr/local/bin/smb-root-files-share.sh` and never edit the deployed copy in place.  The record is `docs/rollouts/2026-10-28-root-files-share.md`.
+
 From the server the Mac is reachable over the tailnet as `ssh mac`
 (`~/.ssh/config`), once the host's public key is in the Mac's
 `~/.ssh/authorized_keys`.
