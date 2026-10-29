@@ -113,6 +113,16 @@ case "${CURL_MODE:?}" in
       '<item><sparkle:version>1234567890123456789</sparkle:version></item>' \
       '</channel></rss>'
     ;;
+  max12)
+    printf '%s\n' '<rss><channel>' \
+      '<item><sparkle:version>999999999999</sparkle:version></item>' \
+      '</channel></rss>'
+    ;;
+  over12)
+    printf '%s\n' '<rss><channel>' \
+      '<item><sparkle:version>1000000000000</sparkle:version></item>' \
+      '</channel></rss>'
+    ;;
   edge)
     printf '%s\n' '<rss><channel>' \
       '<item><sparkle:version>1</sparkle:version></item>' \
@@ -378,14 +388,28 @@ case "$max_line" in
   *) fail "feed scrape is not whitespace-tolerant: $max_line" ;;
 esac
 
-# 23. An 18-digit feed max joins the plan; a 19-digit one fails closed.
+# 23. The feed floor is capped at 12 digits: a 12-digit max joins the plan;
+# a 13-digit (or longer) max fails closed with the URL and the value.
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=max12
+[[ "$(rc)" -eq 0 ]] || fail "12-digit floor should return 0, got $(rc): $(stderr)"
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 999999999999 --merge-stamp ${STAMP}" ]] \
+  || fail "12-digit floor misread: $(client_args)"
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=over12
+[[ "$(rc)" -eq 1 ]] || fail "13-digit floor should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an over-long floor must print no build"
+stderr | grep -q -F "$FEED_URL" || fail "13-digit floor did not name the URL: $(stderr)"
+stderr | grep -q -F "1000000000000" || fail "13-digit floor did not name the value: $(stderr)"
+stderr | grep -q -F "at most 12 digits" || fail "13-digit floor did not say why: $(stderr)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an over-long floor"
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=huge18
-[[ "$(rc)" -eq 0 ]] || fail "18-digit floor should return 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 123456789012345678 --merge-stamp ${STAMP}" ]] \
-  || fail "18-digit floor misread: $(client_args)"
+[[ "$(rc)" -eq 1 ]] || fail "18-digit floor should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an 18-digit floor must print no build"
+stderr | grep -q -F "$FEED_URL" || fail "18-digit floor did not name the URL: $(stderr)"
+stderr | grep -q -F "123456789012345678" || fail "18-digit floor did not name the value: $(stderr)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an 18-digit floor"
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=giant
 [[ "$(rc)" -eq 1 ]] || fail "19-digit floor should return 1, got $(rc)"
-[[ -s "${tmp}/stdout" ]] && fail "an over-long floor must print no build"
+[[ -s "${tmp}/stdout" ]] && fail "a 19-digit floor must print no build"
 stderr | grep -q -F "$FEED_URL" || fail "19-digit floor did not name the URL: $(stderr)"
 stderr | grep -q -F "not a positive integer" || fail "19-digit floor did not say why: $(stderr)"
 [[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an over-long floor"

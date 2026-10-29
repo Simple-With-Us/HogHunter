@@ -1737,7 +1737,8 @@ async function main() {
   // is the highest first numeric component among every build of the app on
   // iOS and of its paired macOS app (and vice versa), plus every extra floor.
   // Every build counts: expired builds, all version trains, and old
-  // timestamp-style builds on either platform.  No floor and no cap.
+  // timestamp-style builds on either platform.  Fixed mode caps the result
+  // at 12 digits: a plan above 999999999999 throws instead of shipping.
   //
   // plan-release-build is the release planner: the CI plan-build job runs it
   // once per release and every platform ship job reuses the one value, so iOS

@@ -104,3 +104,11 @@ test('incomplete inventory refuses', () => {
   assert.throws(() => next({macBuilds: [], complete: true, mergeStamp: STAMP}), /complete build inventory required/);
   assert.throws(() => next({iosBuilds: '1000', macBuilds: [], complete: true, mergeStamp: STAMP}), /complete build inventory required/);
 });
+test('a plan above 12 digits throws instead of shipping it', () => {
+  assert.throws(() => next({...input, iosBuilds: ['999999999999']}), /planned build exceeds 12 digits/);
+  assert.throws(() => next({...input, macBuilds: ['123456789012345678']}), /planned build exceeds 12 digits/);
+  assert.throws(() => next({...input, extraFloors: ['999999999999']}), /planned build exceeds 12 digits/);
+  assert.throws(() => next({...input, extraFloors: ['1000000000000']}), /planned build exceeds 12 digits/);
+  assert.deepEqual(next({...input, iosBuilds: ['999999999998']}), {build: '999999999999'});
+  assert.throws(() => next({...input, iosBuilds: ['999999999999', 'NaN']}), /malformed build inventory/);
+});

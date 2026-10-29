@@ -6,7 +6,8 @@
 // first numeric component among every build of the app on iOS and of its
 // paired macOS app (and vice versa), plus every extra floor.  Every build
 // counts: expired builds, all version trains, and old timestamp-style builds
-// on either platform.  No floor and no cap.  A rebuild of the same commit
+// on either platform.  Fixed mode caps the result at 12 digits: a plan above
+// 999999999999 throws instead of shipping.  A rebuild of the same commit
 // still goes up, because the first upload joined M.
 const BUILD_RE = /^[0-9]+(\.[0-9]+){0,2}$/;
 const STAMP_RE = /^[1-9][0-9]{11}$/;
@@ -64,5 +65,8 @@ export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complet
   if (macMax > highest) highest = macMax;
   if (floorMax > highest) highest = floorMax;
   const next = highest + 1n > stamp ? highest + 1n : stamp;
+  if (next > 999999999999n) {
+    throw new Error(`planned build exceeds 12 digits: ${next}`);
+  }
   return {build: String(next)};
 }

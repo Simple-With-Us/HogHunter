@@ -690,11 +690,12 @@ PY
       logerr "asc-shared-build: pairedBuildFeed $feed has no numeric <sparkle:version>; cannot work out the floor"
       return 1
     fi
-    # A feed max is a positive integer of at most 18 digits.  No arithmetic:
-    # an 18-digit max can exceed the shell's integer range, so the shape is
-    # checked with patterns (all zeros is zero, which is below the floor).
-    if [[ ! "$max" =~ ^[0-9]{1,18}$ || "$max" =~ ^0+$ ]]; then
-      logerr "asc-shared-build: pairedBuildFeed $feed floor $max is not a positive integer of at most 18 digits; cannot work out the release build"
+    # A feed max is a positive integer of at most 12 digits: fixed mode ships
+    # 12-digit merge-timestamp builds only, so a higher floor leaves no
+    # shippable build.  No arithmetic: the shape is checked with patterns
+    # (all zeros is zero, which is below the floor).
+    if [[ ! "$max" =~ ^[0-9]{1,12}$ || "$max" =~ ^0+$ ]]; then
+      logerr "asc-shared-build: pairedBuildFeed $feed floor $max is not a positive integer of at most 12 digits; cannot work out the release build"
       return 1
     fi
     floor="$max"
