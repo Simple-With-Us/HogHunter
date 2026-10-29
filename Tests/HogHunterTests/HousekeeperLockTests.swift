@@ -36,9 +36,10 @@ final class HousekeeperLockTests: XCTestCase {
 
     // MARK: - Acquire and release
 
-    func testAcquireCreatesTheLockAsADirectory() {
+    func testAcquireCreatesTheLockAsADirectory() async {
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome = await lock.acquire()
+        XCTAssertEqual(outcome, .acquired)
 
         var isDirectory: ObjCBool = false
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path, isDirectory: &isDirectory))
@@ -47,43 +48,47 @@ final class HousekeeperLockTests: XCTestCase {
         lock.release()
     }
 
-    func testAPeerHoldingTheLockIsRefused() {
+    func testAPeerHoldingTheLockIsRefused() async {
         let first = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(first.acquire(), .acquired)
+        let outcome2 = await first.acquire()
+        XCTAssertEqual(outcome2, .acquired)
 
         let second = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(second.acquire(), .heldByPeer)
+        let outcome3 = await second.acquire()
+        XCTAssertEqual(outcome3, .heldByPeer)
 
         // The peer's lock is still there, untouched.
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
         first.release()
     }
 
-    func testReleaseRemovesTheLock() {
+    func testReleaseRemovesTheLock() async {
         let lock = HousekeeperLock(path: lockPath)
-        _ = lock.acquire()
+        _ = await lock.acquire()
         lock.release()
         XCTAssertFalse(FileManager.default.fileExists(atPath: lockPath.path))
     }
 
-    func testReleaseOnALockThisProcessDidNotTakeLeavesThePeersLockAlone() {
+    func testReleaseOnALockThisProcessDidNotTakeLeavesThePeersLockAlone() async {
         let peer = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(peer.acquire(), .acquired)
+        let outcome4 = await peer.acquire()
+        XCTAssertEqual(outcome4, .acquired)
 
         let other = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(other.acquire(), .heldByPeer)
+        let outcome5 = await other.acquire()
+        XCTAssertEqual(outcome5, .heldByPeer)
         other.release()  // never took it, so it must not remove the peer's lock
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
         peer.release()
     }
 
-    func testALockWithContentsIsNotRemoved() {
+    func testALockWithContentsIsNotRemoved() async {
         // The Python side uses rmdir, which also refuses a non-empty
         // directory.  The lock is a marker, and a directory with something in
         // it is not the marker we made.
         let lock = HousekeeperLock(path: lockPath)
-        _ = lock.acquire()
+        _ = await lock.acquire()
         let inside = lockPath.appendingPathComponent("owner.txt")
         FileManager.default.createFile(atPath: inside.path, contents: Data("busy".utf8))
 
@@ -94,36 +99,39 @@ final class HousekeeperLockTests: XCTestCase {
 
     // MARK: - Stale locks
 
-    func testAStaleLockIsTakenOver() {
+    func testAStaleLockIsTakenOver() async {
         let dead = HousekeeperLock(path: lockPath)
-        _ = dead.acquire()
+        _ = await dead.acquire()
         // Backdate it past the stale window: a process that died mid-run and
         // left its lock behind.
         let old = Date().addingTimeInterval(-(HousekeeperLock.defaultStaleMinutes + 5) * 60)
         try? FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: lockPath.path)
 
         let fresh = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(fresh.acquire(), .acquired)
+        let outcome6 = await fresh.acquire()
+        XCTAssertEqual(outcome6, .acquired)
         fresh.release()
     }
 
-    func testAFreshLockIsNotTakenOver() {
+    func testAFreshLockIsNotTakenOver() async {
         let live = HousekeeperLock(path: lockPath)
-        _ = live.acquire()
+        _ = await live.acquire()
 
         let other = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(other.acquire(), .heldByPeer)
+        let outcome7 = await other.acquire()
+        XCTAssertEqual(outcome7, .heldByPeer)
         live.release()
     }
 
     // MARK: - Re-entrancy
 
-    func testTheOwnerTokenLetsAChildThroughWithoutTouchingTheDirectory() {
+    func testTheOwnerTokenLetsAChildThroughWithoutTouchingTheDirectory() async {
         // The peer takes the lock normally, with no token: it is a real
         // holder, and the directory has to be there for the rest to mean
         // anything.
         let peer = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(peer.acquire(), .acquired)
+        let outcome8 = await peer.acquire()
+        XCTAssertEqual(outcome8, .acquired)
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
 
         // The Python lock sets HOUSEKEEPER_LOCK_OWNER=1 for its children, so a
@@ -136,7 +144,8 @@ final class HousekeeperLockTests: XCTestCase {
 
         // Even a lock that exists and is fresh is let through with the token.
         let child = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(child.acquire(), .acquired)
+        let outcome9 = await child.acquire()
+        XCTAssertEqual(outcome9, .acquired)
 
         // The child never took the lock, so it must not remove it.
         child.release()
@@ -147,14 +156,15 @@ final class HousekeeperLockTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: lockPath.path))
     }
 
-    func testWithoutTheTokenAFreshLockIsStillRefused() {
+    func testWithoutTheTokenAFreshLockIsStillRefused() async {
         unsetenv("HOUSEKEEPER_LOCK_OWNER")
         XCTAssertFalse(HousekeeperLock.isReentrantOwner)
 
         let peer = HousekeeperLock(path: lockPath)
-        _ = peer.acquire()
+        _ = await peer.acquire()
         let other = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(other.acquire(), .heldByPeer)
+        let outcome10 = await other.acquire()
+        XCTAssertEqual(outcome10, .heldByPeer)
         peer.release()
     }
 
@@ -175,8 +185,8 @@ final class HousekeeperLockTests: XCTestCase {
     /// start time and no lock.  A record the readers reject is not evidence
     /// of anything, so those cases were passing without testing what they
     /// claimed to test.
-    private func writeOwner(pid: Int32, start: String? = nil, extraKey: Bool = false) {
-        let token = HousekeeperLock.processStartToken(pid)
+    private func writeOwner(pid: Int32, start: String? = nil, extraKey: Bool = false) async {
+        let token = await HousekeeperLock.processStartToken(pid)
         var payload: [String: Any] = [
             "pid": Int(pid),
             "host": HousekeeperLock.currentHostName(),
@@ -220,9 +230,10 @@ final class HousekeeperLockTests: XCTestCase {
             .appendingPathComponent(lockPath.lastPathComponent + ".owner")
     }
 
-    func testAcquireWritesAnOwnerFileBesideTheLock() {
+    func testAcquireWritesAnOwnerFileBesideTheLock() async {
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome11 = await lock.acquire()
+        XCTAssertEqual(outcome11, .acquired)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: ownerPath.path),
                       "the owner file records who holds the lock")
@@ -239,26 +250,29 @@ final class HousekeeperLockTests: XCTestCase {
         lock.release()
     }
 
-    func testTheOwnerFileCarriesTheStartTimeOfThisProcess() {
+    func testTheOwnerFileCarriesTheStartTimeOfThisProcess() async {
         // The start time travels with the pid, because a pid the kernel has
         // since handed to somebody else would otherwise look exactly like a
         // live holder.
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome12 = await lock.acquire()
+        XCTAssertEqual(outcome12, .acquired)
 
         let data = try? Data(contentsOf: ownerPath)
         let object = (try? JSONSerialization.jsonObject(with: data ?? Data())) as? [String: Any]
+        let expectedStart = await HousekeeperLock.processStartToken(getpid())
         XCTAssertEqual(object?["start"] as? String,
-                       HousekeeperLock.processStartToken(getpid()),
+                       expectedStart,
                        "the record carries the start time of the process that holds the lock")
 
         lock.release()
     }
 
-    func testTheOwnerFileIsPrivateToTheUser() {
+    func testTheOwnerFileIsPrivateToTheUser() async {
         // The record names a pid and a host and sits in a shared directory.
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome13 = await lock.acquire()
+        XCTAssertEqual(outcome13, .acquired)
 
         let attributes = try? FileManager.default.attributesOfItem(atPath: ownerPath.path)
         let permissions = (attributes?[.posixPermissions] as? NSNumber)?.int16Value
@@ -267,13 +281,14 @@ final class HousekeeperLockTests: XCTestCase {
         lock.release()
     }
 
-    func testTheOwnerFileIsARivalOfTheLockDirectoryNotInsideIt() {
+    func testTheOwnerFileIsARivalOfTheLockDirectoryNotInsideIt() async {
         // `~/apps/mac-auto-cleanup.sh` releases the lock with a plain `rmdir`,
         // and `rmdir` refuses a directory that has anything in it.  An owner
         // file inside the lock would make the shell's release silently fail
         // and leak the lock forever.
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome14 = await lock.acquire()
+        XCTAssertEqual(outcome14, .acquired)
 
         let contents = try? FileManager.default.contentsOfDirectory(atPath: lockPath.path)
         XCTAssertEqual(contents?.isEmpty, true, "the lock directory must stay empty for the shell's rmdir")
@@ -281,61 +296,65 @@ final class HousekeeperLockTests: XCTestCase {
         lock.release()
     }
 
-    func testReleaseRemovesTheOwnerFile() {
+    func testReleaseRemovesTheOwnerFile() async {
         let lock = HousekeeperLock(path: lockPath)
-        _ = lock.acquire()
+        _ = await lock.acquire()
         XCTAssertTrue(FileManager.default.fileExists(atPath: ownerPath.path))
         lock.release()
         XCTAssertFalse(FileManager.default.fileExists(atPath: ownerPath.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: lockPath.path))
     }
 
-    func testALockWhoseOwnerIsGoneIsTakenOverAtOnce() {
+    func testALockWhoseOwnerIsGoneIsTakenOverAtOnce() async {
         // A pid above the system maximum cannot name a live process, so this
         // is what a lock left behind by a killed tick looks like.
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
-        writeOwner(pid: 999_999)
+        await writeOwner(pid: 999_999)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired,
+        let outcome15 = await lock.acquire()
+        XCTAssertEqual(outcome15, .acquired,
                        "a lock whose owner is gone is taken over at once, not after the stale window")
         lock.release()
     }
 
-    func testALockWhoseOwnerIsAliveIsRefused() {
+    func testALockWhoseOwnerIsAliveIsRefused() async {
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
-        writeOwner(pid: getpid())
+        await writeOwner(pid: getpid())
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer,
+        let outcome16 = await lock.acquire()
+        XCTAssertEqual(outcome16, .heldByPeer,
                        "a live owner keeps the lock, however fresh the directory is")
     }
 
-    func testAReusedPidIsTakenOverAtOnce() {
+    func testAReusedPidIsTakenOverAtOnce() async {
         // The kernel hands a pid to somebody else once the original exits,
         // and a reused pid that is ALIVE looks exactly like a live holder.
         // The start time is what tells the two apart.
         let pid = liveProcessPid()
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
-        writeOwner(pid: pid, start: "Mon Jan  1 00:00:00 2024")
+        await writeOwner(pid: pid, start: "Mon Jan  1 00:00:00 2024")
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired,
+        let outcome17 = await lock.acquire()
+        XCTAssertEqual(outcome17, .acquired,
                        "a reused pid is taken over at once, not after the stale window")
         lock.release()
     }
 
-    func testALiveHolderWithTheRightStartTimeIsRefused() {
+    func testALiveHolderWithTheRightStartTimeIsRefused() async {
         let pid = liveProcessPid()
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
-        writeOwner(pid: pid, start: HousekeeperLock.processStartToken(pid))
+        await writeOwner(pid: pid, start: await HousekeeperLock.processStartToken(pid))
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer,
+        let outcome18 = await lock.acquire()
+        XCTAssertEqual(outcome18, .heldByPeer,
                        "a live holder keeps the lock, however fresh the directory is")
     }
 
-    func testAnOwnerRecordWithoutTheStartTimeIsNotEvidence() {
+    func testAnOwnerRecordWithoutTheStartTimeIsNotEvidence() async {
         // A record that is not the record this protocol publishes names no
         // holder, so the age rule decides.
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
@@ -349,24 +368,60 @@ final class HousekeeperLockTests: XCTestCase {
         try? data?.write(to: ownerPath)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer)
+        let outcome19 = await lock.acquire()
+        XCTAssertEqual(outcome19, .heldByPeer)
     }
 
-    func testAnOwnerRecordWithAnUnknownKeyIsNotEvidence() {
+    func testAnOwnerRecordWithAFloatPidIsNotEvidence() async {
+        // A float pid is not the record this protocol publishes.  The Python
+        // parser refuses any pid that is not an int, so the Swift reader has
+        // to refuse a double as well, or the two readers reach different
+        // ownership decisions about one file.
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
-        writeOwner(pid: 999_999, extraKey: true)
+        let text = "{\"pid\": 1234.0, \"host\": \"\(HousekeeperLock.currentHostName())\", "
+            + "\"acquired_at\": \(Date().timeIntervalSince1970), "
+            + "\"lock\": \"\(lockPath.path)\", \"start\": \"Mon Jan  1 00:00:00 2024\"}"
+        try? text.write(to: ownerPath, atomically: true, encoding: .utf8)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer)
+        let outcome = await lock.acquire()
+        XCTAssertEqual(outcome, .heldByPeer)
     }
 
-    func testAFreshLockWithNoOwnerFileIsNotTakenOver() {
+    func testAnOwnerRecordWithATokenLongerInScalarsThanInGraphemesIsNotEvidence() async {
+        // The token length is measured in Unicode scalars, because that is
+        // what Python's len() counts.  A token of combining marks is short in
+        // grapheme clusters and long in scalars, and the two readers have to
+        // refuse the same one.
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        let text = "{\"pid\": 999999, \"host\": \"\(HousekeeperLock.currentHostName())\", "
+            + "\"acquired_at\": \(Date().timeIntervalSince1970), "
+            + "\"lock\": \"\(lockPath.path)\", "
+            + "\"start\": \"\(String(repeating: "e\u{0301}", count: 100))\"}"
+        try? text.write(to: ownerPath, atomically: true, encoding: .utf8)
+
+        let lock = HousekeeperLock(path: lockPath)
+        let outcome = await lock.acquire()
+        XCTAssertEqual(outcome, .heldByPeer)
+    }
+
+    func testAnOwnerRecordWithAnUnknownKeyIsNotEvidence() async {
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        await writeOwner(pid: 999_999, extraKey: true)
+
+        let lock = HousekeeperLock(path: lockPath)
+        let outcome20 = await lock.acquire()
+        XCTAssertEqual(outcome20, .heldByPeer)
+    }
+
+    func testAFreshLockWithNoOwnerFileIsNotTakenOver() async {
         // The shell holder never writes an owner file, so a missing one is not
         // proof of anything.  The age rule decides.
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer)
+        let outcome21 = await lock.acquire()
+        XCTAssertEqual(outcome21, .heldByPeer)
     }
 
     // MARK: - The atomic takeover
@@ -379,29 +434,31 @@ final class HousekeeperLockTests: XCTestCase {
     /// lock and creates its own, so both believe they hold it.  Moving the
     /// directory aside lets only one caller win the race.
 
-    func testALeftoverOwnerFileOlderThanTheLockDoesNotUnlockIt() {
+    func testALeftoverOwnerFileOlderThanTheLockDoesNotUnlockIt() async {
         // The shell holder never writes an owner file, so an owner file left
         // beside the lock can name a pid that is long gone.  Reading it as the
         // current holder would let a fresh, live lock be taken over.  The
         // owner file only describes the holder when it is at least as new as
         // the lock directory.
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
-        writeOwner(pid: 999_999)
+        await writeOwner(pid: 999_999)
         let older = Date().addingTimeInterval(-600)
         try? FileManager.default.setAttributes([.modificationDate: older], ofItemAtPath: ownerPath.path)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer,
+        let outcome22 = await lock.acquire()
+        XCTAssertEqual(outcome22, .heldByPeer,
                        "a leftover owner file must not unlock a fresh lock")
     }
 
-    func testAStaleLockIsMovedAsideAndLeavesNothingBehind() {
+    func testAStaleLockIsMovedAsideAndLeavesNothingBehind() async {
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
         let old = Date().addingTimeInterval(-(HousekeeperLock.defaultStaleMinutes + 5) * 60)
         try? FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: lockPath.path)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome23 = await lock.acquire()
+        XCTAssertEqual(outcome23, .acquired)
 
         let leftovers = try? FileManager.default.contentsOfDirectory(atPath: root.path)
         let moved = (leftovers ?? []).filter { $0.contains(".stale-") }
@@ -409,7 +466,7 @@ final class HousekeeperLockTests: XCTestCase {
         lock.release()
     }
 
-    func testALockWithContentsIsPutBackRatherThanRemoved() {
+    func testALockWithContentsIsPutBackRatherThanRemoved() async {
         // The lock is a marker: a directory with contents in it is not the
         // marker we made, so it is put back rather than removed.
         try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
@@ -419,24 +476,27 @@ final class HousekeeperLockTests: XCTestCase {
         try? FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: lockPath.path)
 
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .heldByPeer)
+        let outcome24 = await lock.acquire()
+        XCTAssertEqual(outcome24, .heldByPeer)
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path),
                       "the lock was put back")
         XCTAssertTrue(FileManager.default.fileExists(atPath: inside.path),
                       "what was inside it is still there")
     }
 
-    func testAFreshLockHeldByALiveProcessIsPutBackRatherThanRemoved() {
+    func testAFreshLockHeldByALiveProcessIsPutBackRatherThanRemoved() async {
         // The move acts on whatever is at the path at that instant.  When a
         // peer had already replaced the stale lock, that is the peer's fresh
         // lock, and it is put back rather than removed.
         let peer = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(peer.acquire(), .acquired)
+        let outcome25 = await peer.acquire()
+        XCTAssertEqual(outcome25, .acquired)
 
         // The peer's owner file names a live pid, so the lock is not free to
         // take and the peer keeps it.
         let other = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(other.acquire(), .heldByPeer)
+        let outcome26 = await other.acquire()
+        XCTAssertEqual(outcome26, .heldByPeer)
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path))
         peer.release()
     }
@@ -477,28 +537,30 @@ final class HousekeeperLockTests: XCTestCase {
 
     // MARK: - The release
 
-    func testReleaseDoesNotRemoveTheNewHoldersOwnerFile() {
+    func testReleaseDoesNotRemoveTheNewHoldersOwnerFile() async {
         // The lock was taken over while this one was still running, so the
         // owner file names the new holder now.  Deleting it takes away the
         // new holder's identity and leaves it holding a lock that nobody
         // owns.
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome27 = await lock.acquire()
+        XCTAssertEqual(outcome27, .acquired)
 
-        writeOwner(pid: 999_999)
+        await writeOwner(pid: 999_999)
         lock.release()
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: ownerPath.path),
                       "the new holder's owner file must not be removed")
     }
 
-    func testAFailedRemovalLeavesTheOwnerFileSoTheLockIsStillRecoverable() {
+    func testAFailedRemovalLeavesTheOwnerFileSoTheLockIsStillRecoverable() async {
         // The lock directory goes first and the owner file second.  The
         // other order strands the lock: a removal that fails after the
         // owner file is gone leaves a lock that nobody owns and that
         // nothing can take over until the whole stale window has passed.
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome28 = await lock.acquire()
+        XCTAssertEqual(outcome28, .acquired)
         let inside = lockPath.appendingPathComponent("leftover.txt")
         FileManager.default.createFile(atPath: inside.path, contents: Data("busy".utf8))
 
@@ -510,7 +572,7 @@ final class HousekeeperLockTests: XCTestCase {
                       "a lock that could not be removed keeps its owner file")
     }
 
-    func testTheStaleAsideNameIsDerivedFromTheLockPath() {
+    func testTheStaleAsideNameIsDerivedFromTheLockPath() async {
         // The moved-aside name has to follow the lock path, or the copy
         // lands beside the lock under a name that belongs to no lock.
         let custom = root.appendingPathComponent("custom.lock", isDirectory: true)
@@ -520,7 +582,8 @@ final class HousekeeperLockTests: XCTestCase {
 
         let recorder = HousekeeperRecordingFileManager()
         let lock = HousekeeperLock(path: custom, fileManager: recorder)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome29 = await lock.acquire()
+        XCTAssertEqual(outcome29, .acquired)
 
         let asides = recorder.movedDestinations.filter { $0.lastPathComponent.contains(".stale-") }
         XCTAssertEqual(asides.count, 1,
@@ -544,9 +607,10 @@ final class HousekeeperLockTests: XCTestCase {
             .appendingPathComponent(lockPath.lastPathComponent + ".guard")
     }
 
-    func testTheGuardIsASiblingFileBesideTheLock() {
+    func testTheGuardIsASiblingFileBesideTheLock() async {
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome30 = await lock.acquire()
+        XCTAssertEqual(outcome30, .acquired)
 
         var isDirectory: ObjCBool = false
         XCTAssertTrue(FileManager.default.fileExists(atPath: guardURL.path, isDirectory: &isDirectory))
@@ -602,7 +666,7 @@ final class HousekeeperLockTests: XCTestCase {
         return nil
     }
 
-    func testTheAcquireWaitsForAGuardAnotherProcessHolds() throws {
+    func testTheAcquireWaitsForAGuardAnotherProcessHolds() async throws {
         // The acquire holds the guard across the ownership check, the
         // stale takeover, the removal, the `mkdir` and the owner-file
         // publication, so a peer that holds the guard holds the acquire up
@@ -613,14 +677,15 @@ final class HousekeeperLockTests: XCTestCase {
 
         let deadline = Date().addingTimeInterval(30)
         while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path),
                       "the other process holds the guard")
 
         let lock = HousekeeperLock(path: lockPath)
         let started = Date()
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome31 = await lock.acquire()
+        XCTAssertEqual(outcome31, .acquired)
         let elapsed = Date().timeIntervalSince(started)
 
         XCTAssertGreaterThan(elapsed, 1.0,
@@ -629,11 +694,12 @@ final class HousekeeperLockTests: XCTestCase {
         lock.release()
     }
 
-    func testTheReleaseWaitsForAGuardAnotherProcessHolds() throws {
+    func testTheReleaseWaitsForAGuardAnotherProcessHolds() async throws {
         // The release holds the guard across its ownership check and its
         // removal, so a peer that holds the guard holds the release up.
         let lock = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(lock.acquire(), .acquired)
+        let outcome32 = await lock.acquire()
+        XCTAssertEqual(outcome32, .acquired)
 
         let ready = root.appendingPathComponent("holder.ready")
         let holder = try guardHolder(seconds: 2, ready: ready)
@@ -641,7 +707,7 @@ final class HousekeeperLockTests: XCTestCase {
 
         let deadline = Date().addingTimeInterval(30)
         while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path),
                       "the other process holds the guard")

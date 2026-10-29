@@ -2100,6 +2100,21 @@ class TestHousekeeperLock(unittest.TestCase):
             with HousekeeperLock(self.lock_path):
                 pass
 
+    def test_an_owner_record_with_a_pid_above_the_bound_is_not_evidence(self):
+        # The Swift reader refuses a pid above Int32.max, so a pid this big
+        # has to be "not an owner record" here as well, or the two readers
+        # disagree about one file.
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        record = self._owner_record(pid=999999)
+        record["pid"] = 2**31
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
     def test_a_fresh_lock_with_no_owner_file_is_not_taken_over(self):
         # The shell holder never writes an owner file, so a missing one is not
         # proof of anything.  The age rule decides.

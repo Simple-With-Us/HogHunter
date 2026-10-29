@@ -81,6 +81,64 @@ And one rule about the removal, which AFC's readers already state and Hog Hunter
 - The Python cases that wrote a bare `{"pid": ...}` now write a well formed record.  Those cases were passing without testing what they claimed to test, because a record the readers refuse is no evidence of anything.
 - New cases on both sides: the published record has exactly the five keys, it carries this process's own start token, it is private to the user, a reused pid is taken over at once, a live holder with the right start token is refused, a record without the start time is not evidence, a record with an unknown key is not evidence, and a record with a boolean pid is not evidence.
 
+## The review round
+
+Seven findings came back on this pull request: six from Kody, one from Sentry.
+Six were legitimate and are fixed in code.  One is real but cannot be fixed
+here alone, and it is written down rather than half-landed.
+
+**Fixed**
+
+- A floating-point pid is refused on the Swift side.  `NSNumber.intValue`
+  truncates `1234.0` to `1234`, so the Swift reader accepted a record that
+  the Python reader refuses, and the two sides reached different ownership
+  decisions about one file.  `CFNumberIsFloatType` tells a JSON `1` from a
+  JSON `1.0` without guessing from the text, and the check applies to the
+  pid only:  `acquired_at` is legitimately a double.
+- The Swift lock no longer runs `ps` on the caller's thread.  The Mac app
+  takes this lock from the main actor, and a fork-and-exec plus a pipe read
+  on the main thread is a visible stall.  `acquire()` is async now,
+  `processStartToken` runs the `Process` inside `Task.detached`, and
+  `CleanRegimenRunner` awaits the lock instead of blocking on it.  The
+  peer-lock branch keeps the age rule's short circuit, so `ps` runs only
+  when the age rule did not already decide the outcome.
+- The Swift owner file is created 0600 and published with `rename(2)`, the
+  same way the Python writer creates its temp file.  Before, the mode was
+  applied after the write, which left a window in which the pid and the host
+  were readable by any local account, and a failed chmod left them readable
+  for good.
+- Hog Hunter's Python side runs `/bin/ps` by absolute path, the same binary
+  the Swift side runs, so a PATH that names a foreign `ps` cannot make the
+  two sides disagree about one live process.  AFC's two implementations
+  resolve `ps` through PATH and want the same one-line change;  they live in
+  the other repository, so that is separate work.
+- A pid above `Int32.max` is refused by the Python parser, because the
+  Swift reader refuses one and the two must agree about what a record is.
+- The start token's length is measured in Unicode scalars, not in grapheme
+  clusters, because that is what Python's `len()` counts.  A token of
+  combining marks is short in graphemes and long in scalars, and the two
+  readers would otherwise accept different lengths.
+
+**Not fixed here, on purpose**
+
+- The start token is rendered by `ps` in local time, so a timezone or a
+  daylight-saving change makes a live holder's token differ from the one
+  its record published, and a reader concludes the holder is gone.  The
+  finding is correct.  The fix cannot be made in one implementation: the
+  four implementations have to accept a UTC token and a local token first,
+  and only then may they publish UTC.  Changing Hog Hunter alone would make
+  AFC's two readers call every live Hog Hunter holder gone, which is the
+  exact harm the finding warns about.  It needs its own board row and its
+  own cross-repository change.
+
+**Tests**
+
+- New cases on both sides: a float pid is not evidence, a pid above the
+  bound is not evidence, and a token that is longer in scalars than in
+  graphemes is not evidence.  The Swift float case writes the JSON by hand,
+  because `JSONSerialization` would serialize a Swift `Double` as `1234`
+  and could not express the case.
+
 ## Measured
 
 The cross-implementation check ran the **deployed** AFC reader, extracted verbatim from `/Users/jay/apps/mac-auto-cleanup.sh`, against records written by Hog Hunter's own writer:
@@ -97,16 +155,19 @@ The cross-implementation check ran the **deployed** AFC reader, extracted verbat
 
 ```bash
 # The Python side: the whole suite.
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py     # 389 tests, OK
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py     # 390 tests, OK
 
 # The Swift side is compiled and run by CI on macos-26.
 # .github/workflows/ci.yml -> the `test` job: xcodegen generate, build, test.
 ```
 
-The Swift change was type-checked locally with `swiftc -typecheck` against the macOS 14.0 SDK, with the XCTest framework on the search path, over `Sources/Storage/HousekeeperLock.swift` and `Tests/HogHunterTests/HousekeeperLockTests.swift` together.  That is a type check only: the compiler that runs the tests is CI's.
+The Swift change was type-checked locally with `swiftc -typecheck` against the macOS 14.0 SDK, with the XCTest framework on the search path, over the lock's whole dependency cone (50 files under `Sources/`) and both test files together.  That is a type check only: the compiler that runs the tests is CI's.  Three files are left out of that local check because they need packages this machine does not have vendored:  `App/AutoUpdate.swift` needs Sparkle, `Telemetry/SentryTelemetry.swift` needs Sentry, and `UI/SettingsView.swift` needs the real `AppUpdater`.  None of the three touches the lock.
 
 ## Still open
 
 - The board writes refuse for this seat ("no bearer-verified seat: the write verbs refuse"), so there is no Linear row for this work and none could be filed.  AFC's side of it is AFC-554 (`ea7d7b29`).
 - The installed copy of the Mac app still writes the old shape until it is rebuilt and released, and an old-shaped record is not evidence to any of the four readers.  That costs liveness only, and it is the state the fleet was already in.
+- The start token is rendered in local time, and fixing that needs all four
+  implementations to change together.  It is described above and it needs
+  its own board row, which this seat cannot file.
 - The shared protocol now has four implementations that must agree.  AFC's own drift guard compares its two readers;  nothing compares Hog Hunter's two against AFC's two, so the agreement is asserted by the tests on each side and by the cross-implementation check above, not enforced by a single tool.

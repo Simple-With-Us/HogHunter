@@ -121,7 +121,8 @@ final class CleanRegimenRunnerTests: XCTestCase {
         // kinds of things, so they must not run at the same time.  The lock is
         // the same one the Python engine takes.
         let peer = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(peer.acquire(), .acquired)
+        let peerOutcome = await peer.acquire()
+        XCTAssertEqual(peerOutcome, .acquired)
 
         let runner = makeRunner()
         await runner.runNow(regimen: makeRegimen())?.value
@@ -145,7 +146,8 @@ final class CleanRegimenRunnerTests: XCTestCase {
         let regimen = makeRegimen(enabled: true, intervalHours: 4)
 
         let peer = HousekeeperLock(path: lockPath)
-        XCTAssertEqual(peer.acquire(), .acquired)
+        let peerOutcome = await peer.acquire()
+        XCTAssertEqual(peerOutcome, .acquired)
         defer { peer.release() }
 
         let runner = makeRunner(now: now, defaults: defaults)

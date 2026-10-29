@@ -224,6 +224,11 @@ _OWNER_KEYS = frozenset({"pid", "host", "acquired_at", "lock", "start"})
 # same bound, in the same place.
 _OWNER_START_MAX = 128
 
+# The largest pid this protocol accepts.  The Swift reader refuses a pid
+# above Int32.max, so a pid this big would be an owner record for one
+# reader and "not an owner record" for the other.
+_OWNER_PID_MAX = 2**31 - 1
+
 
 def _parse_owner(raw: str) -> dict | None:
     """The owner payload in a raw owner file, or None when it is not usable.
@@ -247,6 +252,10 @@ def _parse_owner(raw: str) -> dict | None:
         return None
     pid = owner["pid"]
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    if pid > _OWNER_PID_MAX:
+        # The Swift reader refuses a pid above Int32.max, so a pid this big
+        # would be an owner record for one reader and not for the other.
         return None
     host = owner["host"]
     if not isinstance(host, str) or not host:
@@ -334,11 +343,15 @@ def _process_start_token(pid: int) -> str:
     for the same process:  a TZ in the environment renders the same start
     time in a different zone, and the tokens would then disagree for a
     holder that never moved.
+
+    The absolute path to ps is used, the same one the Swift reader runs, so
+    the two cannot resolve different binaries through a PATH that names a
+    foreign ps.
     """
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
     try:
         result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True, text=True, timeout=10, check=False, env=env,
         )
     except (OSError, subprocess.SubprocessError):

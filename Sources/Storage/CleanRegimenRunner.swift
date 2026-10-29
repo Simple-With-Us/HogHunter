@@ -443,7 +443,7 @@ final class CleanRegimenRunner: ObservableObject {
         // This is the same lock `scripts/vacuum/lock.py` takes, so the Swift
         // runner and the Python engine exclude each other.
         let lock = lockProvider()
-        guard lock.acquire() == .acquired else {
+        guard await lock.acquire() == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
             recordsRun = false
             finish(result, regimen: regimen)
