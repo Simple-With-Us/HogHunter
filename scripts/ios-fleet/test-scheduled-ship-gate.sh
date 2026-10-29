@@ -246,6 +246,36 @@ bash "$GATE" --event schedule --path-prefix "!" --repo-root "$REPO" --state-dir 
 check "bare ! --path-prefix is refused (exit)" 2 "$?"
 PREFIX_ARGS=(--path-prefix "ios/")
 
+echo "== 13. renames, quoted names, and bare patterns match push.paths =="
+# A file renamed OUT of a watched path still changed that path: rename
+# detection would list only the new name, so the gate disables it.  A
+# non-ASCII name must arrive unquoted to match.  A bare pattern with no glob
+# characters and no trailing slash is one exact file, like GitHub's filter:
+# it never matches the tree under a directory of that name.
+git -C "$REPO" config core.quotePath true
+git -C "$REPO" config diff.renames true
+PREFIX_ARGS=(--path-prefix "ios/")
+commit "ios/App/Renamed.swift" "// will move out" "fix(ios): file that will be renamed out" >/dev/null
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" mv "ios/App/Renamed.swift" "server/Renamed.swift"
+git -C "$REPO" commit --quiet -m "refactor: move a file out of the iOS tree"
+out="$(run_gate schedule demo)"
+check "rename out of a watched path -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+UTF_NAME="$(printf 'ios/App/Caf\xc3\xa9.swift')"
+commit "$UTF_NAME" "// cafe" "fix(ios): non-ascii filename" >/dev/null
+out="$(run_gate schedule demo)"
+check "non-ascii filename under a watched path -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+PREFIX_ARGS=(--path-prefix "shared")
+commit "shared/deep/Nested.swift" "// nested" "fix: nested file under a bare pattern" >/dev/null
+out="$(run_gate schedule demo)"
+check "bare pattern does not match the tree under it" 0 "$(field "$out" should_ship)"
+PREFIX_ARGS=(--path-prefix "shared/deep/Nested.swift")
+out="$(run_gate schedule demo)"
+check "bare pattern still matches its exact file" 1 "$(field "$out" should_ship)"
+PREFIX_ARGS=(--path-prefix "ios/")
+
 echo
 echo "passed=${PASS} failed=${FAIL}"
 [[ "$FAIL" -eq 0 ]] || exit 1

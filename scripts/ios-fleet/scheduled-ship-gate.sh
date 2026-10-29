@@ -30,10 +30,11 @@
 #                     GitHub filter semantics (** crosses /, * and ? stay
 #                     within one path segment), a trailing-slash dir/ is a
 #                     plain prefix, anything else without glob characters is
-#                     one exact file (or a directory, which matches the tree
-#                     under it), and a leading ! excludes (last match wins,
-#                     exactly like push.paths).  Order matters, so keep the
-#                     push order including the ! entries at the end.  A single
+#                     one exact file, and a leading ! excludes (last match
+#                     wins, exactly like push.paths).  A bare directory name
+#                     never matches the tree under it (that needs dir/ or
+#                     dir/**).  Order matters, so keep the push order
+#                     including the ! entries at the end.  A single
 #                     --path-prefix dir/ keeps working as before.
 #   --path-exclude P  Shorthand for --path-prefix '!P' (repeatable).
 #   --event NAME      GitHub event name (default: $GITHUB_EVENT_NAME).
@@ -170,12 +171,9 @@ _pattern_matches() {
       esac
       ;;
   esac
-  # Exact file, or a directory naming the tree under it.
-  [[ "$file" == "$pattern" ]] && return 0
-  case "$file" in
-    "${pattern}/"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  # Exact file only, like GitHub's push.paths: a bare directory name does
+  # not match the tree under it (that needs dir/ or dir/**).
+  [[ "$file" == "$pattern" ]]
 }
 
 _selected() {
@@ -278,7 +276,10 @@ for app in $APPS; do
         log "[${app}] last shipped sha ${last_sha} is unreachable from HEAD (shipped from another worktree/branch, or history was rewritten)."
         last_ts="$(awk 'NR==1{print $1}' "$state" 2>/dev/null || true)"
         if [[ "${last_ts:-}" =~ ^[0-9]+$ ]]; then
-          _since_all="$(git -C "$REPO_ROOT" log --since="@${last_ts}" --format= --name-only 2>/dev/null | sed '/^$/d' | sort -u || true)"
+          # --no-renames so a rename out of a watched path still lists the
+          # old name; -c core.quotePath=false so non-ASCII names arrive as
+          # raw bytes the matcher can compare.
+          _since_all="$(git -C "$REPO_ROOT" -c core.quotePath=false log --no-renames --since="@${last_ts}" --format= --name-only 2>/dev/null | sed '/^$/d' | sort -u || true)"
           since_changed="$(printf '%s\n' "$_since_all" | _filter_selected || true)"
           if [[ -n "$since_changed" ]]; then
             log "[${app}] falling back to time: ${PATHS_DESC} changed after the last ship:"
@@ -305,8 +306,12 @@ for app in $APPS; do
       # The full name list is filtered in-script (never by git pathspecs or
       # by piping into an early-exiting grep, which SIGPIPEs git under
       # pipefail): only the in-script filter knows the ! exclusions and the
-      # GitHub **-vs-* distinction.
-      _changed_all="$(git -C "$REPO_ROOT" diff --name-only "$last_sha" HEAD 2>/dev/null || true)"
+      # GitHub **-vs-* distinction.  --no-renames so a rename out of a
+      # watched path still lists the old name (rename detection shows only
+      # the new one and the gate would miss the change); -c
+      # core.quotePath=false so non-ASCII names arrive as raw bytes the
+      # matcher can compare.
+      _changed_all="$(git -C "$REPO_ROOT" -c core.quotePath=false diff --no-renames --name-only "$last_sha" HEAD 2>/dev/null || true)"
       changed="$(printf '%s\n' "$_changed_all" | _filter_selected || true)"
       if [[ -n "$changed" ]]; then
         log "[${app}] ${PATHS_DESC} changed since ${last_sha}:"
