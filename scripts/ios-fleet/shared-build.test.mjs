@@ -22,6 +22,31 @@ test('extra floors raise the counter above 999', () => {
   assert.deepEqual(next({...input, extraFloors: [1500]}), {build: '1501', ignoredIos: 0});
   assert.deepEqual(next({...input, iosBuilds: ['1100'], extraFloors: [1500]}), {build: '1501', ignoredIos: 0});
 });
+test('999 is the floor: a build or floor of 999 still starts at 1000', () => {
+  assert.deepEqual(next({...input, iosBuilds: ['999']}), {build: '1000', ignoredIos: 0});
+  assert.deepEqual(next({...input, macBuilds: ['999']}), {build: '1000', ignoredIos: 0});
+  assert.deepEqual(next({...input, extraFloors: [999]}), {build: '1000', ignoredIos: 0});
+});
+test('next is above an iOS build, a macOS build and a floor at once', () => {
+  // Each of the three sources wins in turn; the callers concatenate the
+  // paired app's builds into these same arrays (both platforms, both apps).
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1200'], macBuilds: ['1300'], extraFloors: [1400]}),
+    {build: '1401', ignoredIos: 0}
+  );
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1500'], macBuilds: ['1300'], extraFloors: [1400]}),
+    {build: '1501', ignoredIos: 0}
+  );
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1200'], macBuilds: ['1600'], extraFloors: [1400]}),
+    {build: '1601', ignoredIos: 0}
+  );
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1100', '1150'], macBuilds: ['1140'], extraFloors: [1130]}),
+    {build: '1151', ignoredIos: 0}
+  );
+});
 test('iOS timestamp builds are ignored and counted', () => {
   assert.deepEqual(
     next({...input, iosBuilds: ['202610190645', '202610180127']}),

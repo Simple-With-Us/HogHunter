@@ -100,6 +100,26 @@ function decodeP8(b64) {
   return pem.includes("-----BEGIN ") ? pem : null;
 }
 
+// The next page of a builds listing, validated before it is followed
+// (next-shared-build, Kody review).  parsed must be a non-null non-array
+// object, links must be one too when present, and links.next must be a string
+// when non-null.  Returns { ok, next }; the caller treats !ok as malformed
+// pagination.  Exported so the offline suite can pin it without credentials.
+export function nextBuildsPage(parsed) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, next: "" };
+  }
+  const links = parsed.links;
+  if (links === undefined) return { ok: true, next: "" };
+  if (links === null || typeof links !== "object" || Array.isArray(links)) {
+    return { ok: false, next: "" };
+  }
+  const next = links.next;
+  if (next === null || next === undefined) return { ok: true, next: "" };
+  if (typeof next !== "string") return { ok: false, next: "" };
+  return { ok: true, next };
+}
+
 // Infisical Fleet-OPS through `fleet-secrets get` (AFC-359).  "" when absent.
 // FLEET_SECRETS_BIN (ship-testflight.sh, the sh test) then FLEET_SECRETS (the js
 // test), then ~/.local/bin, then whatever "fleet-secrets" is on PATH.  Values stay
@@ -1735,7 +1755,12 @@ async function main() {
           failExit(res.status);
         }
         for (const b of res.parsed.data) out.push(b?.attributes?.version);
-        url = res.parsed.links?.next || "";
+        const paging = nextBuildsPage(res.parsed);
+        if (!paging.ok) {
+          console.error("next-shared-build: malformed pagination");
+          process.exit(2);
+        }
+        url = paging.next;
       }
       if (url) {
         console.error("next-shared-build: more than 100 pages of builds; refusing to guess");
@@ -1743,9 +1768,30 @@ async function main() {
       }
       return out;
     }
-    const iosBuilds = await allBuilds(appId, "IOS");
-    let macBuilds = await allBuilds(appId, "MAC_OS");
-    if (macAppId) macBuilds = macBuilds.concat(await allBuilds(macAppId, "MAC_OS"));
+    // One counter per app across iOS and macOS: when the paired bundle id
+    // resolves to a different app, BOTH platforms of BOTH apps join it:
+    // iosBuilds = IOS(app) + IOS(paired), macBuilds = MAC_OS(app) +
+    // MAC_OS(paired).  The inventories are independent, so they are read
+    // concurrently; the pager still fails closed past its page cap.
+    let iosBuilds;
+    let macBuilds;
+    if (macAppId) {
+      const [iosA, macA, iosB, macB] = await Promise.all([
+        allBuilds(appId, "IOS"),
+        allBuilds(appId, "MAC_OS"),
+        allBuilds(macAppId, "IOS"),
+        allBuilds(macAppId, "MAC_OS")
+      ]);
+      iosBuilds = iosA.concat(iosB);
+      macBuilds = macA.concat(macB);
+    } else {
+      const [iosA, macA] = await Promise.all([
+        allBuilds(appId, "IOS"),
+        allBuilds(appId, "MAC_OS")
+      ]);
+      iosBuilds = iosA;
+      macBuilds = macA;
+    }
     try {
       const planned = nextSharedBuild({ iosBuilds, macBuilds, extraFloors, complete: true });
       console.error(`next-shared-build: ${iosBuilds.length} iOS build(s) + ${macBuilds.length} macOS build(s) inspected; ignored ${planned.ignoredIos} iOS timestamp build(s); next is ${planned.build}`);
