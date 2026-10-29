@@ -352,7 +352,8 @@ final class HousekeeperLock {
         // The owner file is read before the move, because the move is what
         // decides the race and the file is only removed when it still names
         // the dead holder we found.
-        let deadOwnerPid = ownerPid()
+        let deadOwner = ownerRecord()
+        let deadOwnerPid = deadOwner?.pid
         // The moved-aside name is derived from the lock path, so it works
         // for any lock path and not only for the production one.
         let aside = path.deletingLastPathComponent()
@@ -376,7 +377,10 @@ final class HousekeeperLock {
         // rule alone would refuse it, which is the wedge this whole change
         // exists to undo.
         let movedIsStale = isStale(at: aside)
-        let ownerIsGone = deadOwnerPid.map { $0 > 0 && !HousekeeperLock.isProcessAlive($0) } ?? false
+        // The holder we found is gone when its pid is dead, or when that pid
+        // now names a different process.  The start token is what tells the
+        // two apart, and it is the same rule every implementation applies.
+        let ownerIsGone = deadOwner.map { HousekeeperLock.ownerIsGone($0) } ?? false
         guard movedIsStale || ownerIsGone else {
             // Someone else's fresh lock, held by a live process.  Put it back.
             putBack(aside)
@@ -488,16 +492,142 @@ final class HousekeeperLock {
         #endif
     }
 
+    /// The owner record, when the file holds one this protocol publishes.
+    ///
+    /// The shape is checked rather than coerced: the owner file is shared
+    /// state that any process can write, and a record this side calls
+    /// malformed while another implementation calls it usable leaves the
+    /// fleet with conflicting ownership decisions about one lock.
+    struct OwnerRecord {
+        let pid: Int32
+        let host: String
+        let acquiredAt: Double
+        let lock: String
+        let start: String
+    }
+
+    /// The exact shape of an owner record.
+    ///
+    /// This protocol is written in four places -- this file,
+    /// `scripts/vacuum/lock.py`, and AFC's `mac-auto-cleanup.sh` and
+    /// `mac-resource-watch.py` -- and all four publish and accept the SAME
+    /// shape.  A missing key and an unknown key are the same failure:  the
+    /// record is not the record this protocol publishes.
+    static let ownerRecordKeys: Set<String> = ["pid", "host", "acquired_at", "lock", "start"]
+
+    /// The longest start token this protocol accepts.
+    ///
+    /// The token is opaque and is never parsed, so this bound only keeps a
+    /// hostile file from putting an unbounded string in memory.
+    static let ownerStartMax = 128
+
+    /// True when a JSON number is really a boolean.
+    ///
+    /// `JSONSerialization` bridges JSON `true` and `false` to `NSNumber`, and
+    /// an `NSNumber` holding 0 or 1 bridges back to `Bool` in Swift, so a
+    /// pid cannot be told from a boolean by casting alone.  The CoreFoundation
+    /// type is what tells them apart.
+    static func isBooleanNumber(_ number: NSNumber) -> Bool {
+        #if canImport(Darwin)
+        return CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID()
+        #else
+        return false
+        #endif
+    }
+
+    /// The host name this process runs on, in the exact form the other
+    /// implementations compare against.
+    ///
+    /// `gethostname` rather than `ProcessInfo.processInfo.hostName`:  the
+    /// Python side reads `socket.gethostname()`, which is this very call, so
+    /// using it here makes the two byte-identical by construction rather than
+    /// by luck.
+    static func currentHostName() -> String {
+        #if canImport(Darwin)
+        var buffer = [CChar](repeating: 0, count: 256)
+        guard gethostname(&buffer, buffer.count) == 0 else { return "" }
+        return String(cString: buffer)
+        #else
+        return ProcessInfo.processInfo.hostName
+        #endif
+    }
+
+    /// The start time of the process a pid names, as an opaque string.
+    ///
+    /// A pid alone does not name a process:  the kernel hands the same number
+    /// to somebody else once the original exits, and a reused pid that is
+    /// ALIVE looks exactly like a holder that is still running.  The start
+    /// time tells the two apart.
+    ///
+    /// The token is opaque:  it is compared and never parsed.  It comes from
+    /// the same command, in the same locale, that every other implementation
+    /// of this protocol uses, so all four produce the SAME string for the
+    /// same process:
+    ///
+    ///     LC_ALL=C ps -o lstart= -p <pid>
+    ///
+    /// The environment is MINIMAL on purpose.  A TZ in the environment renders
+    /// the same start time in a different zone, so the token would depend on
+    /// the caller's environment and two implementations could disagree about
+    /// one live process.
+    static func processStartToken(_ pid: Int32) -> String {
+        guard pid > 0 else { return "" }
+        #if os(macOS)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/ps")
+        task.arguments = ["-o", "lstart=", "-p", String(pid)]
+        var environment: [String: String] = ["LC_ALL": "C"]
+        if let path = getenv("PATH") {
+            environment["PATH"] = String(cString: path)
+        }
+        task.environment = environment
+        let output = Pipe()
+        task.standardOutput = output
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            return ""
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return "" }
+        guard let text = String(data: data, encoding: .utf8) else { return "" }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        #else
+        return ""
+        #endif
+    }
+
+    /// True when the owner record proves the holder is gone.
+    ///
+    /// A dead pid proves it at once.  A live pid does not, because the
+    /// kernel hands the number to somebody else once the original exits:  the
+    /// holder is gone when that pid now names a DIFFERENT process, and the
+    /// start token is what tells the two apart.  When the token cannot be
+    /// read the record cannot speak for the lock, and the age rule decides.
+    static func ownerIsGone(_ owner: OwnerRecord) -> Bool {
+        if !isProcessAlive(owner.pid) { return true }
+        let current = processStartToken(owner.pid)
+        if current.isEmpty { return false }
+        return current != owner.start
+    }
+
     /// True when the recorded owner is definitely gone.
     ///
     /// A missing or unreadable owner file is *not* proof of anything: the
     /// shell holder never wrote one, so the caller falls back to the age
     /// rule.  Guessing wrong in that direction would steal a live lock.
     private var isOwnerGone: Bool {
-        guard ownerDescribesHolder(), let pid = ownerPid(), pid > 0, pid != getpid() else {
+        guard ownerDescribesHolder(), let owner = ownerRecord(),
+              owner.pid > 0, owner.pid != getpid() else {
             return false
         }
-        return !HousekeeperLock.isProcessAlive(pid)
+        // A pid only means something on the machine that owns it, so a lock
+        // held on another host cannot be taken over on the strength of a pid
+        // that is not ours.
+        guard owner.host == HousekeeperLock.currentHostName() else { return false }
+        return HousekeeperLock.ownerIsGone(owner)
     }
 
     /// True when the owner file describes the holder of the lock that is
@@ -507,7 +637,12 @@ final class HousekeeperLock {
     /// a leftover file from an earlier holder beside it.  That file names a
     /// pid that is gone, and reading it as the current holder would let a
     /// fresh live lock be taken over.  The owner file is only about the
-    /// current holder when it is at least as new as the lock directory.
+    /// current holder when it is STRICTLY newer than the lock directory.
+    ///
+    /// Strictly, not "at least as new":  the other three implementations of
+    /// this protocol refuse a record whose mtime equals the lock
+    /// directory's, and two readers that disagree about the same file leave
+    /// the fleet with conflicting ownership decisions about one lock.
     private func ownerDescribesHolder() -> Bool {
         guard let ownerAttributes = try? fileManager.attributesOfItem(atPath: ownerPath.path),
               let ownerModified = ownerAttributes[.modificationDate] as? Date,
@@ -515,18 +650,55 @@ final class HousekeeperLock {
               let lockModified = lockAttributes[.modificationDate] as? Date else {
             return false
         }
-        return ownerModified >= lockModified
+        return ownerModified > lockModified
+    }
+
+    /// The owner record, when the file holds one this protocol publishes.
+    ///
+    /// The types and the bounds of every value are checked, because the file
+    /// is shared state that any process can write:  a record that is missing
+    /// a key, carries an unknown key, or holds a value of the wrong type or
+    /// out of bounds is not an owner record, and handing one to the
+    /// lock-ownership logic would let a malformed file decide who holds the
+    /// lock.
+    private func ownerRecord() -> OwnerRecord? {
+        guard let data = fileManager.contents(atPath: ownerPath.path),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else {
+            return nil
+        }
+        guard Set(dict.keys) == HousekeeperLock.ownerRecordKeys else { return nil }
+        // A float pid is refused the way the Python reader refuses a
+        // non-int one; intValue would otherwise truncate 1234.5 to 1234.
+        guard let pidNumber = dict["pid"] as? NSNumber,
+              !HousekeeperLock.isBooleanNumber(pidNumber),
+              !CFNumberIsFloatType(pidNumber as CFNumber) else {
+            return nil
+        }
+        let pidValue = pidNumber.intValue
+        guard pidValue > 0, pidValue <= Int(Int32.max) else { return nil }
+        guard let host = dict["host"] as? String, !host.isEmpty else { return nil }
+        guard let acquiredNumber = dict["acquired_at"] as? NSNumber,
+              !HousekeeperLock.isBooleanNumber(acquiredNumber) else {
+            return nil
+        }
+        let acquiredAt = acquiredNumber.doubleValue
+        guard acquiredAt.isFinite else { return nil }
+        guard let lock = dict["lock"] as? String, !lock.isEmpty else { return nil }
+        guard let start = dict["start"] as? String,
+              !start.isEmpty,
+              // Unicode scalars, not grapheme clusters:  Python's len()
+              // counts code points, and both readers must agree on the bound.
+              start.unicodeScalars.count <= HousekeeperLock.ownerStartMax else {
+            return nil
+        }
+        return OwnerRecord(pid: Int32(pidValue), host: host, acquiredAt: acquiredAt,
+                           lock: lock, start: start)
     }
 
     /// The pid recorded in the owner file, when there is a readable one.
     private func ownerPid() -> Int32? {
-        guard let data = fileManager.contents(atPath: ownerPath.path),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let dict = object as? [String: Any],
-              let pid = dict["pid"] as? NSNumber else {
-            return nil
-        }
-        return pid.int32Value
+        ownerRecord()?.pid
     }
 
     /// The pid the owner file names right now.
@@ -547,33 +719,65 @@ final class HousekeeperLock {
 
     /// Record who holds the lock.
     ///
-    /// The pid is what makes a killed holder recoverable.  A failure to write
-    /// is not fatal: the lock directory is the real mutex, and the owner file
-    /// only makes recovery fast.
+    /// The pid is what makes a killed holder recoverable.  The start time
+    /// travels with the pid, because a pid the kernel has since handed to
+    /// somebody else would otherwise look exactly like a live holder.
+    ///
+    /// A failure to write is not fatal: the lock directory is the real mutex,
+    /// and the owner file only makes recovery fast.
     private func writeOwnerFile() {
-        var payload: [String: Any] = [
+        let start = HousekeeperLock.processStartToken(getpid())
+        guard !start.isEmpty else {
+            // Without the start time the record cannot tell the holder from
+            // a reused pid, so none is written:  a missing owner file is an
+            // ordinary state -- the shell holder writes none at all -- and
+            // the age rule decides.
+            return
+        }
+        let host = HousekeeperLock.currentHostName()
+        guard !host.isEmpty else { return }
+        let payload: [String: Any] = [
             "pid": Int(getpid()),
+            "host": host,
             "acquired_at": Date().timeIntervalSince1970,
             "lock": path.path,
+            "start": start,
         ]
-        let host = ProcessInfo.processInfo.hostName
-        if !host.isEmpty { payload["host"] = host }
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        try? data.write(to: ownerPath, options: .atomic)
+        // The record names a pid and a host and sits in a shared directory,
+        // so it is PRIVATE to the user from creation, the same as the Python
+        // writer's O_EXCL 0600 temp file:  a mode applied after the write
+        // would leave a window, or a widened file if the chmod failed.  The
+        // temp file is renamed over the record, so readers never see a
+        // partial write.
+        let tempPath = ownerPath.path + ".tmp.\(getpid())"
+        let fd = open(tempPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else { return }
+        let written = data.withUnsafeBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Darwin.write(fd, base, buffer.count)
+        }
+        close(fd)
+        guard written == data.count, rename(tempPath, ownerPath.path) == 0 else {
+            unlink(tempPath)
+            return
+        }
     }
 
     /// Remove the owner file, but only when it is this process's own.
     ///
     /// A lock that was taken over while this one was still running names the
     /// new holder now, and deleting that file takes away the new holder's
-    /// identity.  A file that names no readable pid belongs to nobody, so it
-    /// goes.
+    /// identity.
+    ///
+    /// A file that cannot be READ AS AN OWNER RECORD is left alone too.  A
+    /// holder that cannot read the file cannot know whose it is, and
+    /// deleting it would take away the identity of whoever really holds the
+    /// lock now.  The same rule the AFC readers apply, and they are the
+    /// other readers of this very file.
     private func removeOwnerFile() {
-        guard let pid = ownerPid() else {
-            try? fileManager.removeItem(at: ownerPath)
-            return
-        }
-        guard pid == getpid() else { return }
+        guard let owner = ownerRecord() else { return }
+        guard owner.pid == getpid() else { return }
         try? fileManager.removeItem(at: ownerPath)
     }
 

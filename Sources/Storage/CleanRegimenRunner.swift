@@ -442,8 +442,14 @@ final class CleanRegimenRunner: ObservableObject {
         // racing over one file is how a half-deleted cache directory happens.
         // This is the same lock `scripts/vacuum/lock.py` takes, so the Swift
         // runner and the Python engine exclude each other.
+        //
+        // `acquire()` runs `/bin/ps` to read the owner's start token, and
+        // this runner is on the main actor, so the take happens on a detached
+        // task: a slow `ps` or a contended guard must not stall the UI.
+        // `release()` spawns no process, so the deferred give-back stays here.
         let lock = lockProvider()
-        guard lock.acquire() == .acquired else {
+        let outcome = await Task.detached(priority: .utility) { lock.acquire() }.value
+        guard outcome == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
             recordsRun = false
             finish(result, regimen: regimen)
