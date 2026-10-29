@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+The housekeeper owner record is one protocol across all four implementations (shared with AFC-554):
+
+- The lock at `~/.claude-disk-janitor/.housekeeper.lock` is shared by four programs: Hog Hunter's Python vacuum, Hog Hunter's Swift lock, and AFC's `mac-auto-cleanup.sh` and `mac-resource-watch.py`.  All four write an owner file beside the lock directory and read it back to answer one question: is the holder still there?
+- AFC PR #980 made AFC's two readers enforce one strict schema, and the record must carry the start time of the holder's process so that a pid the kernel has since handed to somebody else cannot pass for a live holder.  Hog Hunter's two writers still published the old shape, so a Hog Hunter holder's record was refused outright and AFC's readers fell back to the 120-minute age rule.  The cost was liveness only: no live holder was ever displaced.
+- Both Hog Hunter sides now publish the same five keys as AFC: `pid`, `host`, `acquired_at`, `lock` and `start`.  The key set is exact, every value is checked for its type and its bounds, and a boolean pid is refused because `isinstance(True, int)` is true in Python and JSON `true` bridges to `NSNumber` in Swift.
+- The start token is opaque and comes from one command in one locale: `LC_ALL=C ps -o lstart= -p <pid>`, run with PATH and LC_ALL alone.  The minimal environment is load-bearing: `ps` renders the start time in the caller's zone, so a TZ in the environment renders the same process with a different token, and a reader that passed its whole environment along would read a live holder as gone.
+- The owner file must be strictly newer than the lock directory beside it, and a file that cannot be read as an owner record is left alone rather than deleted, because a holder that cannot read it cannot know whose it is.
+- The Swift side reads the host with `gethostname` rather than `ProcessInfo.processInfo.hostName`, so it is byte-identical with the Python side's `socket.gethostname()` by construction.  Full context in `docs/rollouts/2026-10-28-housekeeper-owner-record-protocol.md`.
+
 One failed PR lookup no longer throws away the whole doctor report (HH-168):
 
 - The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.
