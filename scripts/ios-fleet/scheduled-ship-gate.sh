@@ -14,19 +14,28 @@
 # tests "is HEAD the sha I last shipped" plus a time interval. Without this
 # script, a backend-only commit sitting past the rate-limit window would ship a
 # TestFlight build for changes no tester can see. The owner does not want
-# TestFlight spammed, so the scheduled path ships only when the app's own
-# source tree actually changed since its last successful ship.
+# TestFlight spammed, so the scheduled path ships only when a path the
+# workflow's own push filter would have shipped actually changed since the
+# last successful ship. Owner rule 2026-10-29: unless a merge built recently
+# it should automatically build, so the gate takes EVERY push path (native
+# tree plus ship machinery) and a missed push still ships on the next tick.
 #
 # Usage:
-#   scheduled-ship-gate.sh --path-prefix <dir/> [options] <app_key> [app_key...]
+#   scheduled-ship-gate.sh --path-prefix <pattern> [options] <app_key> [app_key...]
 #
 # Options:
-#   --path-prefix P   Repo-relative path prefix that counts as app source
-#                     (required; e.g. clients/ios/ or ios/).  Repeat the flag
-#                     when the app also compiles files from outside its own
-#                     tree (CodeCaps compiles shared Sources/QuotaCore files);
-#                     a change under ANY prefix counts.  A prefix may also be
-#                     one exact file.
+#   --path-prefix P   Repo-relative path pattern that counts as shippable
+#                     (required, repeatable; e.g. ios/** or ios/).  Pass the
+#                     workflow's own on.push.paths list verbatim: globs follow
+#                     GitHub filter semantics (** crosses /, * and ? stay
+#                     within one path segment), a trailing-slash dir/ is a
+#                     plain prefix, anything else without glob characters is
+#                     one exact file (or a directory, which matches the tree
+#                     under it), and a leading ! excludes (last match wins,
+#                     exactly like push.paths).  Order matters, so keep the
+#                     push order including the ! entries at the end.  A single
+#                     --path-prefix dir/ keeps working as before.
+#   --path-exclude P  Shorthand for --path-prefix '!P' (repeatable).
 #   --event NAME      GitHub event name (default: $GITHUB_EVENT_NAME).
 #                     Anything other than "schedule" votes ship=1 for every
 #                     app: a push already passed the workflow's paths filter,
@@ -59,6 +68,7 @@ log() { echo "[ship-gate] $*"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --path-prefix) PATH_PREFIXES+=("${2:-}"); shift 2 ;;
+    --path-exclude) PATH_PREFIXES+=("!${2:-}"); shift 2 ;;
     --event) EVENT="${2:-}"; shift 2 ;;
     --repo-root) REPO_ROOT="${2:-}"; shift 2 ;;
     --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
@@ -72,6 +82,7 @@ done
 # Every prefix must be non-empty: an empty pathspec would match the whole repo.
 for _p in "${PATH_PREFIXES[@]}"; do
   [[ -n "$_p" ]] || die "--path-prefix must not be empty"
+  [[ "$_p" != "!" ]] || die "--path-prefix must not be a bare '!'"
 done
 # One printable list for the log lines (comma-separated).
 PATHS_DESC=""
@@ -82,6 +93,126 @@ done
 
 if [[ -z "$REPO_ROOT" ]]; then REPO_ROOT="$(pwd)"; fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd)" || die "bad --repo-root"
+
+# GitHub push-paths matching, as closely as bash 3.2 allows. A changed file is
+# selected when the LAST matching pattern is an include: includes set it, a !
+# exclusion clears it. Patterns are evaluated in the order given, so the gate
+# call keeps the on.push.paths order verbatim.
+_GP=()
+_GF=()
+_GPLEN=0
+_GFLEN=0
+
+_match_at() {
+  # _match_at <pattern_index> <file_index>; uses _GP/_GF Globals.
+  local pi="$1" fi="$2" seg fseg k
+  if [[ "$pi" -ge "$_GPLEN" ]]; then
+    [[ "$fi" -ge "$_GFLEN" ]] && return 0 || return 1
+  fi
+  seg="${_GP[$pi]}"
+  if [[ "$seg" == "**" ]]; then
+    if [[ "$((pi + 1))" -ge "$_GPLEN" ]]; then
+      return 0
+    fi
+    k="$fi"
+    while [[ "$k" -le "$_GFLEN" ]]; do
+      if _match_at "$((pi + 1))" "$k"; then
+        return 0
+      fi
+      k="$((k + 1))"
+    done
+    return 1
+  fi
+  [[ "$fi" -ge "$_GFLEN" ]] && return 1
+  fseg="${_GF[$fi]}"
+  case "$seg" in
+    *\*\**) seg="${seg//\*\*/\*}" ;;
+  esac
+  # Unquoted $seg is the shell pattern (* ? [...] stay in-segment because a
+  # segment never holds a slash); quoted would compare literally.
+  # shellcheck disable=SC2053
+  if [[ "$fseg" == $seg ]]; then
+    _match_at "$((pi + 1))" "$((fi + 1))"
+  else
+    return 1
+  fi
+}
+
+_glob_match() {
+  # _glob_match <pattern> <file>: ** crosses /, * and ? do not.
+  local pattern="$1" file="$2" oldifs="$IFS"
+  IFS='/'
+  set -f
+  _GP=($pattern)
+  _GF=($file)
+  set +f
+  IFS="$oldifs"
+  _GPLEN="${#_GP[@]}"
+  _GFLEN="${#_GF[@]}"
+  _match_at 0 0
+}
+
+_pattern_matches() {
+  # _pattern_matches <pattern> <file> (pattern without any leading !).
+  local pattern="$1" file="$2"
+  case "$pattern" in
+    *\**|*\?*|*\[*)
+      _glob_match "$pattern" "$file"
+      return "$?"
+      ;;
+  esac
+  case "$pattern" in
+    */)
+      # Plain dir/ prefix, the pre-glob calling convention.
+      case "$file" in
+        "${pattern}"*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  # Exact file, or a directory naming the tree under it.
+  [[ "$file" == "$pattern" ]] && return 0
+  case "$file" in
+    "${pattern}/"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_selected() {
+  # _selected <file>: true when push.paths would have shipped a push of it.
+  local file="$1" pat rest selected=1
+  for pat in "${PATH_PREFIXES[@]}"; do
+    case "$pat" in
+      !*)
+        rest="${pat#!}"
+        if _pattern_matches "$rest" "$file"; then
+          selected=1
+        fi
+        ;;
+      *)
+        if _pattern_matches "$pat" "$file"; then
+          selected=0
+        fi
+        ;;
+    esac
+  done
+  return "$selected"
+}
+
+_filter_selected() {
+  # _filter_selected: stdin is newline-separated changed paths, stdout is the
+  # selected ones (at most 20, for the log). Prints nothing when none match.
+  local f count=0
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    if _selected "$f"; then
+      printf '%s\n' "$f"
+      count="$((count + 1))"
+      [[ "$count" -ge 20 ]] && break
+    fi
+  done
+  return 0
+}
 
 emit() {
   # emit <key> <value>
@@ -147,7 +278,8 @@ for app in $APPS; do
         log "[${app}] last shipped sha ${last_sha} is unreachable from HEAD (shipped from another worktree/branch, or history was rewritten)."
         last_ts="$(awk 'NR==1{print $1}' "$state" 2>/dev/null || true)"
         if [[ "${last_ts:-}" =~ ^[0-9]+$ ]]; then
-          since_changed="$(git -C "$REPO_ROOT" log --since="@${last_ts}" --format= --name-only -- "${PATH_PREFIXES[@]}" 2>/dev/null | sed '/^$/d' | sort -u | head -20)"
+          _since_all="$(git -C "$REPO_ROOT" log --since="@${last_ts}" --format= --name-only 2>/dev/null | sed '/^$/d' | sort -u || true)"
+          since_changed="$(printf '%s\n' "$_since_all" | _filter_selected || true)"
           if [[ -n "$since_changed" ]]; then
             log "[${app}] falling back to time: ${PATHS_DESC} changed after the last ship:"
             # Line-by-line, NOT `printf ... $var`: Socratic.Trade's iOS path is
@@ -170,10 +302,12 @@ for app in $APPS; do
 
     if [[ "$decision" -eq -1 ]]; then
       # Reachable range: the only case where a real diff is meaningful.
-      # Captured into a variable, not piped into `grep -q`: under pipefail an
-      # early-exiting grep SIGPIPEs git and the pipeline reports failure even
-      # though it matched.
-      changed="$(git -C "$REPO_ROOT" diff --name-only "$last_sha" HEAD -- "${PATH_PREFIXES[@]}" 2>/dev/null | head -20)"
+      # The full name list is filtered in-script (never by git pathspecs or
+      # by piping into an early-exiting grep, which SIGPIPEs git under
+      # pipefail): only the in-script filter knows the ! exclusions and the
+      # GitHub **-vs-* distinction.
+      _changed_all="$(git -C "$REPO_ROOT" diff --name-only "$last_sha" HEAD 2>/dev/null || true)"
+      changed="$(printf '%s\n' "$_changed_all" | _filter_selected || true)"
       if [[ -n "$changed" ]]; then
         log "[${app}] ${PATHS_DESC} changed since ${last_sha}:"
         printf '%s\n' "$changed" | while IFS= read -r f; do echo "  $f"; done
