@@ -444,4 +444,18 @@ build_exceeds 999999999999 1000000000000 && fail "length-lesser build accepted"
 build_exceeds 1234567890123456789 123456789012345678 || fail "over-long comparison misread"
 ok
 
+# 28. An over-length planner answer fails closed with a message naming it:
+# fixed mode requires the 12-digit merge-timestamp shape, so a plan above it
+# is refused loudly instead of shipped or silently dropped.
+run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=2026102905319
+[[ "$(rc)" -eq 1 ]] || fail "13-digit client answer should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an over-length client answer must print no build"
+stderr | grep -q -F "2026102905319" || fail "over-length answer not named: $(stderr)"
+stderr | grep -q -F "12-digit" || fail "over-length answer did not say why: $(stderr)"
+run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=123456789012345678
+[[ "$(rc)" -eq 1 ]] || fail "18-digit client answer should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an over-length client answer must print no build"
+stderr | grep -q -F "123456789012345678" || fail "18-digit answer not named: $(stderr)"
+ok
+
 echo "PASS: ${pass} plan-release-build ship-helper checks"

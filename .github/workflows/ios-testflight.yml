@@ -109,9 +109,10 @@ jobs:
   # ship job of the release reuses this one value through --build, so two
   # platforms can never compute different builds.  Read-only: it queries App
   # Store Connect and the merge stamp of HEAD, plans nothing when the
-  # inventory is incomplete, and consumes nothing.  It runs before the ship
-  # gate on purpose -- a tick with nothing to ship still plans a number, and
-  # the ship job below then gates out and uploads nothing.
+  # inventory is incomplete, and consumes nothing.  The scheduled gate runs
+  # first, so a tick with nothing to ship plans nothing and queries nothing:
+  # without it every hourly tick would pay a full ASC inventory, and a
+  # transient ASC hiccup would red a run that had nothing to ship.
   plan-build:
     name: Plan release build
     if: >-
@@ -128,11 +129,45 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # The gate below diffs HEAD against the sha recorded by the last
+          # successful ship.  A shallow clone makes the range uncomputable.
+          fetch-depth: 0
+
+      - name: Restore iOS ship state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ios-fleet
+          key: ios-fleet-state-hoghunter-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ios-fleet-state-hoghunter-ios-${{ github.run_id }}-
+            ios-fleet-state-hoghunter-ios-
+
+      # Before any ASC query, so a tick with nothing to ship costs seconds and
+      # a transient ASC hiccup cannot red it.  Prefixes mirror on.push.paths
+      # (minus the machinery files, which only a push or a dispatch should act
+      # on) and the ship job's gate below.  The logic lives in a script so CI
+      # unit-tests it, and scripts/test-ios-release.py pins both prefix lists
+      # to project.yml.
+      - name: Scheduled ship gate (skip unless iOS code changed)
+        id: gate
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/ios-fleet/scheduled-ship-gate.sh" \
+            --event "${{ github.event_name }}" \
+            --path-prefix 'ios/' \
+            --path-prefix 'project.yml' \
+            --path-prefix 'Sources/Companion/CompanionSnapshot.swift' \
+            --path-prefix 'Sources/Companion/CompanionHTTP.swift' \
+            --path-prefix 'Sources/Companion/CompanionPeer.swift' \
+            --path-prefix 'Sources/UI/CpuSparklineView.swift' \
+            --path-prefix 'Sources/Telemetry/SentryTelemetry.swift' \
+            --repo-root "$GITHUB_WORKSPACE" \
+            hoghunter
 
       # ASC key from Fleet-OPS prod /asc.  Same block as the ship job:  the
       # planner queries App Store Connect, so it loads the credential the
       # same way (names only;  values are never printed).
       - name: Load ASC credentials (Fleet-OPS prod /asc)
+        if: steps.gate.outputs.should_ship == '1'
         env:
           # The org secret shared with this repository (ContactLogo reads /asc
           # the same way), so this public file never names the project.
@@ -239,6 +274,7 @@ jobs:
 
       - name: Plan the release build
         id: plan
+        if: steps.gate.outputs.should_ship == '1'
         run: |
           set -euo pipefail
           build="$(bash "$GITHUB_WORKSPACE/scripts/ios-fleet/ship-testflight.sh" hoghunter --plan-build-only --repo-root "$GITHUB_WORKSPACE")"

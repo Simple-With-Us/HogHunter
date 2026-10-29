@@ -588,6 +588,11 @@ project_marketing_seq() {
 # component among every build of the app on iOS and of its paired macOS app
 # (and vice versa), plus the pairedBuildFeed max.  Prints the build on
 # stdout.  Returns 1 (and prints nothing) when it cannot be worked out.
+# Fixed mode ships 12-digit merge-timestamp builds only (the workflow plan
+# step and the --build check enforce the same shape), so a plan above that
+# shape is refused with a message naming it, never shipped or silently
+# dropped:  an App Store Connect build or feed floor above 999999999999
+# leaves no shippable build for this release.
 asc_next_shared_build() {
   local out rc mac_id feed feed_xml max floor curl_err curl_stderr rev _plat _is_mac stamp
   command -v "$ASC_NODE" >/dev/null 2>&1 || return 1
@@ -716,7 +721,13 @@ PY
     rc=$?
   fi
   set -e
-  [[ $rc -eq 0 && "$out" =~ ^[1-9][0-9]{11}$ ]] || return 1
+  # A failing client already said why on stderr; only the shape refusal needs
+  # its own message, naming the answer so the log shows what was refused.
+  [[ $rc -eq 0 ]] || return 1
+  if [[ ! "$out" =~ ^[1-9][0-9]{11}$ ]]; then
+    logerr "asc-shared-build: planner answered '${out:-<empty>}', which is not a 12-digit merge-timestamp build; fixed mode requires YYYYMMDDHHMM with no leading zero, so an App Store Connect build or feed floor above 999999999999 leaves no shippable build"
+    return 1
+  fi
   printf '%s' "$out"
 }
 
