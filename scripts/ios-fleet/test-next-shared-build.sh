@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# next-shared-build ship-helper tests: the pairedBuildFeed fetch is bounded and
-# fails closed with the feed URL in the message, and the paired bundle id
-# reaches the node client (pairedBundleId preferred, macBundleId as the alias,
-# reverse lookup for a macOS entry with neither).
+# plan-release-build ship-helper tests: the pairedBuildFeed fetch is bounded and
+# fails closed with the feed URL in the message, the merge stamp of HEAD joins
+# the client call, the planned 12-digit build is validated, and the paired
+# bundle id reaches the node client (pairedBundleId preferred, macBundleId as
+# the alias, reverse lookup for a macOS entry with neither).  The
+# max-platform-build helper and the build_exceeds comparison behind the
+# fixed-mode --build check are covered too.
 #
-# Offline: a fake curl, a fake node client and a fixture apps.json.  No
-# network, no App Store Connect, no secrets.  The helper is extracted from
-# ship-testflight.sh the way test-asc-credentials.sh extracts load_secrets.
+# Offline: a fake curl, a fake node client, a fixture apps.json and a fixture
+# git repo with a fixed committer date.  No network, no App Store Connect, no
+# secrets.  The helpers are extracted from ship-testflight.sh the way
+# test-asc-credentials.sh extracts load_secrets.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +26,22 @@ ok() { pass=$((pass + 1)); }
 
 FEED_URL="https://feeds.example.invalid/ios.xml"
 HTTP_FEED_URL="http://feeds.example.invalid/ios.xml"
+# The planned build the fake client answers with when CLIENT_BUILD is unset.
+FAKE_BUILD="202610290531"
+
+# Fixture repo: one commit with a fixed committer date, so the merge stamp is
+# deterministic.  2026-10-20 12:00 -0500 is 12:00 on the America/Chicago clock.
+gitrepo="${tmp}/repo"
+mkdir -p "$gitrepo"
+git -c init.defaultBranch=main init -q "$gitrepo"
+git -C "$gitrepo" config user.email test@example.invalid
+git -C "$gitrepo" config user.name Test
+GIT_COMMITTER_DATE="2026-10-20 12:00:00 -0500" GIT_AUTHOR_DATE="2026-10-20 12:00:00 -0500" \
+  git -C "$gitrepo" commit -q --allow-empty -m fixture
+STAMP="$(TZ=America/Chicago git -C "$gitrepo" show -s --format=%cd --date=format-local:%Y%m%d%H%M HEAD)"
+[[ "$STAMP" == "202610201200" ]] || fail "fixture stamp is $STAMP, want 202610201200"
+export REPO_ROOT="$gitrepo"
+export ASC_PLATFORM="IOS"
 
 cat > "${tmp}/apps.json" <<JSON
 {"apps": {
@@ -83,6 +103,26 @@ case "${CURL_MODE:?}" in
       '<item><sparkle:version>10000</sparkle:version></item>' \
       '</channel></rss>'
     ;;
+  huge18)
+    printf '%s\n' '<rss><channel>' \
+      '<item><sparkle:version>123456789012345678</sparkle:version></item>' \
+      '</channel></rss>'
+    ;;
+  giant)
+    printf '%s\n' '<rss><channel>' \
+      '<item><sparkle:version>1234567890123456789</sparkle:version></item>' \
+      '</channel></rss>'
+    ;;
+  max12)
+    printf '%s\n' '<rss><channel>' \
+      '<item><sparkle:version>999999999999</sparkle:version></item>' \
+      '</channel></rss>'
+    ;;
+  over12)
+    printf '%s\n' '<rss><channel>' \
+      '<item><sparkle:version>1000000000000</sparkle:version></item>' \
+      '</channel></rss>'
+    ;;
   edge)
     printf '%s\n' '<rss><channel>' \
       '<item><sparkle:version>1</sparkle:version></item>' \
@@ -96,20 +136,20 @@ chmod +x "${tmp}/curl"
 
 # Fake node client: records its args (minus the asc-api.mjs path asc_client
 # prepends), then prints CLIENT_BUILD.  Never touches the network.
-cat > "${tmp}/fake-client" <<'FAKE'
+cat > "${tmp}/fake-client" <<FAKE
 #!/usr/bin/env bash
 shift
-printf '%s' "$*" > "${CLIENT_ARGS_FILE:?}"
-if [[ "${CLIENT_RC:-0}" -eq 0 ]]; then
-  printf '%s' "${CLIENT_BUILD:-1501}"
+printf '%s' "\$*" > "\${CLIENT_ARGS_FILE:?}"
+if [[ "\${CLIENT_RC:-0}" -eq 0 ]]; then
+  printf '%s' "\${CLIENT_BUILD:-$FAKE_BUILD}"
 fi
-exit "${CLIENT_RC:-0}"
+exit "\${CLIENT_RC:-0}"
 FAKE
 chmod +x "${tmp}/fake-client"
 
 extract() {
   awk '
-    /^json_get\(\) \{/ || /^asc_credential_source_present\(\) \{/ || /^asc_client\(\) \{/ || /^asc_next_shared_build\(\) \{/ { grab = 1 }
+    /^json_get\(\) \{/ || /^asc_credential_source_present\(\) \{/ || /^asc_client\(\) \{/ || /^asc_next_shared_build\(\) \{/ || /^asc_platform_max_build\(\) \{/ || /^build_exceeds\(\) \{/ { grab = 1 }
     grab { print }
     grab && /^\}/ { grab = 0 }
   ' "$script"
@@ -124,13 +164,19 @@ funcs="${tmp}/funcs.sh"
   extract
 } > "$funcs"
 grep -q '^asc_next_shared_build()' "$funcs" || fail "asc_next_shared_build not found in ship-testflight.sh"
+grep -q '^asc_platform_max_build()' "$funcs" || fail "asc_platform_max_build not found in ship-testflight.sh"
+grep -q '^build_exceeds()' "$funcs" || fail "build_exceeds not found in ship-testflight.sh"
 grep -q '^json_get()' "$funcs" || fail "json_get not found in ship-testflight.sh"
 grep -q '^asc_client()' "$funcs" || fail "asc_client not found in ship-testflight.sh"
 
 cat > "${tmp}/run.sh" <<RUN
 set -u
 source "${funcs}"
-asc_next_shared_build
+if [[ "\${HELPER_MODE:-shared}" == "max" ]]; then
+  asc_platform_max_build
+else
+  asc_next_shared_build
+fi
 RUN
 
 export CURL_ARGS_FILE="${tmp}/curl-args"
@@ -200,34 +246,34 @@ stderr | grep -q -F "$FEED_URL" || fail "missing curl did not name the URL: $(st
 export PATH="${tmp}:/usr/bin:/bin"
 ok
 
-# 6. pairedBundleId is preferred over macBundleId, and the feed max joins as
-# the floor.
+# 6. pairedBundleId is preferred over macBundleId, the feed max joins as the
+# floor, and the merge stamp of HEAD joins as the trailing flag.
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(stdout)" == "1501" ]] || fail "expected the client build on stdout, got: $(stdout)"
-[[ "$(client_args)" == "next-shared-build com.example.ios com.example.mac 1400" ]] \
+[[ "$(stdout)" == "$FAKE_BUILD" ]] || fail "expected the client build on stdout, got: $(stdout)"
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 1400 --merge-stamp ${STAMP}" ]] \
   || fail "paired passthrough wrong: $(client_args)"
 ok
 
 # 7. macBundleId stays accepted as the alias.
 run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.ios com.example.mac 1400" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 1400 --merge-stamp ${STAMP}" ]] \
   || fail "macBundleId alias not passed through: $(client_args)"
 ok
 
 # 8. A macOS entry names its iOS app as the paired id.
 run_helper mac-paired com.example.mac "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.mac com.example.ios" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.mac com.example.ios --merge-stamp ${STAMP}" ]] \
   || fail "mac entry passthrough wrong: $(client_args)"
 [[ ! -s "$CURL_ARGS_FILE" ]] || fail "no feed configured, but curl ran: $(curl_args)"
 ok
 
-# 9. No paired id and no feed: the client gets the bundle alone.
+# 9. No paired id and no feed: the client gets the bundle and the stamp.
 run_helper solo com.example.solo "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.solo" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.solo --merge-stamp ${STAMP}" ]] \
   || fail "solo passthrough wrong: $(client_args)"
 ok
 
@@ -237,10 +283,17 @@ run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_RC=2
 [[ -s "${tmp}/stdout" ]] && fail "a failed client must print no build"
 ok
 
-# 11. A malformed client answer fails closed.
+# 11. A malformed client answer fails closed, including the retired
+# four-digit counter form.
 run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=xyz
 [[ "$(rc)" -eq 1 ]] || fail "malformed client output should return 1, got $(rc)"
 [[ -s "${tmp}/stdout" ]] && fail "a malformed client answer must print no build"
+run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=1501
+[[ "$(rc)" -eq 1 ]] || fail "a four-digit client answer should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "a four-digit client answer must print no build"
+run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=02610290531
+[[ "$(rc)" -eq 1 ]] || fail "a zero-leading client answer should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "a zero-leading client answer must print no build"
 ok
 
 # 12. No credential source fails closed without running curl or the client.
@@ -256,7 +309,7 @@ ok
 # 13. Whitespace-padded <sparkle:version> values still count.
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=padded
 [[ "$(rc)" -eq 0 ]] || fail "padded feed should return 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.ios com.example.mac 1400" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 1400 --merge-stamp ${STAMP}" ]] \
   || fail "padded versions misread: $(client_args)"
 ok
 
@@ -270,41 +323,39 @@ stderr | grep -q -F "not https" || fail "http feed did not say why: $(stderr)"
 [[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran for a non-https feed"
 ok
 
-# 15. A feed max above 9998 fails closed with the URL in the message.
+# 15. A feed max of 9999 joins the plan: the 1..9998 cap is gone.
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=big
-[[ "$(rc)" -eq 1 ]] || fail "9999 floor should return 1, got $(rc)"
-[[ -s "${tmp}/stdout" ]] && fail "an out-of-range floor must print no build"
-stderr | grep -q -F "$FEED_URL" || fail "big floor did not name the URL: $(stderr)"
-stderr | grep -q -F "outside 1..9998" || fail "big floor did not say why: $(stderr)"
-[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an out-of-range floor"
+[[ "$(rc)" -eq 0 ]] || fail "9999 floor should return 0, got $(rc): $(stderr)"
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 9999 --merge-stamp ${STAMP}" ]] \
+  || fail "9999 floor misread: $(client_args)"
 ok
 
-# 16. A feed max of 10000 fails closed the same way.
+# 16. A feed max of 10000 joins the plan the same way.
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=huge
-[[ "$(rc)" -eq 1 ]] || fail "10000 floor should return 1, got $(rc)"
-stderr | grep -q -F "$FEED_URL" || fail "huge floor did not name the URL: $(stderr)"
-stderr | grep -q -F "outside 1..9998" || fail "huge floor did not say why: $(stderr)"
+[[ "$(rc)" -eq 0 ]] || fail "10000 floor should return 0, got $(rc): $(stderr)"
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 10000 --merge-stamp ${STAMP}" ]] \
+  || fail "10000 floor misread: $(client_args)"
 ok
 
 # 17. A feed max below 1 fails closed with the URL in the message.
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=zero
 [[ "$(rc)" -eq 1 ]] || fail "zero floor should return 1, got $(rc)"
 stderr | grep -q -F "$FEED_URL" || fail "zero floor did not name the URL: $(stderr)"
-stderr | grep -q -F "outside 1..9998" || fail "zero floor did not say why: $(stderr)"
+stderr | grep -q -F "not a positive integer" || fail "zero floor did not say why: $(stderr)"
 ok
 
 # 18. The boundary floors 1 and 9998 are accepted; the max joins.
 run_helper ios-paired com.example.ios "$CRED" CURL_MODE=edge
 [[ "$(rc)" -eq 0 ]] || fail "edge feed should return 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.ios com.example.mac 9998" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 9998 --merge-stamp ${STAMP}" ]] \
   || fail "edge floor misread: $(client_args)"
 ok
 
 # 19. A macOS entry with no paired id reverse-resolves its peer, so the
-# peer's iOS builds join the counter.
+# peer's iOS builds join the plan.
 run_helper mac-orphan com.example.mac2 "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.mac2 com.example.ios2" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.mac2 com.example.ios2 --merge-stamp ${STAMP}" ]] \
   || fail "mac reverse lookup wrong: $(client_args)"
 [[ ! -s "$CURL_ARGS_FILE" ]] || fail "no feed configured, but curl ran: $(curl_args)"
 ok
@@ -312,7 +363,7 @@ ok
 # 20. The -mac key suffix counts as a macOS entry for the reverse lookup.
 run_helper lonely-mac com.example.mac4 "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.mac4 com.example.ios4" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.mac4 com.example.ios4 --merge-stamp ${STAMP}" ]] \
   || fail "suffix reverse lookup wrong: $(client_args)"
 [[ ! -s "$CURL_ARGS_FILE" ]] || fail "no feed configured, but curl ran: $(curl_args)"
 ok
@@ -321,7 +372,7 @@ ok
 # names it: the reverse lookup is for macOS ships only.
 run_helper ios-orphan com.example.ios3 "$CRED" CURL_MODE=ok
 [[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
-[[ "$(client_args)" == "next-shared-build com.example.ios3" ]] \
+[[ "$(client_args)" == "plan-release-build com.example.ios3 --merge-stamp ${STAMP}" ]] \
   || fail "ios entry should stay solo: $(client_args)"
 ok
 
@@ -337,4 +388,98 @@ case "$max_line" in
   *) fail "feed scrape is not whitespace-tolerant: $max_line" ;;
 esac
 
-echo "PASS: ${pass} next-shared-build ship-helper checks"
+# 23. The feed floor is capped at 12 digits: a 12-digit max joins the plan;
+# a 13-digit (or longer) max fails closed with the URL and the value.
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=max12
+[[ "$(rc)" -eq 0 ]] || fail "12-digit floor should return 0, got $(rc): $(stderr)"
+[[ "$(client_args)" == "plan-release-build com.example.ios com.example.mac 999999999999 --merge-stamp ${STAMP}" ]] \
+  || fail "12-digit floor misread: $(client_args)"
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=over12
+[[ "$(rc)" -eq 1 ]] || fail "13-digit floor should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an over-long floor must print no build"
+stderr | grep -q -F "$FEED_URL" || fail "13-digit floor did not name the URL: $(stderr)"
+stderr | grep -q -F "1000000000000" || fail "13-digit floor did not name the value: $(stderr)"
+stderr | grep -q -F "at most 12 digits" || fail "13-digit floor did not say why: $(stderr)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an over-long floor"
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=huge18
+[[ "$(rc)" -eq 1 ]] || fail "18-digit floor should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an 18-digit floor must print no build"
+stderr | grep -q -F "$FEED_URL" || fail "18-digit floor did not name the URL: $(stderr)"
+stderr | grep -q -F "123456789012345678" || fail "18-digit floor did not name the value: $(stderr)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an 18-digit floor"
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=giant
+[[ "$(rc)" -eq 1 ]] || fail "19-digit floor should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "a 19-digit floor must print no build"
+stderr | grep -q -F "$FEED_URL" || fail "19-digit floor did not name the URL: $(stderr)"
+stderr | grep -q -F "not a positive integer" || fail "19-digit floor did not say why: $(stderr)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran with an over-long floor"
+ok
+
+# 24. An unreadable merge stamp fails closed before the client runs.
+run_helper solo com.example.solo "$CRED" CURL_MODE=ok REPO_ROOT="${tmp}/no-such-dir"
+[[ "$(rc)" -eq 1 ]] || fail "unreadable stamp should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an unreadable stamp must print no build"
+stderr | grep -q -F "merge stamp" || fail "unreadable stamp did not say why: $(stderr)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran without a merge stamp"
+ok
+
+# 25. The platform max asks for this app record on this platform only: no
+# paired id, no feed fetch, even when both are configured.
+run_helper ios-paired com.example.ios "$CRED" CURL_MODE=ok HELPER_MODE=max CLIENT_BUILD=202610190645
+[[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
+[[ "$(stdout)" == "202610190645" ]] || fail "expected the client max on stdout, got: $(stdout)"
+[[ "$(client_args)" == "max-platform-build com.example.ios IOS" ]] \
+  || fail "platform max passthrough wrong: $(client_args)"
+[[ ! -s "$CURL_ARGS_FILE" ]] || fail "feed fetched for a platform max: $(curl_args)"
+run_helper mac-orphan com.example.mac2 "$CRED" CURL_MODE=ok HELPER_MODE=max ASC_PLATFORM=MAC_OS CLIENT_BUILD=0
+[[ "$(rc)" -eq 0 ]] || fail "expected rc 0, got $(rc): $(stderr)"
+[[ "$(stdout)" == "0" ]] || fail "expected 0 for an empty platform, got: $(stdout)"
+[[ "$(client_args)" == "max-platform-build com.example.mac2 MAC_OS" ]] \
+  || fail "mac platform max passthrough wrong: $(client_args)"
+ok
+
+# 26. A failing or malformed platform max fails closed and prints nothing.
+run_helper solo com.example.solo "$CRED" CURL_MODE=ok HELPER_MODE=max CLIENT_RC=2
+[[ "$(rc)" -eq 1 ]] || fail "max client failure should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "a failed max must print no build"
+run_helper solo com.example.solo "$CRED" CURL_MODE=ok HELPER_MODE=max CLIENT_BUILD=xyz
+[[ "$(rc)" -eq 1 ]] || fail "malformed max should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "a malformed max must print no build"
+run_helper solo com.example.solo PATH=/nonexistent HOME="${tmp}/emptyhome" \
+  ASC_KEY_ID= APPLE_API_KEY_ID= FLEET_SECRETS_BIN=/nonexistent-test-dir/fleet-secrets \
+  HELPER_MODE=max
+[[ "$(rc)" -eq 1 ]] || fail "max without credentials should return 1, got $(rc)"
+[[ ! -s "$CLIENT_ARGS_FILE" ]] || fail "client ran without credentials"
+export PATH="${tmp}:/usr/bin:/bin"
+ok
+
+# 27. build_exceeds compares integers of any length: a requested build equal
+# to the paired platform's existing build is accepted (the check only sees
+# this platform's max), while at-or-below this platform's max is rejected.
+# shellcheck disable=SC1090
+source "$funcs"
+build_exceeds 202610290532 202610290531 || fail "greater 12-digit build rejected"
+build_exceeds 202610290531 202610290531 && fail "equal build accepted"
+build_exceeds 202610290530 202610290531 && fail "lesser build accepted"
+build_exceeds 202610290531 0 || fail "build above an empty platform rejected"
+build_exceeds 202610290531 202610190645 || fail "paired platform's build rejected against a lower platform max"
+build_exceeds 1000000000000 999999999999 || fail "length-greater build rejected"
+build_exceeds 999999999999 1000000000000 && fail "length-lesser build accepted"
+build_exceeds 1234567890123456789 123456789012345678 || fail "over-long comparison misread"
+ok
+
+# 28. An over-length planner answer fails closed with a message naming it:
+# fixed mode requires the 12-digit merge-timestamp shape, so a plan above it
+# is refused loudly instead of shipped or silently dropped.
+run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=2026102905319
+[[ "$(rc)" -eq 1 ]] || fail "13-digit client answer should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an over-length client answer must print no build"
+stderr | grep -q -F "2026102905319" || fail "over-length answer not named: $(stderr)"
+stderr | grep -q -F "12-digit" || fail "over-length answer did not say why: $(stderr)"
+run_helper ios-alias com.example.ios "$CRED" CURL_MODE=ok CLIENT_BUILD=123456789012345678
+[[ "$(rc)" -eq 1 ]] || fail "18-digit client answer should return 1, got $(rc)"
+[[ -s "${tmp}/stdout" ]] && fail "an over-length client answer must print no build"
+stderr | grep -q -F "123456789012345678" || fail "18-digit answer not named: $(stderr)"
+ok
+
+echo "PASS: ${pass} plan-release-build ship-helper checks"

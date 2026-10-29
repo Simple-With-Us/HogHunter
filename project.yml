@@ -149,8 +149,11 @@ targets:
         PRODUCT_NAME: HogHunter
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0.152"
-        CURRENT_PROJECT_VERSION: "152"
+        # Placeholder: the TestFlight ship passes both values on the xcodebuild
+        # command line (fixed 0.1.0 marketing version, planned merge-timestamp
+        # build), so these never ship.
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "202610290000"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -176,8 +179,11 @@ targets:
         PRODUCT_NAME: HogHunterWidgets
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0.152"
-        CURRENT_PROJECT_VERSION: "152"
+        # Placeholder: the TestFlight ship passes both values on the xcodebuild
+        # command line (fixed 0.1.0 marketing version, planned merge-timestamp
+        # build), so these never ship.
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "202610290000"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_FILE: ios/Widgets/Info.plist
         SWIFT_EMIT_LOC_STRINGS: YES

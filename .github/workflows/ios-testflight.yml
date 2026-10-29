@@ -14,10 +14,12 @@ name: Hog Hunter iOS TestFlight
 # The ship goes through the fleet script (scripts/ios-fleet/ship-testflight.sh,
 # via scripts/ios-ship-testflight.sh), the same path Socratic.Trade,
 # Congress.Trade, Usage Monitor and Clutch use.  It owns:
-#   * the marketing version and the build number:  both are the repo's commit
-#     count, 1.0.<commit_count> and <commit_count>, so a version string is
-#     never uploaded twice (the old release script read 1.0.6 from project.yml
-#     and reused it);
+#   * the marketing version and the build number:  the fixed 0.1.0 marketing
+#     version and one shared merge-timestamp build per release, max(S, M + 1),
+#     computed ONCE by the plan-build job below (ship-testflight.sh
+#     --plan-build-only, read-only over App Store Connect and the merge stamp
+#     of HEAD) and handed to the ship through --build, so a version string is
+#     never uploaded twice;
 #   * the rate gate (one upload per hour) and the same-HEAD skip.  This file
 #     never sets IOS_TF_MIN_INTERVAL_SEC and never passes --force-ship;
 #   * ensure-tf-ready, which declares export compliance on the exact build and
@@ -103,8 +105,189 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The release build, computed ONCE per release (owner 2026-10-29).  Every
+  # ship job of the release reuses this one value through --build, so two
+  # platforms can never compute different builds.  Read-only: it queries App
+  # Store Connect and the merge stamp of HEAD, plans nothing when the
+  # inventory is incomplete, and consumes nothing.  The scheduled gate runs
+  # first, so a tick with nothing to ship plans nothing and queries nothing:
+  # without it every hourly tick would pay a full ASC inventory, and a
+  # transient ASC hiccup would red a run that had nothing to ship.
+  plan-build:
+    name: Plan release build
+    if: >-
+      github.event.repository.fork == false &&
+      vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
+      (github.ref == 'refs/heads/main' ||
+       (github.event_name == 'workflow_dispatch' && inputs.upload == false))
+    runs-on: macos-latest
+    timeout-minutes: 15
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # The gate below diffs HEAD against the sha recorded by the last
+          # successful ship.  A shallow clone makes the range uncomputable.
+          fetch-depth: 0
+
+      - name: Restore iOS ship state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ios-fleet
+          key: ios-fleet-state-hoghunter-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ios-fleet-state-hoghunter-ios-${{ github.run_id }}-
+            ios-fleet-state-hoghunter-ios-
+
+      # Before any ASC query, so a tick with nothing to ship costs seconds and
+      # a transient ASC hiccup cannot red it.  Prefixes mirror on.push.paths
+      # (minus the machinery files, which only a push or a dispatch should act
+      # on) and the ship job's gate below.  The logic lives in a script so CI
+      # unit-tests it, and scripts/test-ios-release.py pins both prefix lists
+      # to project.yml.
+      - name: Scheduled ship gate (skip unless iOS code changed)
+        id: gate
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/ios-fleet/scheduled-ship-gate.sh" \
+            --event "${{ github.event_name }}" \
+            --path-prefix 'ios/' \
+            --path-prefix 'project.yml' \
+            --path-prefix 'Sources/Companion/CompanionSnapshot.swift' \
+            --path-prefix 'Sources/Companion/CompanionHTTP.swift' \
+            --path-prefix 'Sources/Companion/CompanionPeer.swift' \
+            --path-prefix 'Sources/UI/CpuSparklineView.swift' \
+            --path-prefix 'Sources/Telemetry/SentryTelemetry.swift' \
+            --repo-root "$GITHUB_WORKSPACE" \
+            hoghunter
+
+      # ASC key from Fleet-OPS prod /asc.  Same block as the ship job:  the
+      # planner queries App Store Connect, so it loads the credential the
+      # same way (names only;  values are never printed).
+      - name: Load ASC credentials (Fleet-OPS prod /asc)
+        if: steps.gate.outputs.should_ship == '1'
+        env:
+          # The org secret shared with this repository (ContactLogo reads /asc
+          # the same way), so this public file never names the project.
+          ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          set +o xtrace
+          set -euo pipefail
+          export INFISICAL_DISABLE_UPDATE_CHECK=true
+
+          if [ -z "${ASC_INFISICAL_PROJECT_ID:-}" ]; then
+            echo "::error::The org secret INFISICAL_FLEET_OPS_PROJECT_ID is empty or not shared with this repository." >&2
+            exit 1
+          fi
+
+          if ! command -v infisical >/dev/null 2>&1; then
+            NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install infisical/get-cli/infisical
+          fi
+          command -v infisical >/dev/null 2>&1 || {
+            echo "::error::Infisical CLI is not installed."
+            exit 1
+          }
+
+          CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID}"
+          CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET}"
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            CLIENT_ID="${INFISICAL_CLIENT_ID}"
+            CLIENT_SECRET="${INFISICAL_CLIENT_SECRET}"
+          fi
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::Missing Infisical machine identity.  Set INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET (fallback INFISICAL_CLIENT_ID/SECRET) on the org or repo."
+            exit 1
+          fi
+
+          TOKEN="$(
+            env -u INFISICAL_CLIENT_ID -u INFISICAL_CLIENT_SECRET -u INFISICAL_TOKEN \
+              INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CLIENT_ID" \
+              INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CLIENT_SECRET" \
+              infisical login --method=universal-auth --silent --plain --telemetry=false 2>/dev/null || true
+          )"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Infisical universal-auth login failed."
+            exit 1
+          fi
+          if [[ "$TOKEN" == *$'\n'* || "$TOKEN" == *$'\r'* ]]; then
+            echo '::error::Infisical returned a multiline token.' >&2
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
+
+          for name in ASC_KEY_ID ASC_ISSUER_ID; do
+            val="$(
+              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
+                --plain --silent --telemetry=false --expand=false \
+                --projectId="$ASC_INFISICAL_PROJECT_ID" --env=prod --path=/asc \
+                2>/dev/null || true
+            )"
+            if [ -z "$val" ]; then
+              echo "::error::Missing $name in Fleet-OPS prod /asc;  verify the CI identity has read access to the Fleet-OPS project, path /asc." >&2
+              exit 1
+            fi
+            if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+              echo "::error::Signing field $name must be single-line;  correct Infisical formatting." >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${val//'%'/'%25'}"
+            printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
+            #  The same values under the hosted names the shell layer and the
+            #  client read:  ASC_KEY_ID becomes APPLE_API_KEY_ID.
+            printf 'APPLE_API_%s=%s\n' "${name#ASC_}" "$val" >> "$GITHUB_ENV"
+          done
+
+          # Keep the multiline PEM out of GITHUB_ENV and every later step
+          # environment.  The staged file below carries it, and only the path
+          # crosses the step boundary.
+          key_material="$(
+            INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
+              --plain --silent --telemetry=false --expand=false \
+              --projectId="$ASC_INFISICAL_PROJECT_ID" --env=prod --path=/asc \
+              2>/dev/null || true
+          )"
+          if [ -z "$key_material" ]; then
+            echo "::error::Missing ASC key material in Fleet-OPS prod /asc;  verify the CI identity has read access to the Fleet-OPS project, path /asc." >&2
+            exit 1
+          fi
+          printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
+
+          # The hosted form of the credential:  the key id, the issuer and the
+          # key as base64.  `base64` wraps its output at 76 columns, and a
+          # multi-line blob would leak every line after the first unmasked
+          # (add-mask is parsed per line) and break the environment file, so
+          # the value is flattened to one line and the raw PEM never enters
+          # GITHUB_ENV.  The shell layer and the client both read the trio
+          # from the environment, because a path on disk is not an approved
+          # credential source (AFC-459).
+          key_b64="$(printf '%s' "$key_material" | base64 | tr -d '\n')"
+          printf '::add-mask::%s\n' "${key_b64//'%'/'%25'}"
+          printf 'APPLE_API_KEY_P8_BASE64=%s\n' "$key_b64" >> "$GITHUB_ENV"
+
+          unset key_material key_b64 TOKEN CLIENT_ID CLIENT_SECRET val
+
+      - name: Plan the release build
+        id: plan
+        if: steps.gate.outputs.should_ship == '1'
+        run: |
+          set -euo pipefail
+          build="$(bash "$GITHUB_WORKSPACE/scripts/ios-fleet/ship-testflight.sh" hoghunter --plan-build-only --repo-root "$GITHUB_WORKSPACE")"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::plan-build produced a malformed build." >&2
+            exit 1
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Release build::Planned build $build for this release."
+
   ship:
     name: TestFlight archive + upload
+    needs: [plan-build]
     if: >-
       github.event.repository.fork == false &&
       vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
@@ -350,12 +533,17 @@ jobs:
           # Publish What to Test to App Store Connect (owner 2026-09-08).
           IOS_TF_RELEASE_NOTES: "1"
           EXPORT_ONLY: ${{ steps.mode.outputs.export_only }}
+          PLANNED_BUILD: ${{ needs.plan-build.outputs.build }}
         run: |
+          if [ -z "$PLANNED_BUILD" ]; then
+            echo "::error::No planned build from the plan-build job." >&2
+            exit 1
+          fi
           args=()
           if [ "$EXPORT_ONLY" = "1" ]; then
             args+=(--export-only)
           fi
-          bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
+          bash scripts/ios-ship-testflight.sh --build "$PLANNED_BUILD" ${args[@]+"${args[@]}"}
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.

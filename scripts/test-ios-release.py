@@ -229,7 +229,12 @@ class NativeTreeTests(unittest.TestCase):
                 expected.append(prefix)
         # project.yml defines the iOS targets, so a change to it ships as well.
         expected.append("project.yml")
-        self.assertEqual(sorted(gate_prefixes(self.text)), sorted(set(expected)))
+        # Both jobs run the gate with identical prefixes (plan-build gates
+        # before any ASC query; ship gates before any toolchain or secret
+        # step), so the whole file carries each prefix twice.
+        found = gate_prefixes(self.text)
+        self.assertEqual(sorted(set(found)), sorted(set(expected)))
+        self.assertEqual(len(found), 2 * len(set(expected)))
 
     def test_no_native_source_is_missing_from_the_push_paths_text(self):
         for path in native_sources():
@@ -297,6 +302,21 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", self.code)
         self.assertIn("inputs.upload == false", self.code)
         self.assertIn("--export-only", self.code)
+
+    def test_plan_build_gates_before_any_asc_query(self):
+        # A tick with nothing to ship must plan nothing and query nothing:
+        # the plan-build job runs the scheduled gate before the credential
+        # load and the plan, and both steps run only when the gate votes to
+        # ship.  Otherwise every hourly tick pays a full ASC inventory and a
+        # transient ASC hiccup reds a run that had nothing to ship.
+        self.assertEqual(self.code.count("scheduled-ship-gate.sh"), 2)
+        plan_job = self.code.split("plan-build:", 1)[1].split("\n  ship:", 1)[0]
+        gate_at = plan_job.index("scheduled-ship-gate.sh")
+        self.assertLess(gate_at, plan_job.index("infisical login"))
+        self.assertLess(gate_at, plan_job.index("--plan-build-only"))
+        self.assertIn("actions/cache/restore@", plan_job)
+        self.assertRegex(plan_job, r"(?s)Load ASC credentials.*steps\.gate\.outputs\.should_ship == '1'")
+        self.assertRegex(plan_job, r"(?s)Plan the release build.*steps\.gate\.outputs\.should_ship == '1'")
 
     def test_vendored_fleet_files_are_registered_for_hog_hunter(self):
         for name in (
