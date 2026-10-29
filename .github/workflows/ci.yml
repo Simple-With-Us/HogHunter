@@ -20,6 +20,7 @@ jobs:
       - name: Check manual release scripts without signing credentials
         run: |
           bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/ios-fleet/scheduled-ship-gate.sh scripts/ios-fleet/test-scheduled-ship-gate.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh scripts/mac-release-build.sh scripts/make_appcast.sh
+          bash -n scripts/smb-root-files-share.sh
           node --check scripts/ios-fleet/asc-api.mjs
           node --check scripts/ios-fleet/asc-key.mjs
           node --check scripts/ios-fleet/version-plan.mjs
@@ -35,6 +36,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-ci-report.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-wiring.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-smb-root-files-share.py
 
       - name: Robotic Vacuum Python tests
         run: |
