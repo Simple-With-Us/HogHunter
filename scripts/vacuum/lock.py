@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import socket
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -207,18 +209,90 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# The exact shape of an owner record.  This protocol is written in four
+# places -- this file, HogHunter's Swift lock, and AFC's
+# `mac-auto-cleanup.sh` and `mac-resource-watch.py` -- and all four publish
+# and accept the SAME shape.  A record one of them calls malformed and the
+# other calls usable leaves them with conflicting ownership decisions about
+# the same lock and the same file, which is how a live lock gets taken away
+# from a live holder.
+_OWNER_KEYS = frozenset({"pid", "host", "acquired_at", "lock", "start"})
+
+# The longest start token this protocol accepts.  The token is opaque and is
+# never parsed, so this bound only keeps a hostile file from putting an
+# unbounded string in memory.  The other three implementations apply the
+# same bound, in the same place.
+_OWNER_START_MAX = 128
+
+
+def _parse_owner(raw: str) -> dict | None:
+    """The owner payload in a raw owner file, or None when it is not usable.
+
+    The owner file is shared state that any process can write, so its shape
+    is checked rather than coerced, and this function never raises.  A record
+    that is missing a key, carries an unknown key, or holds a value of the
+    wrong type or out of bounds is not an owner record, and handing one to
+    the lock-ownership logic would let a malformed file decide who holds the
+    lock.
+    """
+    try:
+        owner = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(owner, dict):
+        return None
+    if set(owner) != _OWNER_KEYS:
+        # A missing key and an unknown key are the same failure:  the record
+        # is not the record this protocol publishes.
+        return None
+    pid = owner["pid"]
+    # Upper bound matches the Swift reader (pid_t is 32-bit):  both readers
+    # must accept exactly the same set of owner records.
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > 2**31 - 1:
+        return None
+    host = owner["host"]
+    if not isinstance(host, str) or not host:
+        return None
+    acquired_at = owner["acquired_at"]
+    if isinstance(acquired_at, bool) or not isinstance(acquired_at, (int, float)):
+        return None
+    try:
+        finite = math.isfinite(acquired_at)
+    except OverflowError:
+        # A hundreds-of-digits int is too large to convert to a float:  it
+        # is not a timestamp this protocol publishes.
+        return None
+    if not finite:
+        # json accepts NaN and Infinity as literals, so a finite bound is a
+        # real check and not a formality.
+        return None
+    lock = owner["lock"]
+    if not isinstance(lock, str) or not lock:
+        return None
+    start = owner["start"]
+    if not isinstance(start, str) or not start or len(start) > _OWNER_START_MAX:
+        return None
+    return owner
+
+
 def _read_owner(owner_path: Path) -> dict | None:
-    """Read the owner file, or None when it is missing or unreadable.
+    """Read the owner file, or None when it is missing or unusable.
 
     A corrupt owner file is treated as no owner file at all, so the caller
     falls back to the age rule.  That is the conservative direction: we wait
     rather than steal a lock we cannot identify.
     """
     try:
-        data = json.loads(owner_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = owner_path.read_text(encoding="utf-8")
+    except OSError:
         return None
-    return data if isinstance(data, dict) else None
+    except ValueError:
+        # A file that is not UTF-8 raises UnicodeDecodeError, which is a
+        # ValueError and NOT an OSError.  It must not escape the release
+        # path:  an owner file nobody can read is left alone like any other
+        # malformed one.
+        return None
+    return _parse_owner(raw)
 
 
 def _owner_pid(owner_path: Path) -> int | None:
@@ -232,10 +306,7 @@ def _owner_pid(owner_path: Path) -> int | None:
     owner = _read_owner(owner_path)
     if owner is None:
         return None
-    try:
-        pid = int(owner.get("pid", -1))
-    except (TypeError, ValueError):
-        return None
+    pid = owner["pid"]
     return pid if pid > 0 else None
 
 
@@ -244,13 +315,61 @@ def _owner_is_local(owner: dict) -> bool:
 
     A pid only means something on the machine that owns it, so a lock held
     on another host cannot be taken over on the strength of a pid that is
-    not ours.  An owner file with no host in it is read the way it always
-    was, so a holder that died here is still recovered at once.
+    not ours.  The record always names a host, so there is no "no host" case
+    left to guess about, and the other three implementations of this
+    protocol make the same comparison.
     """
-    host = owner.get("host")
-    if not host:
+    return owner["host"] == socket.gethostname()
+
+
+def _process_start_token(pid: int) -> str:
+    """The start time of the process a pid names, as an opaque string.
+
+    A pid alone does not name a process:  the kernel hands the same number to
+    somebody else once the original exits, and a reused pid that is ALIVE
+    looks exactly like a holder that is still running.  The start time tells
+    the two apart.
+
+    The token is an opaque string, compared and never parsed.  The C locale
+    is forced, and the environment is kept to PATH and LC_ALL alone, so that
+    this reader and the other three implementations produce the SAME string
+    for the same process:  a TZ in the environment renders the same start
+    time in a different zone, and the tokens would then disagree for a
+    holder that never moved.
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
+    try:
+        result = subprocess.run(
+            # Absolute path:  the Swift reader runs /bin/ps, and a different ps
+            # earlier on PATH could render the same process differently.
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=10, check=False, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _owner_is_gone(owner: dict) -> bool:
+    """True when the owner record proves the holder is gone.
+
+    A dead pid proves it at once.  A live pid does not, because the kernel
+    hands the number to somebody else once the original exits:  the holder
+    is gone when that pid now names a DIFFERENT process, and the start token
+    is what tells the two apart.  When the token cannot be read the record
+    cannot speak for the lock, and the age rule decides.
+    """
+    pid = owner["pid"]
+    if not _pid_alive(pid):
         return True
-    return str(host) == socket.gethostname()
+    current = _process_start_token(pid)
+    if not current:
+        # The start time could not be read:  the record cannot speak for the
+        # lock, and the age rule decides.
+        return False
+    return current != owner["start"]
 
 
 def _write_owner(owner_path: Path, lock_path: Path) -> None:
@@ -258,22 +377,41 @@ def _write_owner(owner_path: Path, lock_path: Path) -> None:
 
     The pid is what makes a killed holder recoverable: the next process to
     ask for the lock can see that the pid is gone and take over at once,
-    instead of waiting out the whole stale window.
+    instead of waiting out the whole stale window.  The start time travels
+    with the pid, because a pid the kernel has since handed to somebody else
+    would otherwise look exactly like a live holder.
 
     The file is published with a replace rather than written in place.  A
     reader that opens the owner file while it is being written would
     otherwise see half of it, and half of it is a file with no readable
     pid in it, which reads as "no owner" and makes the lock look free.
     """
+    start = _process_start_token(os.getpid())
+    if not start:
+        # Without the start time the record cannot tell the holder from a
+        # reused pid, so none is written:  a missing owner file is an
+        # ordinary state -- the shell holder writes none at all -- and the
+        # age rule decides.  The lock itself is the mutex.
+        return
     payload = {
         "pid": os.getpid(),
-        "host": socket.gethostname(),
+        # The host must be a non-empty string:  that is the declared shape of
+        # the record, and a record this process writes must be one it can
+        # read back.
+        "host": socket.gethostname() or "unknown",
         "acquired_at": time.time(),
         "lock": str(lock_path),
+        # The start time of THIS process, so a reader can tell the holder
+        # from a pid the kernel has since handed to somebody else.
+        "start": start,
     }
     tmp = owner_path.with_name(f"{owner_path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        # The temp file is PRIVATE (0600):  the owner record names a pid and
+        # a host and sits in a shared directory.
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload))
         os.replace(tmp, owner_path)
     except OSError:
         # The lock itself is the mutex.  The owner file is only a hint that
@@ -292,14 +430,19 @@ def _owner_describes_holder(owner_path: Path, lock_path: Path) -> bool:
     leftover file from an earlier holder beside it.  That file names a pid
     that is gone, and reading it as the current holder would let a fresh live
     lock be taken over.  The owner file is only about the current holder when
-    it is at least as new as the lock directory.
+    it is STRICTLY newer than the lock directory.
+
+    Strictly, not "at least as new":  the other three implementations of this
+    protocol refuse a record whose mtime equals the lock directory's, and two
+    readers that disagree about the same file leave the fleet with
+    conflicting ownership decisions about one lock.
     """
     try:
         owner_modified = owner_path.stat().st_mtime
         lock_modified = lock_path.stat().st_mtime
     except OSError:
         return False
-    return owner_modified >= lock_modified
+    return owner_modified > lock_modified
 
 
 def _clear_owner(owner_path: Path, only_pid: int | None = None) -> None:
@@ -307,12 +450,17 @@ def _clear_owner(owner_path: Path, only_pid: int | None = None) -> None:
 
     The pid check is what keeps one holder from deleting the identity of
     another: if our lock was stolen as stale while we were still running, the
-    file now names somebody else and we leave it alone.  A file that names no
-    readable pid names nobody, so it goes.
+    file now names somebody else and we leave it alone.
+
+    A file that cannot be READ AS AN OWNER RECORD is left alone as well.  A
+    holder that cannot read the file cannot know whose it is, and deleting
+    it would take away the identity of whoever really holds the lock now.
+    The same rule the AFC readers apply, and they are the other readers of
+    this very file.
     """
     if only_pid is not None:
         pid = _owner_pid(owner_path)
-        if pid is not None and pid != only_pid:
+        if pid is None or pid != only_pid:
             return
     try:
         owner_path.unlink()
@@ -468,14 +616,11 @@ class HousekeeperLock:
             return True
         owner = _read_owner(self.owner_path)
         if owner is None:
-            # No owner file: either a shell holder that never wrote one, or
-            # an owner file we cannot read.  Fall back to the age rule.
+            # No usable owner file: either a shell holder that never wrote
+            # one, or a file that is not the record this protocol publishes.
+            # Fall back to the age rule.
             return False
-        pid = _owner_pid(self.owner_path)
-        if pid is None:
-            # The owner file names no readable pid, so it names no holder we
-            # can check.  Fall back to the age rule.
-            return False
+        pid = owner["pid"]
         if pid == os.getpid():
             # Our own pid.  The re-entrancy token normally covers this, but if
             # the token was lost we must not steal our own lock.
@@ -493,7 +638,9 @@ class HousekeeperLock:
             # process here, so the lock may only be taken over once the stale
             # window has passed.
             return False
-        return not _pid_alive(pid)
+        # The record proves the holder is gone:  a dead pid, or a live pid
+        # that now names a different process.
+        return _owner_is_gone(owner)
 
     def _takeover(self) -> bool:
         """Take a lock that is free to be taken, atomically.
@@ -513,7 +660,8 @@ class HousekeeperLock:
         # The owner file is read before the move, because the move is what
         # decides the race and the file is only removed when it still names
         # the dead holder we found.
-        dead_owner_pid = self._owner_pid()
+        dead_owner = _read_owner(self.owner_path)
+        dead_owner_pid = dead_owner["pid"] if dead_owner is not None else None
         aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-{uuid.uuid4().hex}")
         try:
             os.rename(self.lock_path, aside)
@@ -521,7 +669,7 @@ class HousekeeperLock:
             # Nothing to move: another caller won the race, or the holder
             # released the lock between the check and the move.
             return False
-        if self._owner_pid() != dead_owner_pid:
+        if _read_owner(self.owner_path) != dead_owner:
             # The owner file names somebody else now.  A new holder took over
             # between our read and our move, so what we moved aside is that
             # holder's lock.  Put it back.
@@ -533,11 +681,10 @@ class HousekeeperLock:
         # rule alone would refuse it, which is the wedge this whole change
         # exists to undo.
         moved_is_stale = self._is_stale_at(aside)
-        owner_is_gone = (
-            dead_owner_pid is not None
-            and dead_owner_pid > 0
-            and not _pid_alive(dead_owner_pid)
-        )
+        # The holder we found is gone when its pid is dead, or when that pid
+        # now names a different process.  The start token is what tells the
+        # two apart, and it is the same rule every implementation applies.
+        owner_is_gone = dead_owner is not None and _owner_is_gone(dead_owner)
         if not (moved_is_stale or owner_is_gone):
             # Someone else's fresh lock, held by a live process.  Put it back.
             self._put_back(aside)
