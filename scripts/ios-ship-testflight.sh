@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Thin wrapper: ship the Hog Hunter iPhone companion to TestFlight through the
 # fleet script (scripts/ios-fleet/ship-testflight.sh), the same path the other
-# fleet apps use.  The fleet script owns the version (the next patch on the
-# app's train, from App Store Connect) and the build number (the repo commit
-# count, raised above the App Store Connect floor), the rate gate and same-HEAD
-# skip, ensure-tf-ready, and the What to Test notes.  The two numbers are
-# independent;  see scripts/ios-fleet/version-plan.mjs.
+# fleet apps use.  The version is the fixed 0.1.0 marketing version and the
+# planned merge-timestamp build, one value per release computed by the
+# plan-build job and handed in through --build.  The fleet script owns the
+# rate gate and same-HEAD skip, ensure-tf-ready, and the What to Test notes.
 #
 # Release lane only:  .github/workflows/ios-testflight.yml runs this on a
 # GitHub-hosted macOS runner.  A local upload is refused, as the old release

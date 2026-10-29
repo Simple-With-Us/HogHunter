@@ -1,89 +1,106 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {nextSharedBuild as next} from './shared-build.mjs';
-const input = {iosBuilds: [], macBuilds: [], complete: true};
-test('empty inventory starts at smallest four-digit integer', () => {
-  assert.deepEqual(next(input), {build: '1000', ignoredIos: 0});
+import {maxExtraFloor, maxFirstComponent, nextSharedBuild as next} from './shared-build.mjs';
+const STAMP = '202610290531';
+const input = {iosBuilds: [], macBuilds: [], complete: true, mergeStamp: STAMP};
+test('a fresh app ships the merge stamp', () => {
+  assert.deepEqual(next(input), {build: STAMP});
 });
-test('dotted and sub-floor builds stay at the four-digit floor', () => {
-  assert.deepEqual(next({...input, iosBuilds: ['0.1.3', '1.1.2']}), {build: '1000', ignoredIos: 0});
-  assert.deepEqual(next({...input, iosBuilds: ['101']}), {build: '1000', ignoredIos: 0});
-  assert.deepEqual(next({...input, macBuilds: ['0.1.3']}), {build: '1000', ignoredIos: 0});
+test('existing builds below the stamp still ship the stamp', () => {
+  assert.deepEqual(next({...input, iosBuilds: ['101', '2394']}), {build: STAMP});
+  assert.deepEqual(next({...input, macBuilds: ['0.1.3']}), {build: STAMP});
+  assert.deepEqual(next({...input, extraFloors: [1500]}), {build: STAMP});
 });
-test('iOS four-digit build continues above it', () => {
-  assert.deepEqual(next({...input, iosBuilds: ['2394']}), {build: '2395', ignoredIos: 0});
+test('an existing build at or above the stamp moves one up', () => {
+  assert.deepEqual(next({...input, iosBuilds: [STAMP]}), {build: '202610290532'});
+  assert.deepEqual(next({...input, iosBuilds: ['209912312359']}), {build: '209912312360'});
+  assert.deepEqual(next({...input, macBuilds: ['209912312359']}), {build: '209912312360'});
 });
-test('shared counter takes the max across iOS and macOS', () => {
-  assert.deepEqual(next({...input, iosBuilds: ['1100'], macBuilds: ['1200']}), {build: '1201', ignoredIos: 0});
-  assert.deepEqual(next({...input, iosBuilds: ['1300'], macBuilds: ['1200']}), {build: '1301', ignoredIos: 0});
+test('a rebuild of the same commit still goes up', () => {
+  const first = next(input).build;
+  assert.equal(first, STAMP);
+  assert.deepEqual(next({...input, iosBuilds: [first]}), {build: '202610290532'});
 });
-test('extra floors raise the counter above 999', () => {
-  assert.deepEqual(next({...input, extraFloors: [986]}), {build: '1000', ignoredIos: 0});
-  assert.deepEqual(next({...input, extraFloors: [1500]}), {build: '1501', ignoredIos: 0});
-  assert.deepEqual(next({...input, iosBuilds: ['1100'], extraFloors: [1500]}), {build: '1501', ignoredIos: 0});
-});
-test('999 is the floor: a build or floor of 999 still starts at 1000', () => {
-  assert.deepEqual(next({...input, iosBuilds: ['999']}), {build: '1000', ignoredIos: 0});
-  assert.deepEqual(next({...input, macBuilds: ['999']}), {build: '1000', ignoredIos: 0});
-  assert.deepEqual(next({...input, extraFloors: [999]}), {build: '1000', ignoredIos: 0});
-});
-test('next is above an iOS build, a macOS build and a floor at once', () => {
-  // Each of the three sources wins in turn; the callers concatenate the
-  // paired app's builds into these same arrays (both platforms, both apps).
-  assert.deepEqual(
-    next({...input, iosBuilds: ['1200'], macBuilds: ['1300'], extraFloors: [1400]}),
-    {build: '1401', ignoredIos: 0}
-  );
-  assert.deepEqual(
-    next({...input, iosBuilds: ['1500'], macBuilds: ['1300'], extraFloors: [1400]}),
-    {build: '1501', ignoredIos: 0}
-  );
-  assert.deepEqual(
-    next({...input, iosBuilds: ['1200'], macBuilds: ['1600'], extraFloors: [1400]}),
-    {build: '1601', ignoredIos: 0}
-  );
-  assert.deepEqual(
-    next({...input, iosBuilds: ['1100', '1150'], macBuilds: ['1140'], extraFloors: [1130]}),
-    {build: '1151', ignoredIos: 0}
-  );
-});
-test('iOS timestamp builds are ignored and counted', () => {
+test('iOS timestamp builds count now', () => {
   assert.deepEqual(
     next({...input, iosBuilds: ['202610190645', '202610180127']}),
-    {build: '1000', ignoredIos: 2}
+    {build: STAMP}
   );
   assert.deepEqual(
-    next({...input, iosBuilds: ['202610190645', '2394']}),
-    {build: '2395', ignoredIos: 1}
+    next({...input, iosBuilds: ['202610190645', STAMP]}),
+    {build: '202610290532'}
   );
 });
-test('macOS timestamp build cannot fit the four-digit range', () => {
-  assert.throws(
-    () => next({...input, macBuilds: ['202610190645']}),
-    /four-digit build unavailable on macOS: existing 202610190645 requires >= 202610190646/
+test('a mac-only higher build wins across platforms', () => {
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1100'], macBuilds: ['202610290540']}),
+    {build: '202610290541'}
   );
 });
-test('9999 exhausts the range on either platform', () => {
-  assert.throws(() => next({...input, iosBuilds: ['9999']}), /four-digit build range exhausted/);
-  assert.throws(() => next({...input, macBuilds: ['9999']}), /four-digit build unavailable on macOS/);
-  assert.throws(() => next({...input, extraFloors: [9999]}), /four-digit build range exhausted/);
-  assert.deepEqual(next({...input, iosBuilds: ['9998']}), {build: '9999', ignoredIos: 0});
+test('the shared build sits above every source at once', () => {
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1200'], macBuilds: ['1300'], extraFloors: [1400]}),
+    {build: STAMP}
+  );
+  assert.deepEqual(
+    next({...input, iosBuilds: ['202610290540'], macBuilds: ['1300'], extraFloors: [1400]}),
+    {build: '202610290541'}
+  );
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1200'], macBuilds: ['202610290540'], extraFloors: [1400]}),
+    {build: '202610290541'}
+  );
+  assert.deepEqual(
+    next({...input, iosBuilds: ['1200'], macBuilds: ['1300'], extraFloors: ['202610290540']}),
+    {build: '202610290541'}
+  );
+});
+test('dotted builds compare by first component', () => {
+  assert.deepEqual(next({...input, iosBuilds: ['0.1.3', '1.1.2']}), {build: STAMP});
+  assert.deepEqual(
+    next({...input, iosBuilds: ['202610290540.1']}),
+    {build: '202610290541'}
+  );
+});
+test('extra floors accept safe integers and digit strings', () => {
+  assert.equal(maxExtraFloor([]), 0n);
+  assert.equal(maxExtraFloor([1500, '1400', 0]), 1500n);
+  assert.equal(maxExtraFloor(['202610290540']), 202610290540n);
+  assert.throws(() => maxExtraFloor([-1]), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor([1.5]), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor([NaN]), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor([null]), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor(['']), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor(['1.5']), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor([' 1500']), /malformed build inventory/);
+  assert.throws(() => maxExtraFloor('1500'), /malformed build inventory/);
+});
+test('maxFirstComponent takes the highest first component', () => {
+  assert.equal(maxFirstComponent([]), 0n);
+  assert.equal(maxFirstComponent(['101', '2394.2', '2394']), 2394n);
+  assert.equal(maxFirstComponent(['202610190645']), 202610190645n);
+});
+test('a bad merge stamp throws before computing', () => {
+  for (const bad of [null, undefined, 202610290531, '', '02610290531', '20261029053', '2026102905311', '20261029053a', ' 202610290531', '000000000000']) {
+    assert.throws(() => next({...input, mergeStamp: bad}), /malformed merge stamp/);
+  }
 });
 test('malformed inventory throws before computing', () => {
   for (const bad of [null, 'NaN', '1.2.3.4', 42, '', ' 1000', 'v1']) {
     assert.throws(() => next({...input, iosBuilds: [bad]}), /malformed build inventory/);
     assert.throws(() => next({...input, macBuilds: [bad]}), /malformed build inventory/);
   }
-  for (const bad of [-1, 1.5, NaN, '1500', null]) {
+  for (const bad of [-1, 1.5, NaN, null]) {
     assert.throws(() => next({...input, extraFloors: [bad]}), /malformed build inventory/);
   }
   // A malformed entry is reported even when a range error would also apply.
-  assert.throws(() => next({...input, iosBuilds: ['9999', 'NaN']}), /malformed build inventory/);
+  assert.throws(() => next({...input, iosBuilds: ['209912312359', 'NaN']}), /malformed build inventory/);
+  assert.throws(() => next({...input, mergeStamp: 'nope', iosBuilds: ['NaN']}), /malformed merge stamp/);
 });
 test('incomplete inventory refuses', () => {
   assert.throws(() => next({...input, complete: false}), /complete build inventory required/);
   assert.throws(() => next({...input, complete: undefined}), /complete build inventory required/);
-  assert.throws(() => next({iosBuilds: [], complete: true}), /complete build inventory required/);
-  assert.throws(() => next({macBuilds: [], complete: true}), /complete build inventory required/);
-  assert.throws(() => next({iosBuilds: '1000', macBuilds: [], complete: true}), /complete build inventory required/);
+  assert.throws(() => next({iosBuilds: [], complete: true, mergeStamp: STAMP}), /complete build inventory required/);
+  assert.throws(() => next({macBuilds: [], complete: true, mergeStamp: STAMP}), /complete build inventory required/);
+  assert.throws(() => next({iosBuilds: '1000', macBuilds: [], complete: true, mergeStamp: STAMP}), /complete build inventory required/);
 });
