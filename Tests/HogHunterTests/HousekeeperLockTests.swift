@@ -168,10 +168,51 @@ final class HousekeeperLockTests: XCTestCase {
     /// hour stale window expired.  The owner file names the holding pid, so a
     /// holder that is demonstrably gone is taken over immediately.
 
-    private func writeOwner(pid: Int32) {
-        let payload: [String: Any] = ["pid": Int(pid), "acquired_at": Date().timeIntervalSince1970]
+    /// Write a well formed owner record: the shape this protocol publishes.
+    ///
+    /// The tests used to write a bare `{"pid": ...}`, which is not a record
+    /// any implementation of this protocol accepts:  it names no host, no
+    /// start time and no lock.  A record the readers reject is not evidence
+    /// of anything, so those cases were passing without testing what they
+    /// claimed to test.
+    private func writeOwner(pid: Int32, start: String? = nil, extraKey: Bool = false) {
+        let token = HousekeeperLock.processStartToken(pid)
+        var payload: [String: Any] = [
+            "pid": Int(pid),
+            "host": HousekeeperLock.currentHostName(),
+            "acquired_at": Date().timeIntervalSince1970,
+            "lock": lockPath.path,
+            // A pid that is not alive has no start time of its own, so a
+            // placeholder stands in for it:  the record only has to be well
+            // formed, and a dead pid is proven gone without reading a token.
+            "start": start ?? (token.isEmpty ? "Mon Jan  1 00:00:00 2024" : token),
+        ]
+        if extraKey {
+            payload["extra"] = "not part of the record"
+        }
         let data = try? JSONSerialization.data(withJSONObject: payload)
         try? data?.write(to: ownerPath)
+    }
+
+    /// The pid of a live process that is not this one.
+    ///
+    /// The "our own pid" guard decides the case before the start token is
+    /// ever read, so a reused-pid case needs a holder that is somebody
+    /// else.
+    private func liveProcessPid() -> Int32 {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        task.arguments = ["30"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        addTeardownBlock {
+            if task.isRunning {
+                task.terminate()
+            }
+            task.waitUntilExit()
+        }
+        return task.processIdentifier
     }
 
     private var ownerPath: URL {
@@ -188,6 +229,40 @@ final class HousekeeperLockTests: XCTestCase {
         let data = try? Data(contentsOf: ownerPath)
         let object = (try? JSONSerialization.jsonObject(with: data ?? Data())) as? [String: Any]
         XCTAssertEqual(object?["pid"] as? Int, Int(getpid()))
+        // All four implementations of this protocol publish the SAME shape.
+        // A record one of them calls malformed and the other calls usable
+        // leaves them with conflicting ownership decisions about one lock.
+        XCTAssertEqual(Set(object?.keys.map { $0 } ?? []),
+                       ["pid", "host", "acquired_at", "lock", "start"],
+                       "every implementation of this protocol publishes the same shape")
+
+        lock.release()
+    }
+
+    func testTheOwnerFileCarriesTheStartTimeOfThisProcess() {
+        // The start time travels with the pid, because a pid the kernel has
+        // since handed to somebody else would otherwise look exactly like a
+        // live holder.
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired)
+
+        let data = try? Data(contentsOf: ownerPath)
+        let object = (try? JSONSerialization.jsonObject(with: data ?? Data())) as? [String: Any]
+        XCTAssertEqual(object?["start"] as? String,
+                       HousekeeperLock.processStartToken(getpid()),
+                       "the record carries the start time of the process that holds the lock")
+
+        lock.release()
+    }
+
+    func testTheOwnerFileIsPrivateToTheUser() {
+        // The record names a pid and a host and sits in a shared directory.
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired)
+
+        let attributes = try? FileManager.default.attributesOfItem(atPath: ownerPath.path)
+        let permissions = (attributes?[.posixPermissions] as? NSNumber)?.int16Value
+        XCTAssertEqual(permissions, 0o600, "the owner record is private to the user")
 
         lock.release()
     }
@@ -234,6 +309,55 @@ final class HousekeeperLockTests: XCTestCase {
         let lock = HousekeeperLock(path: lockPath)
         XCTAssertEqual(lock.acquire(), .heldByPeer,
                        "a live owner keeps the lock, however fresh the directory is")
+    }
+
+    func testAReusedPidIsTakenOverAtOnce() {
+        // The kernel hands a pid to somebody else once the original exits,
+        // and a reused pid that is ALIVE looks exactly like a live holder.
+        // The start time is what tells the two apart.
+        let pid = liveProcessPid()
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        writeOwner(pid: pid, start: "Mon Jan  1 00:00:00 2024")
+
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .acquired,
+                       "a reused pid is taken over at once, not after the stale window")
+        lock.release()
+    }
+
+    func testALiveHolderWithTheRightStartTimeIsRefused() {
+        let pid = liveProcessPid()
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        writeOwner(pid: pid, start: HousekeeperLock.processStartToken(pid))
+
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .heldByPeer,
+                       "a live holder keeps the lock, however fresh the directory is")
+    }
+
+    func testAnOwnerRecordWithoutTheStartTimeIsNotEvidence() {
+        // A record that is not the record this protocol publishes names no
+        // holder, so the age rule decides.
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        let payload: [String: Any] = [
+            "pid": Int(999_999),
+            "host": HousekeeperLock.currentHostName(),
+            "acquired_at": Date().timeIntervalSince1970,
+            "lock": lockPath.path,
+        ]
+        let data = try? JSONSerialization.data(withJSONObject: payload)
+        try? data?.write(to: ownerPath)
+
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .heldByPeer)
+    }
+
+    func testAnOwnerRecordWithAnUnknownKeyIsNotEvidence() {
+        try? FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: true)
+        writeOwner(pid: 999_999, extraKey: true)
+
+        let lock = HousekeeperLock(path: lockPath)
+        XCTAssertEqual(lock.acquire(), .heldByPeer)
     }
 
     func testAFreshLockWithNoOwnerFileIsNotTakenOver() {

@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1889,6 +1890,60 @@ class TestHousekeeperLock(unittest.TestCase):
         os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
         self.tmp.cleanup()
 
+    def _owner_record(self, pid=None, host=None, start=None):
+        """A well formed owner record: the shape this protocol publishes.
+
+        The tests below used to write a bare ``{"pid": ...}``, which is not a
+        record any implementation of this protocol accepts:  it names no
+        host, no start time and no lock.  A record the readers reject is not
+        evidence of anything, so those cases were passing without testing
+        what they claimed to test.
+        """
+        import socket
+
+        from vacuum.lock import _process_start_token
+
+        if pid is None:
+            pid = 999999
+        if host is None:
+            host = socket.gethostname()
+        if start is None:
+            # A pid that is not alive has no start time of its own, so a
+            # placeholder stands in for it:  the record only has to be well
+            # formed, and a dead pid is proven gone without reading a token.
+            start = _process_start_token(pid) or "Mon Jan  1 00:00:00 2024"
+        return {
+            "pid": pid,
+            "host": host,
+            "acquired_at": time.time(),
+            "lock": str(self.lock_path),
+            "start": start,
+        }
+
+    def _write_owner_record(self, **kwargs):
+        from vacuum.lock import owner_path_for
+
+        owner_path_for(self.lock_path).write_text(json.dumps(self._owner_record(**kwargs)))
+
+    def _live_process_pid(self):
+        """The pid of a live process that is not this one.
+
+        The "our own pid" guard decides the case before the start token is
+        ever read, so a reused-pid case needs a holder that is somebody
+        else.
+        """
+        child = subprocess.Popen(["sleep", "30"])
+
+        def cleanup():
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+        self.addCleanup(cleanup)
+        return child.pid
+
     def test_acquire_writes_an_owner_file_beside_the_lock(self):
         from vacuum.lock import HousekeeperLock, owner_path_for
 
@@ -1897,6 +1952,46 @@ class TestHousekeeperLock(unittest.TestCase):
             self.assertTrue(owner.is_file(), "the owner file records who holds the lock")
             data = json.loads(owner.read_text())
             self.assertEqual(data["pid"], os.getpid())
+
+    def test_the_owner_record_has_exactly_the_shape_the_protocol_publishes(self):
+        # All four implementations of this protocol publish the SAME shape.
+        # A record one of them calls malformed and the other calls usable
+        # leaves them with conflicting ownership decisions about one lock.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            data = json.loads(owner_path_for(self.lock_path).read_text())
+            self.assertEqual(
+                set(data),
+                {"pid", "host", "acquired_at", "lock", "start"},
+                "every implementation of this protocol publishes the same shape",
+            )
+
+    def test_the_owner_record_carries_the_start_time_of_this_process(self):
+        # The start time travels with the pid, because a pid the kernel has
+        # since handed to somebody else would otherwise look exactly like a
+        # live holder.
+        from vacuum.lock import HousekeeperLock, _process_start_token, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            data = json.loads(owner_path_for(self.lock_path).read_text())
+            self.assertEqual(
+                data["start"],
+                _process_start_token(os.getpid()),
+                "the record carries the start time of the process that holds the lock",
+            )
+
+    def test_the_owner_record_is_private_to_the_user(self):
+        # The record names a pid and a host and sits in a shared directory.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            owner = owner_path_for(self.lock_path)
+            self.assertEqual(
+                owner.stat().st_mode & 0o777,
+                0o600,
+                "the owner record is private to the user",
+            )
 
     def test_the_lock_directory_stays_empty_for_the_shell_rmdir(self):
         # ~/apps/mac-auto-cleanup.sh releases the lock with a plain rmdir, and
@@ -1918,21 +2013,88 @@ class TestHousekeeperLock(unittest.TestCase):
         self.assertFalse(self.lock_path.exists())
 
     def test_a_lock_whose_owner_is_gone_is_taken_over_at_once(self):
-        from vacuum.lock import HousekeeperLock, owner_path_for
+        from vacuum.lock import HousekeeperLock
 
         self.lock_path.mkdir(parents=True)
         # A pid above the system maximum cannot name a live process, so this
         # is what a lock left behind by a killed tick looks like.
-        owner_path_for(self.lock_path).write_text(json.dumps({"pid": 999999}))
+        self._write_owner_record(pid=999999)
 
         with HousekeeperLock(self.lock_path):
             self.assertTrue(self.lock_path.is_dir(), "the dead owner's lock was taken over")
 
     def test_a_lock_whose_owner_is_alive_is_refused(self):
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=os.getpid())
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_reused_pid_is_taken_over_at_once(self):
+        # The kernel hands a pid to somebody else once the original exits, and
+        # a reused pid that is ALIVE looks exactly like a live holder.  The
+        # start time is what tells the two apart.
+        from vacuum.lock import HousekeeperLock
+
+        pid = self._live_process_pid()
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=pid, start="Mon Jan  1 00:00:00 2024")
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(
+                self.lock_path.is_dir(),
+                "a reused pid is taken over at once, not after the stale window",
+            )
+
+    def test_a_live_holder_with_the_right_start_time_is_refused(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, _process_start_token
+
+        pid = self._live_process_pid()
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=pid, start=_process_start_token(pid))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_record_without_the_start_time_is_not_evidence(self):
+        # A record that is not the record this protocol publishes names no
+        # holder, so the age rule decides.
+        import socket
+
         from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
 
         self.lock_path.mkdir(parents=True)
-        owner_path_for(self.lock_path).write_text(json.dumps({"pid": os.getpid()}))
+        owner_path_for(self.lock_path).write_text(
+            json.dumps({"pid": 999999, "host": socket.gethostname()})
+        )
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_record_with_an_unknown_key_is_not_evidence(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        record = self._owner_record(pid=999999)
+        record["extra"] = "not part of the record"
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_record_with_a_boolean_pid_is_not_evidence(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        record = self._owner_record(pid=999999)
+        record["pid"] = True
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
 
         with self.assertRaises(LockHeld):
             with HousekeeperLock(self.lock_path):
@@ -1969,10 +2131,10 @@ class TestHousekeeperLock(unittest.TestCase):
         self.assertFalse(owner_path_for(self.lock_path).exists())
 
     def test_force_release_leaves_a_peers_lock_alone(self):
-        from vacuum.lock import HousekeeperLock, force_release, owner_path_for
+        from vacuum.lock import HousekeeperLock, force_release
 
         self.lock_path.mkdir(parents=True)
-        owner_path_for(self.lock_path).write_text(json.dumps({"pid": 999999}))
+        self._write_owner_record(pid=999999)
 
         self.assertFalse(force_release(), "a lock this process does not hold is not released")
         self.assertTrue(self.lock_path.is_dir())
@@ -1981,13 +2143,13 @@ class TestHousekeeperLock(unittest.TestCase):
         # The shell holder never writes an owner file, so an owner file left
         # beside the lock can name a pid that is long gone.  Reading it as the
         # current holder would let a fresh, live lock be taken over.  The
-        # owner file only describes the holder when it is at least as new as
+        # owner file only describes the holder when it is STRICTLY newer than
         # the lock directory.
         from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
 
         self.lock_path.mkdir(parents=True)
         owner = owner_path_for(self.lock_path)
-        owner.write_text(json.dumps({"pid": 999999}))
+        self._write_owner_record(pid=999999)
         # The lock directory is newer than the owner file, so the owner file
         # is a leftover from an earlier holder.
         now = time.time()
@@ -2118,7 +2280,7 @@ class TestHousekeeperLock(unittest.TestCase):
 
         self.lock_path.mkdir(parents=True)
         owner = owner_path_for(self.lock_path)
-        owner.write_text(json.dumps({"pid": 999999}))
+        self._write_owner_record(pid=999999)
         old = time.time() - (121 * 60)
         os.utime(self.lock_path, (old, old))
 
@@ -2149,7 +2311,7 @@ class TestHousekeeperLock(unittest.TestCase):
         from vacuum.lock import HousekeeperLock, owner_path_for
 
         self.lock_path.mkdir(parents=True)
-        owner_path_for(self.lock_path).write_text(json.dumps({"pid": 999999}))
+        self._write_owner_record(pid=999999)
 
         with HousekeeperLock(self.lock_path):
             self.assertTrue(self.lock_path.is_dir(), "the dead owner's fresh lock was taken over")
@@ -2161,7 +2323,9 @@ class TestHousekeeperLock(unittest.TestCase):
         from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
 
         self.lock_path.mkdir(parents=True)
-        owner_path_for(self.lock_path).write_text(json.dumps({"pid": "not-a-pid"}))
+        record = self._owner_record(pid=999999)
+        record["pid"] = "not-a-pid"
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
 
         with self.assertRaises(LockHeld):
             with HousekeeperLock(self.lock_path):
@@ -2172,7 +2336,9 @@ class TestHousekeeperLock(unittest.TestCase):
 
         lock = HousekeeperLock(self.lock_path)
         lock.__enter__()
-        owner_path_for(self.lock_path).write_text(json.dumps({"pid": None}))
+        record = self._owner_record(pid=os.getpid())
+        record["pid"] = None
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
         lock.__exit__(None, None, None)
         self.assertFalse(self.lock_path.exists())
 
@@ -2231,26 +2397,20 @@ class TestHousekeeperLock(unittest.TestCase):
         # A pid only means something on the machine that owns it, so a lock
         # held on another host may only be taken over once the stale window
         # has passed.
-        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+        from vacuum.lock import HousekeeperLock, LockHeld
 
         self.lock_path.mkdir(parents=True)
-        owner_path_for(self.lock_path).write_text(
-            json.dumps({"pid": 999999, "host": "some-other-machine"})
-        )
+        self._write_owner_record(pid=999999, host="some-other-machine")
 
         with self.assertRaises(LockHeld):
             with HousekeeperLock(self.lock_path):
                 pass
 
     def test_a_lock_whose_owner_is_gone_on_this_host_is_still_taken_over_at_once(self):
-        import socket
-
-        from vacuum.lock import HousekeeperLock, owner_path_for
+        from vacuum.lock import HousekeeperLock
 
         self.lock_path.mkdir(parents=True)
-        owner_path_for(self.lock_path).write_text(
-            json.dumps({"pid": 999999, "host": socket.gethostname()})
-        )
+        self._write_owner_record(pid=999999)
 
         with HousekeeperLock(self.lock_path):
             self.assertTrue(self.lock_path.is_dir(), "a dead holder on this host is taken over")
@@ -2293,7 +2453,13 @@ class TestHousekeeperLock(unittest.TestCase):
                 # with its own, right here in the window.
                 self.lock_path.mkdir(parents=True, exist_ok=True)
                 lock_module.owner_path_for(self.lock_path).write_text(
-                    json.dumps({"pid": 999999})
+                    json.dumps({
+                        "pid": 999999,
+                        "host": socket.gethostname(),
+                        "acquired_at": time.time(),
+                        "lock": str(self.lock_path),
+                        "start": "Mon Jan  1 00:00:00 2024",
+                    })
                 )
             return real_rmdir(path)
 
