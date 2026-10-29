@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,9 +42,26 @@ class FingerprintTests(unittest.TestCase):
             frozenset({"failure", "timed_out", "startup_failure"}),
         )
 
-    def test_no_cron_schedules_until_a_workflow_gains_one(self):
-        self.assertEqual(reporter.CRON_SCHEDULES, {})
+    def test_cron_schedules_map_the_testflight_lane(self):
+        self.assertEqual(
+            reporter.CRON_SCHEDULES, {"Hog Hunter iOS TestFlight": "41 * * * *"})
         self.assertEqual(reporter.find_cron_schedule_drift(reporter.discover_workflow_names()), [])
+
+    def test_every_scheduled_workflow_is_mapped_with_its_cron(self):
+        """Reverse drift: a workflow `schedule:` must have a CRON_SCHEDULES entry."""
+        found = {}
+        for path in sorted(reporter.WORKFLOWS_DIR.glob("*.y*ml")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            crons = re.findall(
+                r"^\s*-\s*cron:\s*['\"]?([^'\"#\n]+?)['\"]?\s*(?:#.*)?$", text, re.MULTILINE)
+            if not crons:
+                continue
+            name_match = re.search(r"^name:\s*(.+?)\s*$", text, re.MULTILINE)
+            self.assertIsNotNone(name_match, f"{path.name} has a schedule but no name:")
+            name = name_match.group(1).strip().strip("\"'")
+            self.assertEqual(len(crons), 1, f"{path.name}: one cron per workflow expected")
+            found[name] = crons[0].strip()
+        self.assertEqual(reporter.CRON_SCHEDULES, found)
 
     def test_monitor_slug_stays_under_fifty_chars(self):
         slug = reporter.monitor_slug("hoghunter", "Hog Hunter iOS TestFlight")
@@ -115,6 +133,29 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(payload["tags"]["app"], "hoghunter")
         self.assertEqual(payload["tags"]["branch"], "cursor/hoghunter-sentry-1d2c")
         self.assertNotIn("cursor/hoghunter-sentry-1d2c", payload["fingerprint"])
+
+    def test_scheduled_testflight_run_sends_checkin_not_drift(self):
+        rc, posts = self.captured_send(
+            {
+                "SENTRY_FLEET_DSN": "https://abc123@o1.ingest.example.test/42",
+                "WORKFLOW_NAME": "Hog Hunter iOS TestFlight",
+                "WORKFLOW_BRANCH": "main",
+            },
+            conclusion="success",
+            event="schedule",
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(posts), 1)
+        items = [json.loads(line) for line in posts[0]["body"].split(b"\n") if line.strip()]
+        checkins = [item for item in items if "monitor_slug" in item]
+        self.assertEqual(len(checkins), 1)
+        checkin = checkins[0]
+        self.assertEqual(checkin["status"], "ok")
+        self.assertEqual(
+            checkin["monitor_config"]["schedule"], {"type": "crontab", "value": "41 * * * *"})
+        self.assertEqual(checkin["monitor_config"]["checkin_margin"], 30)
+        self.assertFalse(
+            any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
 
     def test_malformed_dsn_never_fails_the_job(self):
         rc, posts = self.captured_send({"SENTRY_FLEET_DSN": "not-a-dsn"})

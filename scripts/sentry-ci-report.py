@@ -17,9 +17,9 @@ Two independent signals are sent per completed run:
      [ci-failure, app, workflow] so every failure of one workflow groups into
      ONE Sentry issue instead of paging separately every time.
   2. If the run was schedule-triggered (event == "schedule"): a Sentry Crons
-     check-in.  HogHunter currently has no scheduled workflows, so
-     CRON_SCHEDULES is empty; an unexpected schedule still raises a config-
-     drift event instead of minting a silent dead monitor.
+     check-in for every workflow mapped in CRON_SCHEDULES.  A schedule-triggered
+     run with no mapping still raises a config-drift event instead of minting a
+     silent dead monitor.
 
 The branch is deliberately NOT part of the fingerprint (it was until
 2026-08-12).  Branch names are unbounded and short-lived, so including one
@@ -51,14 +51,21 @@ from pathlib import Path
 # This repo's identity in the shared fleet-infra project.
 APP = "hoghunter"
 
-# Keyed by the workflow's DISPLAY NAME (its `name:`).  HogHunter has no
-# `schedule:` triggers today; keep this empty rather than inventing monitors
-# that would immediately page as missed.  If a cron lane is added, put its
-# display name and expression here in the same PR.
-CRON_SCHEDULES: dict[str, str] = {}
+# Keyed by the workflow's DISPLAY NAME (its `name:`), valued by the exact
+# `cron:` expression of its `schedule:` trigger.  When a cron lane is added or
+# changed, update it here in the same PR; scripts/test-sentry-ci-report.py
+# fails CI if a workflow's schedule is missing or differs.
+CRON_SCHEDULES: dict[str, str] = {
+    # .github/workflows/ios-testflight.yml: hourly scheduled ship gate.
+    "Hog Hunter iOS TestFlight": "41 * * * *",
+}
 
 DEFAULT_CHECKIN_MARGIN_MINUTES = 15
-CRON_CHECKIN_MARGIN_OVERRIDES: dict[str, int] = {}
+# The check-in is only sent after the run completes (via workflow_run), and
+# GitHub routinely starts cron runs late, so give the ship lane more slack.
+CRON_CHECKIN_MARGIN_OVERRIDES: dict[str, int] = {
+    "Hog Hunter iOS TestFlight": 30,
+}
 _CRON_CHECKIN_MARGIN_FOLDED = {
     name.casefold(): margin for name, margin in CRON_CHECKIN_MARGIN_OVERRIDES.items()
 }
