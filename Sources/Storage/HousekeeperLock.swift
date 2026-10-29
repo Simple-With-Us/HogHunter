@@ -668,8 +668,11 @@ final class HousekeeperLock {
             return nil
         }
         guard Set(dict.keys) == HousekeeperLock.ownerRecordKeys else { return nil }
+        // A float pid is refused the way the Python reader refuses a
+        // non-int one; intValue would otherwise truncate 1234.5 to 1234.
         guard let pidNumber = dict["pid"] as? NSNumber,
-              !HousekeeperLock.isBooleanNumber(pidNumber) else {
+              !HousekeeperLock.isBooleanNumber(pidNumber),
+              !CFNumberIsFloatType(pidNumber as CFNumber) else {
             return nil
         }
         let pidValue = pidNumber.intValue
@@ -684,7 +687,9 @@ final class HousekeeperLock {
         guard let lock = dict["lock"] as? String, !lock.isEmpty else { return nil }
         guard let start = dict["start"] as? String,
               !start.isEmpty,
-              start.count <= HousekeeperLock.ownerStartMax else {
+              // Unicode scalars, not grapheme clusters:  Python's len()
+              // counts code points, and both readers must agree on the bound.
+              start.unicodeScalars.count <= HousekeeperLock.ownerStartMax else {
             return nil
         }
         return OwnerRecord(pid: Int32(pidValue), host: host, acquiredAt: acquiredAt,
@@ -739,11 +744,24 @@ final class HousekeeperLock {
             "start": start,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        try? data.write(to: ownerPath, options: .atomic)
         // The record names a pid and a host and sits in a shared directory,
-        // so it is PRIVATE to the user, the same as the Python writer's.
-        try? fileManager.setAttributes([.posixPermissions: 0o600],
-                                       ofItemAtPath: ownerPath.path)
+        // so it is PRIVATE to the user from creation, the same as the Python
+        // writer's O_EXCL 0600 temp file:  a mode applied after the write
+        // would leave a window, or a widened file if the chmod failed.  The
+        // temp file is renamed over the record, so readers never see a
+        // partial write.
+        let tempPath = ownerPath.path + ".tmp.\(getpid())"
+        let fd = open(tempPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else { return }
+        let written = data.withUnsafeBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Darwin.write(fd, base, buffer.count)
+        }
+        close(fd)
+        guard written == data.count, rename(tempPath, ownerPath.path) == 0 else {
+            unlink(tempPath)
+            return
+        }
     }
 
     /// Remove the owner file, but only when it is this process's own.

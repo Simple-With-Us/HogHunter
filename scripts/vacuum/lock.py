@@ -246,7 +246,9 @@ def _parse_owner(raw: str) -> dict | None:
         # is not the record this protocol publishes.
         return None
     pid = owner["pid"]
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    # Upper bound matches the Swift reader (pid_t is 32-bit):  both readers
+    # must accept exactly the same set of owner records.
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > 2**31 - 1:
         return None
     host = owner["host"]
     if not isinstance(host, str) or not host:
@@ -338,7 +340,9 @@ def _process_start_token(pid: int) -> str:
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
     try:
         result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
+            # Absolute path:  the Swift reader runs /bin/ps, and a different ps
+            # earlier on PATH could render the same process differently.
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True, text=True, timeout=10, check=False, env=env,
         )
     except (OSError, subprocess.SubprocessError):
