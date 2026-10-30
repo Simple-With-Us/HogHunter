@@ -83,7 +83,7 @@ def push_paths(text):
         if collecting:
             if line.strip().startswith("#") or not line.strip():
                 continue
-            item = re.match(r"""^\s+-\s+['"]?([^'"\s]+)['"]?\s*$""", line)
+            item = re.match(r"""^\s+-\s+['"]?([^'"\s]+)['"]?\s*(?:#.*)?$""", line)
             if not item:
                 break
             paths.append(item.group(1))
@@ -91,21 +91,23 @@ def push_paths(text):
 
 
 _GATE_PREFIX_RE = re.compile(r"""--path-prefix\s+['"]?([^'"\s]+)['"]?""")
+_TRAILING_COMMENT_RE = re.compile(r"\s*(?:#.*)?$")
 
 
 def gate_prefixes(text):
     """--path-prefix values from the scheduled-gate call blocks only."""
     prefixes, in_gate = [], False
     for line in text.splitlines():
+        code = _TRAILING_COMMENT_RE.sub("", line)
         if not in_gate:
-            if "scheduled-ship-gate.sh" in line and not line.lstrip().startswith("#"):
+            if "scheduled-ship-gate.sh" in code:
                 in_gate = True
-                prefixes.extend(_GATE_PREFIX_RE.findall(line))
-                if not line.rstrip().endswith("\\"):
+                prefixes.extend(_GATE_PREFIX_RE.findall(code))
+                if not code.rstrip().endswith("\\"):
                     in_gate = False
             continue
-        prefixes.extend(_GATE_PREFIX_RE.findall(line))
-        if not line.rstrip().endswith("\\"):
+        prefixes.extend(_GATE_PREFIX_RE.findall(code))
+        if not code.rstrip().endswith("\\"):
             in_gate = False
     return prefixes
 
@@ -260,7 +262,7 @@ class NativeTreeTests(unittest.TestCase):
             "    branches:\n"
             "      - main\n"
             "    paths:\n"
-            "      - 'ios/**'\n"
+            "      - 'ios/**' # kept, not - 'evil/**'\n"
             '      - "project.yml"\n'
             "      - scripts/ios-fleet/**\n"
             "    paths-ignore:\n"
@@ -273,7 +275,7 @@ class NativeTreeTests(unittest.TestCase):
             "# --path-prefix 'commented/out/**'\n"
             "bash scripts/ios-fleet/scheduled-ship-gate.sh \\\n"
             "  --event schedule \\\n"
-            "  --path-prefix 'ios/**' \\\n"
+            "  --path-prefix 'ios/**' \\ # kept, not --path-prefix 'evil/**'\n"
             '  --path-prefix "project.yml" \\\n'
             "  --path-prefix scripts/ios-fleet/** \\\n"
             "  hoghunter\n"
