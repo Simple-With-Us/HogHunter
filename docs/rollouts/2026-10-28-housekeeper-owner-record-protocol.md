@@ -64,6 +64,8 @@ And one rule about the removal, which AFC's readers already state and Hog Hunter
 
 ## AFC-582 Reader Compatibility
 
+Before a legacy-token mismatch can use `acquired_at` as a cutoff, that timestamp must agree with the lock-directory and owner-file mtimes within two seconds and must not be more than 60 seconds in the future.  An out-of-range timestamp is inconclusive, so the age rule decides.
+
 Hog Hunter's Swift and Python readers accept both forms before any writer changes to UTC.  Their writer calls still omit TZ, preserving compatibility with deployed readers that expect the legacy local form.  All four readers across Hog Hunter and AFC must land before the separate UTC writer phase.
 
 The C-locale timestamp parser uses explicit English weekday and month names and UTC calendar arithmetic.  It does not depend on the reader's process locale or timezone.  Invalid calendar dates, mismatched weekdays and malformed tokens are inconclusive, preserving the existing age fallback.

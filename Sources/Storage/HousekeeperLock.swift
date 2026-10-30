@@ -380,7 +380,7 @@ final class HousekeeperLock {
         // The holder we found is gone when its pid is dead, or when that pid
         // now names a different process.  The start token is what tells the
         // two apart, and it is the same rule every implementation applies.
-        let ownerIsGone = deadOwner.map { HousekeeperLock.ownerIsGone($0) } ?? false
+        let ownerIsGone = deadOwner.map { ownerRecordIsGone($0, lockURL: aside) } ?? false
         guard movedIsStale || ownerIsGone else {
             // Someone else's fresh lock, held by a live process.  Put it back.
             putBack(aside)
@@ -519,6 +519,8 @@ final class HousekeeperLock {
     ///
     /// This bound keeps a hostile file from putting an unbounded string in memory.
     static let ownerStartMax = 128
+    static let ownerAcquiredAtFilesystemSkew: TimeInterval = 2
+    static let ownerAcquiredAtFutureSkew: TimeInterval = 60
 
     /// True when a JSON number is really a boolean.
     ///
@@ -632,17 +634,44 @@ final class HousekeeperLock {
     /// when the process was already running at acquisition.
     /// An unreadable or unparseable token cannot speak for the lock, and
     /// the age rule decides.
-    static func ownerIsGone(_ owner: OwnerRecord) -> Bool {
+    static func ownerIsGone(
+        _ owner: OwnerRecord,
+        lockModified: Date,
+        ownerModified: Date
+    ) -> Bool {
         if !isProcessAlive(owner.pid) { return true }
         let current = processStartToken(owner.pid, utc: true)
         if current.isEmpty { return false }
         if current == owner.start { return false }
         guard let currentEpoch = startTokenEpoch(current),
               let recordedCivilEpoch = startTokenEpoch(owner.start) else { return false }
+        guard ownerAcquiredAtIsSane(
+            owner.acquiredAt,
+            lockModified: lockModified,
+            ownerModified: ownerModified,
+            now: Date()
+        ) else { return false }
         // A legacy local token may differ only by its zone's UTC offset.
         // The acquisition bound prevents a newly reused pid from being
         // accepted as the prior holder merely because it started within a day.
-        return currentEpoch > owner.acquiredAt || abs(recordedCivilEpoch - currentEpoch) > 24 * 60 * 60
+        return currentEpoch > owner.acquiredAt
+            || abs(recordedCivilEpoch - currentEpoch) > 24 * 60 * 60
+    }
+
+    private static func ownerAcquiredAtIsSane(
+        _ acquiredAt: Double,
+        lockModified: Date,
+        ownerModified: Date,
+        now: Date
+    ) -> Bool {
+        guard acquiredAt.isFinite, ownerModified > lockModified else { return false }
+        let lockEpoch = lockModified.timeIntervalSince1970
+        let ownerEpoch = ownerModified.timeIntervalSince1970
+        let nowEpoch = now.timeIntervalSince1970
+        let skew = ownerAcquiredAtFilesystemSkew
+        return lockEpoch - skew <= acquiredAt
+            && acquiredAt <= ownerEpoch + skew
+            && acquiredAt <= nowEpoch + ownerAcquiredAtFutureSkew
     }
 
     /// True when the recorded owner is definitely gone.
@@ -651,7 +680,7 @@ final class HousekeeperLock {
     /// shell holder never wrote one, so the caller falls back to the age
     /// rule.  Guessing wrong in that direction would steal a live lock.
     private var isOwnerGone: Bool {
-        guard ownerDescribesHolder(), let owner = ownerRecord(),
+        guard let times = ownerFileTimes(for: path), let owner = ownerRecord(),
               owner.pid > 0, owner.pid != getpid() else {
             return false
         }
@@ -659,7 +688,16 @@ final class HousekeeperLock {
         // held on another host cannot be taken over on the strength of a pid
         // that is not ours.
         guard owner.host == HousekeeperLock.currentHostName() else { return false }
-        return HousekeeperLock.ownerIsGone(owner)
+        return HousekeeperLock.ownerIsGone(
+            owner, lockModified: times.lockModified, ownerModified: times.ownerModified
+        )
+    }
+
+    private func ownerRecordIsGone(_ owner: OwnerRecord, lockURL: URL) -> Bool {
+        guard let times = ownerFileTimes(for: lockURL) else { return false }
+        return HousekeeperLock.ownerIsGone(
+            owner, lockModified: times.lockModified, ownerModified: times.ownerModified
+        )
     }
 
     /// True when the owner file describes the holder of the lock that is
@@ -675,14 +713,15 @@ final class HousekeeperLock {
     /// this protocol refuse a record whose mtime equals the lock
     /// directory's, and two readers that disagree about the same file leave
     /// the fleet with conflicting ownership decisions about one lock.
-    private func ownerDescribesHolder() -> Bool {
+    private func ownerFileTimes(for lockURL: URL) -> (lockModified: Date, ownerModified: Date)? {
         guard let ownerAttributes = try? fileManager.attributesOfItem(atPath: ownerPath.path),
               let ownerModified = ownerAttributes[.modificationDate] as? Date,
-              let lockAttributes = try? fileManager.attributesOfItem(atPath: path.path),
+              let lockAttributes = try? fileManager.attributesOfItem(atPath: lockURL.path),
               let lockModified = lockAttributes[.modificationDate] as? Date else {
-            return false
+            return nil
         }
-        return ownerModified > lockModified
+        guard ownerModified > lockModified else { return nil }
+        return (lockModified, ownerModified)
     }
 
     /// The owner record, when the file holds one this protocol publishes.

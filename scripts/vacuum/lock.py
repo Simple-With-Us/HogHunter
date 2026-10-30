@@ -223,6 +223,8 @@ _OWNER_KEYS = frozenset({"pid", "host", "acquired_at", "lock", "start"})
 # file from putting an unbounded string in memory.
 # The other three implementations apply the same bound, in the same place.
 _OWNER_START_MAX = 128
+_OWNER_ACQUIRED_AT_FS_SKEW_SEC = 2.0
+_OWNER_ACQUIRED_AT_FUTURE_SKEW_SEC = 60.0
 
 
 def _parse_owner(raw: str) -> dict | None:
@@ -375,7 +377,21 @@ def _start_token_epoch(token: str) -> float | None:
         return None
 
 
-def _owner_is_gone(owner: dict) -> bool:
+def _owner_acquired_at_is_sane(
+    acquired_at: float, lock_mtime: float, owner_mtime: float, *, now: float | None = None
+) -> bool:
+    """Whether acquired_at agrees with the lock and owner file timestamps."""
+    if not math.isfinite(acquired_at):
+        return False
+    now = time.time() if now is None else now
+    skew = _OWNER_ACQUIRED_AT_FS_SKEW_SEC
+    return (
+        lock_mtime - skew <= acquired_at <= owner_mtime + skew
+        and acquired_at <= now + _OWNER_ACQUIRED_AT_FUTURE_SKEW_SEC
+    )
+
+
+def _owner_is_gone(owner: dict, lock_path: Path, owner_path: Path) -> bool:
     """True when the owner record proves the holder is gone.
 
     A dead pid proves it at once.  A live pid does not, because the kernel
@@ -385,6 +401,13 @@ def _owner_is_gone(owner: dict) -> bool:
     already running at acquisition.  An unreadable or unparseable token
     cannot speak for the lock, and the age rule decides.
     """
+    try:
+        lock_mtime = lock_path.stat().st_mtime
+        owner_mtime = owner_path.stat().st_mtime
+    except OSError:
+        return False
+    if owner_mtime <= lock_mtime:
+        return False
     pid = owner["pid"]
     if not _pid_alive(pid):
         return True
@@ -398,6 +421,10 @@ def _owner_is_gone(owner: dict) -> bool:
     current_epoch = _start_token_epoch(current)
     recorded_civil_epoch = _start_token_epoch(owner["start"])
     if current_epoch is None or recorded_civil_epoch is None:
+        return False
+    if not _owner_acquired_at_is_sane(
+        owner["acquired_at"], lock_mtime, owner_mtime
+    ):
         return False
     # A legacy local token may differ only by its zone's UTC offset.  The
     # acquisition bound prevents a newly reused pid from being accepted as
@@ -674,7 +701,7 @@ class HousekeeperLock:
             return False
         # The record proves the holder is gone:  a dead pid, or a live pid
         # that now names a different process.
-        return _owner_is_gone(owner)
+        return _owner_is_gone(owner, self.lock_path, self.owner_path)
 
     def _takeover(self) -> bool:
         """Take a lock that is free to be taken, atomically.
@@ -718,7 +745,9 @@ class HousekeeperLock:
         # The holder we found is gone when its pid is dead, or when that pid
         # now names a different process.  The start token is what tells the
         # two apart, and it is the same rule every implementation applies.
-        owner_is_gone = dead_owner is not None and _owner_is_gone(dead_owner)
+        owner_is_gone = dead_owner is not None and _owner_is_gone(
+            dead_owner, aside, self.owner_path
+        )
         if not (moved_is_stale or owner_is_gone):
             # Someone else's fresh lock, held by a live process.  Put it back.
             self._put_back(aside)
