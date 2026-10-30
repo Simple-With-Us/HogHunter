@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreFoundation
 import Foundation
 
 /// Reads Maintain status from the on-disk store the Python engine maintains.
@@ -35,6 +36,8 @@ final class MaintainStore: ObservableObject {
 
     // Maintenance tuning knobs
     @Published var lowFreeGiB: Double = 80.0
+    @Published var worktreeRetireMinDays: Int = 7
+    @Published private(set) var worktreeRetireDaysPersisted = true
     @Published var pm2LogsCapMB: Int = 50
     @Published var coolifySSHHost: String = ""
     @Published var customDerivedDataPath: String = ""
@@ -75,9 +78,9 @@ final class MaintainStore: ObservableObject {
         configURL = support.appendingPathComponent("config.json")
         MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
-        self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
         self.infisical = infisical ?? InfisicalSettings.shared
         self.infisicalStore = infisicalStore ?? InfisicalStore.shared
+        self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root, infisicalStore: self.infisicalStore)
         self.vpsStore = VPSStatusStore(fetcher: vpsFetcher)
         NotificationCenter.default.addObserver(
             self,
@@ -171,6 +174,20 @@ final class MaintainStore: ObservableObject {
     private func loadMaintainConfig() {
         let json = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let lanes = json?["lanes"] as? [String: Any]
+        let fileRetireDays = Self.validRetireDays(lanes?["retire_min_days"]) ?? 7
+        let infisicalRetireText = infisical.isConfigured
+            ? infisicalStore.string(for: InfisicalKey.maintainJanitorRetireMinDays)
+            : nil
+        let retireDays = infisicalRetireText.map { Self.validRetireDays($0) ?? 7 } ?? fileRetireDays
+        if worktreeRetireDaysPersisted, worktreeRetireMinDays != retireDays {
+            worktreeRetireMinDays = retireDays
+        }
+        // Keep launchd's config-file fallback aligned with a value refreshed
+        // from Infisical while the app is open.
+        if worktreeRetireDaysPersisted, infisicalRetireText != nil, fileRetireDays != retireDays {
+            Self.writeRetireDays(retireDays, to: configURL)
+        }
         // Set even when the file or key is missing, so a host removed on disk
         // reads empty here too, as the old read-on-every-access getter did.
         // Infisical is the source of truth: a non-empty host there wins once
@@ -224,6 +241,75 @@ final class MaintainStore: ObservableObject {
             try? outData.write(to: configURL, options: .atomic)
         }
         refresh()
+    }
+
+    /// Writes the retention knob to Infisical first when configured, then
+    /// mirrors it to config.json for launchd's standalone Python scheduler.
+    func saveWorktreeRetireMinDays() {
+        guard (1...90).contains(worktreeRetireMinDays) else {
+            worktreeRetireMinDays = 7
+            return
+        }
+        worktreeRetireDaysPersisted = false
+        let value = worktreeRetireMinDays
+        let infisical = self.infisical
+        let previous = worktreeRetireTask
+        previous?.cancel()
+        worktreeRetireTask = Task { [weak self] in
+            _ = await previous?.value
+            guard !Task.isCancelled, let self else { return }
+            if infisical.isConfigured {
+                do {
+                    try await infisical.set(
+                        String(value),
+                        forKey: InfisicalKey.maintainJanitorRetireMinDays,
+                        expectedGeneration: infisical.connectionGeneration
+                    )
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.lastError = Self.infisicalSaveFailure("the merged worktree retention", error: error)
+                    self.worktreeRetireDaysPersisted = true
+                    self.refresh()
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            Self.writeRetireDays(value, to: self.configURL)
+            self.lastError = nil
+            self.worktreeRetireDaysPersisted = true
+            self.refresh()
+        }
+    }
+
+    private var worktreeRetireTask: Task<Void, Never>?
+
+    private static func validRetireDays(_ value: Any?) -> Int? {
+        let parsed: Int?
+        if let number = value as? NSNumber {
+            guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let double = number.doubleValue
+            guard double.isFinite, double.rounded(.towardZero) == double else { return nil }
+            parsed = Int(exactly: double)
+        } else if let string = value as? String, let int = Int(string), string == String(int) {
+            parsed = int
+        } else {
+            parsed = nil
+        }
+        guard let parsed, (1...90).contains(parsed) else { return nil }
+        return parsed
+    }
+
+    private static func writeRetireDays(_ days: Int, to configURL: URL) {
+        try? FileManager.default.createDirectory(
+            at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        var json = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        var lanes = json["lanes"] as? [String: Any] ?? [:]
+        lanes["retire_min_days"] = days
+        json["lanes"] = lanes
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: configURL, options: .atomic)
     }
 
     func setToolPath(toolId: String, path: String) {
@@ -382,7 +468,7 @@ final class MaintainStore: ObservableObject {
     }
 
     /// The launcher the app uses: `/usr/bin/python3 scripts/maintain.py ...`.
-    nonisolated static func pythonLauncher(repoRoot: URL) -> Launcher {
+    nonisolated static func pythonLauncher(repoRoot: URL, infisicalStore: InfisicalStore = .shared) -> Launcher {
         { arguments in
             guard !isRunningUnderTest else { throw LauncherRefused() }
             let maintain = repoRoot.appendingPathComponent("scripts/maintain.py")
@@ -393,6 +479,13 @@ final class MaintainStore: ObservableObject {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
                 proc.arguments = [script.path] + arguments
                 var env = ProcessInfo.processInfo.environment
+                let infisicalSnapshot = infisicalStore.snapshot
+                if infisicalSnapshot.projectId != nil,
+                   infisicalSnapshot.projectId != InfisicalStore.localProjectId,
+                   let configured = infisicalSnapshot.values[InfisicalKey.maintainJanitorRetireMinDays],
+                   let days = Int(configured), String(days) == configured, (1...90).contains(days) {
+                    env["hoghunter.maintain.janitor.retireMinDays"] = configured
+                }
                 let home = FileManager.default.homeDirectoryForCurrentUser.path
                 let extraPaths = [
                     "/opt/homebrew/bin",

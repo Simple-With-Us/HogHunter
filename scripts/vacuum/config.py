@@ -121,12 +121,13 @@ LEGACY_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
 DEFAULT_HISTORY_MAX_RUNS = 500
 DEFAULT_HOUSEKEEPER_LOCK = "~/.claude-disk-janitor/.housekeeper.lock"
 
-# Lane doctor settings (see vacuum/lanes.py).  The only setting is where the doctor is installed, a machine-local
-# path like hoghunter_clean.  The report age, schema, timeout, and age limits are code constants in lanes.py, and
-# numeric keys in a `lanes` config block are ignored.
+# Lane doctor settings (see vacuum/lanes.py).  The doctor path is machine-local; merged-worktree retention is a
+# validated runtime setting.  Report age, schema, doctor timeout, and dependency age remain code constants.
 DEFAULT_LANES: dict[str, Any] = {
     # Argv, never a shell.  A leading ~ means the Vacuum's home.  HOGHUNTER_LANE_DOCTOR_COMMAND overrides it.
     "doctor_command": ["~/apps/lane", "ls", "--json"],
+    # Merged worktree retention.  The other lane safety gates remain fixed in code.
+    "retire_min_days": 7,
 }
 
 # Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
@@ -296,6 +297,15 @@ def _parse_int(val: str) -> int | None:
         return None
 
 
+def _parse_retire_days(val: str) -> int | None:
+    """Whole-day retention knob, bounded so bad config cannot erase the safety floor."""
+    text = val.strip()
+    if not text.isdigit():
+        return None
+    parsed = int(text)
+    return parsed if 1 <= parsed <= 90 else None
+
+
 def _parse_float(val: str) -> float | None:
     try:
         return float(val.strip())
@@ -383,6 +393,18 @@ def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = No
             val = _parse_float(env[key])
             if val is not None:
                 janitor["low_free_gib"] = val
+
+    # Merged worktree retention.  An explicitly invalid override fails safe to
+    # the built-in seven-day default rather than accepting a stale file value.
+    retire_keys = (
+        "hoghunter.maintain.janitor.retireMinDays",
+        "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
+    )
+    for key in retire_keys:
+        if key in env:
+            lanes = base.setdefault("lanes", {})
+            lanes["retire_min_days"] = _parse_retire_days(str(env[key])) or 7
+            break
 
     # Resource watch thresholds
     resource_watch = base.setdefault("resource_watch", {})

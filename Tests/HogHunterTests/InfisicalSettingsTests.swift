@@ -571,6 +571,7 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainCoolifySshHost], "")
         XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorMaxLoadHard], "250")
         XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorLowFreeGib], "80")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorRetireMinDays], "7")
         XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainWatchDiskFreeWarnGb], "25")
         XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainWatchSwapUsedPct], "90")
 
@@ -578,6 +579,7 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainStepXcodeDerivedData))
         XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainIntervalWatchSec))
         XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainCoolifySshHost))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainJanitorRetireMinDays))
     }
 
     // The Maintain store's Infisical override and write-through tests live in

@@ -456,10 +456,6 @@ private struct MaintenanceSettingsTab: View {
 private struct MaintenanceSettingsContent: View {
     @ObservedObject var maintain: MaintainStore
 
-    /// Mirrors `RETIRE_MIN_DAYS` in `scripts/vacuum/lanes.py`, a code
-    /// constant the engine never reads from the config.
-    static let worktreeRetireMinDays = 7
-
     var body: some View {
         Form {
             Section("Scheduled Maintenance Steps") {
@@ -592,13 +588,14 @@ private struct MaintenanceSettingsContent: View {
                         Text("Merged Git Worktree Retention:")
                             .font(.system(size: 12, weight: .medium))
                         Spacer()
-                        Text("\(Self.worktreeRetireMinDays) days")
+                        Text("\(maintain.worktreeRetireMinDays) days")
                             .font(.system(size: 12, weight: .bold))
+                        Stepper("", value: $maintain.worktreeRetireMinDays, in: 1...90)
+                        .labelsHidden()
+                        .onChange(of: maintain.worktreeRetireMinDays) { _ in maintain.saveWorktreeRetireMinDays() }
+                        .help("Choose 1 to 90 whole days")
                     }
-                    // Read-only on purpose: the engine's lane_settings ignores
-                    // numeric `lanes` keys in the config, so a stray value can
-                    // neither loosen nor tighten this safety floor.
-                    Text("A merged lane worktree must sit idle at least this long before automated retirement.\u{00A0} This is a fixed safety limit, not a setting.")
+                    Text("Choose 1 to 90 whole days; default 7 days.\u{00A0} Only clean, merged, inactive worktrees are eligible.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
