@@ -836,6 +836,24 @@ def process_state(runner: Runner, pattern: str, what: str = "a running process m
     return True, f"pgrep exited {res.returncode}; treated as busy"
 
 
+def executable_state(runner: Runner, name: str, what: Optional[str] = None) -> tuple:
+    """Check an executable name exactly, without matching unrelated argv text.
+
+    `pgrep -x` checks the process name instead of its full command line.  As
+    with process_state, any probe failure is busy so a failed lookup cannot
+    open a destructive gate.
+    """
+    label = what or f"{name} is running"
+    res, err = call(runner, ["pgrep", "-x", name], 3.0)
+    if res is None:
+        return True, f"pgrep failed ({err}); treated as busy"
+    if res.returncode == 0:
+        return True, label
+    if res.returncode == 1:
+        return False, ""
+    return True, f"pgrep exited {res.returncode}; treated as busy"
+
+
 _ERE_SPECIAL = re.compile(r"([.\[\\()*+?{|^$])")
 
 
