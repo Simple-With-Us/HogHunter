@@ -7,9 +7,12 @@ name: Hog Hunter iOS TestFlight
 # (project.yml, targets HogHunterIOS and HogHunterWidgets).  They are listed as
 # exact files, not Sources/Companion/**:  most of that directory is the Mac
 # companion server, and a Mac-only edit must not cut a TestFlight build.
-# scripts/test-ios-release.py pins both lists (these push paths and the
-# scheduled gate prefixes below) to project.yml, so a file added to the iOS
-# targets cannot quietly stop shipping.  workflow_dispatch is the manual path.
+# scripts/test-ios-release.py pins these push paths to project.yml, so a file
+# added to the iOS targets cannot quietly stop shipping, and pins the
+# scheduled gate prefixes below to THESE push paths verbatim (owner rule
+# 2026-10-29: unless a merge built recently it automatically builds, so a
+# merge the push trigger would have shipped can never be skipped by the cron
+# just because the push event was missed).  workflow_dispatch is the manual path.
 #
 # The ship goes through the fleet script (scripts/ios-fleet/ship-testflight.sh,
 # via scripts/ios-ship-testflight.sh), the same path Socratic.Trade,
@@ -48,10 +51,11 @@ name: Hog Hunter iOS TestFlight
 # A pull request merged by github-actions[bot] lands on main under GitHub's
 # recursion guard and dispatches no push run, and a push run that failed is
 # never retried.  A cron is exempt from both.  It is gated twice:
-# scripts/ios-fleet/scheduled-ship-gate.sh refuses unless a native path changed
-# since the last successful ship, and the ship script rate-limits and skips an
-# already-shipped HEAD.  A tick with nothing to ship exits in seconds.  push and
-# workflow_dispatch skip the path gate (a push already passed `paths:`).
+# scripts/ios-fleet/scheduled-ship-gate.sh refuses unless a path from the push
+# filter above changed since the last successful ship (native tree AND ship
+# machinery, with the same ! exclusions), and the ship script rate-limits and
+# skips an already-shipped HEAD.  A tick with nothing to ship exits in seconds.
+# push and workflow_dispatch skip the path gate (a push already passed `paths:`).
 #
 # The ship state (~/.cache/ios-fleet) is restored from actions/cache because a
 # hosted runner starts with an empty home;  without it every run would look like
@@ -143,23 +147,31 @@ jobs:
             ios-fleet-state-hoghunter-ios-
 
       # Before any ASC query, so a tick with nothing to ship costs seconds and
-      # a transient ASC hiccup cannot red it.  Prefixes mirror on.push.paths
-      # (minus the machinery files, which only a push or a dispatch should act
-      # on) and the ship job's gate below.  The logic lives in a script so CI
-      # unit-tests it, and scripts/test-ios-release.py pins both prefix lists
-      # to project.yml.
-      - name: Scheduled ship gate (skip unless iOS code changed)
+      # a transient ASC hiccup cannot red it.  Prefixes are on.push.paths
+      # verbatim and in order (native tree AND ship machinery, with the same !
+      # exclusions), matching the ship job's gate below, so a merge the push
+      # trigger would have shipped still ships when the push event was missed.
+      # The logic lives in a script so CI unit-tests it, and
+      # scripts/test-ios-release.py pins both prefix lists to on.push.paths.
+      - name: Scheduled ship gate (skip unless a push path changed)
         id: gate
         run: |
           bash "$GITHUB_WORKSPACE/scripts/ios-fleet/scheduled-ship-gate.sh" \
             --event "${{ github.event_name }}" \
-            --path-prefix 'ios/' \
+            --path-prefix 'ios/**' \
             --path-prefix 'project.yml' \
             --path-prefix 'Sources/Companion/CompanionSnapshot.swift' \
             --path-prefix 'Sources/Companion/CompanionHTTP.swift' \
             --path-prefix 'Sources/Companion/CompanionPeer.swift' \
             --path-prefix 'Sources/UI/CpuSparklineView.swift' \
             --path-prefix 'Sources/Telemetry/SentryTelemetry.swift' \
+            --path-prefix '.github/workflows/ios-testflight.yml' \
+            --path-prefix '.github/actions/infisical-secrets/**' \
+            --path-prefix 'scripts/infisical-fetch.mjs' \
+            --path-prefix 'scripts/ios-*.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix '!scripts/ios-fleet/test-*.sh' \
+            --path-prefix '!scripts/ios-fleet/README.md' \
             --repo-root "$GITHUB_WORKSPACE" \
             hoghunter
 
@@ -339,21 +351,28 @@ jobs:
         run: rm -rf "$HOME"/.cache/ios-fleet/*.lockdir
 
       # Runs before any toolchain or secret step, so a tick with nothing to ship
-      # costs seconds.  Prefixes mirror on.push.paths (minus the machinery files,
-      # which only a push or a dispatch should act on).  The logic lives in a
-      # script so CI unit-tests it.
-      - name: Scheduled ship gate (skip unless iOS code changed)
+      # costs seconds.  Prefixes are on.push.paths verbatim and in order (native
+      # tree AND ship machinery, with the same ! exclusions), matching the
+      # plan-build gate above.  The logic lives in a script so CI unit-tests it.
+      - name: Scheduled ship gate (skip unless a push path changed)
         id: gate
         run: |
           bash "$GITHUB_WORKSPACE/scripts/ios-fleet/scheduled-ship-gate.sh" \
             --event "${{ github.event_name }}" \
-            --path-prefix 'ios/' \
+            --path-prefix 'ios/**' \
             --path-prefix 'project.yml' \
             --path-prefix 'Sources/Companion/CompanionSnapshot.swift' \
             --path-prefix 'Sources/Companion/CompanionHTTP.swift' \
             --path-prefix 'Sources/Companion/CompanionPeer.swift' \
             --path-prefix 'Sources/UI/CpuSparklineView.swift' \
             --path-prefix 'Sources/Telemetry/SentryTelemetry.swift' \
+            --path-prefix '.github/workflows/ios-testflight.yml' \
+            --path-prefix '.github/actions/infisical-secrets/**' \
+            --path-prefix 'scripts/infisical-fetch.mjs' \
+            --path-prefix 'scripts/ios-*.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix '!scripts/ios-fleet/test-*.sh' \
+            --path-prefix '!scripts/ios-fleet/README.md' \
             --repo-root "$GITHUB_WORKSPACE" \
             hoghunter
 

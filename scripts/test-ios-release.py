@@ -3,9 +3,11 @@
 
 Never contacts Apple, GitHub or Infisical and never reads a credential.  It pins:
 
-* the push paths and the scheduled gate prefixes of ios-testflight.yml to the
-  sources project.yml compiles into the iOS app and the widget, so a file added
-  to those targets cannot quietly stop shipping;
+* the push paths of ios-testflight.yml to the sources project.yml compiles
+  into the iOS app and the widget, so a file added to those targets cannot
+  quietly stop shipping, and the scheduled gate prefixes to those push paths
+  verbatim (owner rule 2026-10-29: a merge the push trigger would have shipped
+  must still ship when the push event was missed);
 * the release contract the owner set on 2026-10-17 (fleet ship script, What to
   Test published, Fleet-OPS /asc key, no standing gate override);
 * the vendored fleet files and the What to Test renderer (no agent names, no
@@ -81,15 +83,33 @@ def push_paths(text):
         if collecting:
             if line.strip().startswith("#") or not line.strip():
                 continue
-            item = re.match(r"^      - '([^']+)'\s*$", line)
+            item = re.match(r"""^\s+-\s+['"]?([^'"\s]+)['"]?\s*(?:#.*)?$""", line)
             if not item:
                 break
             paths.append(item.group(1))
     return paths
 
 
+_GATE_PREFIX_RE = re.compile(r"""--path-prefix\s+['"]?([^'"\s]+)['"]?""")
+_TRAILING_COMMENT_RE = re.compile(r"\s*(?:#.*)?$")
+
+
 def gate_prefixes(text):
-    return re.findall(r"--path-prefix '([^']+)'", text)
+    """--path-prefix values from the scheduled-gate call blocks only."""
+    prefixes, in_gate = [], False
+    for line in text.splitlines():
+        code = _TRAILING_COMMENT_RE.sub("", line)
+        if not in_gate:
+            if "scheduled-ship-gate.sh" in code:
+                in_gate = True
+                prefixes.extend(_GATE_PREFIX_RE.findall(code))
+                if not code.rstrip().endswith("\\"):
+                    in_gate = False
+            continue
+        prefixes.extend(_GATE_PREFIX_RE.findall(code))
+        if not code.rstrip().endswith("\\"):
+            in_gate = False
+    return prefixes
 
 
 def glob_regex(pattern):
@@ -221,20 +241,47 @@ class NativeTreeTests(unittest.TestCase):
         self.assertTrue(triggers(["scripts/ios-fleet/**"], "scripts/ios-fleet/a/b.sh"))
         self.assertFalse(triggers(["Assets.xcassets"], "Assets.xcassets/AppIcon.appiconset/Contents.json"))
 
-    def test_scheduled_gate_prefixes_mirror_the_native_sources(self):
-        expected = []
-        for path in native_sources():
-            prefix = "ios/" if path.startswith("ios/") else path
-            if prefix not in expected:
-                expected.append(prefix)
-        # project.yml defines the iOS targets, so a change to it ships as well.
-        expected.append("project.yml")
-        # Both jobs run the gate with identical prefixes (plan-build gates
-        # before any ASC query; ship gates before any toolchain or secret
-        # step), so the whole file carries each prefix twice.
+    def test_scheduled_gate_prefixes_match_push_paths_verbatim(self):
+        # Owner rule 2026-10-29: the scheduled backstop catches every merge the
+        # push trigger would have shipped, so both gates take on.push.paths
+        # verbatim and in order (native tree AND ship machinery, with the same
+        # ! exclusions last).  Both jobs run the gate (plan-build gates before
+        # any ASC query; ship gates before any toolchain or secret step), so
+        # the whole file carries the push list twice, in order.
         found = gate_prefixes(self.text)
-        self.assertEqual(sorted(set(found)), sorted(set(expected)))
-        self.assertEqual(len(found), 2 * len(set(expected)))
+        count = len(self.push)
+        self.assertGreater(count, 0)
+        self.assertEqual(len(found), 2 * count)
+        self.assertEqual(found[:count], self.push)
+        self.assertEqual(found[count:], self.push)
+
+    def test_extractors_accept_any_quote_style(self):
+        sample = (
+            "on:\n"
+            "  push:\n"
+            "    branches:\n"
+            "      - main\n"
+            "    paths:\n"
+            "      - 'ios/**' # kept, not - 'evil/**'\n"
+            '      - "project.yml"\n'
+            "      - scripts/ios-fleet/**\n"
+            "    paths-ignore:\n"
+            "      - 'docs/**'\n"
+            "  schedule:\n"
+        )
+        self.assertEqual(push_paths(sample), ["ios/**", "project.yml", "scripts/ios-fleet/**"])
+        gate_sample = (
+            "# scripts/ios-fleet/scheduled-ship-gate.sh refuses unless a push path changed\n"
+            "# --path-prefix 'commented/out/**'\n"
+            "bash scripts/ios-fleet/scheduled-ship-gate.sh \\\n"
+            "  --event schedule \\\n"
+            "  --path-prefix 'ios/**' \\ # kept, not --path-prefix 'evil/**'\n"
+            '  --path-prefix "project.yml" \\\n'
+            "  --path-prefix scripts/ios-fleet/** \\\n"
+            "  hoghunter\n"
+            "--path-prefix 'after/block/**'\n"
+        )
+        self.assertEqual(gate_prefixes(gate_sample), ["ios/**", "project.yml", "scripts/ios-fleet/**"])
 
     def test_no_native_source_is_missing_from_the_push_paths_text(self):
         for path in native_sources():
