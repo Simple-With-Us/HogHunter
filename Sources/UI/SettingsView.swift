@@ -590,9 +590,14 @@ private struct MaintenanceSettingsContent: View {
                         Spacer()
                         Text("\(maintain.worktreeRetireMinDays) days")
                             .font(.system(size: 12, weight: .bold))
-                        Stepper("", value: $maintain.worktreeRetireMinDays, in: 1...90)
+                        Stepper("", value: Binding(
+                            get: { maintain.worktreeRetireMinDays },
+                            set: {
+                                maintain.worktreeRetireMinDays = $0
+                                maintain.saveWorktreeRetireMinDays()
+                            }
+                        ), in: 1...90)
                         .labelsHidden()
-                        .onChange(of: maintain.worktreeRetireMinDays) { _ in maintain.saveWorktreeRetireMinDays() }
                         .help("Choose 1 to 90 whole days")
                     }
                     Text("Choose 1 to 90 whole days; default 7 days.\u{00A0} Only clean, merged, inactive worktrees are eligible.")
