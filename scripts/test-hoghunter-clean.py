@@ -1028,6 +1028,49 @@ def test_proc_count_fails_closed(hh):
     assert hh.PROBE_FAILED > 20, "also over the 'node and tsc are building' threshold"
 
 
+def test_proc_count_exact_checks_the_executable_name_and_fails_closed(hh):
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(1)) as run:
+        assert hh.proc_count_exact("xcodebuild") == 0
+    assert run.call_args.args[0] == ["/usr/bin/pgrep", "-x", "xcodebuild"]
+    with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("pgrep", 15)):
+        assert hh.proc_count_exact("xcodebuild") == hh.PROBE_FAILED
+    with mock.patch.object(hh.subprocess, "run", return_value=completed(2)):
+        assert hh.proc_count_exact("xcodebuild") == hh.PROBE_FAILED
+
+
+def test_dev_cache_gate_ignores_unrelated_argv_text_but_blocks_real_builder(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        cache = home / "Library/Caches/node-gyp"
+        cache.mkdir(parents=True)
+        big = cache / "headers.tar"
+        big.write_bytes(b"x" * (9 * 1024 * 1024))
+        old = hh.time.time() - 5 * 3600
+        os.utime(big, (old, old))
+        os.utime(cache, (old, old))
+
+        def fake_run(argv, **kwargs):
+            # An idle xcodebuildmcp launcher has xcodebuild in argv, but is not
+            # the xcodebuild executable.  Exact-name probes remain clear.
+            if argv[1] == "-x":
+                return completed(1)
+            return completed(0 if argv[-1] == "xcodebuild" else 1, "123\n")
+
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "dir_bytes", return_value=9 * 1024 * 1024):
+            with mock.patch.object(hh.subprocess, "run", side_effect=fake_run):
+                assert hh.proc_count("xcodebuild") == 1  # the launcher argv contains the name
+                assert [c.path for c in hh.rule_dev_caches()] == [str(cache)]
+
+            def real_builder(argv, **kwargs):
+                return completed(0, "123\n") if argv[1] == "-x" and argv[2] == "xcodebuild" else completed(1)
+
+            with mock.patch.object(hh.subprocess, "run", side_effect=real_builder):
+                assert hh.rule_dev_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_a_failed_pgrep_stops_the_dev_cache_rule(hh):
     """The visible effect: with pgrep unavailable the dev-cache rule offers nothing, instead of offering a cache
     that a build may be using.  The control case proves the fixture would be offered when pgrep says all clear."""

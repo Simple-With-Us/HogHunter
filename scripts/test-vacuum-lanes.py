@@ -1811,6 +1811,27 @@ class OnlyMatching(Runner):
         return super().__call__(argv, **kwargs)
 
 
+class ExecutableOnly(Runner):
+    """Exact executable matches, independent of command-line text."""
+
+    def __init__(self, names=(), argv_text=(), pgrep_rc=1):
+        super().__init__(pgrep_rc=pgrep_rc)
+        self.names = set(names)
+        self.argv_text = tuple(argv_text)
+
+    def __call__(self, argv, **kwargs):
+        if argv[0] == "pgrep":
+            self.calls.append(list(argv))
+            if len(argv) > 2 and argv[1] == "-x":
+                rc = 0 if argv[2] in self.names else self.pgrep_rc
+            elif len(argv) > 2 and argv[1] == "-f":
+                rc = 0 if any(text in argv[2] for text in self.argv_text) else self.pgrep_rc
+            else:
+                rc = self.pgrep_rc
+            return subprocess.CompletedProcess(argv, rc, "123\n" if rc == 0 else "", "")
+        return super().__call__(argv, **kwargs)
+
+
 class TestLegacyFullSteps(unittest.TestCase):
     """The older `full` steps follow config/reclaim-policy.json: no Xcode cleanup while a build runs, idle gates
     per folder, never `simctl delete unavailable` (it deletes CoreSimulator/Devices), and brew --prune=all."""
@@ -1857,6 +1878,23 @@ class TestLegacyFullSteps(unittest.TestCase):
             self.assertEqual((freed, status), (0, StepStatus.SKIPPED), needle)
             self.assertIn(needle, reason)
             self.assertTrue(idle.exists(), needle)
+
+    def test_build_gate_uses_executable_name_not_command_line_arguments(self) -> None:
+        fake_helper_args = ExecutableOnly(argv_text=("xcodebuild",))
+        engine = self.engine(fake_helper_args)
+        self.assertEqual(engine._build_running(), "")
+        self.assertTrue(fake_helper_args.calls)
+        self.assertEqual(fake_helper_args.calls[0], ["pgrep", "-x", "xcodebuild"])
+        self.assertEqual(fake_helper_args.calls[1:], [
+            ["pgrep", "-f", "swift-frontend"],
+            ["pgrep", "-f", "clang"],
+        ])
+
+        running_builder = self.engine(ExecutableOnly(names=("xcodebuild",)))
+        self.assertEqual(running_builder._build_running(), "xcodebuild is running")
+
+        failed_check = self.engine(ExecutableOnly(pgrep_rc=2))
+        self.assertIn("treated as busy", failed_check._build_running())
 
     def test_derived_data_keeps_marked_and_linked_folders(self) -> None:
         kept = self.folder(self.dd, "Kept", 0)
@@ -1932,9 +1970,11 @@ class TestLegacyFullSteps(unittest.TestCase):
             }
         })
         shut: list[str] = []
+        pgrep_calls: list[list[str]] = []
 
         def fake_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             if cmd[0] == "pgrep":
+                pgrep_calls.append(list(cmd))
                 return subprocess.CompletedProcess(cmd, 1, "", "")
             if cmd[:4] == ["xcrun", "simctl", "list", "devices"]:
                 return subprocess.CompletedProcess(cmd, 0, booted_payload, "")
@@ -1947,6 +1987,11 @@ class TestLegacyFullSteps(unittest.TestCase):
             _freed, reason, status = self.engine(fake_runner)._shutdown_simulators()
         self.assertEqual((status, reason), (StepStatus.RAN, "shut down 2 booted simulators"))
         self.assertEqual(shut, ["U-1", "U-2"])
+        self.assertEqual(pgrep_calls[:3], [
+            ["pgrep", "-x", "xcodebuild"],
+            ["pgrep", "-f", "xctest"],
+            ["pgrep", "-f", r"Simulator\.app"],
+        ])
 
         # Bitrig running -> exempts 1 simulator and shuts down the extra one
         shut.clear()
