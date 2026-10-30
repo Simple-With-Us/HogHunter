@@ -83,15 +83,31 @@ def push_paths(text):
         if collecting:
             if line.strip().startswith("#") or not line.strip():
                 continue
-            item = re.match(r"^      - '([^']+)'\s*$", line)
+            item = re.match(r"""^\s+-\s+['"]?([^'"\s]+)['"]?\s*$""", line)
             if not item:
                 break
             paths.append(item.group(1))
     return paths
 
 
+_GATE_PREFIX_RE = re.compile(r"""--path-prefix\s+['"]?([^'"\s]+)['"]?""")
+
+
 def gate_prefixes(text):
-    return re.findall(r"--path-prefix '([^']+)'", text)
+    """--path-prefix values from the scheduled-gate call blocks only."""
+    prefixes, in_gate = [], False
+    for line in text.splitlines():
+        if not in_gate:
+            if "scheduled-ship-gate.sh" in line and not line.lstrip().startswith("#"):
+                in_gate = True
+                prefixes.extend(_GATE_PREFIX_RE.findall(line))
+                if not line.rstrip().endswith("\\"):
+                    in_gate = False
+            continue
+        prefixes.extend(_GATE_PREFIX_RE.findall(line))
+        if not line.rstrip().endswith("\\"):
+            in_gate = False
+    return prefixes
 
 
 def glob_regex(pattern):
@@ -236,6 +252,34 @@ class NativeTreeTests(unittest.TestCase):
         self.assertEqual(len(found), 2 * count)
         self.assertEqual(found[:count], self.push)
         self.assertEqual(found[count:], self.push)
+
+    def test_extractors_accept_any_quote_style(self):
+        sample = (
+            "on:\n"
+            "  push:\n"
+            "    branches:\n"
+            "      - main\n"
+            "    paths:\n"
+            "      - 'ios/**'\n"
+            '      - "project.yml"\n'
+            "      - scripts/ios-fleet/**\n"
+            "    paths-ignore:\n"
+            "      - 'docs/**'\n"
+            "  schedule:\n"
+        )
+        self.assertEqual(push_paths(sample), ["ios/**", "project.yml", "scripts/ios-fleet/**"])
+        gate_sample = (
+            "# scripts/ios-fleet/scheduled-ship-gate.sh refuses unless a push path changed\n"
+            "# --path-prefix 'commented/out/**'\n"
+            "bash scripts/ios-fleet/scheduled-ship-gate.sh \\\n"
+            "  --event schedule \\\n"
+            "  --path-prefix 'ios/**' \\\n"
+            '  --path-prefix "project.yml" \\\n'
+            "  --path-prefix scripts/ios-fleet/** \\\n"
+            "  hoghunter\n"
+            "--path-prefix 'after/block/**'\n"
+        )
+        self.assertEqual(gate_prefixes(gate_sample), ["ios/**", "project.yml", "scripts/ios-fleet/**"])
 
     def test_no_native_source_is_missing_from_the_push_paths_text(self):
         for path in native_sources():
