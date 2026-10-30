@@ -256,6 +256,12 @@ final class MaintainStore: ObservableObject {
         let previous = worktreeRetireTask
         previous?.cancel()
         worktreeRetireTask = Task { [weak self] in
+            // Coalesce rapid stepper input before starting a network write.
+            do {
+                try await Task.sleep(nanoseconds: 300_000_000)
+            } catch {
+                return
+            }
             _ = await previous?.value
             guard !Task.isCancelled, let self else { return }
             if infisical.isConfigured {

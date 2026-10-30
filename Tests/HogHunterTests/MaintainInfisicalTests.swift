@@ -240,4 +240,27 @@ final class MaintainInfisicalTests: XCTestCase {
         let lanes = try XCTUnwrap(json["lanes"] as? [String: Any])
         XCTAssertEqual(lanes["retire_min_days"] as? Int, 7)
     }
+
+    func testRapidRetentionEditsWriteOnlyTheSettledValue() async throws {
+        let key = InfisicalKey.maintainJanitorRetireMinDays
+        let setup = try await makeConfiguredMaintain(secrets: [key: "7"])
+        for days in [6, 5, 4, 3] {
+            setup.store.worktreeRetireMinDays = days
+            setup.store.saveWorktreeRetireMinDays()
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(setup.client.written.isEmpty)
+        for _ in 0..<200 where !setup.store.worktreeRetireDaysPersisted {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(setup.client.written.map { $0.value }, ["3"])
+        XCTAssertEqual(setup.cache.string(for: key), "3")
+    }
+
+    func testNoncanonicalRetentionStringsFailSafe() async throws {
+        for value in ["03", " 3 ", "3.0", "²", "٣"] {
+            let setup = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: value)
+            XCTAssertEqual(setup.store.worktreeRetireMinDays, 7, value)
+        }
+    }
 }

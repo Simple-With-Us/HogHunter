@@ -667,9 +667,37 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(self.limits(lanes.lane_settings(cfg, Path("/h"), env={})), self.CONSTANTS)
 
     def test_retention_config_is_bounded_and_invalid_values_default_to_seven(self) -> None:
-        for value, expected in ((1, 1.0), (3, 3.0), (90, 90.0), (0, 7.0), (91, 7.0), (3.5, 7.0), (True, 7.0), ("bad", 7.0)):
+        for value, expected in (
+            (1, 1.0), (3, 3.0), (3.0, 3.0), (90, 90.0),
+            (0, 7.0), (91, 7.0), (3.5, 7.0), (True, 7.0), ("bad", 7.0),
+        ):
             settings = lanes.lane_settings({"lanes": {"retire_min_days": value}}, Path("/h"), env={})
             self.assertEqual(settings.retire_min_days, expected, value)
+
+    def test_retention_env_uses_canonical_ascii_integer_strings_for_both_names(self) -> None:
+        keys = (
+            "hoghunter.maintain.janitor.retireMinDays",
+            "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
+        )
+        for key in keys:
+            for value, expected in (("1", 1.0), ("90", 90.0)):
+                cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, expected, (key, value))
+            for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
+                cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, 7.0, (key, value[:16]))
+
+    def test_retention_config_uses_canonical_strings_and_accepts_integral_json_numbers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hh-retire-config-") as temp:
+            path = Path(temp) / "config.json"
+            for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
+                path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
+                cfg = load_config(path=path, home=Path(temp), env={})
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, 7.0, value[:16])
+            for value in (1, 3, 3.0, 90):
+                path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
+                cfg = load_config(path=path, home=Path(temp), env={})
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, float(value), value)
 
     def test_nondefault_retention_is_passed_to_doctor_without_changing_default_argv(self) -> None:
         sb = Sandbox(self)

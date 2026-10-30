@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from copy import deepcopy
@@ -18,6 +19,8 @@ DEFAULT_POLICY = REPO_ROOT / "config" / "robotic-vacuum.json"
 # is how a tick reported zero bytes while the cleaner had already done most
 # of its job.
 TICK_WATCHDOG_SEC = 900.0
+MIN_RETIRE_DAYS = 1
+MAX_RETIRE_DAYS = 90
 
 # Step metadata: default enabled, which triggers include the step.
 STEP_CATALOG: dict[str, dict[str, Any]] = {
@@ -297,13 +300,28 @@ def _parse_int(val: str) -> int | None:
         return None
 
 
-def _parse_retire_days(val: str) -> int | None:
-    """Whole-day retention knob, bounded so bad config cannot erase the safety floor."""
-    text = val.strip()
-    if not text.isdigit():
+def parse_retire_min_days(value: Any) -> int | None:
+    """Parse the canonical 1..90 whole-day value used by Swift and Python settings."""
+    if isinstance(value, bool):
         return None
-    parsed = int(text)
-    return parsed if 1 <= parsed <= 90 else None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        parsed = int(value)
+    elif isinstance(value, str):
+        if not value or not value.isascii() or not all("0" <= char <= "9" for char in value):
+            return None
+        try:
+            parsed = int(value)
+        except ValueError:  # includes Python's digit-count safety limit
+            return None
+        if value != str(parsed):
+            return None
+    else:
+        return None
+    return parsed if MIN_RETIRE_DAYS <= parsed <= MAX_RETIRE_DAYS else None
 
 
 def _parse_float(val: str) -> float | None:
@@ -403,7 +421,7 @@ def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = No
     for key in retire_keys:
         if key in env:
             lanes = base.setdefault("lanes", {})
-            lanes["retire_min_days"] = _parse_retire_days(str(env[key])) or 7
+            lanes["retire_min_days"] = parse_retire_min_days(env[key]) or 7
             break
 
     # Resource watch thresholds

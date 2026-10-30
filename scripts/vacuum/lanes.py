@@ -43,7 +43,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from .config import DEFAULT_LANES
+from .config import DEFAULT_LANES, MAX_RETIRE_DAYS, MIN_RETIRE_DAYS, parse_retire_min_days
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 DoctorRunner = Callable[[list, float], "subprocess.CompletedProcess[str]"]
@@ -120,8 +120,6 @@ DOCTOR_TIMEOUT_MARGIN = 1.25
 DOCTOR_TIMEOUT_PAD_SECONDS = 45.0
 DOCTOR_LAST_RUN_NAME = "doctor-last-run.json"
 DEFAULT_RETIRE_MIN_DAYS = 7
-MIN_RETIRE_DAYS = 1
-MAX_RETIRE_DAYS = 90
 DOCTOR_RETIRE_DAYS_FLAG = "--cleaner-retention-days"
 DEPS_MIN_HOURS = 24.0
 LSOF_CACHE_SECONDS = 30.0
@@ -181,14 +179,8 @@ def lane_settings(cfg: Mapping[str, Any], home: Path, env: Optional[Mapping[str,
     if not isinstance(command, (list, tuple)) or not all(isinstance(part, str) and part for part in command):
         command = []
     argv = tuple(_expand_arg(part, home) for part in command)
-    raw_retire_days = raw.get("retire_min_days", DEFAULT_RETIRE_MIN_DAYS)
-    try:
-        retire_days = int(raw_retire_days)
-        if isinstance(raw_retire_days, bool) or float(raw_retire_days) != retire_days:
-            raise ValueError
-        if not MIN_RETIRE_DAYS <= retire_days <= MAX_RETIRE_DAYS:
-            raise ValueError
-    except (TypeError, ValueError, OverflowError):
+    retire_days = parse_retire_min_days(raw.get("retire_min_days", DEFAULT_RETIRE_MIN_DAYS))
+    if retire_days is None:
         retire_days = DEFAULT_RETIRE_MIN_DAYS
     return LaneSettings(
         command=argv,
