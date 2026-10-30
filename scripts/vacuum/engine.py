@@ -481,7 +481,8 @@ class VacuumEngine:
         """Non-empty when xcodebuild, swift-frontend or clang runs, or when the check itself failed.  This is the
         skipWhenAny gate of the xcode-artifacts and dev-caches rules in config/reclaim-policy.json."""
         for name in _BUILD_PROCESSES:
-            busy, reason = lanes.executable_state(self._runner, name, f"{name} is running")
+            probe = lanes.executable_state if name == "xcodebuild" else lanes.process_state
+            busy, reason = probe(self._runner, name, f"{name} is running")
             if busy:
                 return reason
         return ""
@@ -616,13 +617,12 @@ class VacuumEngine:
         running, 1 booted simulator is exempted so Bitrig can keep its single shared simulator across projects."""
         if not shutil.which("xcrun"):
             return 0, "xcrun not installed", StepStatus.SKIPPED
-        for proc_name, label in (
-            ("xcodebuild", "xcodebuild is running"),
-            ("xctest", "xctest is running"),
-        ):
-            busy, reason = lanes.executable_state(self._runner, proc_name, label)
-            if busy:
-                return 0, f"skipped: {reason}", StepStatus.SKIPPED
+        busy, reason = lanes.executable_state(self._runner, "xcodebuild", "xcodebuild is running")
+        if busy:
+            return 0, f"skipped: {reason}", StepStatus.SKIPPED
+        busy, reason = lanes.process_state(self._runner, "xctest", "xctest is running")
+        if busy:
+            return 0, f"skipped: {reason}", StepStatus.SKIPPED
         busy, reason = lanes.process_state(self._runner, r"Simulator\.app", "Simulator.app is open")
         if busy:
             return 0, f"skipped: {reason}", StepStatus.SKIPPED

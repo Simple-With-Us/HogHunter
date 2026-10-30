@@ -1301,7 +1301,7 @@ def rule_dev_caches() -> list[Candidate]:
     no build is running, because on this Mac the build fan-out is what
     drives load and swap and disturbing it makes things worse.
     """
-    if proc_count_exact("xcodebuild") or proc_count_exact("swift-frontend") or proc_count_exact("clang"):
+    if proc_count_exact("xcodebuild") or proc_count("swift-frontend") or proc_count("clang"):
         return []  # real build in flight -- leave the caches it is using alone
     cands: list[Candidate] = []
     paths = [
@@ -1344,7 +1344,7 @@ def rule_xcode_artifacts() -> list[Candidate]:
     biggest win on this Mac (18.5 GB measured 09-27).  Simulator *Devices*
     are NOT -- they hold user simulator state and are ask-first.
     """
-    if proc_count_exact("xcodebuild") or proc_count_exact("clang") or proc_count_exact("swift-frontend"):
+    if proc_count_exact("xcodebuild") or proc_count("clang") or proc_count("swift-frontend"):
         return []
     cands: list[Candidate] = []
     dd = HOME / "Library/Developer/Xcode/DerivedData"
@@ -1376,8 +1376,8 @@ def rule_simulator_runtimes() -> list[Candidate]:
     Large (18+ GB measured), fully re-downloadable from Xcode.  Deleting a
     runtime does not touch CoreSimulator/Devices, which stays ask-first.
     """
-    if (proc_count_exact("xcodebuild") or proc_count_exact("Simulator") or
-            proc_count_exact("CoreSimulatorService") or proc_count("[Bb]itrig")):
+    if (proc_count_exact("xcodebuild") or proc_count("Simulator") or
+            proc_count("CoreSimulatorService") or proc_count("[Bb]itrig")):
         return []
     cands: list[Candidate] = []
     roots = [

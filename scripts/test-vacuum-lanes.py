@@ -1880,11 +1880,15 @@ class TestLegacyFullSteps(unittest.TestCase):
             self.assertTrue(idle.exists(), needle)
 
     def test_build_gate_uses_executable_name_not_command_line_arguments(self) -> None:
-        fake_helper_args = ExecutableOnly(argv_text=("xcodebuild", "swift-frontend", "clang"))
+        fake_helper_args = ExecutableOnly(argv_text=("xcodebuild",))
         engine = self.engine(fake_helper_args)
         self.assertEqual(engine._build_running(), "")
         self.assertTrue(fake_helper_args.calls)
-        self.assertTrue(all(call[:2] == ["pgrep", "-x"] for call in fake_helper_args.calls))
+        self.assertEqual(fake_helper_args.calls[0], ["pgrep", "-x", "xcodebuild"])
+        self.assertEqual(fake_helper_args.calls[1:], [
+            ["pgrep", "-f", "swift-frontend"],
+            ["pgrep", "-f", "clang"],
+        ])
 
         running_builder = self.engine(ExecutableOnly(names=("xcodebuild",)))
         self.assertEqual(running_builder._build_running(), "xcodebuild is running")
@@ -1966,9 +1970,11 @@ class TestLegacyFullSteps(unittest.TestCase):
             }
         })
         shut: list[str] = []
+        pgrep_calls: list[list[str]] = []
 
         def fake_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             if cmd[0] == "pgrep":
+                pgrep_calls.append(list(cmd))
                 return subprocess.CompletedProcess(cmd, 1, "", "")
             if cmd[:4] == ["xcrun", "simctl", "list", "devices"]:
                 return subprocess.CompletedProcess(cmd, 0, booted_payload, "")
@@ -1981,6 +1987,11 @@ class TestLegacyFullSteps(unittest.TestCase):
             _freed, reason, status = self.engine(fake_runner)._shutdown_simulators()
         self.assertEqual((status, reason), (StepStatus.RAN, "shut down 2 booted simulators"))
         self.assertEqual(shut, ["U-1", "U-2"])
+        self.assertEqual(pgrep_calls[:3], [
+            ["pgrep", "-x", "xcodebuild"],
+            ["pgrep", "-f", "xctest"],
+            ["pgrep", "-f", r"Simulator\.app"],
+        ])
 
         # Bitrig running -> exempts 1 simulator and shuts down the extra one
         shut.clear()

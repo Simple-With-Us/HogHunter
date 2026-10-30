@@ -1032,13 +1032,10 @@ def test_proc_count_exact_checks_the_executable_name_and_fails_closed(hh):
     with mock.patch.object(hh.subprocess, "run", return_value=completed(1)) as run:
         assert hh.proc_count_exact("xcodebuild") == 0
     assert run.call_args.args[0] == ["/usr/bin/pgrep", "-x", "xcodebuild"]
-    with mock.patch.object(hh.subprocess, "run", return_value=completed(0, "101\n202\n")) as run:
-        assert hh.proc_count_exact("swift-frontend") == 2
-    assert run.call_args.args[0] == ["/usr/bin/pgrep", "-x", "swift-frontend"]
     with mock.patch.object(hh.subprocess, "run", side_effect=subprocess.TimeoutExpired("pgrep", 15)):
-        assert hh.proc_count_exact("clang") == hh.PROBE_FAILED
+        assert hh.proc_count_exact("xcodebuild") == hh.PROBE_FAILED
     with mock.patch.object(hh.subprocess, "run", return_value=completed(2)):
-        assert hh.proc_count_exact("clang") == hh.PROBE_FAILED
+        assert hh.proc_count_exact("xcodebuild") == hh.PROBE_FAILED
 
 
 def test_dev_cache_gate_ignores_unrelated_argv_text_but_blocks_real_builder(hh):
