@@ -80,6 +80,7 @@ enum InfisicalKey {
     static let maintainCoolifySshHost = "hoghunter.maintain.coolifySshHost"
     static let maintainJanitorMaxLoadHard = "hoghunter.maintain.janitor.maxLoadHard"
     static let maintainJanitorLowFreeGib = "hoghunter.maintain.janitor.lowFreeGib"
+    static let maintainJanitorRetireMinDays = "hoghunter.maintain.janitor.retireMinDays"
     static let maintainWatchDiskFreeWarnGb = "hoghunter.maintain.watch.diskFreeWarnGb"
     static let maintainWatchSwapUsedPct = "hoghunter.maintain.watch.swapUsedPct"
 
@@ -98,6 +99,7 @@ enum InfisicalKey {
         maintainIntervalWatchSec, maintainIntervalJanitorSec, maintainIntervalFullSec,
         maintainHistoryMaxRuns, maintainCleanBudgetSec, maintainCoolifySshHost,
         maintainJanitorMaxLoadHard, maintainJanitorLowFreeGib,
+        maintainJanitorRetireMinDays,
         maintainWatchDiskFreeWarnGb, maintainWatchSwapUsedPct,
     ]
 }
@@ -141,6 +143,7 @@ enum InfisicalDefaults {
         InfisicalKey.maintainCoolifySshHost: "",
         InfisicalKey.maintainJanitorMaxLoadHard: "250",
         InfisicalKey.maintainJanitorLowFreeGib: "80",
+        InfisicalKey.maintainJanitorRetireMinDays: "7",
         InfisicalKey.maintainWatchDiskFreeWarnGb: "25",
         InfisicalKey.maintainWatchSwapUsedPct: "90",
     ]
@@ -335,7 +338,7 @@ final class InfisicalClient: InfisicalServing {
 /// a dictionary lookup -- zero network calls after init, by construction.
 /// Deliberately not MainActor-isolated so hot paths (CleanPressure,
 /// CleanRegimen, Alerts) can read it without an actor hop.
-final class InfisicalStore {
+final class InfisicalStore: @unchecked Sendable {
     static let shared = InfisicalStore()
 
     private let lock = NSLock()

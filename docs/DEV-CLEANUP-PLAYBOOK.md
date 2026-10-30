@@ -33,8 +33,8 @@ The table below is the target.  The Python tick reaches it two ways: the `hoghun
 
 **Lane checks, in order.**  Any failure removes nothing and writes the reason.
 
-1. The doctor report must be fresh (15 minutes), schema 2 or newer, from this home, with `lsof` ok and, for removing a lane, `gh` ok (dependency folders do not need `gh`).  A spawn error, timeout (5 minutes), bad JSON, or a future timestamp fails closed.  These limits, and the 7-day and 24-hour floors, are code constants.  Config can change only where the doctor is installed.
-2. The doctor's own conjunction: SAFE-TO-REMOVE, merged-PR evidence by head sha (MERGED, or CLOSED on an exact head match), age and idle at least 7 days, no keep marker, no process cwd, a lane-like location, not a tool cache, no read errors, and a good `gh` lookup for that repo.
+1. The doctor report must be fresh (15 minutes), schema 2 or newer, from this home, with `lsof` ok and, for removing a lane, `gh` ok (dependency folders do not need `gh`).  A spawn error, timeout (5 minutes), bad JSON, or a future timestamp fails closed.  Report validation and the 24-hour dependency floor remain fixed.  Merged-worktree retention is configurable from 1 to 90 whole days, defaulting to 7; the doctor report must use that same retention.
+2. The doctor's own conjunction: SAFE-TO-REMOVE, merged-PR evidence by head sha (MERGED, or CLOSED on an exact head match), age and idle at least the configured retention, no keep marker, no process cwd, a lane-like location, not a tool cache, no read errors, and a good `gh` lookup for that repo.
 3. The Vacuum's re-check at plan time and again right before removal:
    - The path is unchanged, not a symlink, and has a `.git` file.  It is not under a never-touch folder (`~/.grok/worktrees` and the rest of the `hoghunter-clean` list).  No keep marker is on disk, and no other checkout from the report sits inside it.
    - HEAD equals the reported head sha, on the reported branch.
@@ -46,7 +46,7 @@ The table below is the target.  The Python tick reaches it two ways: the `hoghun
    - No process has it as its working directory (`lsof`), and `pgrep -f`, given the path as a literal (regex characters escaped), finds no process naming it.
 4. The command is exactly `git -C <main repo> worktree remove <path>`.  A code assertion rejects `-f` and `--force`.  A non-zero exit is logged as failed and the loop goes on.
 
-What to expect.  On the 2026-10-08 doctor report (270 checkouts), a read-only replay of step 3 over the 38 lane-like worktrees rated SAFE-TO-REMOVE with merged evidence, with the age floor ignored, gave this result: 29 pass, 7 are refused for a nested repository, and 2 are kept by the keep list.  The 7 are SwiftPM `.build/checkouts`, which are real clones.  24 of the 29 pass only because of Rule 6: their commits are under no remote ref, only under the PR head on GitHub and the local branch, and the log line says so.  A real run also needs the 7-day floor and the doctor's cleaner list, so it removes fewer.  No real removal has been run.
+What to expect.  On the 2026-10-08 doctor report (270 checkouts), a read-only replay of step 3 over the 38 lane-like worktrees rated SAFE-TO-REMOVE with merged evidence, with the age floor ignored, gave this result: 29 pass, 7 are refused for a nested repository, and 2 are kept by the keep list.  The 7 are SwiftPM `.build/checkouts`, which are real clones.  24 of the 29 pass only because of Rule 6: their commits are under no remote ref, only under the PR head on GitHub and the local branch, and the log line says so.  A real run also needs the configured retention and the doctor's cleaner list, so it removes fewer.  No real removal has been run.
 
 Automatic mode never removes a lane that is dirty, open, fresh, beyond its merged PR, or unknown, and never touches anything in Mode 3.
 
@@ -131,7 +131,7 @@ The lesson: the inventory came first, and every removal had to name the evidence
 
 ## Tunables
 
-New numeric knobs for the Swift tiers (a DerivedData age, the stale-lane idle days) go in Infisical with an `INFISICAL.md` row when the Swift code lands.  Exclusions and enabled rules stay in UserDefaults.  The Python Vacuum's lane limits are not knobs: report age, schema, doctor timeout, the 7-day retire floor, and the 24-hour dependency floor are code constants, and config can change only the doctor's install path.  The Vacuum's older settings in `config/robotic-vacuum.json` predate this work and have no Infisical reader (see `INFISICAL.md`).
+New numeric knobs for the Swift tiers (a DerivedData age, the stale-lane idle days) go in Infisical with an `INFISICAL.md` row when the Swift code lands.  Exclusions and enabled rules stay in UserDefaults.  Merged-worktree retention uses `hoghunter.maintain.janitor.retireMinDays` in Infisical and the mirrored `lanes.retire_min_days` fallback for standalone scheduling.  The valid range is 1 to 90 whole days, default 7; invalid values use 7.  Report age, schema, doctor timeout, and the 24-hour dependency floor stay fixed.  A nondefault retention requires the lane doctor's `--cleaner-retention-days` support; a mismatched report fails closed.
 
 ## Sequencing
 

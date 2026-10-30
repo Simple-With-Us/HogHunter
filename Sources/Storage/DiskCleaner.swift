@@ -55,7 +55,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .trash:
             return "Items sitting in the macOS Trash bin."
         case .developer:
-            return "Xcode DerivedData, Archives, iOS DeviceSupport, and package manager caches."
+            return "Coding app caches, Xcode build artifacts, and package manager caches."
         case .orphanedData:
             return "Support folders remaining from applications no longer installed."
         case .aiArtifacts:
@@ -592,6 +592,36 @@ struct CleanResult: Sendable {
 
 /// Engine responsible for discovering reclaimable files and performing safe cleaning operations.
 final class DiskCleaner: @unchecked Sendable {
+    /// Rebuildable caches for IDEs, editors, and coding assistants.  Keep this
+    /// list to cache roots only; session history and application state live in
+    /// separate locations and are intentionally not included.
+    private static let codingPlatformCacheTargets: [(name: String, path: String, detail: String)] = [
+        ("Cursor Cache", "Library/Caches/com.todesktop.230313mzl4w4u92", "Cursor editor cache"),
+        ("Cursor Update Cache", "Library/Caches/com.todesktop.230313mzl4w4u92.ShipIt", "Cursor updater staging"),
+        ("Cursor Compile Cache", "Library/Caches/cursor-compile-cache", "Cursor compilation cache"),
+        ("Cursor Sandbox Cache", "Library/Caches/com.anysphere.sand", "Cursor sandbox cache"),
+        ("Visual Studio Code Cache", "Library/Caches/Code", "Visual Studio Code editor cache"),
+        ("Visual Studio Code Cache", "Library/Caches/com.microsoft.VSCode", "Visual Studio Code editor cache"),
+        ("Claude Desktop Cache", "Library/Caches/com.anthropic.claudefordesktop", "Claude desktop app cache"),
+        ("Claude CLI Cache", "Library/Caches/claude-cli-nodejs", "Claude CLI package cache"),
+        ("Codex Cache", "Library/Caches/Codex", "Codex app cache"),
+        ("Antigravity Cache", "Library/Caches/com.google.antigravity", "Antigravity IDE cache"),
+        ("Antigravity IDE Cache", "Library/Caches/com.google.antigravity-ide", "Antigravity IDE cache"),
+        ("OpenCode Cache", "Library/Caches/ai.opencode.desktop", "OpenCode coding assistant cache"),
+        ("Kimi Code Cache", "Library/Caches/kimi-code", "Kimi Code app cache"),
+        ("Clutch Cache", "Library/Caches/codes.clutch.macos", "Clutch app cache"),
+        ("BotFleet Cache", "Library/Caches/app.botfleet.control.macos", "BotFleet app cache"),
+        ("SwiftPM Cache", "Library/Caches/org.swift.swiftpm", "Swift package downloads and build artifacts"),
+        ("Swift Compiler Cache", "Library/Caches/swift-frontend", "Swift compiler cache"),
+        ("Node Headers Cache", "Library/Caches/node-gyp", "Node.js native module headers"),
+        ("Electron Cache", "Library/Caches/electron", "Electron runtime downloads"),
+        ("Electron Builder Cache", "Library/Caches/electron-builder", "Electron packaging cache"),
+        ("Deno Cache", "Library/Caches/deno", "Deno package and compilation cache"),
+        ("Copilot Cache", "Library/Caches/copilot", "Copilot toolchain cache"),
+        ("Playwright Cache", "Library/Caches/ms-playwright", "Playwright browser downloads"),
+        ("Puppeteer Cache", "Library/Caches/puppeteer", "Puppeteer browser downloads"),
+    ]
+
     private let fileManager: FileManager
     /// Tests substitute a closure that does not call `tmutil`.
     private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
@@ -998,10 +1028,14 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // Developer package managers that live in Caches are attributed to Developer category instead
-        let developerCacheNames: Set<String> = [
+        let developerCacheNames = Set([
             "Homebrew", "CocoaPods", "Yarn", "pnpm", "go-build", "pip", "com.apple.dt.Xcode",
             "dev.kdrag0n.MacVirt", "com.docker.docker"
-        ]
+        ] + Self.codingPlatformCacheTargets.compactMap { target -> String? in
+            let components = target.path.split(separator: "/")
+            guard components.count == 3, components[0] == "Library", components[1] == "Caches" else { return nil }
+            return String(components[2])
+        })
 
         var items: [CleanItem] = []
         for url in contents {
@@ -1165,7 +1199,7 @@ final class DiskCleaner: @unchecked Sendable {
             ("OrbStack Engine Cache", "Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches", "OrbStack container engine caches"),
             ("Docker Buildx Cache", ".docker/buildx/cache", "Docker buildx local build cache"),
             ("Docker Desktop Cache", "Library/Caches/com.docker.docker", "Docker desktop temporary cache")
-        ]
+        ] + Self.codingPlatformCacheTargets
 
         for target in targets {
             if Task.isCancelled { break }
@@ -1176,6 +1210,9 @@ final class DiskCleaner: @unchecked Sendable {
             let stats = directoryStats(at: url)
             guard stats.bytes > 0 else { continue }
 
+            let highChurn = Self.highChurnCacheIdentifiers.first {
+                url.lastPathComponent.lowercased().contains($0.pattern)
+            }
             items.append(CleanItem(
                 category: .developer,
                 title: target.name,
@@ -1185,8 +1222,8 @@ final class DiskCleaner: @unchecked Sendable {
                 fileCount: stats.fileCount,
                 isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
-                isSelected: CleanCategory.developer.defaultSelected,
-                detail: target.detail
+                isSelected: highChurn == nil && CleanCategory.developer.defaultSelected,
+                detail: highChurn?.reason ?? target.detail
             ))
         }
 
@@ -2167,7 +2204,7 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/Library/Group Containers/HUAQ24HBR6.dev.orbstack/Library/Caches",
                 home + "/.docker/buildx/cache",
                 home + "/Library/Caches/com.docker.docker"
-            ]
+            ] + Self.codingPlatformCacheTargets.map { home + "/" + $0.path }
             return allowedDeveloperPrefixes.contains { path == $0 || path.hasPrefix($0 + "/") }
 
         case .orphanedData:

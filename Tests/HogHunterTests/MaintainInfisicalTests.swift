@@ -28,6 +28,7 @@ private final class MaintainInfisicalClient: InfisicalServing {
 @MainActor
 private struct ConfiguredMaintain {
     let store: MaintainStore
+    let directory: URL
     let infisical: InfisicalSettings
     let cache: InfisicalStore
     let client: MaintainInfisicalClient
@@ -48,12 +49,15 @@ final class MaintainInfisicalTests: XCTestCase {
     /// refresh) and whose `config.json` holds `jsonSteps`.
     private func makeConfiguredMaintain(
         secrets: [String: String],
-        jsonSteps: [String: Bool] = [:]
+        jsonSteps: [String: Bool] = [:],
+        jsonRetireDays: Any? = nil
     ) async throws -> ConfiguredMaintain {
         let directory = try temporaryDirectory()
-        if !jsonSteps.isEmpty {
+        if !jsonSteps.isEmpty || jsonRetireDays != nil {
             let steps = jsonSteps.mapValues { ["enabled": $0] }
-            let data = try JSONSerialization.data(withJSONObject: ["steps": steps])
+            var json: [String: Any] = ["steps": steps]
+            if let jsonRetireDays { json["lanes"] = ["retire_min_days": jsonRetireDays] }
+            let data = try JSONSerialization.data(withJSONObject: json)
             try data.write(to: directory.appendingPathComponent("config.json"))
         }
 
@@ -81,7 +85,7 @@ final class MaintainInfisicalTests: XCTestCase {
             infisical: infisical,
             infisicalStore: cache
         )
-        return ConfiguredMaintain(store: store, infisical: infisical, cache: cache, client: client, launches: launches)
+        return ConfiguredMaintain(store: store, directory: directory, infisical: infisical, cache: cache, client: client, launches: launches)
     }
 
     // MARK: - Reading
@@ -121,6 +125,27 @@ final class MaintainInfisicalTests: XCTestCase {
         XCTAssertFalse(infisical.isConfigured)
         // Defaults: shutdown_simulators is on.
         XCTAssertEqual(store.stepToggles["shutdown_simulators"], true)
+    }
+
+    func testMergedWorktreeRetentionUsesInfisicalThenConfigFallback() async throws {
+        let key = InfisicalKey.maintainJanitorRetireMinDays
+        let overridden = try await makeConfiguredMaintain(
+            secrets: [key: "3"], jsonRetireDays: 9
+        )
+        XCTAssertEqual(overridden.store.worktreeRetireMinDays, 3)
+
+        let localFallback = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: 5)
+        XCTAssertEqual(localFallback.store.worktreeRetireMinDays, 5)
+
+        let booleanConfig = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: false)
+        XCTAssertEqual(booleanConfig.store.worktreeRetireMinDays, 7)
+        let fractionalConfig = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: 3.5)
+        XCTAssertEqual(fractionalConfig.store.worktreeRetireMinDays, 7)
+
+        let invalidInfisical = try await makeConfiguredMaintain(
+            secrets: [key: "91"], jsonRetireDays: 5
+        )
+        XCTAssertEqual(invalidInfisical.store.worktreeRetireMinDays, 7)
     }
 
     // MARK: - Writing
@@ -175,5 +200,67 @@ final class MaintainInfisicalTests: XCTestCase {
         XCTAssertEqual(setup.store.coolifyHost, "old-host")
         XCTAssertEqual(setup.cache.string(for: key), "old-host")
         XCTAssertTrue(setup.launches.value.isEmpty)
+    }
+
+    func testRetentionWritesInfisicalBeforeMirroringConfig() async throws {
+        let key = InfisicalKey.maintainJanitorRetireMinDays
+        let setup = try await makeConfiguredMaintain(secrets: [key: "7"])
+        setup.store.worktreeRetireMinDays = 3
+        setup.store.saveWorktreeRetireMinDays()
+        for _ in 0..<200 where !setup.store.worktreeRetireDaysPersisted {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(setup.client.written.map { $0.key }, [key])
+        XCTAssertEqual(setup.client.written.map { $0.value }, ["3"])
+        XCTAssertEqual(setup.cache.string(for: key), "3")
+        let data = try Data(contentsOf: setup.directory.appendingPathComponent("config.json"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let lanes = try XCTUnwrap(json["lanes"] as? [String: Any])
+        XCTAssertEqual(lanes["retire_min_days"] as? Int, 3)
+        XCTAssertNil(setup.store.lastError)
+    }
+
+    func testFailedRetentionWriteDoesNotChangeConfig() async throws {
+        let key = InfisicalKey.maintainJanitorRetireMinDays
+        let setup = try await makeConfiguredMaintain(secrets: [key: "7"], jsonRetireDays: 7)
+        setup.client.failWrites = true
+        setup.store.worktreeRetireMinDays = 3
+        setup.store.saveWorktreeRetireMinDays()
+        for _ in 0..<200 where setup.store.lastError == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(setup.store.worktreeRetireMinDays, 7)
+        XCTAssertEqual(setup.cache.string(for: key), "7")
+        XCTAssertTrue(setup.client.written.isEmpty)
+        XCTAssertEqual(setup.launches.value, [])
+        let data = try Data(contentsOf: setup.directory.appendingPathComponent("config.json"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let lanes = try XCTUnwrap(json["lanes"] as? [String: Any])
+        XCTAssertEqual(lanes["retire_min_days"] as? Int, 7)
+    }
+
+    func testRapidRetentionEditsWriteOnlyTheSettledValue() async throws {
+        let key = InfisicalKey.maintainJanitorRetireMinDays
+        let setup = try await makeConfiguredMaintain(secrets: [key: "7"])
+        for days in [6, 5, 4, 3] {
+            setup.store.worktreeRetireMinDays = days
+            setup.store.saveWorktreeRetireMinDays()
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(setup.client.written.isEmpty)
+        for _ in 0..<200 where !setup.store.worktreeRetireDaysPersisted {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(setup.client.written.map { $0.value }, ["3"])
+        XCTAssertEqual(setup.cache.string(for: key), "3")
+    }
+
+    func testNoncanonicalRetentionStringsFailSafe() async throws {
+        for value in ["03", " 3 ", "3.0", "²", "٣"] {
+            let setup = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: value)
+            XCTAssertEqual(setup.store.worktreeRetireMinDays, 7, value)
+        }
     }
 }

@@ -15,6 +15,7 @@ struct MaintainScriptEntry: Codable, Identifiable, Equatable {
     var isRemote: Bool { scope.lowercased() == "remote" }
 
     var displayName: String {
+        if id == "maintain_entrypoints" { return "Hog Hunter Maintenance" }
         let name = URL(fileURLWithPath: path).lastPathComponent
         return name.isEmpty ? id : name
     }
@@ -69,7 +70,26 @@ enum MaintainRegistryStore {
             }
         }
 
-        return registered
+        return presentationEntries(registered)
+    }
+
+    /// The shipped scheduler and manual entry are two callers of one script.
+    /// Combine their inventory rows without changing the executable registry.
+    static func presentationEntries(_ entries: [MaintainScriptEntry]) -> [MaintainScriptEntry] {
+        guard let scheduled = entries.first(where: { $0.id == "maintain_scheduler" }),
+              let manual = entries.first(where: { $0.id == "maintain_cli" }),
+              URL(fileURLWithPath: scheduled.path).standardizedFileURL ==
+                URL(fileURLWithPath: manual.path).standardizedFileURL,
+              scheduled.mode == manual.mode, scheduled.scope == manual.scope else {
+            return entries
+        }
+        var combined = scheduled
+        combined.id = "maintain_entrypoints"
+        combined.owner = "Scheduled by launchd and available through the app or CLI"
+        return entries.compactMap { entry in
+            if entry.id == "maintain_cli" { return nil }
+            return entry.id == "maintain_scheduler" ? combined : entry
+        }
     }
 
     static func ensureDirectoriesExist() {

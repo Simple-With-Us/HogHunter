@@ -43,7 +43,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from .config import DEFAULT_LANES
+from .config import DEFAULT_LANES, MAX_RETIRE_DAYS, MIN_RETIRE_DAYS, parse_retire_min_days
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 DoctorRunner = Callable[[list, float], "subprocess.CompletedProcess[str]"]
@@ -119,7 +119,8 @@ DOCTOR_TIMEOUT_MAX_SECONDS = 900.0
 DOCTOR_TIMEOUT_MARGIN = 1.25
 DOCTOR_TIMEOUT_PAD_SECONDS = 45.0
 DOCTOR_LAST_RUN_NAME = "doctor-last-run.json"
-RETIRE_MIN_DAYS = 7.0
+DEFAULT_RETIRE_MIN_DAYS = 7
+DOCTOR_RETIRE_DAYS_FLAG = "--cleaner-retention-days"
 DEPS_MIN_HOURS = 24.0
 LSOF_CACHE_SECONDS = 30.0
 WALK_FILE_CAP = 200_000
@@ -153,14 +154,15 @@ def _expand_arg(arg: str, home: Path) -> str:
 
 def lane_settings(cfg: Mapping[str, Any], home: Path, env: Optional[Mapping[str, str]] = None) -> LaneSettings:
     """Read the doctor command from the `lanes` block of the Vacuum config (or HOGHUNTER_LANE_DOCTOR_COMMAND).
-    Everything else is a code constant: report age 15 minutes, schema 2, doctor timeout 5 minutes, 7 days to
-    retire, 24 hours for dependency folders.  Numeric `lanes` keys in a config file are ignored, so a stray
-    value can neither loosen nor tighten a safety limit."""
+    Report age, schema, doctor timeout, and dependency idle time are code constants.  The merged-worktree
+    retention is configurable from 1 to 90 whole days, defaulting safely to 7 when invalid."""
     env = os.environ if env is None else env
     raw: dict = dict(DEFAULT_LANES)
     block = cfg.get("lanes")
     if isinstance(block, dict) and "doctor_command" in block:
         raw["doctor_command"] = block["doctor_command"]
+    if isinstance(block, dict) and "retire_min_days" in block:
+        raw["retire_min_days"] = block["retire_min_days"]
 
     command: Any = raw.get("doctor_command")
     override = env.get(DOCTOR_ENV_VAR)
@@ -177,12 +179,15 @@ def lane_settings(cfg: Mapping[str, Any], home: Path, env: Optional[Mapping[str,
     if not isinstance(command, (list, tuple)) or not all(isinstance(part, str) and part for part in command):
         command = []
     argv = tuple(_expand_arg(part, home) for part in command)
+    retire_days = parse_retire_min_days(raw.get("retire_min_days", DEFAULT_RETIRE_MIN_DAYS))
+    if retire_days is None:
+        retire_days = DEFAULT_RETIRE_MIN_DAYS
     return LaneSettings(
         command=argv,
         max_report_age_seconds=REPORT_MAX_AGE_SECONDS,
         min_schema=MIN_SCHEMA,
         timeout_seconds=DOCTOR_TIMEOUT_SECONDS,
-        retire_min_days=RETIRE_MIN_DAYS,
+        retire_min_days=float(retire_days),
         deps_min_hours=DEPS_MIN_HOURS,
     )
 
@@ -353,6 +358,41 @@ def _save_doctor_cache(cache_file: Path, payload: str) -> None:
         pass
 
 
+def _doctor_argv(settings: LaneSettings) -> tuple[list[str], str]:
+    """Add the configured cleaner floor only when it differs from the doctor default.
+
+    A custom command may already carry the flag.  Keep one exact match, but reject malformed,
+    duplicate, or conflicting values rather than allowing two sources to disagree.
+    """
+    argv = list(settings.command)
+    found: list[int] = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == DOCTOR_RETIRE_DAYS_FLAG:
+            if index + 1 >= len(argv) or not argv[index + 1].isdigit():
+                return argv, f"doctor command has an invalid {DOCTOR_RETIRE_DAYS_FLAG} value"
+            found.append(int(argv[index + 1]))
+            index += 2
+            continue
+        prefix = DOCTOR_RETIRE_DAYS_FLAG + "="
+        if arg.startswith(prefix):
+            value = arg[len(prefix):]
+            if not value.isdigit():
+                return argv, f"doctor command has an invalid {DOCTOR_RETIRE_DAYS_FLAG} value"
+            found.append(int(value))
+        index += 1
+
+    expected = int(settings.retire_min_days)
+    if len(found) > 1:
+        return argv, f"doctor command repeats {DOCTOR_RETIRE_DAYS_FLAG}"
+    if found and found[0] != expected:
+        return argv, f"doctor command {DOCTOR_RETIRE_DAYS_FLAG}={found[0]} conflicts with configured {expected} days"
+    if not found and expected != DEFAULT_RETIRE_MIN_DAYS:
+        argv.extend((DOCTOR_RETIRE_DAYS_FLAG, str(expected)))
+    return argv, ""
+
+
 def _load_cached_report(
     cache_file: Path,
     settings: LaneSettings,
@@ -397,7 +437,9 @@ def load_report(
     to the cached report when one is young enough (CACHED_REPORT_MAX_AGE_SECONDS).  Only a report that
     passes every gate may overwrite the cache, so a bad run can never poison it.  cache_write=False
     (dry runs) reads the cache but never writes it: planning persists no state."""
-    argv = list(settings.command)
+    argv, argv_error = _doctor_argv(settings)
+    if argv_error:
+        return _fail(argv_error, command=tuple(argv))
     if not argv:
         return _fail("no doctor command configured")
     exe = argv[0]
@@ -464,6 +506,14 @@ def validate_report(data: Any, settings: LaneSettings, home: Path, clock: Callab
         return _fail("doctor report has no schema number")
     if schema < settings.min_schema:
         return _fail(f"doctor schema {schema} is below the required {settings.min_schema}")
+    reported_retire_days = _num(data.get("cleaner_min_days"))
+    if reported_retire_days is None:
+        if settings.retire_min_days != DEFAULT_RETIRE_MIN_DAYS:
+            return _fail("doctor report has no cleaner_min_days for the configured retention")
+    elif reported_retire_days != settings.retire_min_days:
+        return _fail(
+            f"doctor cleaner_min_days is {reported_retire_days:g}, expected {settings.retire_min_days:g}"
+        )
     stamp = data.get("generated_at")
     generated = parse_timestamp(stamp)
     if generated is None:

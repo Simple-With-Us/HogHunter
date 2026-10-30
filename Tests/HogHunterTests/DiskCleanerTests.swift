@@ -604,6 +604,58 @@ final class DiskCleanerTests: XCTestCase {
         }
     }
 
+    func testCodingPlatformCachesScanOnlyAsDeveloperJunk() throws {
+        let targets: [(String, String)] = [
+            ("Cursor Cache", "com.todesktop.230313mzl4w4u92"),
+            ("Cursor Update Cache", "com.todesktop.230313mzl4w4u92.ShipIt"),
+            ("Cursor Compile Cache", "cursor-compile-cache"),
+            ("Visual Studio Code Cache", "Code"),
+            ("Claude Desktop Cache", "com.anthropic.claudefordesktop"),
+            ("Claude CLI Cache", "claude-cli-nodejs"),
+            ("Codex Cache", "Codex"),
+            ("Antigravity Cache", "com.google.antigravity"),
+            ("OpenCode Cache", "ai.opencode.desktop"),
+            ("Kimi Code Cache", "kimi-code"),
+            ("Clutch Cache", "codes.clutch.macos"),
+            ("BotFleet Cache", "app.botfleet.control.macos"),
+            ("SwiftPM Cache", "org.swift.swiftpm"),
+            ("Deno Cache", "deno"),
+            ("Node Headers Cache", "node-gyp"),
+            ("Puppeteer Cache", "puppeteer")
+        ]
+        let caches = tempDirectory.appendingPathComponent("Library/Caches", isDirectory: true)
+        try FileManager.default.createDirectory(at: caches, withIntermediateDirectories: true)
+        for (_, cacheName) in targets {
+            let cache = caches.appendingPathComponent(cacheName, isDirectory: true)
+            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+            try Data("rebuildable cache".utf8).write(to: cache.appendingPathComponent("cache.bin"))
+        }
+        let ordinary = caches.appendingPathComponent("com.example.notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: ordinary, withIntermediateDirectories: true)
+        try Data("ordinary app cache".utf8).write(to: ordinary.appendingPathComponent("cache.bin"))
+
+        let testCleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let userItems = testCleaner.scanUserCaches()
+        let developerItems = testCleaner.scanDeveloper()
+        let userPaths = Set(userItems.map { $0.url.standardizedFileURL.path })
+        let developerPaths = developerItems.map { $0.url.standardizedFileURL.path }
+
+        for (title, cacheName) in targets {
+            let cache = caches.appendingPathComponent(cacheName, isDirectory: true)
+            XCTAssertFalse(userPaths.contains(cache.standardizedFileURL.path), "\(cacheName) must not appear in User Caches")
+            XCTAssertEqual(developerPaths.filter { $0 == cache.standardizedFileURL.path }.count, 1, "\(cacheName) must appear once in Developer Junk")
+            let item = try XCTUnwrap(developerItems.first { $0.url.standardizedFileURL == cache.standardizedFileURL })
+            XCTAssertEqual(item.category, .developer)
+            XCTAssertEqual(item.title, title)
+            let highChurn = DiskCleaner.highChurnCacheIdentifiers.contains { cacheName.lowercased().contains($0.pattern) }
+            XCTAssertEqual(item.isSelected, !highChurn && CleanCategory.developer.defaultSelected)
+            XCTAssertTrue(testCleaner.isSafeToDelete(url: cache, category: .developer))
+        }
+        XCTAssertTrue(userPaths.contains(ordinary.standardizedFileURL.path), "ordinary app caches remain User Caches")
+        XCTAssertFalse(developerPaths.contains(ordinary.standardizedFileURL.path))
+        XCTAssertTrue(testCleaner.isSafeToDelete(url: ordinary, category: .userCaches))
+    }
+
     func testPrimaryIOS27SimulatorPreservationAndSeparateOption() async throws {
         let fm = FileManager.default
         let simBase = tempDirectory.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)

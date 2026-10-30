@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from copy import deepcopy
@@ -18,6 +19,8 @@ DEFAULT_POLICY = REPO_ROOT / "config" / "robotic-vacuum.json"
 # is how a tick reported zero bytes while the cleaner had already done most
 # of its job.
 TICK_WATCHDOG_SEC = 900.0
+MIN_RETIRE_DAYS = 1
+MAX_RETIRE_DAYS = 90
 
 # Step metadata: default enabled, which triggers include the step.
 STEP_CATALOG: dict[str, dict[str, Any]] = {
@@ -121,12 +124,13 @@ LEGACY_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
 DEFAULT_HISTORY_MAX_RUNS = 500
 DEFAULT_HOUSEKEEPER_LOCK = "~/.claude-disk-janitor/.housekeeper.lock"
 
-# Lane doctor settings (see vacuum/lanes.py).  The only setting is where the doctor is installed, a machine-local
-# path like hoghunter_clean.  The report age, schema, timeout, and age limits are code constants in lanes.py, and
-# numeric keys in a `lanes` config block are ignored.
+# Lane doctor settings (see vacuum/lanes.py).  The doctor path is machine-local; merged-worktree retention is a
+# validated runtime setting.  Report age, schema, doctor timeout, and dependency age remain code constants.
 DEFAULT_LANES: dict[str, Any] = {
     # Argv, never a shell.  A leading ~ means the Vacuum's home.  HOGHUNTER_LANE_DOCTOR_COMMAND overrides it.
     "doctor_command": ["~/apps/lane", "ls", "--json"],
+    # Merged worktree retention.  The other lane safety gates remain fixed in code.
+    "retire_min_days": 7,
 }
 
 # Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
@@ -296,6 +300,30 @@ def _parse_int(val: str) -> int | None:
         return None
 
 
+def parse_retire_min_days(value: Any) -> int | None:
+    """Parse the canonical 1..90 whole-day value used by Swift and Python settings."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        parsed = int(value)
+    elif isinstance(value, str):
+        if not value or not value.isascii() or not all("0" <= char <= "9" for char in value):
+            return None
+        try:
+            parsed = int(value)
+        except ValueError:  # includes Python's digit-count safety limit
+            return None
+        if value != str(parsed):
+            return None
+    else:
+        return None
+    return parsed if MIN_RETIRE_DAYS <= parsed <= MAX_RETIRE_DAYS else None
+
+
 def _parse_float(val: str) -> float | None:
     try:
         return float(val.strip())
@@ -383,6 +411,18 @@ def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = No
             val = _parse_float(env[key])
             if val is not None:
                 janitor["low_free_gib"] = val
+
+    # Merged worktree retention.  An explicitly invalid override fails safe to
+    # the built-in seven-day default rather than accepting a stale file value.
+    retire_keys = (
+        "hoghunter.maintain.janitor.retireMinDays",
+        "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
+    )
+    for key in retire_keys:
+        if key in env:
+            lanes = base.setdefault("lanes", {})
+            lanes["retire_min_days"] = parse_retire_min_days(env[key]) or 7
+            break
 
     # Resource watch thresholds
     resource_watch = base.setdefault("resource_watch", {})

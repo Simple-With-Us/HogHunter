@@ -260,6 +260,7 @@ class Sandbox:
             "anomalies": [],
             "summary": {},
             "cleaner_candidates": [r["realpath"] for r in rows] if candidates is None else list(candidates),
+            "cleaner_min_days": 7,
         }
         rep.update(top)
         return rep
@@ -273,7 +274,7 @@ class Sandbox:
         return cfg
 
     def settings(self, **lane_over) -> "lanes.LaneSettings":
-        """Settings read from a config whose `lanes` block carries lane_over (numeric keys there are ignored)."""
+        """Settings read from a config whose `lanes` block carries lane_over."""
         return lanes.lane_settings(self.cfg(**lane_over), self.home, env={})
 
     def ctx(self, runner=None, keep=NEVER, clock=time.time, **lane_over) -> "lanes.LaneContext":
@@ -653,8 +654,8 @@ class TestSettings(unittest.TestCase):
         # Review finding: max_report_age_seconds 1e9 used to make a saved report count as fresh forever.
         for block in (
             {"max_report_age_seconds": 1e9, "timeout_seconds": 1e9},
-            {"min_schema": 1, "retire_min_days": 1, "dependency_min_idle_hours": 2, "timeout_seconds": "bad"},
-            {"min_schema": 3, "retire_min_days": 14, "dependency_min_idle_hours": 48, "max_report_age_seconds": 60},
+            {"min_schema": 1, "dependency_min_idle_hours": 2, "timeout_seconds": "bad"},
+            {"min_schema": 3, "dependency_min_idle_hours": 48, "max_report_age_seconds": 60},
             {"max_report_age_seconds": float("inf"), "timeout_seconds": -1, "min_schema": None},
         ):
             settings = lanes.lane_settings({"lanes": dict(block, doctor_command=["/bin/doctor"])}, Path("/h"), env={})
@@ -664,6 +665,98 @@ class TestSettings(unittest.TestCase):
     def test_shipped_config_numbers_have_no_effect(self) -> None:
         cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"))
         self.assertEqual(self.limits(lanes.lane_settings(cfg, Path("/h"), env={})), self.CONSTANTS)
+
+    def test_retention_config_is_bounded_and_invalid_values_default_to_seven(self) -> None:
+        for value, expected in (
+            (1, 1.0), (3, 3.0), (3.0, 3.0), (90, 90.0),
+            (0, 7.0), (91, 7.0), (3.5, 7.0), (True, 7.0), ("bad", 7.0),
+        ):
+            settings = lanes.lane_settings({"lanes": {"retire_min_days": value}}, Path("/h"), env={})
+            self.assertEqual(settings.retire_min_days, expected, value)
+
+    def test_retention_env_uses_canonical_ascii_integer_strings_for_both_names(self) -> None:
+        keys = (
+            "hoghunter.maintain.janitor.retireMinDays",
+            "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
+        )
+        for key in keys:
+            for value, expected in (("1", 1.0), ("90", 90.0)):
+                cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, expected, (key, value))
+            for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
+                cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, 7.0, (key, value[:16]))
+
+    def test_retention_config_uses_canonical_strings_and_accepts_integral_json_numbers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hh-retire-config-") as temp:
+            path = Path(temp) / "config.json"
+            for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
+                path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
+                cfg = load_config(path=path, home=Path(temp), env={})
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, 7.0, value[:16])
+            for value in (1, 3, 3.0, 90):
+                path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
+                cfg = load_config(path=path, home=Path(temp), env={})
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, float(value), value)
+
+    def test_nondefault_retention_is_passed_to_doctor_without_changing_default_argv(self) -> None:
+        sb = Sandbox(self)
+        settings = sb.settings(retire_min_days=3)
+        seen = []
+        payload = sb.report([], cleaner_min_days=3)
+
+        def run(argv, timeout):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+        report = lanes.load_report(settings, sb.home, doctor_runner=run)
+        self.assertTrue(report.ok, report.reason)
+        self.assertEqual(seen[0], [*settings.command, "--cleaner-retention-days", "3"])
+
+        matching_cfg = sb.cfg(retire_min_days=3)
+        matching_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "3"]
+        matching = lanes.lane_settings(matching_cfg, sb.home, env={})
+        report = lanes.load_report(matching, sb.home, doctor_runner=run)
+        self.assertTrue(report.ok, report.reason)
+        self.assertEqual(seen[1], list(matching.command), "an exact command-line value is not duplicated")
+
+        conflicting_cfg = sb.cfg(retire_min_days=3)
+        conflicting_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "4"]
+        conflicting = lanes.lane_settings(conflicting_cfg, sb.home, env={})
+        refused = lanes.load_report(conflicting, sb.home, doctor_runner=run)
+        self.assertFalse(refused.ok)
+        self.assertIn("conflicts", refused.reason)
+        self.assertEqual(len(seen), 2, "a conflicting configured command must not run")
+
+    def test_report_retention_metadata_must_match_and_old_default_report_still_loads(self) -> None:
+        sb = Sandbox(self)
+        settings = sb.settings(retire_min_days=3)
+        mismatched = lanes.validate_report(sb.report([], cleaner_min_days=7), settings, sb.home)
+        self.assertFalse(mismatched.ok)
+        self.assertIn("expected 3", mismatched.reason)
+
+        missing = sb.report([])
+        del missing["cleaner_min_days"]
+        missing_default = lanes.validate_report(missing, sb.settings(), sb.home)
+        self.assertTrue(missing_default.ok, missing_default.reason)
+        missing_nondefault = lanes.validate_report(missing, settings, sb.home)
+        self.assertFalse(missing_nondefault.ok)
+        self.assertIn("no cleaner_min_days", missing_nondefault.reason)
+
+    def test_cached_report_with_a_different_retention_floor_is_rejected(self) -> None:
+        sb = Sandbox(self)
+        settings = sb.settings(retire_min_days=3)
+        cache = sb.root / "cache" / "lane-doctor-report.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sb.report([], cleaner_min_days=7)), encoding="utf-8")
+
+        def broken(argv, timeout):
+            raise FileNotFoundError("doctor unavailable")
+
+        report = lanes.load_report(settings, sb.home, doctor_runner=broken, cache_file=cache)
+        self.assertFalse(report.ok)
+        self.assertFalse(report.cached, "the mismatched cache must never be used")
+        self.assertIn("could not run", report.reason)
 
     def test_adaptive_doctor_timeout_grows_after_a_slow_success(self) -> None:
         settings = lanes.lane_settings({}, Path("/h"), env={})
@@ -709,6 +802,7 @@ class TestSettings(unittest.TestCase):
             "hoghunter.maintain.janitor.lowFreeGib": "95.0",
             "hoghunter.maintain.watch.diskFreeWarnGb": "30.0",
             "hoghunter.maintain.watch.swapUsedPct": "85.0",
+            "hoghunter.maintain.janitor.retireMinDays": "3",
         }
         cfg_dotted = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env=env_dotted)
         self.assertFalse(cfg_dotted["steps"]["shutdown_simulators"]["enabled"])
@@ -724,6 +818,7 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(cfg_dotted["janitor"]["low_free_gib"], 95.0)
         self.assertEqual(cfg_dotted["resource_watch"]["disk_free_warn_gb"], 30.0)
         self.assertEqual(cfg_dotted["resource_watch"]["swap_used_pct"], 85.0)
+        self.assertEqual(lanes.lane_settings(cfg_dotted, Path("/h"), env={}).retire_min_days, 3.0)
 
         # Test 2: HOGHUNTER_MAINTAIN_* uppercase namespace overrides.
         env_upper = {
@@ -740,6 +835,7 @@ class TestSettings(unittest.TestCase):
             "HOGHUNTER_MAINTAIN_JANITOR_LOW_FREE_GIB": "70.0",
             "HOGHUNTER_MAINTAIN_WATCH_DISK_FREE_WARN_GB": "20.0",
             "HOGHUNTER_MAINTAIN_WATCH_SWAP_USED_PCT": "75.0",
+            "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS": "5",
         }
         cfg_upper = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env=env_upper)
         self.assertFalse(cfg_upper["steps"]["shutdown_simulators"]["enabled"])
@@ -755,6 +851,14 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(cfg_upper["janitor"]["low_free_gib"], 70.0)
         self.assertEqual(cfg_upper["resource_watch"]["disk_free_warn_gb"], 20.0)
         self.assertEqual(cfg_upper["resource_watch"]["swap_used_pct"], 75.0)
+        self.assertEqual(lanes.lane_settings(cfg_upper, Path("/h"), env={}).retire_min_days, 5.0)
+
+        for invalid in ("0", "91", "3.5", "n/a"):
+            cfg_invalid = load_config(
+                path=Path("/nonexistent/config.json"), home=Path("/h"),
+                env={"hoghunter.maintain.janitor.retireMinDays": invalid},
+            )
+            self.assertEqual(lanes.lane_settings(cfg_invalid, Path("/h"), env={}).retire_min_days, 7.0, invalid)
 
 
 # --------------------------------------------------------------------------- the Vacuum's own re-check
@@ -783,6 +887,16 @@ class TestRecheck(unittest.TestCase):
         self.assertGreater(choice.size_bytes or 0, 0)
         self.assertEqual(choice.command, ["git", "-C", str(self.sb.main), "worktree", "remove", str(self.lane)])
         self.assertIn("PR MERGED #7", choice.reasons)
+
+    def test_configured_retention_controls_actual_retirement_boundary(self) -> None:
+        settings = self.sb.settings(retire_min_days=3)
+        ctx = lanes.LaneContext(self.sb.home, NEVER, settings, Runner())
+        exact = self.sb.row(self.lane, lane_age_days=3.0, idle_days=3.0)
+        report = lanes.validate_report(self.sb.report([exact], cleaner_min_days=3), settings, self.sb.home)
+        self.assertEqual(len(lanes.removable_lanes(report, ctx).choices), 1)
+        too_young = self.sb.row(self.lane, lane_age_days=2.99, idle_days=3.0)
+        report = lanes.validate_report(self.sb.report([too_young], cleaner_min_days=3), settings, self.sb.home)
+        self.assert_blocked(lanes.removable_lanes(report, ctx), "lane_age_days")
 
     def test_ignored_env_file_blocks(self) -> None:
         (self.lane / ".env").write_text("LOCAL_ONLY=1\n", encoding="utf-8")
