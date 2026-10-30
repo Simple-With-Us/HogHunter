@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import datetime
 import json
 import math
 import os
@@ -218,11 +219,12 @@ def _pid_alive(pid: int) -> bool:
 # from a live holder.
 _OWNER_KEYS = frozenset({"pid", "host", "acquired_at", "lock", "start"})
 
-# The longest start token this protocol accepts.  The token is opaque and is
-# never parsed, so this bound only keeps a hostile file from putting an
-# unbounded string in memory.  The other three implementations apply the
-# same bound, in the same place.
+# The longest start token this protocol accepts.  This bound keeps a hostile
+# file from putting an unbounded string in memory.
+# The other three implementations apply the same bound, in the same place.
 _OWNER_START_MAX = 128
+_OWNER_ACQUIRED_AT_FS_SKEW_SEC = 2.0
+_OWNER_ACQUIRED_AT_FUTURE_SKEW_SEC = 60.0
 
 
 def _parse_owner(raw: str) -> dict | None:
@@ -322,22 +324,21 @@ def _owner_is_local(owner: dict) -> bool:
     return owner["host"] == socket.gethostname()
 
 
-def _process_start_token(pid: int) -> str:
-    """The start time of the process a pid names, as an opaque string.
+def _process_start_token(pid: int, *, utc: bool = False) -> str:
+    """The C-locale start time of the process a pid names.
 
     A pid alone does not name a process:  the kernel hands the same number to
     somebody else once the original exits, and a reused pid that is ALIVE
     looks exactly like a holder that is still running.  The start time tells
     the two apart.
 
-    The token is an opaque string, compared and never parsed.  The C locale
-    is forced, and the environment is kept to PATH and LC_ALL alone, so that
-    this reader and the other three implementations produce the SAME string
-    for the same process:  a TZ in the environment renders the same start
-    time in a different zone, and the tokens would then disagree for a
-    holder that never moved.
+    Writers retain the legacy local form during the reader-first rollout.
+    Readers request UTC so changing the machine's zone cannot change their
+    current-process token.  Neither mode inherits the caller's TZ.
     """
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
+    if utc:
+        env["TZ"] = "UTC0"
     try:
         result = subprocess.run(
             # Absolute path:  the Swift reader runs /bin/ps, and a different ps
@@ -352,24 +353,84 @@ def _process_start_token(pid: int) -> str:
     return result.stdout.strip()
 
 
-def _owner_is_gone(owner: dict) -> bool:
+def _start_token_epoch(token: str) -> float | None:
+    """Interpret a C-locale ps civil timestamp as UTC, without changing locale."""
+    fields = token.split()
+    weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    if len(fields) != 5 or fields[0] not in weekdays or fields[1] not in months:
+        return None
+    day, clock, year = fields[2:]
+    times = clock.split(":")
+    if (len(day) not in (1, 2) or len(year) != 4 or len(times) != 3
+            or any(len(part) != 2 for part in times)
+            or any(not part.isascii() or not part.isdigit() for part in (day, year, *times))):
+        return None
+    try:
+        civil = datetime.datetime(int(year), months.index(fields[1]) + 1, int(day),
+                                  *(int(part) for part in times), tzinfo=datetime.timezone.utc)
+        if civil.weekday() != weekdays.index(fields[0]):
+            return None
+        return civil.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _owner_acquired_at_is_sane(
+    acquired_at: float, lock_mtime: float, owner_mtime: float, *, now: float | None = None
+) -> bool:
+    """Whether acquired_at agrees with the lock and owner file timestamps."""
+    if not math.isfinite(acquired_at):
+        return False
+    now = time.time() if now is None else now
+    skew = _OWNER_ACQUIRED_AT_FS_SKEW_SEC
+    return (
+        lock_mtime - skew <= acquired_at <= owner_mtime + skew
+        and acquired_at <= now + _OWNER_ACQUIRED_AT_FUTURE_SKEW_SEC
+    )
+
+
+def _owner_is_gone(owner: dict, lock_path: Path, owner_path: Path) -> bool:
     """True when the owner record proves the holder is gone.
 
     A dead pid proves it at once.  A live pid does not, because the kernel
     hands the number to somebody else once the original exits:  the holder
-    is gone when that pid now names a DIFFERENT process, and the start token
-    is what tells the two apart.  When the token cannot be read the record
+    is gone when that pid now names a DIFFERENT process.  UTC reads accept
+    legacy local tokens within a bounded offset only when the process was
+    already running at acquisition.  An unreadable or unparseable token
     cannot speak for the lock, and the age rule decides.
     """
+    try:
+        lock_mtime = lock_path.stat().st_mtime
+        owner_mtime = owner_path.stat().st_mtime
+    except OSError:
+        return False
+    if owner_mtime <= lock_mtime:
+        return False
     pid = owner["pid"]
     if not _pid_alive(pid):
         return True
-    current = _process_start_token(pid)
+    current = _process_start_token(pid, utc=True)
     if not current:
         # The start time could not be read:  the record cannot speak for the
         # lock, and the age rule decides.
         return False
-    return current != owner["start"]
+    if current == owner["start"]:
+        return False
+    current_epoch = _start_token_epoch(current)
+    recorded_civil_epoch = _start_token_epoch(owner["start"])
+    if current_epoch is None or recorded_civil_epoch is None:
+        return False
+    if not _owner_acquired_at_is_sane(
+        owner["acquired_at"], lock_mtime, owner_mtime
+    ):
+        return False
+    # A legacy local token may differ only by its zone's UTC offset.  The
+    # acquisition bound prevents a newly reused pid from being accepted as
+    # the prior holder merely because its start is within one day.
+    return (current_epoch > owner["acquired_at"]
+            or abs(recorded_civil_epoch - current_epoch) > 24 * 60 * 60)
 
 
 def _write_owner(owner_path: Path, lock_path: Path) -> None:
@@ -640,7 +701,7 @@ class HousekeeperLock:
             return False
         # The record proves the holder is gone:  a dead pid, or a live pid
         # that now names a different process.
-        return _owner_is_gone(owner)
+        return _owner_is_gone(owner, self.lock_path, self.owner_path)
 
     def _takeover(self) -> bool:
         """Take a lock that is free to be taken, atomically.
@@ -684,7 +745,9 @@ class HousekeeperLock:
         # The holder we found is gone when its pid is dead, or when that pid
         # now names a different process.  The start token is what tells the
         # two apart, and it is the same rule every implementation applies.
-        owner_is_gone = dead_owner is not None and _owner_is_gone(dead_owner)
+        owner_is_gone = dead_owner is not None and _owner_is_gone(
+            dead_owner, aside, self.owner_path
+        )
         if not (moved_is_stale or owner_is_gone):
             # Someone else's fresh lock, held by a live process.  Put it back.
             self._put_back(aside)

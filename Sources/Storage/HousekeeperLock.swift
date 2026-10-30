@@ -380,7 +380,7 @@ final class HousekeeperLock {
         // The holder we found is gone when its pid is dead, or when that pid
         // now names a different process.  The start token is what tells the
         // two apart, and it is the same rule every implementation applies.
-        let ownerIsGone = deadOwner.map { HousekeeperLock.ownerIsGone($0) } ?? false
+        let ownerIsGone = deadOwner.map { ownerRecordIsGone($0, lockURL: aside) } ?? false
         guard movedIsStale || ownerIsGone else {
             // Someone else's fresh lock, held by a live process.  Put it back.
             putBack(aside)
@@ -517,9 +517,10 @@ final class HousekeeperLock {
 
     /// The longest start token this protocol accepts.
     ///
-    /// The token is opaque and is never parsed, so this bound only keeps a
-    /// hostile file from putting an unbounded string in memory.
+    /// This bound keeps a hostile file from putting an unbounded string in memory.
     static let ownerStartMax = 128
+    static let ownerAcquiredAtFilesystemSkew: TimeInterval = 2
+    static let ownerAcquiredAtFutureSkew: TimeInterval = 60
 
     /// True when a JSON number is really a boolean.
     ///
@@ -552,25 +553,17 @@ final class HousekeeperLock {
         #endif
     }
 
-    /// The start time of the process a pid names, as an opaque string.
+    /// The C-locale start time of the process a pid names.
     ///
     /// A pid alone does not name a process:  the kernel hands the same number
     /// to somebody else once the original exits, and a reused pid that is
     /// ALIVE looks exactly like a holder that is still running.  The start
     /// time tells the two apart.
     ///
-    /// The token is opaque:  it is compared and never parsed.  It comes from
-    /// the same command, in the same locale, that every other implementation
-    /// of this protocol uses, so all four produce the SAME string for the
-    /// same process:
-    ///
-    ///     LC_ALL=C ps -o lstart= -p <pid>
-    ///
-    /// The environment is MINIMAL on purpose.  A TZ in the environment renders
-    /// the same start time in a different zone, so the token would depend on
-    /// the caller's environment and two implementations could disagree about
-    /// one live process.
-    static func processStartToken(_ pid: Int32) -> String {
+    /// Writers retain the local form during the reader-first rollout.
+    /// Readers request UTC so changing the machine's zone cannot change their
+    /// current-process token.  Neither mode inherits the caller's TZ.
+    static func processStartToken(_ pid: Int32, utc: Bool = false) -> String {
         guard pid > 0 else { return "" }
         #if os(macOS)
         let task = Process()
@@ -580,6 +573,7 @@ final class HousekeeperLock {
         if let path = getenv("PATH") {
             environment["PATH"] = String(cString: path)
         }
+        if utc { environment["TZ"] = "UTC0" }
         task.environment = environment
         let output = Pipe()
         task.standardOutput = output
@@ -599,18 +593,85 @@ final class HousekeeperLock {
         #endif
     }
 
+    /// Interpret a C-locale ps civil timestamp as UTC without changing locale.
+    static func startTokenEpoch(_ token: String) -> TimeInterval? {
+        let fields = token.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        guard fields.count == 5,
+              let weekday = weekdays.firstIndex(of: fields[0]),
+              let month = months.firstIndex(of: fields[1]) else { return nil }
+        let times = fields[3].split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let numeric = [fields[2], fields[4]] + times
+        guard (1...2).contains(fields[2].count), fields[4].count == 4,
+              times.count == 3, times.allSatisfy({ $0.count == 2 }),
+              numeric.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy({ (48...57).contains($0) }) }),
+              let day = Int(fields[2]), let year = Int(fields[4]),
+              let hour = Int(times[0]), let minute = Int(times[1]), let second = Int(times[2]),
+              (1...9999).contains(year), (1...31).contains(day),
+              (0...23).contains(hour), (0...59).contains(minute), (0...59).contains(second)
+        else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let civil = DateComponents(year: year, month: month + 1, day: day,
+                                   hour: hour, minute: minute, second: second)
+        guard let date = calendar.date(from: civil) else { return nil }
+        // Calendar normalizes impossible dates, so verify the components.
+        let actual = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .weekday], from: date)
+        guard actual.year == year, actual.month == month + 1, actual.day == day,
+              actual.hour == hour, actual.minute == minute, actual.second == second,
+              actual.weekday == weekday + 1 else { return nil }
+        return date.timeIntervalSince1970
+    }
+
     /// True when the owner record proves the holder is gone.
     ///
     /// A dead pid proves it at once.  A live pid does not, because the
     /// kernel hands the number to somebody else once the original exits:  the
-    /// holder is gone when that pid now names a DIFFERENT process, and the
-    /// start token is what tells the two apart.  When the token cannot be
-    /// read the record cannot speak for the lock, and the age rule decides.
-    static func ownerIsGone(_ owner: OwnerRecord) -> Bool {
+    /// holder is gone when that pid now names a DIFFERENT process.
+    /// UTC reads accept legacy local tokens within a bounded offset only
+    /// when the process was already running at acquisition.
+    /// An unreadable or unparseable token cannot speak for the lock, and
+    /// the age rule decides.
+    static func ownerIsGone(
+        _ owner: OwnerRecord,
+        lockModified: Date,
+        ownerModified: Date
+    ) -> Bool {
         if !isProcessAlive(owner.pid) { return true }
-        let current = processStartToken(owner.pid)
+        let current = processStartToken(owner.pid, utc: true)
         if current.isEmpty { return false }
-        return current != owner.start
+        if current == owner.start { return false }
+        guard let currentEpoch = startTokenEpoch(current),
+              let recordedCivilEpoch = startTokenEpoch(owner.start) else { return false }
+        guard ownerAcquiredAtIsSane(
+            owner.acquiredAt,
+            lockModified: lockModified,
+            ownerModified: ownerModified,
+            now: Date()
+        ) else { return false }
+        // A legacy local token may differ only by its zone's UTC offset.
+        // The acquisition bound prevents a newly reused pid from being
+        // accepted as the prior holder merely because it started within a day.
+        return currentEpoch > owner.acquiredAt
+            || abs(recordedCivilEpoch - currentEpoch) > 24 * 60 * 60
+    }
+
+    private static func ownerAcquiredAtIsSane(
+        _ acquiredAt: Double,
+        lockModified: Date,
+        ownerModified: Date,
+        now: Date
+    ) -> Bool {
+        guard acquiredAt.isFinite, ownerModified > lockModified else { return false }
+        let lockEpoch = lockModified.timeIntervalSince1970
+        let ownerEpoch = ownerModified.timeIntervalSince1970
+        let nowEpoch = now.timeIntervalSince1970
+        let skew = ownerAcquiredAtFilesystemSkew
+        return lockEpoch - skew <= acquiredAt
+            && acquiredAt <= ownerEpoch + skew
+            && acquiredAt <= nowEpoch + ownerAcquiredAtFutureSkew
     }
 
     /// True when the recorded owner is definitely gone.
@@ -619,7 +680,7 @@ final class HousekeeperLock {
     /// shell holder never wrote one, so the caller falls back to the age
     /// rule.  Guessing wrong in that direction would steal a live lock.
     private var isOwnerGone: Bool {
-        guard ownerDescribesHolder(), let owner = ownerRecord(),
+        guard let times = ownerFileTimes(for: path), let owner = ownerRecord(),
               owner.pid > 0, owner.pid != getpid() else {
             return false
         }
@@ -627,7 +688,16 @@ final class HousekeeperLock {
         // held on another host cannot be taken over on the strength of a pid
         // that is not ours.
         guard owner.host == HousekeeperLock.currentHostName() else { return false }
-        return HousekeeperLock.ownerIsGone(owner)
+        return HousekeeperLock.ownerIsGone(
+            owner, lockModified: times.lockModified, ownerModified: times.ownerModified
+        )
+    }
+
+    private func ownerRecordIsGone(_ owner: OwnerRecord, lockURL: URL) -> Bool {
+        guard let times = ownerFileTimes(for: lockURL) else { return false }
+        return HousekeeperLock.ownerIsGone(
+            owner, lockModified: times.lockModified, ownerModified: times.ownerModified
+        )
     }
 
     /// True when the owner file describes the holder of the lock that is
@@ -643,14 +713,15 @@ final class HousekeeperLock {
     /// this protocol refuse a record whose mtime equals the lock
     /// directory's, and two readers that disagree about the same file leave
     /// the fleet with conflicting ownership decisions about one lock.
-    private func ownerDescribesHolder() -> Bool {
+    private func ownerFileTimes(for lockURL: URL) -> (lockModified: Date, ownerModified: Date)? {
         guard let ownerAttributes = try? fileManager.attributesOfItem(atPath: ownerPath.path),
               let ownerModified = ownerAttributes[.modificationDate] as? Date,
-              let lockAttributes = try? fileManager.attributesOfItem(atPath: path.path),
+              let lockAttributes = try? fileManager.attributesOfItem(atPath: lockURL.path),
               let lockModified = lockAttributes[.modificationDate] as? Date else {
-            return false
+            return nil
         }
-        return ownerModified > lockModified
+        guard ownerModified > lockModified else { return nil }
+        return (lockModified, ownerModified)
     }
 
     /// The owner record, when the file holds one this protocol publishes.
