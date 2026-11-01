@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Codex markers wait for the idle gate (issue 111 follow-up):
+
+- The temp-scratch rule left the `.com.openai.codex.*` markers ungated while the scratch around them waited 3 hours, so it could delete a marker a running Codex still uses.  A marker is now a candidate only when nobody holds it and it was last touched over 3 hours ago, and the loop stops at the rule deadline like the loops above it.
+
 The housekeeper owner record is one protocol across all four implementations (shared with AFC-554):
 
 - The lock at `~/.claude-disk-janitor/.housekeeper.lock` is shared by four programs: Hog Hunter's Python vacuum, Hog Hunter's Swift lock, and AFC's `mac-auto-cleanup.sh` and `mac-resource-watch.py`.  All four write an owner file beside the lock directory and read it back to answer one question: is the holder still there?

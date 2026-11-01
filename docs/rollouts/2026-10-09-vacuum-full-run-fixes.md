@@ -56,5 +56,5 @@ Until now the cleaner never got past the markers, so nothing after them in the l
 
 - The lane doctor needs about 313 s at today's load and the Vacuum waits 300 s (`vacuum/lanes.py`), so worktree retirement and idle-lane cleanup never run.  Board `b39e940c`.
 - `lanes.process_state` gives `pgrep` 3 s.  Under load 600 that times out, so `npm_cache`, `pnpm_store`, `yarn_cache`, and `brew_cleanup` skip as "treated as busy" on most full runs.  Safe, but they free nothing.
-- The Codex marker rule in `hoghunter-clean` has no idle gate (the scratch rules around it wait 3 hours).  It deletes markers a running Codex may still use.
+- The Codex marker rule in `hoghunter-clean` has no idle gate (the scratch rules around it wait 3 hours).  It deletes markers a running Codex may still use.  Done: the rule now skips markers held open or touched within 3 hours.
 - The agent runs `scripts/robotic-vacuum.py` from `~/Code/HogHunter`, the integration tree, which lags `main`.  These fixes reach the agent when that tree updates.
