@@ -1204,12 +1204,21 @@ def rule_temp_scratch() -> list[Candidate]:
             [str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
             probe_timeout(60),
         ):
-            if not f.strip() or f in seen:
+            if time.time() > deadline:
+                log("temp-scratch: budget exhausted, returning partial results")
+                break
+            if not f.strip() or f in seen or is_forbidden(f) or has_keep_sentinel(f):
+                continue
+            try:
+                age_min = (time.time() - Path(f).stat().st_mtime) / 60.0
+            except OSError:
+                continue
+            if age_min < IDLE_MIN_SCRATCH or open_handles(f):
                 continue
             seen.add(f)
             cands.append(Candidate(
                 category="temp-scratch", path=f, bytes=dir_bytes(f),
-                reason="Codex per-run marker file (auto-rotated by Codex)",
+                reason="Codex per-run marker file, no handles, idle over 3h",
             ))
     except (OSError, subprocess.SubprocessError):
         pass

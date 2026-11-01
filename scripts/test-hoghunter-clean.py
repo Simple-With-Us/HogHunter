@@ -1919,6 +1919,81 @@ def test_a_path_two_rules_name_is_only_claimed_once(hh):
     assert len(found) == 1
 
 
+def test_codex_markers_are_held_until_idle_and_unheld(hh):
+    """The Codex markers are files, so the scratch gate reads the file itself.  A marker
+    touched just now or still held open belongs to a running Codex, and only an old
+    marker nobody holds is a candidate."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-codex-"))
+    try:
+        fresh = root / ".com.openai.codex.fresh"
+        idle = root / ".com.openai.codex.idle"
+        held = root / ".com.openai.codex.held"
+        for path in (fresh, idle, held):
+            path.write_text("x\n", encoding="utf-8")
+        old = time.time() - 4 * 3600
+        for path in (idle, held):
+            os.utime(path, (old, old))
+
+        def handles(path):
+            return 1 if path == str(held) else 0
+
+        with mock.patch.object(hh, "_run", return_value=f"{root}/\n"), \
+             mock.patch.object(hh, "open_handles", side_effect=handles), \
+             mock.patch.object(hh, "rule_deadline", return_value=time.time() + 60):
+            found = hh.rule_temp_scratch()
+        by_path = {c.path: c for c in found if c.category == "temp-scratch"}
+        assert str(idle) in by_path, by_path
+        assert str(fresh) not in by_path, "a marker touched just now is not idle"
+        assert str(held) not in by_path, "a marker still held open is not a candidate"
+        assert by_path[str(idle)].reason == "Codex per-run marker file, no handles, idle over 3h"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_codex_markers_respect_keep_sentinel_and_forbidden_paths(hh):
+    """An old, unheld marker is still left alone when the operator marked its parent or
+    policy forbids the path.  The scratch rules around it already honour both gates."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-codex-"))
+    try:
+        marker = root / ".com.openai.codex.kept"
+        marker.write_text("x\n", encoding="utf-8")
+        old = time.time() - 4 * 3600
+        os.utime(marker, (old, old))
+        (root / ".janitor-keep").write_text("", encoding="utf-8")
+        with mock.patch.object(hh, "_run", return_value=f"{root}/\n"), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "rule_deadline", return_value=time.time() + 60):
+            kept = hh.rule_temp_scratch()
+        assert str(marker) not in {c.path for c in kept}, "a kept marker is not a candidate"
+        (root / ".janitor-keep").unlink()
+        with mock.patch.object(hh, "_run", return_value=f"{root}/\n"), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "rule_deadline", return_value=time.time() + 60), \
+             mock.patch.object(hh, "is_forbidden", side_effect=lambda path: path == str(marker)):
+            forbidden = hh.rule_temp_scratch()
+        assert str(marker) not in {c.path for c in forbidden}, "a forbidden marker is not a candidate"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_codex_markers_stop_at_the_rule_deadline(hh):
+    """The marker loop stops when the rule deadline has passed, like the loops
+    above it.  A scan out of time returns what it found instead of walking on."""
+    root = Path(tempfile.mkdtemp(prefix="hhclean-codex-"))
+    try:
+        marker = root / ".com.openai.codex.idle"
+        marker.write_text("x\n", encoding="utf-8")
+        old = time.time() - 4 * 3600
+        os.utime(marker, (old, old))
+        with mock.patch.object(hh, "_run", return_value=f"{root}/\n"), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "rule_deadline", return_value=time.time() - 1):
+            found = hh.rule_temp_scratch()
+        assert str(marker) not in {c.path for c in found}, "the deadline is spent, so no marker is chosen"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
