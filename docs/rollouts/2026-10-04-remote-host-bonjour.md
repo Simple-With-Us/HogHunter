@@ -4,7 +4,7 @@ Sat, Oct 4, 2026.  Seat GROK-BUILD.  Branch `grok-build/hh-remote-offline`.  Pul
 
 ## Context & Objective
 
-repo: `Simple-With-Us/HogHunter`.  Pre-work claim posted to `#agent-sync` (topic HogHunter issue #64 manual host offline on Bonjour).
+repo: `Simple-With-Us/HogHunter`.  Pre-work claim posted to `#Work-In-Progress` (topic HogHunter issue #64 manual host offline on Bonjour).
 
 On the same Wi-Fi, the iPhone companion discovers the Mac with Bonjour (`_hoghunter._tcp`).  A phone paired over Tailscale, LAN IP, or custom domain stores `remoteHost` / `remotePort` and reaches the Mac with `NWEndpoint.hostPort` (shipped in PR #75; see `AGENTS.md`).  Every Bonjour browse tick called `reconcile()`, which treated a missing Bonjour peer as offline and cleared the live dashboard—even while fetches over the saved address still worked.  Issue #64.  A second defect re-presented the pairing sheet every three seconds after Cancel when the Mac returned 401 for a rotated code.
 
