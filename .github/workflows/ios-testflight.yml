@@ -124,7 +124,7 @@ jobs:
       vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
       (github.ref == 'refs/heads/main' ||
        (github.event_name == 'workflow_dispatch' && inputs.upload == false))
-    runs-on: macos-26
+    runs-on: macos-latest
     timeout-minutes: 15
     outputs:
       build: ${{ steps.plan.outputs.build }}
@@ -305,7 +305,7 @@ jobs:
       vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
       (github.ref == 'refs/heads/main' ||
        (github.event_name == 'workflow_dispatch' && inputs.upload == false))
-    runs-on: macos-26
+    runs-on: macos-latest
     timeout-minutes: 90
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

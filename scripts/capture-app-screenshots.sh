@@ -188,6 +188,11 @@ else:
     print("  OK widget extension embedded: HogHunterWidgets.appex")
 
 try:
+    # A simulator left Booting by an earlier cancelled run never finishes;
+    # the first format then burns its whole boot wait on a wedged device and
+    # the run exceeds the supervisor deadline after the required screens are
+    # already saved.  Start from every device shut down so each boot is fresh.
+    subprocess.run(["xcrun", "simctl", "shutdown", "all"], capture_output=True)
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
     devices_data = json.loads(proc.stdout).get("devices", {})
 except Exception as e:
