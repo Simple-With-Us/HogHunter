@@ -607,6 +607,20 @@ final class SampleReportTests: XCTestCase {
         XCTAssertTrue(lines[0].contains("~/Library/Caches/x"))
     }
 
+    func testASampleThatCannotStartSaysSoWithoutSystemText() {
+        let done = expectation(description: "sample finishes")
+        // No process can hold this pid (macOS pids stay below 100000), so
+        // `sample` fails at once without touching a live process.
+        SampleReport.run(name: "ghost", pid: 999_999, seconds: 1) { outcome in
+            guard case .failed(let message) = outcome else {
+                return XCTFail("sampling a pid that cannot exist must fail, got \(outcome)")
+            }
+            XCTAssertEqual(message, "Sampling ghost did not finish.\u{00A0} Try again.")
+            done.fulfill()
+        }
+        waitForExpectations(timeout: 30)
+    }
+
     func testOnlyTheTailOfAHugeReportIsRead() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("hoghunter-sample-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: url) }

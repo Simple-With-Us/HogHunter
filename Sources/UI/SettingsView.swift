@@ -9,10 +9,10 @@ struct SettingsView: View {
 
     @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.system.rawValue
 
-    /// Settings opens on General every time.  Held as state rather than left to
-    /// the scene's implicit default so the tab the window comes back to is a
-    /// decision, not whatever was clicked last.
-    @State private var selection = SettingsTab.general
+    /// The tab the window comes back to.  Stored, so Settings reopens where
+    /// the owner left it instead of always on General; the iPhone opt-ins
+    /// live on the seventh tab and should not need re-finding every time.
+    @AppStorage(HogStore.Key.settingsTab) private var selectionRaw = SettingsTab.general.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -33,7 +33,10 @@ struct SettingsView: View {
             .padding(.horizontal, 16)
             .padding(.top, 12)
 
-            TabView(selection: $selection) {
+            TabView(selection: Binding(
+                get: { SettingsTab(rawValue: selectionRaw) ?? .general },
+                set: { selectionRaw = $0.rawValue }
+            )) {
             GeneralSettingsTab()
                 .environmentObject(store)
                 .tabItem {
@@ -107,11 +110,11 @@ struct SettingsView: View {
             WindowActivator.front()
             // A tab asked for before this window existed (the notification
             // had no subscriber yet) is picked up here.
-            if let tab = HogActions.takePendingSettingsTab() { selection = tab }
+            if let tab = HogActions.takePendingSettingsTab() { selectionRaw = tab.rawValue }
         }
         .onReceive(NotificationCenter.default.publisher(for: .selectSettingsTab)) { note in
             if let tab = note.object as? SettingsTab {
-                selection = tab
+                selectionRaw = tab.rawValue
                 _ = HogActions.takePendingSettingsTab()
             }
         }
@@ -138,9 +141,9 @@ extension SettingsView {
     }
 }
 
-/// Selection identity for the Settings tabs.  Explicit rather than raw strings
-/// so the default tab is written once and cannot drift out of sync with a tab.
-enum SettingsTab: Hashable {
+/// Selection identity for the Settings tabs.  Raw strings so the last tab
+/// survives a relaunch; an unknown stored value falls back to General.
+enum SettingsTab: String, CaseIterable {
     case general, alerts, startup, theme, cleaner, maintenance, iphone, about, advanced
 }
 

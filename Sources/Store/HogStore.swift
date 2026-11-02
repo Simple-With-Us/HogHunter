@@ -300,6 +300,7 @@ final class HogStore: ObservableObject {
         static let allowRemoteMaintain = "allowRemoteMaintain"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
+        static let settingsTab = "settingsTab"
 
         /// Settings keys renamed with the Vacuum -> Maintain rename, mapped
         /// old -> new.  The stored opt-in and the persisted tab selection both

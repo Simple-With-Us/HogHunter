@@ -734,15 +734,23 @@ final class CompanionCleanerStoreTests: XCTestCase {
 
     func testAScanThatNeverFinishesDoesNotShutTheCleanerForGood() async throws {
         store.remoteScanWatchdog = 0.05
+        // The stuck scan waits on a gate instead of a fixed sleep, so it can
+        // neither slow the suite nor outlive the test into the next one.
+        let stuck = CompanionLocked(false)
+        defer { stuck.value = true }
         store.remoteScanner = { tier, _, _ in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            while !stuck.value { try? await Task.sleep(for: .milliseconds(10)) }
             return CleanerFixtures.sampleReport(tier: tier)
         }
         XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202)
         XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 409, "a young scan is still running")
-        try await Task.sleep(nanoseconds: 120_000_000)
         store.remoteScanner = { tier, _, _ in CleanerFixtures.sampleReport(tier: tier) }
-        XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202, "an old one is replaced")
+        var replaced = false
+        for _ in 0..<100 where !replaced {
+            replaced = store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status == 202
+            if !replaced { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertTrue(replaced, "an old one is replaced")
         try await waitForScan()
     }
 

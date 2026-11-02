@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check manual release scripts without signing credentials
         run: |
@@ -58,12 +58,12 @@ jobs:
       TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # macOS exposes waitid/WNOWAIT in Python 3.13 and newer.  Keep the
       # supervisor and capture dependencies on the same explicit interpreter.
       - name: Set Up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.15'
 
@@ -72,7 +72,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install xcodegen
+          curl -sSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
+          sudo mkdir -p /usr/local/bin
+          sudo mv /tmp/xcodegen/xcodegen /usr/local/bin/xcodegen
+          xcodegen --version
           python3 -m pip install --break-system-packages pyobjc-framework-Quartz || python3 -m pip install pyobjc-framework-Quartz
 
       - name: Generate project
