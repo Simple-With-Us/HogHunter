@@ -25,7 +25,7 @@ TOOLS = (
     # command name.  Both are the same tool, and matching only one of them
     # made a running seat read as unknown.
     ('minimax', 'MiniMax Code', ('mcode', 'minimax-code')),
-    ('fleet-cli', 'Fleet CLI', ('simple-chat', 'board')),
+    ('fleet-cli', 'Fleet CLI', ('agent-sync', 'board')),
     ('fleet-listener', 'Fleet Listener', ('agent-sync-listener',)),
     ('recall', 'Fleet Recall', ('recall',)),
     ('shellular', 'Shellular', ('shellular',)),
