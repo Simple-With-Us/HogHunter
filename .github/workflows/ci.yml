@@ -74,10 +74,14 @@ jobs:
         run: |
           curl -sSL --fail --retry 3 --retry-all-errors -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
           test -s /tmp/xcodegen.zip
-          ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
-          test -x /tmp/xcodegen/xcodegen
+          rm -rf /tmp/xcodegen && ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
+          # The zip wraps the binary (xcodegen/bin/xcodegen), not a bare
+          # binary, so locate it instead of assuming the layout.
+          BIN="$(find /tmp/xcodegen -name xcodegen -type f | head -1)"
+          test -n "$BIN" && test -x "$BIN"
           sudo mkdir -p /usr/local/bin
-          sudo mv /tmp/xcodegen/xcodegen /usr/local/bin/xcodegen
+          sudo rm -rf /usr/local/bin/xcodegen
+          sudo mv "$BIN" /usr/local/bin/xcodegen
           # The runner shell does not always carry /usr/local/bin on PATH
           # (non-login shell, image-dependent), so pin it for this step and
           # every later one via GITHUB_PATH, and check by absolute path.
