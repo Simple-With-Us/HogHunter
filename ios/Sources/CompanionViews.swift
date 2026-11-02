@@ -407,7 +407,7 @@ private struct CodeEntryView: View {
                     }
                     .disabled(model.isWaitingForApproval || model.isSubmittingCode)
                 } footer: {
-                    Text("No code needed.\u{00A0} Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.")
+                    Text("No code needed.\u{00A0} Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.\u{00A0} Quit, tame, and clean work only on the same network or over Tailscale.")
                 }
                 if let codeError = model.codeError {
                     Section {
@@ -658,9 +658,9 @@ struct DashboardView: View {
                     Button("Exit Demo") {
                         model.exitDemoMode()
                     }
-                    .font(.caption2.weight(.medium))
+                    .font(.caption.weight(.medium))
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .frame(minHeight: 44)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
@@ -1062,7 +1062,7 @@ struct DashboardView: View {
                             HStack(spacing: 4) {
                                 Text(row.name)
                                     .font(.body.weight(.medium))
-                                    .lineLimit(1)
+                                    .lineLimit(2)
                                 if model.samplingRowId == row.id {
                                     ProgressView()
                                         .controlSize(.mini)
@@ -1086,7 +1086,7 @@ struct DashboardView: View {
                             Text(row.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                                .lineLimit(2)
                         }
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 2) {

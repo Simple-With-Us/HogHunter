@@ -105,9 +105,15 @@ struct HogHunterPanel: View {
                     Text(pageTitle)
                         .font(.system(size: 20, weight: .semibold))
                     if store.isStale {
-                        Text("Sampling behind")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.orange)
+                        Button {
+                            _ = store.tick()
+                        } label: {
+                            Text("Sampling behind")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Last sample \(max(0, Int(Date().timeIntervalSince(store.pulse.sampledAt))))s ago.\u{00A0} Activate to sample now.")
                     }
                     Spacer(minLength: 8)
                 }

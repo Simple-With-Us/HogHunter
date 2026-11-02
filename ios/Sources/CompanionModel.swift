@@ -256,12 +256,24 @@ final class CompanionModel {
             return
         }
         saved = loadSaved()
+        // A pre-Keychain blob keeps its token copy until a save strips it.
+        // Strip it now, so the secret lives in one place after one launch.
+        if let current = saved,
+           let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let blob = try? JSONDecoder().decode(SavedMac.self, from: data),
+           !blob.token.isEmpty,
+           CompanionKeychain.readToken(peerID: current.peerID) == current.token {
+            persistSaved()
+        }
         startBrowser()
         startPathMonitor()
         poll = Task { [weak self] in
+            // Jittered so a roomful of phones paired to one Mac do not poll
+            // in lockstep and hammer the same second.
             while !Task.isCancelled {
                 await self?.refresh()
-                try? await Task.sleep(for: .seconds(3))
+                let jitter = Double.random(in: 2.5...3.5)
+                try? await Task.sleep(for: .seconds(jitter))
             }
         }
     }
@@ -491,6 +503,9 @@ final class CompanionModel {
 
     func forget() {
         resetCleaner()
+        if let peerID = saved?.peerID {
+            CompanionKeychain.deleteToken(peerID: peerID)
+        }
         saved = nil
         snapshot = nil
         codeDraft = ""
@@ -1362,13 +1377,35 @@ final class CompanionModel {
         statusLine = "Can't see \(saved?.name ?? "your Mac") on this Wi-Fi."
     }
 
+    /// The pairing token lives in the Keychain under the Mac's peer ID; the
+    /// UserDefaults blob carries everything else.  A blob that still holds a
+    /// token is a pre-Keychain install: the token moves to the Keychain on
+    /// first read.  A blob with no token and nothing in the Keychain means
+    /// the Keychain did not survive (a restore to a new device drops
+    /// ThisDeviceOnly items), so the phone re-pairs instead of failing.
     private func loadSaved() -> SavedMac? {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return nil }
-        return try? JSONDecoder().decode(SavedMac.self, from: data)
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              var stored = try? JSONDecoder().decode(SavedMac.self, from: data) else { return nil }
+        if let token = CompanionKeychain.readToken(peerID: stored.peerID), !token.isEmpty {
+            stored.token = token
+            return stored
+        }
+        // Pre-Keychain install: the blob still holds the token.  Move it
+        // over; the strip of the blob copy happens below in start().
+        guard !stored.token.isEmpty else { return nil }
+        CompanionKeychain.writeToken(stored.token, peerID: stored.peerID)
+        return stored
     }
 
     private func persistSaved() {
-        guard let saved, let data = try? JSONEncoder().encode(saved) else { return }
+        guard var saved else { return }
+        // The Keychain takes the token first.  When it accepts it, the blob
+        // keeps everything but the token; when it refuses, the blob keeps
+        // the token too, so a Keychain hiccup never logs the phone out.
+        if CompanionKeychain.writeToken(saved.token, peerID: saved.peerID) {
+            saved.token = ""
+        }
+        guard let data = try? JSONEncoder().encode(saved) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
     }
 
