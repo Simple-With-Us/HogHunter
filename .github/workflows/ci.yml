@@ -78,7 +78,11 @@ jobs:
           test -x /tmp/xcodegen/xcodegen
           sudo mkdir -p /usr/local/bin
           sudo mv /tmp/xcodegen/xcodegen /usr/local/bin/xcodegen
-          xcodegen --version
+          # The runner shell does not always carry /usr/local/bin on PATH
+          # (non-login shell, image-dependent), so pin it for this step and
+          # every later one via GITHUB_PATH, and check by absolute path.
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          /usr/local/bin/xcodegen --version
           python3 -m pip install --break-system-packages pyobjc-framework-Quartz || python3 -m pip install pyobjc-framework-Quartz
 
       - name: Generate project
