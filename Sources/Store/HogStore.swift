@@ -1175,8 +1175,8 @@ final class HogStore: ObservableObject {
 
     private func gigabytes(_ bytes: UInt64) -> String {
         let value = Double(bytes) / 1_073_741_824
-        if value == value.rounded() { return String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), value) }
-        return String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
+        if value == value.rounded() { return String(format: "%.0f", value) }
+        return String(format: "%.1f", value)
     }
 
     // MARK: - Actions

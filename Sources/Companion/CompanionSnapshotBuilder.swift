@@ -248,11 +248,10 @@ enum CompanionSnapshotBuilder {
     /// Same rounding the Mac memory caption uses: integer when the value is whole.
     private static func gigabytes(_ bytes: UInt64) -> String {
         let value = Double(bytes) / 1_073_741_824
-        let posix = Locale(identifier: "en_US_POSIX")
         if value == value.rounded() {
-            return String(format: "%.0f", locale: posix, value)
+            return String(format: "%.0f", value)
         }
-        return String(format: "%.1f", locale: posix, value)
+        return String(format: "%.1f", value)
     }
 
     // MARK: - Top apps storage cache

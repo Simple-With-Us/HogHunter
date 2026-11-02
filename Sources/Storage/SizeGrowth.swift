@@ -185,7 +185,7 @@ enum SizeGrowthFormat {
         let scale = pow(10.0, digits - 1 - floor(log10(magnitude)))
         let rounded = (magnitude * scale).rounded() / scale
         let decimals = max(0, Int(digits - 1 - floor(log10(rounded))))
-        let value = String(format: "%.*f", locale: Locale(identifier: "en_US_POSIX"), decimals, rounded)
+        let value = String(format: "%.*f", decimals, rounded)
         return percent < 0 ? "↓-\(value)%" : "↑\(value)%"
     }
 }
