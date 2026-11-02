@@ -2156,7 +2156,9 @@ final class HogStore: ObservableObject {
             bytesReclaimed: cleanResult.bytesReclaimed,
             formattedBytesReclaimed: cleanResult.formattedBytesReclaimed,
             snapshotName: cleanResult.snapshotName,
-            error: cleanResult.errors.isEmpty ? nil : cleanResult.errors.joined(separator: ", ")
+            // The phone gets a count, never the raw paths: a safety check can
+            // name the absolute path it refused to delete.
+            error: cleanResult.errors.isEmpty ? nil : "Clean finished with \(cleanResult.errors.count) item\(cleanResult.errors.count == 1 ? "" : "s") that could not be removed.\u{00A0} Details are on the Mac."
         )
         publishCompanion()
 

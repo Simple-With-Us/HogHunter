@@ -336,6 +336,9 @@ enum SampleReport {
     /// heaviest first.  A dozen lines at most, each cut short, so a phone
     /// can show them and the report itself stays on the Mac.
     static func summary(of report: String, maxLines: Int = 12, maxLineLength: Int = 110) -> [String] {
+        // Call-site lines can carry the owner's absolute home directory, and
+        // this summary travels to the phone.  Fold the home directory to ~.
+        let home = NSHomeDirectory()
         var lines: [String] = []
         var inSection = false
         for raw in report.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -353,7 +356,7 @@ enum SampleReport {
             lines.append(trimmed.count > maxLineLength ? String(trimmed.prefix(maxLineLength - 1)) + "…" : trimmed)
             if lines.count >= maxLines { break }
         }
-        return lines
+        return lines.map { $0.replacingOccurrences(of: home, with: "~") }
     }
 
     /// The last `bytes` bytes of a report as text.  The call-site summary sits

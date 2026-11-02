@@ -598,6 +598,15 @@ final class SampleReportTests: XCTestCase {
         XCTAssertEqual(SampleReport.summary(of: ""), [])
     }
 
+    func testTheSummaryFoldsTheHomeDirectoryToTilde() {
+        let home = NSHomeDirectory()
+        let body = "Sort by top of stack, same collapsed (when >= 5):\n        1 foo \(home)/Library/Caches/x  (in bar)  99\n\nBinary Images:\n"
+        let lines = SampleReport.summary(of: body)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertFalse(lines[0].contains(home))
+        XCTAssertTrue(lines[0].contains("~/Library/Caches/x"))
+    }
+
     func testOnlyTheTailOfAHugeReportIsRead() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("hoghunter-sample-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: url) }

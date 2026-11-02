@@ -361,8 +361,8 @@ final class MaintainStore: ObservableObject {
                 break
             case .success(false):
                 self.lastError = "Cleaning did not finish cleanly.\u{00A0} Check Logs for details."
-            case .failure(let error):
-                self.lastError = error.localizedDescription
+            case .failure:
+                self.lastError = "Cleaning could not be started.\u{00A0} Check Logs for details."
             }
             self.isRunningNow = false
             self.refresh()
@@ -398,8 +398,8 @@ final class MaintainStore: ObservableObject {
                 break
             case .success(false):
                 self.lastError = "That step did not finish cleanly.\u{00A0} Check Logs for details."
-            case .failure(let error):
-                self.lastError = error.localizedDescription
+            case .failure:
+                self.lastError = "That step could not be started.\u{00A0} Check Logs for details."
             }
             self.isRunningNow = false
             self.refresh()
@@ -447,8 +447,8 @@ final class MaintainStore: ObservableObject {
                 self.lastError = nil
             case .success(false):
                 self.lastError = "Could not save that step setting."
-            case .failure(let error):
-                self.lastError = error.localizedDescription
+            case .failure:
+                self.lastError = "That step setting could not be saved.\u{00A0} Check Logs for details."
             }
             self.stepTogglesPersisted = true
             self.refresh()
@@ -740,8 +740,8 @@ final class MaintainStore: ObservableObject {
                     self.lastError = nil
                 case .success(false):
                     self.lastError = "Could not save remote server SSH host."
-                case .failure(let error):
-                    self.lastError = error.localizedDescription
+                case .failure:
+                    self.lastError = "That host could not be saved.\u{00A0} Check Logs for details."
                 }
                 self.refresh()
             }
