@@ -10,7 +10,7 @@ Issue #67.  Branch `grok-build/hh-vendor-folders`.  PR #72.
 
 ### Handoff
 
-`FLEET-PROTOCOL.md` was read from the AI-Fleet-Coordinator mirror before this follow-up (canonical live path is unavailable on the cloud seat).  Pre-work `#Work-In-Progress` claim: process failure — the cloud environment had the retired relay env tokens, but the retired relay host exposed only `/health` (authenticated POST to `/post` returns 404) and no Zulip bot credentials (`ZULIP_EMAIL` / `ZULIP_API_KEY`) are present, so no `repo:`-first claim could be posted.  No claim id is invented.  Effort row and issue #67 remain the board reservation; Mac-side reconciliation can post the missing claim when Zulip credentials are available.
+The fleet handbook was read from the AI-Fleet-Coordinator mirror before this follow-up (canonical live path is unavailable on the cloud seat).  Pre-work coordination-channel claim: process failure — the cloud environment had the retired relay env tokens, but the retired relay host exposed only `/health` (authenticated POST to `/post` returns 404) and no Zulip bot credentials (`ZULIP_EMAIL` / `ZULIP_API_KEY`) are present, so no `repo:`-first claim could be posted.  No claim id is invented.  Effort row and issue #67 remain the board reservation; Mac-side reconciliation can post the missing claim when Zulip credentials are available.
 
 ## Changes Made
 
