@@ -123,7 +123,11 @@ final class CompanionServer: @unchecked Sendable {
         let first = host.split(separator: ".").first.map(String.init) ?? host
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "Hog Hunter" : trimmed
-        return String(name.prefix(63))
+        var result = name
+        while result.utf8.count > 63 {
+            result = String(result.dropLast())
+        }
+        return result
     }
 
     /// How long a client has to send a whole request.  A reply that is held

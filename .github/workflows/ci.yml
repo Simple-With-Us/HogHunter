@@ -107,7 +107,6 @@ jobs:
 
       - name: Capture app screenshots
         if: ${{ !cancelled() }}
-        continue-on-error: true
         timeout-minutes: 10
         # The supervisor finishes when capture exits and kills its whole process
         # group, including orphan helpers that could retain runner output handles.

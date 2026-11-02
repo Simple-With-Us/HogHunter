@@ -2026,6 +2026,25 @@ final class DiskCleaner: @unchecked Sendable {
             let progressFraction = Double(index) / Double(totalItems)
             progress?(progressFraction, item.title)
 
+            // Resolve a symlink target before the category-prefix and
+            // exclusion checks: a link inside an allowed prefix must not
+            // smuggle deletes outside it (e.g. a Caches link into Documents).
+            let linkTarget = item.url.resolvingSymlinksInPath()
+            let itemIsLink = item.isSymlink
+                || ((try? item.url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false)
+            if itemIsLink, linkTarget.path != item.url.path {
+                let targetPath = denormalizedCleanPath(linkTarget.path)
+                let targetURL = URL(fileURLWithPath: targetPath)
+                if exclusions.isPathExcluded(targetPath) || isHandsOff(targetURL) {
+                    errors.append("Safety check failed for path: \(item.url.path) (symlink target is excluded or hands off)")
+                    continue
+                }
+                guard isSafeToDelete(url: targetURL, category: item.category) else {
+                    errors.append("Safety check failed for path: \(item.url.path) (symlink target \(targetPath) is outside the \(item.category.rawValue) scope)")
+                    continue
+                }
+            }
+
             guard isSafeToDelete(url: item.url, category: item.category) else {
                 errors.append("Safety check failed for path: \(item.url.path)")
                 continue
@@ -2044,10 +2063,15 @@ final class DiskCleaner: @unchecked Sendable {
                 } else if item.isSymlink {
                     // Safe removal for symlinks: preserve the symlink itself, clean its target contents.
                     // Moving the symlink itself to Trash would sever the external offload link.
+                    // Every child is re-checked: an exclusion, a hands-off marker, or a
+                    // category-scope escape on any child keeps that child in place.
                     let targetURL = item.url.resolvingSymlinksInPath()
                     if targetURL.path != item.url.path, fileManager.fileExists(atPath: targetURL.path) {
                         if let contents = try? fileManager.contentsOfDirectory(at: targetURL, includingPropertiesForKeys: nil, options: []) {
                             for child in contents {
+                                let checkURL = URL(fileURLWithPath: denormalizedCleanPath(child.path))
+                                guard !exclusions.isPathExcluded(checkURL.path),
+                                      isSafeToDelete(url: checkURL, category: item.category) else { continue }
                                 var trashedURL: NSURL?
                                 try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)
                             }
@@ -2486,6 +2510,20 @@ final class DiskCleaner: @unchecked Sendable {
     /// `standardizingPath` does not consult the file system.
     static func resolvedPath(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    /// Maps a symlink-resolved path back under the (possibly symlinked,
+    /// e.g. `/var` -> `/private/var`) home so category-prefix checks see one
+    /// path form.  Paths outside the home pass through unchanged.
+    private func denormalizedCleanPath(_ resolved: String) -> String {
+        let homeStd = (userHomeURL.path as NSString).standardizingPath
+        let homeRes = (userHomeURL.resolvingSymlinksInPath().path as NSString).standardizingPath
+        let resolvedStd = (resolved as NSString).standardizingPath
+        if homeRes != homeStd,
+           resolvedStd == homeRes || resolvedStd.hasPrefix(homeRes + "/") {
+            return homeStd + resolvedStd.dropFirst(homeRes.count)
+        }
+        return resolvedStd
     }
 
     /// True for a folder or bundle-id *name* that belongs to Hog Hunter

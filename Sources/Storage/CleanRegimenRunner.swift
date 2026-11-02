@@ -462,6 +462,7 @@ final class CleanRegimenRunner: ObservableObject {
         // answer is the same either way, and the walk is the expensive part.
         guard !regimen.enabledRules.isEmpty else {
             result.skippedReason = "No cleaning rules are enabled."
+            recordsRun = false
             finish(result, regimen: regimen)
             return
         }
@@ -474,6 +475,7 @@ final class CleanRegimenRunner: ObservableObject {
         let decision = Self.pendingItems(from: scanned, rules: regimen.enabledRules)
         guard decision.skipReason == nil else {
             result.skippedReason = decision.skipReason
+            recordsRun = false
             finish(result, regimen: regimen)
             return
         }

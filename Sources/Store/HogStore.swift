@@ -1715,7 +1715,25 @@ final class HogStore: ObservableObject {
         return approved
     }
 
-    private func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {
+    /// An exclusions change the Mac will not take, answered the way the view
+    /// route answers one: the phone reads `status` and shows `message`.
+    private static func rejectedExclusionsUpdate(_ message: String) -> (status: Int, body: Data) {
+        let resp = CompanionExclusionsUpdateResponse(
+            status: "rejected",
+            excludedCategories: [],
+            excludedPaths: [],
+            message: message
+        )
+        return (400, (try? JSONEncoder().encode(resp)) ?? Data())
+    }
+
+    func performRemoteExclusionsUpdate(_ req: CompanionExclusionsUpdateRequest) -> (status: Int, body: Data) {
+        // A category the Mac does not clean is refused rather than ignored.
+        // A phone that was told "ok" would show a toggle the Mac never took,
+        // which is the disagreement this route exists to remove.
+        if let catId = req.toggleCategory, CleanCategory(rawValue: catId) == nil {
+            return Self.rejectedExclusionsUpdate("The category must be one the Mac cleans.")
+        }
         // One locked read-modify-write against the stored value.  The Mac
         // panel and Settings edit the same value, so a copy loaded earlier
         // would undo their changes when saved.
@@ -1757,7 +1775,20 @@ final class HogStore: ObservableObject {
         return (400, (try? JSONEncoder().encode(resp)) ?? Data())
     }
 
-    private func performRemoteViewUpdate(_ req: CompanionViewUpdateRequest) -> (status: Int, body: Data) {
+    func performRemoteViewUpdate(_ req: CompanionViewUpdateRequest) -> (status: Int, body: Data) {
+        // A name the Mac does not recognise is refused rather than ignored,
+        // like the sort below.  A phone that was told "ok" would show its
+        // own choice while the Mac kept a different one, which is the
+        // disagreement this route exists to remove.
+        if let raw = req.window, CompanionViewState.window(from: raw) == nil {
+            return Self.rejectedViewUpdate("The window must be Now, Past Hour, or Past 24 Hours.")
+        }
+        if let raw = req.grouping, CompanionViewState.grouping(from: raw) == nil {
+            return Self.rejectedViewUpdate("The grouping must be Apps or Processes.")
+        }
+        if let raw = req.cpuScale, CpuScale.fromPhone(raw) == nil {
+            return Self.rejectedViewUpdate("The CPU scale must be Per Core or Share of Machine.")
+        }
         let targetWindow = req.window.flatMap { CompanionViewState.window(from: $0) }
         let targetGrouping = req.grouping.flatMap { CompanionViewState.grouping(from: $0) }
         let targetCpuScale = req.cpuScale.flatMap { CpuScale.fromPhone($0) }
