@@ -931,6 +931,22 @@ final class CompanionModel {
         return nil
     }
 
+    /// True when the active link is one the Mac takes controls on: the local
+    /// network or Tailscale.  Anything else answers 403, so the phone does
+    /// not offer buttons that cannot work.
+    var controlsReachable: Bool {
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return false }
+        return CompanionPeer.isTrustedEndpoint(endpoint)
+    }
+
+    /// Why a control button is hidden.  The network reason when the Mac opted
+    /// in but this link is not one it takes controls on, else the opt-in note.
+    static let controlNetworkNote = "Controls work only on your local network or over Tailscale.\u{00A0} Connect that way, then try again."
+
+    func controlOffNote(optedIn: Bool, optInNote: String) -> String {
+        optedIn ? Self.controlNetworkNote : optInNote
+    }
+
     private var remoteConnectTask: Task<Void, Never>?
 
     func startRemoteConnect() {
@@ -1235,9 +1251,14 @@ final class CompanionModel {
             return
         }
         // A deep link can reach this only after the person taps Run Safe
-        // Clean.  Refuse here too when the Mac has not opted in.
+        // Clean.  Refuse here too when the Mac has not opted in, or when this
+        // link is not one the Mac takes controls on.
         guard snapshot?.remoteCleanAllowed == true else {
             controlError = CleanLinkPolicy.cleanOffNote
+            return
+        }
+        guard controlsReachable else {
+            controlError = Self.controlNetworkNote
             return
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }

@@ -483,11 +483,12 @@ struct DashboardView: View {
     private func consumeCleanRequest() {
         guard model.takeCleanRequest() else { return }
         // The link never calls triggerRemoteClean.  Offer the destructive
-        // confirmation only when the Mac has opted in.
-        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) {
+        // confirmation only when the Mac has opted in and this link is one
+        // the Mac takes controls on.
+        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) && model.controlsReachable {
             showCleanConfirm = true
         } else {
-            model.controlError = CleanLinkPolicy.cleanOffNote
+            model.controlError = model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote)
         }
     }
 
@@ -503,8 +504,10 @@ struct DashboardView: View {
         showTameConfirm = true
     }
 
-    /// Exclusion and view changes exist only when the Mac owner turned them on.
-    private var canEdit: Bool { snapshot.remoteEditAllowed == true }
+    /// Exclusion and view changes exist only when the Mac owner turned them on
+    /// and this link is one the Mac takes controls on.  Anything else answers
+    /// 403, so the phone does not offer buttons that cannot work.
+    private var canEdit: Bool { snapshot.remoteEditAllowed == true && model.controlsReachable }
 
     /// The CPU rows' scale as the Mac reports it ("Per Core" or "Share of Machine").
     private var isMachineScale: Bool {
@@ -713,9 +716,10 @@ struct DashboardView: View {
         ) {
             Button("Run Safe Clean", role: .destructive) {
                 // The only place a Clean deep link can reach the Mac, and
-                // only after the Mac opt-in.  hoghunter://clean stops here.
-                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) else {
-                    model.controlError = CleanLinkPolicy.cleanOffNote
+                // only after the Mac opt-in on a link it takes controls on.
+                // hoghunter://clean stops here.
+                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) && model.controlsReachable else {
+                    model.controlError = model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote)
                     return
                 }
                 Task { await model.triggerRemoteClean() }
@@ -1025,7 +1029,7 @@ struct DashboardView: View {
             .padding(.vertical, 2)
             .disabled(!canEdit)
             if !canEdit {
-                Text(Self.editOffNote)
+                Text(model.controlOffNote(optedIn: snapshot.remoteEditAllowed == true, optInNote: Self.editOffNote))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1036,10 +1040,11 @@ struct DashboardView: View {
                 Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
                     .foregroundStyle(.secondary)
             } else {
-                // Quit and Tame exist only when the Mac owner turned them on.
-                // Without this the swipe and long-press actions showed on
-                // every row and answered 403 when used.
-                let controlsOn = snapshot.remoteQuitAllowed == true
+                // Quit and Tame exist only when the Mac owner turned them on and
+                // this link is one the Mac takes controls on.  Without this
+                // the swipe and long-press actions showed on every row and
+                // answered 403 when used.
+                let controlsOn = snapshot.remoteQuitAllowed == true && model.controlsReachable
                 ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
                     let rank = index + 1
                     HStack(spacing: 10) {
@@ -1133,8 +1138,7 @@ struct DashboardView: View {
                     }
                     .contextMenu {
                         if !controlsOn {
-                            Text("Quit and Tame are off for \(snapshot.hostName).")
-                            Text("Turn them on in Hog Hunter Settings > iPhone.")
+                            Text(model.controlOffNote(optedIn: snapshot.remoteQuitAllowed == true, optInNote: "Quit and Tame are off for \(snapshot.hostName).\u{00A0} Turn them on in Hog Hunter Settings > iPhone."))
                         }
                         if controlsOn, row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
@@ -1216,7 +1220,7 @@ struct DashboardView: View {
         }
 
         Section {
-            if snapshot.remoteQuitAllowed == true {
+            if snapshot.remoteQuitAllowed == true && model.controlsReachable {
                 if snapshot.rows.contains(where: { $0.canQuit }) {
                     Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press to quit, tame or sample it on \(snapshot.hostName).\u{00A0} You confirm each one.\u{00A0} System processes and tasks owned by other users are protected.")
                         .font(.footnote)
@@ -1231,7 +1235,7 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text("Quitting from iPhone is off.\u{00A0} Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
+                Text(model.controlOffNote(optedIn: snapshot.remoteQuitAllowed == true, optInNote: "Quitting from iPhone is off.\u{00A0} Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1506,10 +1510,10 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
+                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true || !model.controlsReachable)
 
-                if snapshot.remoteCleanAllowed != true {
-                    Text(CleanLinkPolicy.cleanOffNote)
+                if snapshot.remoteCleanAllowed != true || !model.controlsReachable {
+                    Text(model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1640,7 +1644,7 @@ struct DashboardView: View {
                 .disabled(!canEdit)
 
                 if !canEdit {
-                    Text(Self.editOffNote)
+                    Text(model.controlOffNote(optedIn: snapshot.remoteEditAllowed == true, optInNote: Self.editOffNote))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
