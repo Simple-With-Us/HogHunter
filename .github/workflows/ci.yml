@@ -72,8 +72,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          curl -sSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          curl -sSL --fail --retry 3 --retry-all-errors -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          test -s /tmp/xcodegen.zip
           ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
+          test -x /tmp/xcodegen/xcodegen
           sudo mkdir -p /usr/local/bin
           sudo mv /tmp/xcodegen/xcodegen /usr/local/bin/xcodegen
           xcodegen --version
