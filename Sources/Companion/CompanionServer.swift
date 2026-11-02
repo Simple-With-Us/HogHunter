@@ -226,6 +226,14 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Pairing waits on a person, so it is answered off the synchronous
     /// router and never holds the queue that serves snapshots.
+    ///
+    /// Repeat requesters wait per address before they may prompt the Mac
+    /// again.  Trusted peers count per key only, never toward the global
+    /// cap, so one spammer cannot lock out the owner.
+    func pairThrottleWait(for peerKey: String, now: Date = Date()) -> Int? {
+        throttle.retryAfter(for: peerKey, now: now, appliesGlobal: false)
+    }
+
     private func handlePair(_ connection: NWConnection, deviceName: String, peer: CompanionPeer) {
         let send: @Sendable (Data) -> Void = { response in
             connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
@@ -234,6 +242,15 @@ final class CompanionServer: @unchecked Sendable {
         // offered only on the local network and Tailscale.
         guard peer.isTrusted else {
             send(CompanionHTTP.untrustedNetworkReply())
+            return
+        }
+        // Pairing prompts interrupt the person at the Mac, so repeat
+        // requesters are throttled per address like any other credential
+        // route.  Trusted peers count per key only, never toward the
+        // global cap, so one spammer cannot lock out the owner.
+        let now = Date()
+        if let wait = pairThrottleWait(for: peer.key, now: now) {
+            send(CompanionHTTP.throttledReply(retryAfter: wait))
             return
         }
         guard let ask = onRemotePair else {
@@ -246,6 +263,7 @@ final class CompanionServer: @unchecked Sendable {
             pairPending = false
         }
         guard !pairPending, Date().timeIntervalSince(lastPairPromptAt) >= 5.0 else {
+            throttle.recordFailure(peer: peer.key, now: now, countsTowardGlobal: false)
             send(CompanionHTTP.pairBusyResponse())
             return
         }

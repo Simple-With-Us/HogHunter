@@ -61,10 +61,12 @@ struct HogHunterPanel: View {
     let isQuickView: Bool
 
     init(isQuickView: Bool = false, initialTab: PanelTab = .overview,
+         initialStorageSubTab: StorageSubTab = .apps,
          mountedDrives: MountedDriveStore? = nil) {
         self.isQuickView = isQuickView
         _mountedDrives = ObservedObject(wrappedValue: mountedDrives ?? DashboardMountedDrives.shared)
         _selectedTab = State(initialValue: initialTab)
+        _storageSubTab = State(initialValue: initialStorageSubTab)
         _hasVisitedStorage = State(initialValue: initialTab == .storage)
         _hasVisitedNetwork = State(initialValue: initialTab == .network)
     }
@@ -470,7 +472,7 @@ struct HogHunterPanel: View {
                 Spacer()
 
                 Button("Clean…") {
-                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                    DetachedWindowManager.shared.openCleaner(store: store)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
