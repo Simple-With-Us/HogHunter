@@ -128,4 +128,12 @@ final class KeepSentinelTests: XCTestCase {
         // With room to finish, the marker is found.
         XCTAssertTrue(KeepSentinel.containsMarker(url: tree, fileCap: 100))
     }
+
+    func testAnUnlistableTreeAnswersKept() {
+        // No enumerator at all (missing path): fail closed.  A tree the
+        // cleaner cannot even list is not a tree it may trash.
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hoghunter-no-such-tree-\(UUID().uuidString)")
+        XCTAssertTrue(KeepSentinel.containsMarker(url: missing))
+    }
 }

@@ -1120,6 +1120,9 @@ final class CompanionModel {
     /// Counts the fetches the phone has made, so the newest snapshot is the
     /// one on screen and a slow older fetch cannot undo it.
     private var refreshGeneration: Int = 0
+    /// When the on-screen snapshot last refreshed.  A failing poll leaves
+    /// the old snapshot up; past 30s the status says Reconnecting instead.
+    private var lastSuccessfulRefresh = Date.distantPast
 
     func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
@@ -1143,6 +1146,7 @@ final class CompanionModel {
             guard generation == refreshGeneration else { return }
             pairingDismissed = false
             codeFailure = nil
+            lastSuccessfulRefresh = Date()
             adoptSnapshot(fetched)
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
@@ -1172,6 +1176,11 @@ final class CompanionModel {
                 } else {
                     statusLine = "The Mac did not answer."
                 }
+            } else if Date().timeIntervalSince(lastSuccessfulRefresh) > 30 {
+                // Polls keep failing but an older snapshot is on screen: say
+                // so, or the phone presents stale readings as live ones.  The
+                // 30s grace covers transient Wi-Fi drops without flicker.
+                statusLine = "\(saved.name) · Reconnecting…"
             }
         }
     }
