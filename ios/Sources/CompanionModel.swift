@@ -76,6 +76,10 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
 final class CompanionModel {
     private(set) var discovered: [DiscoveredMac] = []
     private(set) var snapshot: CompanionSnapshot?
+    /// True when the Mac's snapshot schema is newer or older than this build
+    /// understands.  The version rides every snapshot but nothing read it, so
+    /// a Mac ahead of the phone silently showed whatever decoded.
+    private(set) var snapshotVersionMismatch = false
     private(set) var phase: Phase = .looking
     private(set) var saved: SavedMac?
     var codeDraft = ""
@@ -97,6 +101,14 @@ final class CompanionModel {
     /// find the Mac and fetch a snapshot before the dashboard exists, so this
     /// is generous -- but short enough that a link is not replayed much later.
     static let cleanRequestLifetime = CleanRequest.lifetime
+
+    /// Records a fetched snapshot, flagging a schema this build does not
+    /// understand.  The banner, not a silent decode, answers a version the
+    /// phone has never seen.
+    private func adoptSnapshot(_ fetched: CompanionSnapshot) {
+        snapshot = fetched
+        snapshotVersionMismatch = (fetched.version != CompanionService.version)
+    }
 
     /// Record a `hoghunter://clean` link as asking for the confirmation now.
     func requestCleanDialog() {
@@ -334,7 +346,7 @@ final class CompanionModel {
             let next = try await Self.fetch(endpoint: mac.endpoint, token: credential)
             saved = SavedMac(peerID: mac.id, name: mac.name, token: credential)
             persistSaved()
-            snapshot = next
+            adoptSnapshot(next)
             codeError = nil
             codeFailure = nil
             pairingDismissed = false
@@ -368,14 +380,14 @@ final class CompanionModel {
         case .unauthorized?:
             return "That code does not match this Mac."
         case .busy?:
-            return "The Mac is already showing a pairing request.  Answer it there, then try again."
+            return "The Mac is already showing a pairing request.\u{00A0} Answer it there, then try again."
         case .timedOut?:
-            return "The Mac did not answer in time.  Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
+            return "The Mac did not answer in time.\u{00A0} Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
         case .throttled?, .forbidden?, .rejected?, .tooOld?, .untrustedNetwork?:
             return describe(error)
         default:
             if let hint = transportHint(error) { return hint }
-            return "The Mac did not answer.  Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
+            return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
         }
     }
 
@@ -388,7 +400,7 @@ final class CompanionModel {
             return
         }
         guard let mac = discovered.first(where: { $0.id == peerID }) else {
-            codeError = "That Mac is no longer on this Wi-Fi.  Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
+            codeError = "That Mac is no longer on this Wi-Fi.\u{00A0} Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
             codeFailure = .other
             return
         }
@@ -401,7 +413,7 @@ final class CompanionModel {
             let next = try await Self.fetch(endpoint: mac.endpoint, token: token)
             saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
             persistSaved()
-            snapshot = next
+            adoptSnapshot(next)
             phase = .live
         } catch {
             codeError = Self.approvalMessage(for: error)
@@ -434,12 +446,12 @@ final class CompanionModel {
     private static func approvalMessage(for error: Error) -> String {
         switch error as? CompanionClientError {
         case .forbidden(let reason)?: return reason
-        case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
-        case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
+        case .busy?: return "The Mac is already showing a pairing request.\u{00A0} Answer it there, then try again."
+        case .timedOut?: return "No one answered on the Mac.\u{00A0} Try again, or type the code from Hog Hunter Settings."
         case .throttled?, .tooOld?, .rejected?, .untrustedNetwork?: return describe(error)
         default:
             if let hint = transportHint(error) { return hint }
-            return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
+            return "The Mac did not answer.\u{00A0} Check that Hog Hunter is open and Share With iPhone is on."
         }
     }
 
@@ -452,16 +464,16 @@ final class CompanionModel {
         case .posix(let code):
             switch code {
             case .ECONNREFUSED:
-                return "The Mac refused the connection.  Open Hog Hunter on it and turn on Share With iPhone in Settings."
+                return "The Mac refused the connection.\u{00A0} Open Hog Hunter on it and turn on Share With iPhone in Settings."
             case .ETIMEDOUT:
-                return "Nothing answered at that address.  Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
+                return "Nothing answered at that address.\u{00A0} Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
             case .EHOSTUNREACH, .EHOSTDOWN, .ENETUNREACH, .ENETDOWN:
-                return "That address cannot be reached from here.  If you connect over Tailscale, check it is connected on both devices."
+                return "That address cannot be reached from here.\u{00A0} If you connect over Tailscale, check it is connected on both devices."
             default:
                 return nil
             }
         case .dns:
-            return "That name did not resolve.  Check the spelling of the Tailscale name or domain."
+            return "That name did not resolve.\u{00A0} Check the spelling of the Tailscale name or domain."
         default:
             return nil
         }
@@ -970,7 +982,7 @@ final class CompanionModel {
         let rawDraft = remoteTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let typed = rawDraft.isEmpty ? "" : CompanionToken.normalizeCode(rawDraft)
         guard typed.isEmpty || typed.count == 8 else {
-            remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
+            remoteConnectError = "The Pairing Code is 8 characters.\u{00A0} Leave it blank to approve on the Mac instead."
             return
         }
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(resolvedPort)) else {
@@ -1009,7 +1021,7 @@ final class CompanionModel {
             persistSaved()
             pairingDismissed = false
             codeFailure = nil
-            snapshot = fetched
+            adoptSnapshot(fetched)
             phase = .live
             statusLine = "\(displayName) (Remote)"
             isRemoteSheetPresented = false
@@ -1023,7 +1035,7 @@ final class CompanionModel {
             if let hint = Self.transportHint(error) {
                 remoteConnectError = hint
             } else {
-                remoteConnectError = "Could not reach \(host) on port \(resolvedPort).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale or Cloudflare Tunnel is connected."
+                remoteConnectError = "Could not reach \(host) on port \(resolvedPort).\u{00A0} Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale or Cloudflare Tunnel is connected."
             }
         }
     }
@@ -1100,7 +1112,7 @@ final class CompanionModel {
             guard generation == refreshGeneration else { return }
             pairingDismissed = false
             codeFailure = nil
-            snapshot = fetched
+            adoptSnapshot(fetched)
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
             storeSnapshotForWidgets(fetched)
@@ -1125,7 +1137,7 @@ final class CompanionModel {
             if snapshot == nil {
                 phase = .offline
                 if let host = saved.remoteHost {
-                    statusLine = "The Mac at \(host) did not answer.  Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
+                    statusLine = "The Mac at \(host) did not answer.\u{00A0} Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
                 } else {
                     statusLine = "The Mac did not answer."
                 }

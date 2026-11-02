@@ -14,6 +14,12 @@ final class CompanionServer: @unchecked Sendable {
     private var targets: [String: CompanionTarget] = [:]
     /// Wrong-credential counts per client address.  Touched only on `queue`.
     private var throttle = CompanionAuthThrottle()
+    /// Last successful enroll per client address.  Touched only on `queue`.
+    /// A loop handing the code back must not mint phones fast enough to push
+    /// the owner's phones past the 32-device LRU.  A person pairs once; a
+    /// repeat within the minute waits.
+    private var lastEnrollSuccess: [String: Date] = [:]
+    private static let enrollSuccessCooldown: TimeInterval = 60
     private var token = ""
     private var onStatus: (@Sendable (String) -> Void)?
 
@@ -68,12 +74,12 @@ final class CompanionServer: @unchecked Sendable {
                                 self?.activePort = p
                             }
                             self?.onStatus?("Sharing on port \(self?.activePort ?? Self.defaultPort)")
-                        case .failed(let error):
+                        case .failed:
                             self?.listener?.cancel()
                             self?.listener = nil
-                            self?.onStatus?("Could not share.  \(error.localizedDescription)")
-                        case .waiting(let error):
-                            self?.onStatus?("Waiting to share.  \(error.localizedDescription)")
+                            self?.onStatus?("Could not share.\u{00A0} Check the port and try again.")
+                        case .waiting:
+                            self?.onStatus?("Waiting to share.\u{00A0} Retrying.")
                         default:
                             break
                         }
@@ -85,7 +91,7 @@ final class CompanionServer: @unchecked Sendable {
                 listener.start(queue: self.queue)
                 self.listener = listener
             } catch {
-                onStatus("Could not share.  \(error.localizedDescription)")
+                onStatus("Could not share.\u{00A0} Check the port and try again.")
             }
         }
     }
@@ -536,6 +542,12 @@ final class CompanionServer: @unchecked Sendable {
             return CompanionHTTP.enrollRejectedReply()
         }
         throttle.recordSuccess(peer: peer.key)
+        if let last = lastEnrollSuccess[peer.key], now.timeIntervalSince(last) < Self.enrollSuccessCooldown {
+            let wait = Int((Self.enrollSuccessCooldown - now.timeIntervalSince(last)).rounded(.up))
+            return CompanionHTTP.throttledReply(retryAfter: wait)
+        }
+        lastEnrollSuccess[peer.key] = now
+        lastEnrollSuccess = lastEnrollSuccess.filter { now.timeIntervalSince($0.value) < Self.enrollSuccessCooldown }
         let issued = devices.issue(name: deviceName, now: now)
         return CompanionHTTP.enrollResponse(token: issued.token, deviceId: issued.device.id)
     }

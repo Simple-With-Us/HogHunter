@@ -75,7 +75,7 @@ struct VPSStatusStripView: View {
             )
         }
         .buttonStyle(.plain)
-        .help("Remote server status.  Click for the full report.")
+        .help("Remote server status.\u{00A0} Click for the full report.")
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Opens the server tab")

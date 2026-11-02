@@ -236,7 +236,7 @@ private struct StartupSettingsTab: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text("Hog Hunter opens with your Mac and samples in the background.  History only covers the time it has been running, so this is also what makes the Past Hour and Past 24 Hours views able to reach a full day.")
+                Text("Hog Hunter opens with your Mac and samples in the background.\u{00A0} History only covers the time it has been running, so this is also what makes the Past Hour and Past 24 Hours views able to reach a full day.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -262,7 +262,7 @@ private struct ThemeSettingsTab: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                Text("System is the default, so Hog Hunter follows the Mac.  Light and Dark pin it either way, here and in the menu bar panel.")
+                Text("System is the default, so Hog Hunter follows the Mac.\u{00A0} Light and Dark pin it either way, here and in the menu bar panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -459,7 +459,7 @@ private struct MaintenanceSettingsContent: View {
     var body: some View {
         Form {
             Section("Scheduled Maintenance Steps") {
-                Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.  Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
+                Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.\u{00A0} Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -625,7 +625,7 @@ private struct MaintenanceSettingsContent: View {
                             }
                         }
                     }
-                    Text("SSH destination for remote Docker and system maintenance sweeps.  Supports ~/.ssh/config aliases or user@host with key-based authentication.  Leave blank to disable.")
+                    Text("SSH destination for remote Docker and system maintenance sweeps.\u{00A0} Supports ~/.ssh/config aliases or user@host with key-based authentication.\u{00A0} Leave blank to disable.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -820,7 +820,7 @@ private struct IPhoneSettingsTab: View {
                             }
                             Spacer()
                             Button("Revoke") { store.revokeCompanionDevice(id: device.id) }
-                                .help("Cut this iPhone off.  It must pair again to reconnect.")
+                                .help("Cut this iPhone off.\u{00A0} It must pair again to reconnect.")
                         }
                     }
                     if store.pairedDevices.count > 1 {
@@ -1107,7 +1107,7 @@ private struct AlertsSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Webhook URL (Slack, Discord, Pushover, generic)", text: $webhookURL)
                     .textFieldStyle(.roundedBorder)
-                Text("Sends a JSON alert payload when a sustained hog triggers.  Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
+                Text("Sends a JSON alert payload when a sustained hog triggers.\u{00A0} Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1162,7 +1162,7 @@ private struct AdvancedSettingsTab: View {
     var body: some View {
         Form {
             Section("Infisical Settings Sync") {
-                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the secure App Group container (mode 0600), never logged or shared across apps.")
+                Text("App-level settings sync from Infisical, the fleet's source of truth.\u{00A0} The credential below is stored in the secure App Group container (mode 0600), never logged or shared across apps.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1217,7 +1217,7 @@ private struct AdvancedSettingsTab: View {
             }
 
             Section("Seed") {
-                Text("Push the current local values of the migrated settings to Infisical.  Secrets are never pushed from here; fill those in the Infisical dashboard.")
+                Text("Push the current local values of the migrated settings to Infisical.\u{00A0} Secrets are never pushed from here; fill those in the Infisical dashboard.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1259,7 +1259,7 @@ private struct AdvancedSettingsTab: View {
         projectId = infisical.projectId
         clientId = ""
         clientSecret = ""
-        notice = "Credential removed.  Local defaults stand until a credential is saved again."
+        notice = "Credential removed.\u{00A0} Local defaults stand until a credential is saved again."
     }
 
     private func syncNow() {

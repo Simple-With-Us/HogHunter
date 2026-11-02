@@ -1062,7 +1062,7 @@ final class HogStore: ObservableObject {
 
     var scaleLegend: String {
         switch cpuScale {
-        case .perCore: return "Rows: % of one core.  Header: % of all cores."
+        case .perCore: return "Rows: % of one core.\u{00A0} Header: % of all cores."
         case .machineShare: return "Rows and header: % of all cores."
         }
     }
@@ -1074,7 +1074,7 @@ final class HogStore: ObservableObject {
         // a number nobody is looking at.
         if window == .now { return "Live snapshot." }
         guard coverage.tickCount > 0 else {
-            return "History starts when Hog Hunter is open.  Turn on Launch at Login in Settings for a full day."
+            return "History starts when Hog Hunter is open.\u{00A0} Turn on Launch at Login in Settings for a full day."
         }
         let windowLabel = window == .day ? "24 h" : "hour"
         return "Sampled \(HogFormat.duration(coverage.sampledSeconds)) of the last \(windowLabel)."

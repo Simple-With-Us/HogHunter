@@ -30,7 +30,7 @@ enum CompanionDeepLink: Equatable {
 /// The Clean link may open a confirmation.  It may not start a clean, and it
 /// may not offer one unless the Mac has already opted in.
 enum CleanLinkPolicy {
-    static let cleanOffNote = "Cleaning from iPhone is off.  Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac."
+    static let cleanOffNote = "Cleaning from iPhone is off.\u{00A0} Turn on Allow iPhone to Run Disk Cleaner in Hog Hunter Settings > iPhone on your Mac."
 
     /// Same gate as the in-app Clean button.  Nil and false both stay off.
     static func mayOfferCleanConfirmation(remoteCleanAllowed: Bool?) -> Bool {

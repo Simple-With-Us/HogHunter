@@ -284,6 +284,20 @@ final class CompanionDeviceRoutingTests: XCTestCase {
         XCTAssertTrue(server.devices.devices.isEmpty)
     }
 
+    func testRepeatEnrollsFromOneAddressWaitWhileAnotherPairs() {
+        let server = makeServer()
+        let otherPhone = CompanionPeer(key: "192.168.1.21", isTrusted: true)
+        let first = server.syncOnQueue { server.enroll(code: code, deviceName: "Jay's iPhone", peer: lan, now: t0) }
+        XCTAssertEqual(CompanionHTTP.statusCode(of: first), 200)
+        let other = server.syncOnQueue { server.enroll(code: code, deviceName: "Family iPhone", peer: otherPhone, now: t0) }
+        XCTAssertEqual(CompanionHTTP.statusCode(of: other), 200, "one noisy address must not slow another phone's pairing")
+        let second = server.syncOnQueue { server.enroll(code: code, deviceName: "Jay's iPhone", peer: lan, now: t0) }
+        XCTAssertEqual(CompanionHTTP.statusCode(of: second), 429, "a loop must not mint phones fast enough to evict the owner's")
+        XCTAssertEqual(server.devices.devices.count, 2, "the refused repeat enrolls nothing")
+        let later = server.syncOnQueue { server.enroll(code: code, deviceName: "Jay's iPhone", peer: lan, now: t0.addingTimeInterval(61)) }
+        XCTAssertEqual(CompanionHTTP.statusCode(of: later), 200, "one genuine re-pair a minute later still works")
+    }
+
     func testEnrollIsRefusedFromAPublicAddressEvenWithTheRightCode() {
         let server = makeServer()
         let reply = server.syncOnQueue { server.enroll(code: code, deviceName: "Jay's iPhone", peer: wan, now: t0) }

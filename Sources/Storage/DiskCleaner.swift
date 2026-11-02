@@ -67,9 +67,9 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .apfsSnapshots:
             return "Local Time Machine backup snapshots pinning deleted disk blocks on APFS containers."
         case .tempFiles:
-            return "Temporary files in /tmp meeting the configured untouched time.  Preserves Git checkouts, source projects, staging, locks, and links."
+            return "Temporary files in /tmp meeting the configured untouched time.\u{00A0} Preserves Git checkouts, source projects, staging, locks, and links."
         case .staleBackups:
-            return "Tool-made backups older than 7 days (Cursor database backups).  Live files are never listed."
+            return "Tool-made backups older than 7 days (Cursor database backups).\u{00A0} Live files are never listed."
         }
     }
 
@@ -1287,7 +1287,7 @@ final class DiskCleaner: @unchecked Sendable {
                             isApproximate: stats.isApproximate,
                             lastModified: stats.lastModified,
                             isSelected: false,
-                            detail: "All installed iOS simulator devices.  Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
+                            detail: "All installed iOS simulator devices.\u{00A0} Removing them deletes every simulator; Xcode re-downloads runtimes on demand."
                         ))
                     }
                 }
@@ -1314,7 +1314,7 @@ final class DiskCleaner: @unchecked Sendable {
                         isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
-                        detail: "Symbols and support files from connected iOS devices.  Re-downloads when a device is connected."
+                        detail: "Symbols and support files from connected iOS devices.\u{00A0} Re-downloads when a device is connected."
                     ))
                 }
             }

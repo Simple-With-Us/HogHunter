@@ -16,6 +16,21 @@ final class DetachedWindowManager {
         openDetachedWindow(store: store, initialTab: .overview, initialStorageSubTab: .apps, activateExisting: true)
     }
 
+    /// Opens the standalone window on the Activity tab, where the full
+    /// flagged-issues list sits above the process list.  The quick view's
+    /// card shows three; this is where the rest are read and acted on.
+    func openActivity(store: HogStore) {
+        openDetachedWindow(store: store, initialTab: .activity, initialStorageSubTab: .apps, activateExisting: false)
+        // An already-open window keeps its tab; bring it forward.
+        if let existing = window {
+            if existing.isMiniaturized {
+                existing.deminiaturize(nil)
+            }
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
     /// Opens the standalone window on the Disk Cleaner, so the quick view's
     /// Clean button lands where the cleanup runs instead of on Overview.
     func openCleaner(store: HogStore) {

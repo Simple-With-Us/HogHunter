@@ -22,6 +22,6 @@ struct CpuHistoryBarsView: View {
         }
         .frame(height: height)
         .accessibilityLabel("CPU over the last 30 minutes")
-        .help("Last 30 minutes.  Each bar is one minute's average; empty minutes have no reading.")
+        .help("Last 30 minutes.\u{00A0} Each bar is one minute's average; empty minutes have no reading.")
     }
 }

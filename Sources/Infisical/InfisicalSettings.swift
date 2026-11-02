@@ -437,7 +437,7 @@ final class InfisicalSettings: ObservableObject {
     /// `environment` so the pane can never name a different environment than
     /// the one the app reads.
     static var credentialNotice: String {
-        "Uses the \(environment) environment.  The connection is checked before replacing your saved setup."
+        "Uses the \(environment) environment.\u{00A0} The connection is checked before replacing your saved setup."
     }
 
     @Published private(set) var isConfigured = false

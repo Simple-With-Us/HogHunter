@@ -249,18 +249,18 @@ struct NetworkView: View {
             Image(systemName: "info.circle")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
-            Text("Connections column is established/open.  Hosts is distinct remote machines.")
+            Text("Connections column is established/open.\u{00A0} Hosts is distinct remote machines.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
-        .help("Established / open sockets for the process, and how many distinct remote hosts it is talking to.  An app with a lot of hosts is usually a chat or sync client; one with many established sockets and no host variety is usually a local service or a stuck retry loop.")
+        .help("Established / open sockets for the process, and how many distinct remote hosts it is talking to.\u{00A0} An app with a lot of hosts is usually a chat or sync client; one with many established sockets and no host variety is usually a local service or a stuck retry loop.")
         .accessibilityElement(children: .combine)
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 4) {
             columnLegend
-            Text("The list is an lsof snapshot of who is holding which connection, refreshed every 10 seconds.  The two cards above are the whole machine's bandwidth, read from the kernel's interface counters.")
+            Text("The list is an lsof snapshot of who is holding which connection, refreshed every 10 seconds.\u{00A0} The two cards above are the whole machine's bandwidth, read from the kernel's interface counters.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
                 // `maxWidth: .infinity` is load-bearing, not cosmetic: without
@@ -270,7 +270,7 @@ struct NetworkView: View {
                 // for a second every time the tab was opened.
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("macOS publishes no per-process byte counter, so Hog Hunter cannot rank apps by bytes moved.  Activity Monitor's Network tab can — it uses private APIs.")
+            Text("macOS publishes no per-process byte counter, so Hog Hunter cannot rank apps by bytes moved.\u{00A0} Activity Monitor's Network tab can — it uses private APIs.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -329,7 +329,7 @@ struct BandwidthCard: View {
         .help(help)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
-        .accessibilityValue("Download \(HogFormat.rate(down)), Upload \(HogFormat.rate(up)).  \(footnote)")
+        .accessibilityValue("Download \(HogFormat.rate(down)), Upload \(HogFormat.rate(up)).\u{00A0} \(footnote)")
     }
 
     private func rateLabel(_ bytesPerSecond: Double, arrow: String, word: String) -> some View {
