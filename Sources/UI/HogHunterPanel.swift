@@ -767,12 +767,13 @@ struct HogHunterPanel: View {
                     Spacer()
                     Text(store.memorySizeCaption)
                         .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                    Text(store.pulse.pressure.label)
+                    Text(store.pulse.pressure == .unknown ? "unavailable" : store.pulse.pressure.label)
                         .font(.system(size: 8, weight: .bold))
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(Severity.forPressure(store.pulse.pressure).color.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
                         .foregroundStyle(Severity.forPressure(store.pulse.pressure).color)
+                        .help(store.pulse.pressure == .unknown ? "No memory-pressure reading right now." : "How hard the Mac is working to find free memory.")
                 }
 
                 GeometryReader { geo in
