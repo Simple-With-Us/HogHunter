@@ -623,8 +623,8 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(
             id: "coolify_remote",
             title: "Remote Server Maintenance",
-            description: "Performs remote Docker and system maintenance on configured host via SSH.",
-            tooltip: "Runs remote maintenance over SSH (e.g. using an SSH alias, IP, or user@host) to prune unused Docker containers, images, and container logs."
+            description: "Includes guarded server cache and rotated backup-log maintenance in this Mac’s maintenance schedule.",
+            tooltip: "Uses this Mac’s maintenance schedule over SSH when the server is under disk pressure; its own schedule is unchanged.\u{00A0} Defaults cover eligible package cache, rotated backup logs and unused build cache; image removal is an explicit manual choice in the server panel."
         ),
         MaintainStepCatalogEntry(
             id: "cleanmymac_cli",

@@ -11,7 +11,7 @@ sudo -n /usr/local/sbin/hoghunter-maintain run --strategy package-cache --confir
 sudo -n /usr/local/sbin/hoghunter-maintain run --strategy package-cache --confirm
 ```
 
-Explicit runs also require disk pressure.   `run` requires at least one named strategy and confirmation.  Duplicate or unknown strategies fail closed.   `scan`, `plan`, and `--dry-run` never acquire locks, create status files or write audits; their inventory commands are read only.  Docker's own read commands may maintain its internal client metadata.
+All invocations remain pressure-gated unless scan, plan or run explicitly includes `--manual`.  `run` requires at least one named strategy and confirmation.  Duplicate or unknown strategies fail closed.   `scan`, `plan`, and `--dry-run` never acquire locks, create status files or write audits; their inventory commands are read only.  Docker's own read commands may maintain its internal client metadata.
 
 | Strategy | Eligibility | Deletion |
 | --- | --- | --- |
@@ -31,6 +31,19 @@ Stdout is exactly one JSON object, `schema_version: 1`, `tool: "hoghunter-server
 The shared mkdir lock is `/run/fleet-housekeeper.lock`.  Its mode-0600 owner record carries PID, Linux process start ticks, directory inode, and a nonce.  Recovery requires a root-owned record with the exact known schema, no dispatch or unknown files, and a provably dead PID or a validated different process-start token under a separate flock guard; unreadable, malformed, symlinked or changed records stay held.  A known live owner or contended guard is a benign busy skip.  Unknown locks and pending dispatch evidence return a visible partial failure that requires inspection.  No age force-break exists.  Before each external mutation, the tool creates and fsyncs a mode-0600 `dispatch.json` inside the lock and fsyncs the directory before launching its CLI.  Only a confirmed zero exit clears that record.  SIGKILL/OOM of the parent, nonzero exit, timeout or an exception leaves dispatch evidence that blocks release and dead-owner recovery, even if the detached CLI or daemon outlives its parent.  Timeout/cancellation kills and reaps the owned subprocess group before releasing the lock.  A read-only inventory timeout releases the lock after successful owned-group termination and reap.  If group termination or reap cannot be confirmed, the owner record becomes deliberately ineligible for automatic recovery and the lock stays held.  A mutation timeout retains its pre-dispatch marker even after the CLI is killed and reaped, because Docker's daemon may continue a request after its CLI dies.  An operator must establish that work stopped before retiring that lock.
 
 Commands have 20-second deadlines and a 1 MiB stdout cap; each invocation has a 90-second work budget.  Filesystem operations cannot interrupt a stuck kernel syscall.  SIGINT/SIGTERM request cooperative cancellation.  Mutation writes root-only started/finished audit records to `/var/log/hoghunter-maintenance.jsonl`; an unavailable starting audit prevents deletion.  The scheduled cron's existing output capture also receives the final JSON.  No background service or new schedule is installed.
+
+## Explicit Manual Control
+
+The Mac server panel offers a read-only Scan and one confirmed Run Now with explicit choices.  Package cache, rotated backup logs and Docker build cache start selected; Docker images start off and need a separate acknowledgement that removal can eliminate local rollback images and require downloading or rebuilding.  The request freezes its host, mode and choices when confirmation opens.  Containers, volumes, active logs and unknown resources remain out of scope.
+
+```sh
+sudo -n /usr/local/sbin/hoghunter-maintain scan --manual --strategy package-cache
+sudo -n /usr/local/sbin/hoghunter-maintain run --manual --strategy package-cache --strategy docker-build-cache --confirm
+```
+
+`--manual` is accepted only for scan, plan and run; scheduled mode rejects it before work starts.  It bypasses the pressure gate only: age, current-use, type, exact identity, keep markers, local-builder checks, audit and shared lock/uncertain-dispatch rules still apply.  The structured result adds manual=true for these requests, with unchanged default/legacy wire fields.  Read-only modes do not delete, acquire cleanup locks or write maintenance audits; scans can still return partial or unavailable evidence.
+
+Include in Mac Maintenance controls only whether this Mac schedules its remote step through the existing settings and Infisical save path.  Manual Scan and Run Now do not require that option.  The server’s native schedule is independent and unchanged.  The panel reports candidate/file/request counts, logical removed-file bytes and observed signed available-space change separately; Docker requests and engine reclaimability are never labelled physical bytes freed.
 
 ## Deployment
 

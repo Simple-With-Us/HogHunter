@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Hermetic: every root/command/active-file probe is replaced; no SSH or Docker."""
 import importlib.util
+import contextlib
 import fcntl
+import io
 import json
 import os
 import re
@@ -62,6 +64,83 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
         self.assertTrue(p.exists())
         self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_healthy_legacy_scan_plan_run_and_scheduled_still_skip_without_inventory(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        self.tool.files = lambda _: self.fail("automatic healthy path inventoried")
+        self.tool.docker_candidates = self.tool.files
+        for mode in ("scan", "plan", "run", "scheduled"):
+            result = self.tool.execute(mode, ["package-cache"], confirm=True)
+            self.assertEqual(result["status"], "skipped")
+            self.assertFalse(result["pressure"])
+            self.assertNotIn("manual", result)
+            self.assertEqual(result["strategies"], [])
+        self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_explicit_manual_healthy_scan_and_plan_are_read_only(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        self.tool.audit = lambda _: self.fail("read-only manual scan wrote audit")
+        for mode in ("scan", "plan"):
+            result = self.tool.execute(mode, ["package-cache"], manual=True)
+            self.assertEqual(result["status"], "planned")
+            self.assertTrue(result["manual"])
+            self.assertFalse(result["pressure"])
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertFalse(result["lock"]["acquired"])
+            self.assertTrue(p.exists())
+        self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_explicit_manual_healthy_run_removes_only_fixture_and_requires_confirmation(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        self.assertEqual(self.tool.execute("run", ["package-cache"], manual=True)["status"], "failed")
+        self.assertTrue(p.exists())
+        result = self.tool.execute("run", ["package-cache"], confirm=True, manual=True)
+        self.assertEqual(result["status"], "ran")
+        self.assertTrue(result["manual"])
+        self.assertEqual(result["removed_file_bytes"], 5)
+        self.assertEqual(result["observed_free_delta_bytes"], 0)
+        self.assertTrue(result["lock"]["released"])
+        self.assertFalse(p.exists())
+
+    def test_manual_refuses_scheduled_unknown_duplicate_or_empty_selectors_without_work(self):
+        self.tool.files = lambda _: self.fail("invalid manual request inventoried")
+        for mode, selectors in [("scheduled", ["package-cache"]), ("run", []),
+                                ("run", ["unknown"]), ("scan", ["package-cache"] * 2)]:
+            self.assertEqual(self.tool.execute(mode, selectors, confirm=True, manual=True)["status"], "failed")
+        self.assertEqual(self.tool.execute("scan", ["package-cache"], manual=1)["status"], "failed")
+        self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_manual_run_cannot_bypass_live_or_uncertain_shared_lock(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        self.assertTrue(self.tool.acquire_lock())
+        self.assertEqual(self.tool.execute("run", ["package-cache"], confirm=True, manual=True)["status"], "skipped")
+        (self.tool.lock / "dispatch.json").write_text("{}")
+        self.assertEqual(self.tool.execute("run", ["package-cache"], confirm=True, manual=True)["status"], "partial")
+        self.assertTrue(p.exists())
+
+    def test_cli_rejects_manual_scheduled_before_constructing_tool(self):
+        with patch.object(sys, "argv", ["hoghunter-maintain", "scheduled", "--manual"]), \
+                patch.object(m, "Maintenance", side_effect=AssertionError("invalid CLI constructed tool")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                m.main()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_cli_explicit_manual_runs_only_synthetic_healthy_fixture(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", ["hoghunter-maintain", "run", "--manual", "--strategy", "package-cache", "--confirm"]), \
+                patch.object(m, "Maintenance", return_value=self.tool), patch.object(m.os, "geteuid", return_value=0), \
+                patch.object(m.signal, "signal"), contextlib.redirect_stdout(stdout):
+            self.assertEqual(m.main(), 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["status"], "ran")
+        self.assertTrue(result["manual"])
+        self.assertFalse(p.exists())
 
     def test_confirmation_and_duplicate_unknown_strategy_refused(self):
         for strategies, confirm in [(["package-cache"], False), (["x"], True), (["package-cache"] * 2, True)]:
