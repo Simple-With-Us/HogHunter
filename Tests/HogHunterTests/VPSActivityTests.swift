@@ -96,6 +96,35 @@ final class VPSActivityTests: XCTestCase {
         XCTAssertEqual(tools[2].reason, "1 container")
     }
 
+    func testOptionalSwapPressureAndControlIdentityDecode() throws {
+        let json = """
+        {"generated_at":"2026-11-03T15:00:00Z","host":"fixture","devices":{},
+         "memory_pressure":{"sampled_at":"2026-11-03T15:00:00Z","duration_seconds":1,
+          "swap_in_bytes_per_second":4096,"swap_out_bytes_per_second":8192,
+          "memory_some_avg10":12.5,"memory_full_avg10":3.25},
+         "processes":[{"pid":42,"name":"worker","start_time":999,"boot_id":"fixture-boot",
+          "owner":"root","cpu_percent":3,"memory_bytes":100,"swap_bytes":200,"nice":19,
+          "allowed_actions":["quit","tame","sample"]}],
+         "coolify":[{"uuid":"fixture","name":"Worker","container":"worker","type":"application","status":"running",
+          "container_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "started_at":"2026-11-03T00:00:00Z","allowed_actions":["stop","restart"]}]}
+        """.data(using: .utf8)!
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: json)
+        let process = try XCTUnwrap(snapshot.processes?.first)
+        XCTAssertEqual(process.swapBytes, 200)
+        XCTAssertEqual(process.id, "fixture-boot:42:999")
+        XCTAssertTrue(process.isTamed)
+        XCTAssertTrue(process.can(action: "sample"))
+        XCTAssertFalse(process.can(action: "force-quit"))
+        XCTAssertTrue(snapshot.coolify?.first?.can(action: "restart") == true)
+        let pressure = try XCTUnwrap(snapshot.memoryPressure)
+        XCTAssertEqual(pressure.swapOutBytesPerSecond, 8192)
+        XCTAssertEqual(pressure.memoryFullAvg10, 3.25)
+        let sourceDate = try XCTUnwrap(pressure.sampledAtDate)
+        XCTAssertTrue(pressure.isFresh(relativeTo: sourceDate.addingTimeInterval(30)))
+        XCTAssertFalse(pressure.isFresh(relativeTo: sourceDate.addingTimeInterval(1800)))
+    }
+
     func testASnapshotWithoutTheNewSectionsStillDecodes() throws {
         /// An older server snapshot carries none of the new readings, and the
         /// app must keep working against it.
@@ -106,5 +135,6 @@ final class VPSActivityTests: XCTestCase {
         XCTAssertNil(snapshot.processes)
         XCTAssertNil(snapshot.coolify)
         XCTAssertNil(snapshot.toolStatuses)
+        XCTAssertNil(snapshot.memoryPressure)
     }
 }

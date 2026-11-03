@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import shutil
 import signal
@@ -38,6 +39,67 @@ from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
 # work, never its SCOPE, and the load and swap thresholds "must never suppress
 # the safe or semi-safe tiers".
 _HEAVY_LANE_STEPS = ("janitor_worktree_retire", "pressure_apps_deps")
+
+
+def parse_server_maintenance_result(text: str) -> dict[str, Any]:
+    """Validate evidence before an SSH response can report work or bytes."""
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate result field")
+            result[key] = value
+        return result
+    if not isinstance(text, str) or len(text) > 1024 * 1024:
+        raise ValueError("invalid result size")
+    obj = json.loads(text, object_pairs_hook=unique)
+    if (not isinstance(obj, dict) or type(obj.get("schema_version")) is not int or obj["schema_version"] != 1
+            or obj.get("tool") != "hoghunter-server-maintenance"
+            or obj.get("mode") != "scheduled" or obj.get("dry_run") is not False
+            or obj.get("status") not in ("ran", "skipped", "partial", "failed", "cancelled")):
+        raise ValueError("invalid result contract")
+    for key in ("reclaimed_bytes", "removed_file_bytes", "candidate_count"):
+        if type(obj.get(key)) is not int or obj[key] < 0:
+            raise ValueError("invalid byte or candidate evidence")
+    if type(obj.get("observed_free_delta_bytes")) is not int:
+        raise ValueError("invalid free-space evidence")
+    for key in ("before", "after"):
+        sample = obj.get(key)
+        if not isinstance(sample, dict):
+            raise ValueError("missing disk evidence")
+        for field in ("free_bytes", "total_bytes"):
+            if type(sample.get(field)) is not int or sample[field] < 0:
+                raise ValueError("invalid disk evidence")
+        if sample["free_bytes"] > sample["total_bytes"]:
+            raise ValueError("invalid filesystem size")
+    duration = obj.get("duration_seconds")
+    if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+        raise ValueError("invalid duration")
+    lock = obj.get("lock")
+    if not isinstance(lock, dict) or type(lock.get("acquired")) is not bool:
+        raise ValueError("missing serialization evidence")
+    if obj["status"] == "ran" and (lock["acquired"] is not True or lock.get("released") is not True):
+        raise ValueError("unserialized success")
+    strategies = obj.get("strategies")
+    if not isinstance(strategies, list) or len(strategies) > 4:
+        raise ValueError("invalid strategies")
+    seen = set()
+    for item in strategies:
+        if (not isinstance(item, dict) or item.get("id") not in
+                ("package-cache", "rotated-logs", "docker-images", "docker-build-cache")
+                or item["id"] in seen or item.get("status") not in ("ran", "skipped", "failed", "partial")):
+            raise ValueError("invalid strategy result")
+        seen.add(item["id"])
+        for field in ("candidate_count", "removed_count", "attempted_count"):
+            if type(item.get(field)) is not int or item[field] < 0:
+                raise ValueError("invalid strategy evidence")
+    if obj["candidate_count"] != sum(s["candidate_count"] for s in strategies):
+        raise ValueError("candidate count mismatch")
+    if obj["status"] == "ran" and not any(s["status"] == "ran" and (s["removed_count"] or s["attempted_count"]) for s in strategies):
+        raise ValueError("success has no completed work evidence")
+    if obj["status"] == "skipped" and obj["reclaimed_bytes"]:
+        raise ValueError("skip cannot claim reclaimed bytes")
+    return obj
 
 
 def ensure_standard_mac_paths() -> None:
@@ -1183,19 +1245,34 @@ class VacuumEngine:
         if not isinstance(host_value, str) or not host_value.strip():
             return 0, "No remote servers are set up", StepStatus.SKIPPED
         host = host_value.strip()
-        check = work.run_process(
-            ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", host, "exit 0"],
-            capture_output=True,
-            timeout=10,
-        )
-        if check.returncode != 0:
-            return 0, "ssh unavailable", StepStatus.SKIPPED
-        work.run_process(
-            ["ssh", "-o", "ConnectTimeout=5", host, "/etc/cron.daily/coolify-auto-maintenance"],
-            capture_output=True,
-            timeout=120,
-        )
-        return 0, "remote maintenance triggered", StepStatus.RAN
+        if host.startswith("-") or any(c.isspace() for c in host):
+            return 0, "invalid remote server host", StepStatus.FAILED
+        try:
+            response = work.run_process(
+                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host,
+                 "sudo", "-n", "/usr/local/sbin/hoghunter-maintain", "scheduled"],
+                capture_output=True, timeout=110,
+            )
+        except subprocess.TimeoutExpired:
+            return 0, "remote maintenance timed out; outcome unconfirmed", StepStatus.FAILED
+        try:
+            raw = response.stdout.decode("utf-8") if isinstance(response.stdout, bytes) else response.stdout
+            if not raw or (isinstance(raw, str) and not raw.strip()):
+                if response.returncode == 255:
+                    return 0, "remote SSH connection or authentication failed; maintenance outcome unconfirmed", StepStatus.FAILED
+                if response.returncode != 0:
+                    return 0, "remote maintenance returned no result; verify installation and sudo access", StepStatus.FAILED
+            result = parse_server_maintenance_result(raw)
+        except (ValueError, TypeError, UnicodeError):
+            return 0, "remote maintenance returned an invalid result", StepStatus.FAILED
+        freed = result["reclaimed_bytes"]
+        self._step_freed = freed
+        status = result["status"]
+        if response.returncode != 0 or status in ("failed", "partial", "cancelled"):
+            return freed, f"remote maintenance {status}; inspect server result", StepStatus.FAILED
+        if status == "skipped":
+            return 0, "remote maintenance skipped; no eligible work or shared lock held", StepStatus.SKIPPED
+        return freed, "remote maintenance completed; disk delta reported separately on server", StepStatus.RAN
 
     def _janitor_worktree_retire(self, dry_run: bool) -> tuple[int, str, StepStatus]:
         step = "janitor_worktree_retire"

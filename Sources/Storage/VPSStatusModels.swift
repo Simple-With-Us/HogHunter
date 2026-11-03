@@ -10,6 +10,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     let cpu: VPSCPU?
     let memory: VPSMemory?
     let swap: VPSSwap?
+    let memoryPressure: VPSMemoryPressure?
     let largestDirs: [VPSDirectory]?
     let toolStatuses: [VPSToolStatus]?
     let databaseSamples: [VPSSizeSample]?
@@ -27,6 +28,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         case cpu
         case memory
         case swap
+        case memoryPressure = "memory_pressure"
         case largestDirs = "largest_dirs"
         case toolStatuses = "tool_statuses"
         case databaseSamples = "database_samples"
@@ -43,6 +45,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         cpu: VPSCPU? = nil,
         memory: VPSMemory? = nil,
         swap: VPSSwap? = nil,
+        memoryPressure: VPSMemoryPressure? = nil,
         largestDirs: [VPSDirectory]? = nil,
         toolStatuses: [VPSToolStatus]? = nil,
         databaseSamples: [VPSSizeSample]? = nil,
@@ -57,6 +60,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         self.cpu = cpu
         self.memory = memory
         self.swap = swap
+        self.memoryPressure = memoryPressure
         self.largestDirs = largestDirs
         self.toolStatuses = toolStatuses
         self.databaseSamples = databaseSamples
@@ -321,13 +325,49 @@ struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
     let cpuPercent: Double
     let memoryBytes: Int64?
 
-    var id: Int { pid }
+    let bootID: String?
+    let swapBytes: Int64?
+    let nice: Int?
+    let allowedActions: [String]?
+    let protectionReason: String?
+
+    init(pid: Int, name: String, startTime: Int64?, owner: String?, container: String?,
+         cpuPercent: Double, memoryBytes: Int64?, bootID: String? = nil,
+         swapBytes: Int64? = nil, nice: Int? = nil, allowedActions: [String]? = nil,
+         protectionReason: String? = nil) {
+        self.pid = pid
+        self.name = name
+        self.startTime = startTime
+        self.owner = owner
+        self.container = container
+        self.cpuPercent = cpuPercent
+        self.memoryBytes = memoryBytes
+        self.bootID = bootID
+        self.swapBytes = swapBytes
+        self.nice = nice
+        self.allowedActions = allowedActions
+        self.protectionReason = protectionReason
+    }
+
+    var isTamed: Bool { (nice ?? 0) >= 15 }
+
+    func can(action: String) -> Bool {
+        guard let bootID, !bootID.isEmpty, let startTime, startTime > 0 else { return false }
+        return allowedActions?.contains(action) == true
+    }
+
+    var id: String { "\(bootID ?? "legacy"):\(pid):\(startTime ?? 0)" }
 
     enum CodingKeys: String, CodingKey {
         case pid, name, owner, container
         case startTime = "start_time"
         case cpuPercent = "cpu_percent"
         case memoryBytes = "memory_bytes"
+        case bootID = "boot_id"
+        case swapBytes = "swap_bytes"
+        case nice
+        case allowedActions = "allowed_actions"
+        case protectionReason = "protection_reason"
     }
 
     /// The group the owner thinks in: a Coolify workload, an account, or
@@ -351,6 +391,33 @@ struct VPSCoolifyResource: Codable, Equatable, Sendable, Identifiable {
     let image: String?
     let startedAt: String?
 
+    let containerID: String?
+    let allowedActions: [String]?
+    let protectionReason: String?
+
+    init(uuid: String, name: String, container: String?, type: String, status: String,
+         cpuPercent: Double?, memoryBytes: Int64?, image: String?, startedAt: String?,
+         containerID: String? = nil, allowedActions: [String]? = nil, protectionReason: String? = nil) {
+        self.uuid = uuid
+        self.name = name
+        self.container = container
+        self.type = type
+        self.status = status
+        self.cpuPercent = cpuPercent
+        self.memoryBytes = memoryBytes
+        self.image = image
+        self.startedAt = startedAt
+        self.containerID = containerID
+        self.allowedActions = allowedActions
+        self.protectionReason = protectionReason
+    }
+
+    func can(action: String) -> Bool {
+        guard let containerID, containerID.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              let startedAt, !startedAt.isEmpty else { return false }
+        return allowedActions?.contains(action) == true
+    }
+
     var id: String { uuid.isEmpty ? name : uuid }
 
     /// The identifier the server indexes workloads by.
@@ -364,6 +431,9 @@ struct VPSCoolifyResource: Codable, Equatable, Sendable, Identifiable {
         case cpuPercent = "cpu_percent"
         case memoryBytes = "memory_bytes"
         case startedAt = "started_at"
+        case containerID = "container_id"
+        case allowedActions = "allowed_actions"
+        case protectionReason = "protection_reason"
     }
 
     /// Whether the workload is the one thing that is wrong.
@@ -381,5 +451,36 @@ struct VPSSizeSample: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case path, bytes
         case sampledAt = "sampled_at"
+    }
+}
+
+/// Paging rates share a measured source window; missing kernel counters stay unavailable.
+struct VPSMemoryPressure: Codable, Equatable, Sendable {
+    let sampledAt: String
+    let durationSeconds: Double
+    let swapInBytesPerSecond: Double?
+    let swapOutBytesPerSecond: Double?
+    let memorySomeAvg10: Double?
+    let memoryFullAvg10: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case sampledAt = "sampled_at"
+        case durationSeconds = "duration_seconds"
+        case swapInBytesPerSecond = "swap_in_bytes_per_second"
+        case swapOutBytesPerSecond = "swap_out_bytes_per_second"
+        case memorySomeAvg10 = "memory_some_avg10"
+        case memoryFullAvg10 = "memory_full_avg10"
+    }
+
+    var sampledAtDate: Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: sampledAt) ?? ISO8601DateFormatter().date(from: sampledAt)
+    }
+
+    func isFresh(relativeTo now: Date = Date(), maximumAge: TimeInterval = 900) -> Bool {
+        guard let date = sampledAtDate, durationSeconds > 0, durationSeconds <= 10 else { return false }
+        let age = now.timeIntervalSince(date)
+        return age >= -5 && age <= maximumAge
     }
 }

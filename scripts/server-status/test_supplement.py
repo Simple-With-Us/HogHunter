@@ -1,4 +1,6 @@
 import importlib.util
+import datetime
+import pwd
 import json
 import os
 from pathlib import Path
@@ -113,48 +115,120 @@ class SupplementTests(unittest.TestCase):
             self.assertNotIn('args', rows[0])
             self.assertNotIn('command', rows[0])
 
-    def test_coolify_resources_reads_labels_and_state(self):
-        inspected = [{
-            'Name': '/yagelvqux9e8l1kztif7bf2o',
-            'Config': {'Labels': {'coolify.name': 'yagelvqux9e8l1kztif7bf2o',
-                                  'coolify.type': 'application',
-                                  'coolify.projectName': 'fleet-infra',
-                                  'coolify.resourceName': 'um-appworker',
-                                  'coolify.applicationUuid': 'yagelvqux9e8l1kztif7bf2o'},
-                       'Image': 'yagelvqux9e8l1kztif7bf2o:5cbd'},
-            'State': {'Status': 'running', 'Health': {'Status': 'healthy'}, 'StartedAt': '2026-10-26T06:11:38Z'},
-        }]
+    def test_paging_uses_actual_window_and_pressure_has_own_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / 'pressure').mkdir()
+            (proc / 'pressure/memory').write_text('some avg10=12.50 avg60=1 avg300=1 total=10\nfull avg10=3.25 avg60=1 avg300=1 total=5\n')
+            (proc / 'vmstat').write_text('pswpin 100\npswpout 200\n')
+            times = iter([10, 12])
+            def sample(_):
+                (proc / 'vmstat').write_text('pswpin 110\npswpout 220\n')
+            stamp = datetime.datetime(2026, 11, 3, 15, tzinfo=datetime.timezone.utc)
+            result = module.memory_pressure(proc, sleep=sample, monotonic=lambda: next(times), now=lambda: stamp)
+            page = os.sysconf('SC_PAGE_SIZE')
+            self.assertEqual(result['swap_in_bytes_per_second'], 10 * page / 2)
+            self.assertEqual(result['swap_out_bytes_per_second'], 20 * page / 2)
+            self.assertEqual(result['duration_seconds'], 2)
+            self.assertEqual(result['sampled_at'], stamp.isoformat())
+            self.assertEqual(result['memory_some_avg10'], 12.5)
+            self.assertEqual(result['memory_full_avg10'], 3.25)
+
+    def test_missing_or_reset_paging_is_unknown_and_invalid_psi_never_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            times = iter([0, 1])
+            self.assertIsNone(module.memory_pressure(proc, sleep=lambda _: None, monotonic=lambda: next(times)))
+            (proc / 'pressure').mkdir()
+            (proc / 'pressure/memory').write_text('some avg10=nan avg60=0\nfull avg10=101 avg60=0\n')
+            (proc / 'vmstat').write_text('pswpin 100\npswpout 100\n')
+            def reset(_):
+                (proc / 'vmstat').write_text('pswpin 10\npswpout 10\n')
+            times = iter([0, 1])
+            self.assertIsNone(module.memory_pressure(proc, sleep=reset, monotonic=lambda: next(times)))
+
+    def test_process_window_rejects_pid_reuse_and_keeps_memory_swap_leaders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / 'sys/kernel/random').mkdir(parents=True)
+            boot = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+            (proc / 'sys/kernel/random/boot_id').write_text(boot)
+            def write(pid, ticks=0, start=999, rss=1, swap=1):
+                path = proc / str(pid)
+                path.mkdir(exist_ok=True)
+                tail = ['S', '1'] + ['0'] * 9 + [str(ticks), '0'] + ['0'] * 3 + ['0', '1', '0', str(start)] + ['0'] * 20
+                (path / 'stat').write_text(str(pid) + ' (worker) ' + ' '.join(tail))
+                (path / 'comm').write_text('worker')
+                (path / 'cgroup').write_text('0::/user.slice/session.scope')
+                (path / 'status').write_text(f'VmRSS: {rss} kB\nVmSwap: {swap} kB\n')
+                if not (path / 'exe').is_symlink():
+                    (path / 'exe').symlink_to('/usr/bin/worker')
+            for pid in (21, 22, 23, 24):
+                write(pid)
+            def advance(_):
+                write(21, ticks=100, rss=10, swap=10)
+                write(22, ticks=1, rss=1000, swap=10)
+                write(23, ticks=1, rss=10, swap=1000)
+                write(24, ticks=10000, start=1001, rss=10000, swap=10000)
+            times = iter([0, 1])
+            rows = module.top_processes(proc, limit=3, sleep=advance, monotonic=lambda: next(times),
+                                        owners=(pwd.getpwuid(os.getuid()).pw_name,),
+                                        run=lambda a, **_: subprocess.CompletedProcess(a, 0, '', ''))
+            self.assertEqual({r['pid'] for r in rows}, {21, 22, 23})
+            self.assertTrue(all(r['boot_id'] == boot and 'quit' in r['allowed_actions'] for r in rows))
+            self.assertEqual(next(r for r in rows if r['pid'] == 23)['swap_bytes'], 1000 * 1024)
+
+    def test_coolify_resources_reads_only_allowlisted_metadata_and_numeric_stats(self):
+        identity = 'a' * 64
+        metadata = dict(id=identity, container='/worker-box', name='worker-box', project='example',
+                        resource='worker', service=None, type='application', status='running',
+                        started_at='2026-11-03T00:00:00Z')
         def run(args, **kwargs):
-            if args[1] == 'ps':
-                return subprocess.CompletedProcess(args, 0, 'abc123\n', '')
-            if args[1] == 'inspect':
-                return subprocess.CompletedProcess(args, 0, json.dumps(inspected), '')
-            if args[1] == 'stats':
-                return subprocess.CompletedProcess(args, 0, 'yagelvqux9e8l1kztif7bf2o\t12.50%\t535.1MiB / 5GiB\n', '')
+            if 'ps' in args:
+                return subprocess.CompletedProcess(args, 0, identity + '\n', '')
+            if 'inspect' in args:
+                self.assertIn('--format', args)
+                self.assertNotIn('Config.Env', args[args.index('--format') + 1])
+                return subprocess.CompletedProcess(args, 0, json.dumps(metadata), '')
+            if 'stats' in args:
+                return subprocess.CompletedProcess(args, 0, 'worker-box\t12.50%\t535.1MiB / 5GiB\n', '')
             return subprocess.CompletedProcess(args, 1, '', '')
         rows = module.coolify_resources(run=run)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['name'], 'fleet-infra / um-appworker')
-        self.assertEqual(rows[0]['type'], 'application')
-        self.assertEqual(rows[0]['status'], 'running')
+        self.assertEqual(rows[0]['name'], 'example / worker')
         self.assertEqual(rows[0]['cpu_percent'], 12.5)
         self.assertEqual(rows[0]['memory_bytes'], int(535.1 * 1024 ** 2))
-        self.assertEqual(rows[0]['uuid'], 'yagelvqux9e8l1kztif7bf2o')
-        self.assertEqual(rows[0]['container'], 'yagelvqux9e8l1kztif7bf2o')
+        self.assertEqual(rows[0]['container_id'], identity)
+        self.assertEqual(rows[0]['allowed_actions'], ['stop', 'restart'])
+        self.assertNotIn('image', rows[0])
 
     def test_coolify_resources_omit_what_they_cannot_measure(self):
+        identity = 'b' * 64
         def run(args, **kwargs):
-            if args[1] == 'ps':
-                return subprocess.CompletedProcess(args, 0, 'abc123\n', '')
-            if args[1] == 'inspect':
-                return subprocess.CompletedProcess(args, 0, json.dumps([{
-                    'Name': '/x', 'Config': {'Labels': {'coolify.name': 'x'}, 'Image': 'i'},
-                    'State': {'Status': 'exited'}}]), '')
+            if 'ps' in args:
+                return subprocess.CompletedProcess(args, 0, identity, '')
+            if 'inspect' in args:
+                return subprocess.CompletedProcess(args, 0, json.dumps(dict(id=identity, container='/worker', name='worker',
+                    project=None, resource=None, service=None, type='application', status='exited', started_at='2026-11-03T00:00:00Z')), '')
             return subprocess.CompletedProcess(args, 1, '', '')
         rows = module.coolify_resources(run=run)
         self.assertEqual(rows[0]['status'], 'exited')
         self.assertIsNone(rows[0]['cpu_percent'])
         self.assertIsNone(rows[0]['memory_bytes'])
+
+    def test_collector_exposes_database_service_and_unknown_classification_refusals(self):
+        identity = 'a' * 64
+        for kind in ('database', 'standalone-postgresql', 'service', None, ''):
+            with self.subTest(kind=kind):
+                metadata = dict(id=identity, container='/production-data', name='production-data',
+                                resource='primary', service=None, project='example', type=kind,
+                                status='running', started_at='2026-11-03T00:00:00Z')
+                def run(args, **_):
+                    return subprocess.CompletedProcess(args, 0,
+                        identity if 'ps' in args else json.dumps(metadata) if 'inspect' in args else '', '')
+                row = module.coolify_resources(run)[0]
+                self.assertEqual(row['allowed_actions'], [])
+                self.assertTrue(row['protection_reason'])
 
     def test_fleet_extra_volume_monitored_when_mounted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -295,7 +369,7 @@ class SupplementTests(unittest.TestCase):
 
         output = module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
                                    lambda _: None, lambda _: 'unknown', containers=[],
-                                   processes=processes, coolify=coolify, collect_live=True)
+                                   processes=processes, coolify=coolify, collect_live=True, pressure=lambda: None)
         # A sequential collector would time the barrier out; both results arrive.
         self.assertEqual(output['processes'], [{'name': 'fixture'}])
         self.assertEqual(output['coolify'], {'state': 'fixture'})
@@ -307,7 +381,7 @@ class SupplementTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
                               lambda _: None, lambda _: 'unknown', containers=[],
-                              processes=lambda: [], coolify=broken, collect_live=True)
+                              processes=lambda: [], coolify=broken, collect_live=True, pressure=lambda: None)
 
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:

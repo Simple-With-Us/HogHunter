@@ -5,6 +5,9 @@ Run after the existing watch finishes, under the same scheduler lock.  Directory
 failures omit that measurement; they never become a fictitious zero size.
 """
 import argparse
+import importlib.machinery
+import importlib.util
+import math
 import concurrent.futures
 import datetime
 import re
@@ -16,6 +19,23 @@ import shutil
 import subprocess
 import tempfile
 import time
+
+def control_policy():
+    # Both source checkout and deployed standalone layout use the same policy.
+    source = Path(__file__).with_name('control.py')
+    if not source.is_file():
+        source = Path('/usr/local/sbin/hoghunter-control')
+    try:
+        loader = importlib.machinery.SourceFileLoader('hoghunter_control_policy', str(source))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module if hasattr(module, 'inspect_process') else None
+    except (OSError, ImportError):
+        return None
+
+
+POLICY = control_policy()
 
 TOOLS = (
     ('claude', 'Claude Code', ('claude',)),
@@ -96,39 +116,15 @@ def installed_command(command, home=None):
 
 
 def container_inventory(run=subprocess.run):
-    """The identities of the running containers, or None when Docker cannot answer.
-
-    A container is named two ways: after its deployment, which is a uuid on
-    this host, and after the Coolify workload it belongs to, which is the name
-    the owner knows.  Both are returned, so a tool can be recognised by
-    whichever one it actually carries.
-    """
-    try:
-        listing = run(['docker', 'ps', '--format', '{{.ID}}'],
-                      capture_output=True, text=True, timeout=5, check=False)
-        if listing.returncode != 0:
-            return None
-        ids = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
-        if not ids:
-            return set()
-        detail = run(['docker', 'inspect'] + ids, capture_output=True, text=True, timeout=15, check=False)
-        if detail.returncode != 0:
-            return None
-        inspected = json.loads(detail.stdout)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+    """Allowlisted Docker metadata only; never full Config/Env/Args inspection."""
+    if POLICY is None:
         return None
-    containers = []
-    for entry in inspected if isinstance(inspected, list) else []:
-        container = (entry.get('Name') or '').lstrip('/')
-        labels = (entry.get('Config') or {}).get('Labels') or {}
-        names = [container] if container else []
-        for key in ('coolify.name', 'coolify.resourceName', 'coolify.serviceName'):
-            value = labels.get(key)
-            if value and value not in names:
-                names.append(value)
-        if names:
-            containers.append({'container': container, 'names': names})
-    return containers
+    rows = POLICY.coolify_containers(run)
+    if rows is None:
+        return None
+    return [{'container': row['container'], 'names': list(dict.fromkeys(
+        value for value in (row['container'], row['name'], row.get('resource'), row.get('service')) if value))}
+        for row in rows]
 
 
 def container_tool_counts(containers):
@@ -332,41 +328,102 @@ def _container_of(pid, identities, proc=Path('/proc')):
     return None
 
 
-def top_processes(proc=Path('/proc'), limit=PROCESS_LIMIT, sleep=time.sleep, elapsed=1.0, run=subprocess.run):
-    """The server's busiest processes, by CPU share of one core.
-
-    The reading comes from executable identity and the kernel's own tick
-    counters.  Command arguments, environment variables and credential files
-    are never read, so a process that hides its work behind an interpreter is
-    still named after its executable and never after its arguments.
-    """
+def top_processes(proc=Path('/proc'), limit=PROCESS_LIMIT, sleep=time.sleep, elapsed=1.0,
+                  run=subprocess.run, monotonic=time.monotonic, owners=None):
+    """Balanced CPU/RSS/swap leaders, using measured time and stable identities."""
     first = _process_ticks(proc)
+    boot = POLICY.boot_identity(proc) if POLICY else None
+    started = monotonic()
     sleep(elapsed)
     second = _process_ticks(proc)
+    duration = monotonic() - started
+    if duration <= 0 or duration > 10 or (POLICY and POLICY.boot_identity(proc) != boot):
+        return []
     hz = os.sysconf('SC_CLK_TCK')
-    identities = container_identities(run)
+    containers = POLICY.coolify_containers(run) if POLICY else None
+    ancestors = POLICY.ancestor_pids(proc) if POLICY else set()
     rows = []
     for pid, (name, ticks, start_time) in second.items():
         before = first.get(pid)
-        if before is None:
-            continue  # The process started inside the window; its rate is unknown.
-        delta = ticks - before[1]
-        if delta < 0:
+        if before is None or before[2] != start_time or ticks < before[1]:
             continue
-        container = _container_of(pid, identities, proc)
-        rows.append(dict(
-            pid=pid,
-            name=name,
-            # The start time is what makes the process identifiable: a pid on
-            # its own can be reused, a pid with its start time cannot.
-            start_time=start_time,
-            owner=_owner_of(pid, proc),
-            container=container,
-            cpu_percent=round(100.0 * delta / (hz * elapsed), 2),
-            memory_bytes=_resident_bytes(pid, proc),
-        ))
-    rows.sort(key=lambda row: (-row['cpu_percent'], row['pid']))
-    return rows[:limit]
+        identity_args = dict(proc=proc, ancestors=ancestors, containers=containers)
+        if owners is not None:
+            identity_args['owners'] = owners
+        target, reason = POLICY.inspect_process(pid, start_time, boot, **identity_args) if POLICY else (None, 'control policy unavailable')
+        sample_target, sample_reason = POLICY.inspect_process(pid, start_time, boot, sample=True, **identity_args) if POLICY else (None, reason)
+        actions = [] if reason else ['quit', 'force-quit', 'tame', 'untame']
+        if not sample_reason:
+            actions.append('sample')
+        fields = POLICY.process_stat_fields(pid, proc) if POLICY else None
+        memory = POLICY.process_memory(pid, proc) if POLICY else {}
+        if fields is not None and fields['start_time'] != start_time:
+            continue
+        try:
+            executable = Path(os.readlink(proc / str(pid) / 'exe')).name
+        except OSError:
+            executable = name
+        identities = {row['id']: row['container'] for row in (containers or [])}
+        rows.append(dict(pid=pid, name=executable, start_time=start_time, boot_id=boot,
+                         owner=_owner_of(pid, proc), container=_container_of(pid, identities, proc),
+                         cpu_percent=round(100.0 * (ticks - before[1]) / (hz * duration), 2),
+                         memory_bytes=memory.get('resident_bytes', _resident_bytes(pid, proc)),
+                         swap_bytes=memory.get('swap_bytes'), nice=fields.get('nice') if fields else None,
+                         allowed_actions=actions, protection_reason=reason))
+    # CPU-only truncation concealed large idle resident/swap holders.  Retain
+    # leaders from each measurement before the Mac applies its selected sort.
+    rankings = [sorted(rows, key=lambda r: (-(r.get(key) or 0), r['pid']))
+                for key in ('cpu_percent', 'memory_bytes', 'swap_bytes')]
+    chosen, seen = [], set()
+    for group in zip(*rankings):
+        for row in group:
+            if row['pid'] not in seen:
+                seen.add(row['pid'])
+                chosen.append(row)
+                if len(chosen) >= limit:
+                    return chosen
+    return chosen
+
+
+def _swap_counters(proc):
+    try:
+        values = {}
+        for line in POLICY.read_text(proc / 'vmstat').splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ('pswpin', 'pswpout') and parts[1].isdigit():
+                values[parts[0]] = int(parts[1])
+        return values
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def memory_pressure(proc=Path('/proc'), sleep=time.sleep, elapsed=1.0,
+                    monotonic=time.monotonic, now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    first = _swap_counters(proc)
+    start = monotonic()
+    sleep(elapsed)
+    duration = monotonic() - start
+    if duration <= 0 or duration > 10:
+        return None
+    last = _swap_counters(proc)
+    result = dict(sampled_at=now().isoformat(), duration_seconds=round(duration, 3),
+                  swap_in_bytes_per_second=None, swap_out_bytes_per_second=None,
+                  memory_some_avg10=None, memory_full_avg10=None)
+    for field, key in [('swap_in_bytes_per_second', 'pswpin'), ('swap_out_bytes_per_second', 'pswpout')]:
+        if key in first and key in last and last[key] >= first[key]:
+            result[field] = (last[key] - first[key]) * os.sysconf('SC_PAGE_SIZE') / duration
+    try:
+        for line in POLICY.read_text(proc / 'pressure/memory', 4096).splitlines():
+            parts = line.split()
+            if len(parts) < 2 or parts[0] not in ('some', 'full'):
+                continue
+            values = dict(part.split('=', 1) for part in parts[1:])
+            value = float(values['avg10'])
+            if math.isfinite(value) and 0 <= value <= 100:
+                result['memory_' + parts[0] + '_avg10'] = value
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    return result if any(result[key] is not None for key in result if key not in ('sampled_at', 'duration_seconds')) else None
 
 
 def _parse_bytes(text):
@@ -386,82 +443,45 @@ def _parse_bytes(text):
 
 
 def coolify_resources(run=subprocess.run):
-    """The Coolify workloads this host runs, from container identity only.
-
-    Coolify's API needs a token, so the snapshot never touches one.  The
-    container's own labels carry its name, type and uuid, and the container
-    runtime carries its state, health and resource use.
-    """
-    try:
-        listing = run(['docker', 'ps', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+    """Safe container identity/state metadata, plus numeric Docker statistics."""
+    if POLICY is None:
         return None
-    if listing.returncode != 0:
-        return None
-    ids = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
-    if not ids:
-        return []
-    try:
-        detail = run(['docker', 'inspect'] + ids, capture_output=True, text=True, timeout=15, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if detail.returncode != 0:
-        return None
-    try:
-        inspected = json.loads(detail.stdout)
-    except ValueError:
+    inspected = POLICY.coolify_containers(run)
+    if inspected is None:
         return None
     stats = {}
-    try:
-        stat_result = run(['docker', 'stats', '--no-stream', '--format', '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'],
-                           capture_output=True, text=True, timeout=20, check=False)
-        if stat_result.returncode == 0:
-            for line in stat_result.stdout.splitlines():
-                parts = line.split('\t')
-                if len(parts) >= 2:
-                    stats[parts[0]] = parts[1:]
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    if inspected:
+        try:
+            result = run(POLICY.DOCKER + ['stats', '--no-stream', '--format', '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'],
+                         capture_output=True, text=True, timeout=20, check=False)
+            if result.returncode == 0 and len(result.stdout) <= 1024 * 1024:
+                for line in result.stdout.splitlines():
+                    parts = line.split('\t')
+                    if len(parts) == 3:
+                        stats[parts[0]] = parts[1:]
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
     rows = []
-    for entry in inspected if isinstance(inspected, list) else []:
-        labels = (entry.get('Config') or {}).get('Labels') or {}
-        if 'coolify.name' not in labels:
-            continue  # Not a Coolify workload; the Mac reads containers elsewhere.
-        container_name = (entry.get('Name') or '').lstrip('/')
-        project = labels.get('coolify.projectName') or ''
-        resource = labels.get('coolify.resourceName') or labels.get('coolify.serviceName') or ''
-        name = ' / '.join(part for part in (project, resource) if part) or labels['coolify.name']
-        state = (entry.get('State') or {})
-        status = state.get('Status') or 'unknown'
-        health = (state.get('Health') or {}).get('Status')
-        if status == 'running':
-            status = 'unhealthy' if health == 'unhealthy' else 'running'
-        usage = stats.get(container_name, [])
-        cpu = None
-        if usage:
-            try:
-                cpu = float(str(usage[0]).replace('%', '').strip())
-            except (IndexError, ValueError):
-                cpu = None
-        memory = None
-        if len(usage) > 1:
-            memory = _parse_bytes(str(usage[1]).split('/')[0])
-        rows.append(dict(
-            uuid=labels.get('coolify.applicationUuid') or labels.get('coolify.uuid') or labels['coolify.name'],
-            name=name,
-            container=container_name,
-            type=labels.get('coolify.type') or 'standalone',
-            status=status,
-            cpu_percent=cpu,
-            memory_bytes=memory,
-            image=(entry.get('Config') or {}).get('Image') or '',
-            started_at=state.get('StartedAt') or '',
-        ))
-    rows.sort(key=lambda row: (row['type'], row['name']))
-    return rows
+    for entry in inspected:
+        usage = stats.get(entry['container'], [])
+        cpu, memory = None, None
+        try:
+            if usage:
+                value = float(usage[0].rstrip('%'))
+                cpu = value if math.isfinite(value) and value >= 0 else None
+            if len(usage) == 2:
+                memory = _parse_bytes(usage[1].split('/')[0])
+        except ValueError:
+            pass
+        rows.append(dict(uuid=entry['id'], name=entry['display_name'], container=entry['container'],
+                         container_id=entry['id'], started_at=entry['started_at'],
+                         type=entry.get('type') or 'standalone', status=entry.get('status') or 'unknown',
+                         cpu_percent=cpu, memory_bytes=memory, allowed_actions=entry['allowed_actions'],
+                         protection_reason=entry['protection_reason']))
+    return sorted(rows, key=lambda row: (row['type'], row['name']))
 
 
-def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount, containers=None, processes=None, coolify=None, collect_live=False):
+def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount, containers=None, processes=None, coolify=None, collect_live=False, pressure=None):
     result = dict(snapshot)
     devices = dict(snapshot.get('devices', {}))
     if extra_volume and ismount_func(str(extra_volume)):
@@ -511,15 +531,19 @@ def supplement(snapshot, home, measure=directory_bytes, inventory=None, services
         # The CPU tick window sleeps and the docker reads wait on the daemon;
         # neither needs the other, so they overlap and a slow daemon no longer
         # adds its time on top of the tick window.  Each keeps its own timeouts.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             processes_future = pool.submit(top_processes if processes is None else processes)
             coolify_future = pool.submit(coolify_resources if coolify is None else coolify)
+            pressure_future = pool.submit(memory_pressure if pressure is None else pressure)
+            result['memory_pressure'] = pressure_future.result()
             result['processes'] = processes_future.result()
             result['coolify'] = coolify_future.result()
     elif processes is not None:
         result['processes'] = processes()
     elif coolify is not None:
         result['coolify'] = coolify()
+    if not collect_live and pressure is not None:
+        result['memory_pressure'] = pressure()
     return result
 
 
