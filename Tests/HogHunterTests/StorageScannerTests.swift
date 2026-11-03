@@ -29,6 +29,77 @@ final class StorageScannerTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempHome)
     }
 
+    private final class ProbeFileManager: FileManager, @unchecked Sendable {
+        var probes: [String] = []
+        override func fileExists(atPath path: String, isDirectory: UnsafeMutablePointer<ObjCBool>?) -> Bool {
+            probes.append(path)
+            return super.fileExists(atPath: path, isDirectory: isDirectory)
+        }
+    }
+
+    func testRepeatedAutomaticScanRejectsProtectedRootAliasAndRetainsLastCompleteSize() throws {
+        let local = tempHome.appendingPathComponent("local")
+        try FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
+        try writeBlob(at: local.appendingPathComponent("data"), bytes: 4096)
+        let alias = tempHome.appendingPathComponent("alias")
+        let blocked = try XCTUnwrap(DirectorySizeWalker.canonicalPath(tempHome.path)) + "/protected"
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: local)
+        let manager = ProbeFileManager()
+        let scanner = StorageScanner(fileManager: manager, mountPaths: [blocked])
+        let complete = scanner.directoryBytes(at: alias)
+        XCTAssertGreaterThan(complete.bytes, 0)
+        XCTAssertFalse(complete.approximate)
+        try FileManager.default.removeItem(at: alias)
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: blocked + "/absent")
+        manager.probes.removeAll()
+        for _ in 0..<4 {
+            let unavailable = scanner.directoryBytes(at: alias)
+            XCTAssertEqual(unavailable.bytes, complete.bytes)
+            XCTAssertTrue(unavailable.approximate)
+            XCTAssertTrue(scanner.appURLs(under: alias).isEmpty)
+            XCTAssertNil(scanner.readInfo(at: alias).bundleId)
+            XCTAssertEqual(scanner.fileOrZeroBytes(at: alias.appendingPathComponent("settings.plist")).bytes, 0)
+        }
+        XCTAssertTrue(manager.probes.isEmpty, "Preflight must reject the target before FileManager probes it")
+        XCTAssertGreaterThan(scanner.directoryBytes(at: local).bytes, 0, "Local scans remain available")
+    }
+
+    func testPermissionFailureDuringEnumerationRetainsLastCompleteSize() throws {
+        let local = tempHome.appendingPathComponent("local")
+        let empty = tempHome.appendingPathComponent("empty")
+        for url in [local, empty] { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
+        try writeBlob(at: local.appendingPathComponent("data"), bytes: 4096)
+        let manager = ProbeFileManager()
+        var denied = false
+        let scanner = StorageScanner(fileManager: manager, enumeratorProvider: { url, keys, options, handler in
+            if denied {
+                _ = handler?(url, NSError(domain: NSPOSIXErrorDomain, code: 1))
+                return manager.enumerator(at: empty, includingPropertiesForKeys: keys, options: options, errorHandler: handler)
+            }
+            return manager.enumerator(at: url, includingPropertiesForKeys: keys, options: options, errorHandler: handler)
+        })
+        let complete = scanner.directoryBytes(at: local)
+        XCTAssertGreaterThan(complete.bytes, 0)
+        denied = true
+        for _ in 0..<3 {
+            let result = scanner.directoryBytes(at: local)
+            XCTAssertEqual(result.bytes, complete.bytes)
+            XCTAssertTrue(result.approximate)
+        }
+    }
+
+    func testAutomaticDirectoryScanDoesNotFollowDescendantExternalSymlink() throws {
+        let dir = tempHome.appendingPathComponent("local")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try writeBlob(at: dir.appendingPathComponent("data"), bytes: 4096)
+        let blocked = try XCTUnwrap(DirectorySizeWalker.canonicalPath(tempHome.path)) + "/protected"
+        try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("external").path, withDestinationPath: blocked + "/absent")
+        let scanner = StorageScanner(mountPaths: [blocked])
+        let result = scanner.directoryBytes(at: dir)
+        XCTAssertGreaterThan(result.bytes, 0)
+        XCTAssertFalse(result.approximate, "A child symlink is a leaf, not a reason to traverse or discard local data")
+    }
+
     // MARK: - AppInfo parsing
 
     func testReadInfoPicksBundleIdDisplayNameAndGroupContainers() throws {

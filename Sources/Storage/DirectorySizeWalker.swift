@@ -198,6 +198,11 @@ final class DirectorySizeWalker {
         resolvePath(path, allowsPath: { _ in true }, willReadMetadata: { _ in })
     }
 
+    /// Shared non-interactive preflight for background inventory readers.
+    static func automaticCanonicalPath(_ path: String, mountPaths: [String]) -> String? {
+        resolvePath(path, allowsPath: automaticAccessPolicy(mountPaths: mountPaths), willReadMetadata: { _ in })
+    }
+
     private func canonicalPath(_ path: String) -> String? {
         let result = Self.resolvePath(path, allowsPath: { [self] candidate in
             guard allowsPath(candidate) else {
