@@ -61,10 +61,12 @@ struct HogHunterPanel: View {
     let isQuickView: Bool
 
     init(isQuickView: Bool = false, initialTab: PanelTab = .overview,
+         initialStorageSubTab: StorageSubTab = .apps,
          mountedDrives: MountedDriveStore? = nil) {
         self.isQuickView = isQuickView
         _mountedDrives = ObservedObject(wrappedValue: mountedDrives ?? DashboardMountedDrives.shared)
         _selectedTab = State(initialValue: initialTab)
+        _storageSubTab = State(initialValue: initialStorageSubTab)
         _hasVisitedStorage = State(initialValue: initialTab == .storage)
         _hasVisitedNetwork = State(initialValue: initialTab == .network)
     }
@@ -103,9 +105,15 @@ struct HogHunterPanel: View {
                     Text(pageTitle)
                         .font(.system(size: 20, weight: .semibold))
                     if store.isStale {
-                        Text("Sampling behind")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.orange)
+                        Button {
+                            _ = store.tick()
+                        } label: {
+                            Text("Sampling behind")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Last sample \(max(0, Int(Date().timeIntervalSince(store.pulse.sampledAt))))s ago.\u{00A0} Activate to sample now.")
                     }
                     Spacer(minLength: 8)
                 }
@@ -349,6 +357,23 @@ struct HogHunterPanel: View {
 
     private var activityContent: some View {
         VStack(alignment: .leading, spacing: 9) {
+            // The quick view's card caps at three.  Every flagged issue is
+            // listed here, with the same per-issue actions, so View-all lands
+            // on the whole set rather than on a tab that hides them.
+            if !store.flaggedIssues.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Flagged Issues")
+                        .font(.system(size: 11, weight: .semibold))
+                    ForEach(store.flaggedIssues) { issue in
+                        flaggedIssueRow(issue)
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+            }
             HStack(spacing: 10) {
                 cpuHistoryCard.frame(width: 170)
                 Meter(title: "Memory", value: store.pulse.memoryPercent,
@@ -470,7 +495,7 @@ struct HogHunterPanel: View {
                 Spacer()
 
                 Button("Clean…") {
-                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                    DetachedWindowManager.shared.openCleaner(store: store)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -539,6 +564,14 @@ struct HogHunterPanel: View {
                         ForEach(Array(issues.prefix(3))) { issue in
                             flaggedIssueRow(issue)
                         }
+                    }
+                    if issues.count > 3 {
+                        Button("View all \(issues.count) alerts") {
+                            DetachedWindowManager.shared.openActivity(store: store)
+                        }
+                        .buttonStyle(.link)
+                        .font(.system(size: 9.5))
+                        .padding(.top, 2)
                     }
                 }
                 .padding(8)
@@ -740,12 +773,13 @@ struct HogHunterPanel: View {
                     Spacer()
                     Text(store.memorySizeCaption)
                         .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                    Text(store.pulse.pressure.label)
+                    Text(store.pulse.pressure == .unknown ? "unavailable" : store.pulse.pressure.label)
                         .font(.system(size: 8, weight: .bold))
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(Severity.forPressure(store.pulse.pressure).color.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
                         .foregroundStyle(Severity.forPressure(store.pulse.pressure).color)
+                        .help(store.pulse.pressure == .unknown ? "No memory-pressure reading right now." : "How hard the Mac is working to find free memory.")
                 }
 
                 GeometryReader { geo in
@@ -1295,9 +1329,9 @@ struct HogHunterPanel: View {
             ? "1 process is included."
             : "\(count) processes are included."
         let forced = count == 1
-            ? "Force Quit ends 1 process immediately.  Unsaved work is lost."
-            : "Force Quit ends \(count) processes immediately.  Unsaved work is lost."
-        return "Asks \(row.name) to quit.  It may show a save prompt or refuse.  \(included)"
+            ? "Force Quit ends 1 process immediately.\u{00A0} Unsaved work is lost."
+            : "Force Quit ends \(count) processes immediately.\u{00A0} Unsaved work is lost."
+        return "Asks \(row.name) to quit.\u{00A0} It may show a save prompt or refuse.\u{00A0} \(included)"
             + "\n\n" + forced
     }
 
@@ -1437,7 +1471,7 @@ struct HogHunterPanel: View {
                 text: text,
                 severity: severity,
                 help: isCharging ? "Charging (\(pct)%)." : isBattery
-                    ? "Running on battery (\(pct)%).  High CPU processes increase discharge rate."
+                    ? "Running on battery (\(pct)%).\u{00A0} High CPU processes increase discharge rate."
                     : "Battery at \(pct)%."
             ))
         }
@@ -1530,7 +1564,7 @@ struct HogHunterPanel: View {
     private var controls: some View {
         HStack(alignment: .bottom, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("TIME")
+                Text("Time")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
                 SegmentedToggleGroup(
@@ -1541,7 +1575,7 @@ struct HogHunterPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("SHOW")
+                Text("Show")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
                 SegmentedToggleGroup(
@@ -1552,7 +1586,7 @@ struct HogHunterPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("SORT")
+                Text("Sort")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
                 SegmentedToggleGroup(
@@ -1621,7 +1655,7 @@ struct HogHunterPanel: View {
     private var emptyMessage: String {
         if !store.hasBaseline { return "Measuring…" }
         if store.window == .now { return "Nothing heavy right now." }
-        return "No history yet.  Leave Hog Hunter open to build it."
+        return "No history yet.\u{00A0} Leave Hog Hunter open to build it."
     }
 
     // MARK: - Footer
@@ -1634,7 +1668,7 @@ struct HogHunterPanel: View {
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            Text("CPU % relative to all \(max(1, store.pulse.coreCount)) cores")
+            Text(store.scaleLegend)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
         }

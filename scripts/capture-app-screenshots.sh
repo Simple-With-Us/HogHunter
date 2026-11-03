@@ -41,7 +41,9 @@ from ios_screenshot_checks import (  # noqa: E402
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
 
-BOOT_TIMEOUT_S = 180
+# First boots on hosted runners take minutes (dyld caches on a cold disk);
+# 180s starved the 13-inch iPad even though its device type was valid.
+BOOT_TIMEOUT_S = 420
 
 
 def boot_simulator(udid):
@@ -173,7 +175,7 @@ FORMATS = {
     "iphone-6.9-6.7": ("iPhone_6.9_6.7_inch", ["iPhone 16 Pro Max", "iPhone 15 Pro Max", "iPhone 16 Plus", "iPhone 15 Plus", "iPhone 17 Pro Max", "iPhone 18 Pro Max"], "iPhone-16-Pro-Max"),
     "iphone-6.3-6.1": ("iPhone_6.3_6.1_inch", ["iPhone 16 Pro", "iPhone 16", "iPhone 15 Pro", "iPhone 15", "iPhone 14", "iPhone 17 Pro", "iPhone 18 Pro"], "iPhone-16-Pro"),
     "iphone-5.5-4.7": ("iPhone_5.5_4.7_inch", ["iPhone SE (3rd generation)", "iPhone 8 Plus", "iPhone SE"], "iPhone-SE-3rd-generation"),
-    "ipad-13":        ("iPad_13_inch",        ["iPad Pro 13-inch (M4)", "iPad Pro (12.9-inch) (6th generation)", "iPad Pro (12.9-inch)", "iPad Air 13-inch (M2)"], "iPad-Pro-13-inch-M4"),
+    "ipad-13":        ("iPad_13_inch",        ["iPad Pro 13-inch (M4)", "iPad Pro (12.9-inch) (6th generation)", "iPad Pro (12.9-inch)", "iPad Air 13-inch (M2)"], "iPad-Pro-13-inch-M4-16GB"),
     "ipad-11":        ("iPad_11_inch",        ["iPad Air 11-inch (M2)", "iPad Pro (11-inch) (4th generation)", "iPad (10th generation)", "iPad mini (6th generation)"], "iPad-Air-11-inch-M2")
 }
 
@@ -188,6 +190,11 @@ else:
     print("  OK widget extension embedded: HogHunterWidgets.appex")
 
 try:
+    # A simulator left Booting by an earlier cancelled run never finishes;
+    # the first format then burns its whole boot wait on a wedged device and
+    # the run exceeds the supervisor deadline after the required screens are
+    # already saved.  Start from every device shut down so each boot is fresh.
+    subprocess.run(["xcrun", "simctl", "shutdown", "all"], capture_output=True)
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
     devices_data = json.loads(proc.stdout).get("devices", {})
 except Exception as e:
@@ -235,6 +242,42 @@ print(f"Selected iOS runtime: {ios_runtimes[-1][2] if ios_runtimes else 'none'} 
 
 print(f"Available simulators detected: {len(available_devices)}")
 
+# Device type identifiers change across Xcode (the M4 iPad gained -16GB/-8GB
+# suffixes, so a hardcoded fallback rots).  Fetch the real list once and
+# prefer the configured fallback, then fuzzy matches, when creating.
+devtype_idents = []
+try:
+    tproc = subprocess.run(["xcrun", "simctl", "list", "-j", "devicetypes"], capture_output=True, text=True)
+    for t in json.loads(tproc.stdout).get("devicetypes", []):
+        ident = t.get("identifier", "")
+        if ident.startswith("com.apple.CoreSimulator.SimDeviceType."):
+            devtype_idents.append((ident.split(".")[-1], t.get("name", "")))
+except Exception as e:
+    print(f"  WARN: could not list device types: {e}")
+
+def creation_idents(configured, family, hint_words):
+    # Configured fallback first, then known device types of the same family
+    # whose identifier or display name contains a hint word, in hint order.
+    # Hint-major ordering keeps the preference (a 13-inch iPad beats a
+    # 12.9-inch one) regardless of simctl's listing order.
+    cands = [configured] if configured else []
+    for h in hint_words:
+        for ident, name in devtype_idents:
+            low = (ident + " " + name).lower()
+            if family in low and h in low and ident not in cands:
+                cands.append(ident)
+    return cands
+
+# Per-format hints for the fuzzy step, most-preferred first.  The 13-inch
+# iPad takes any 13-inch type, then a 12.9-inch one, rather than failing.
+FALLBACK_HINTS = {
+    "iphone-6.9-6.7": ["pro-max", "plus"],
+    "iphone-6.3-6.1": ["pro", "iphone-1"],
+    "iphone-5.5-4.7": ["se", "8-plus"],
+    "ipad-13": ["13-inch", "12-9-inch"],
+    "ipad-11": ["11-inch", "10th", "mini"],
+}
+
 for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
     udid = None
     chosen_device = None
@@ -255,17 +298,27 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
                 chosen_device = name_or_type
                 break
 
-    # If still not found and runtime exists, create a temporary simulator
+    # If still not found and runtime exists, create a temporary simulator.
+    # The configured type is tried first, then live device types matching
+    # the format's hints: hardcoded identifiers rot across Xcode (the M4
+    # iPad gained memory suffixes), so a single blind attempt fails the
+    # whole lane on a newer runner.
     if not udid and latest_ios_runtime and fallback_type:
+        family = "iphone" if fmt_key.startswith("iphone") else "ipad"
+        tried = []
         try:
-            full_dev_type = f"com.apple.CoreSimulator.SimDeviceType.{fallback_type}"
-            c_proc = subprocess.run(["xcrun", "simctl", "create", f"temp-{out_name}", full_dev_type, latest_ios_runtime], capture_output=True, text=True)
-            if c_proc.returncode == 0:
-                created_udid = c_proc.stdout.strip()
-                udid = created_udid
-                chosen_device = f"Created {fallback_type}"
-            else:
-                print(f"[{fmt_key}] ERROR: could not create simulator: {c_proc.stderr.strip()}")
+            for cand_ident in creation_idents(fallback_type, family, FALLBACK_HINTS.get(fmt_key, [])):
+                full_dev_type = f"com.apple.CoreSimulator.SimDeviceType.{cand_ident}"
+                c_proc = subprocess.run(["xcrun", "simctl", "create", f"temp-{out_name}", full_dev_type, latest_ios_runtime], capture_output=True, text=True)
+                tried.append(cand_ident)
+                if c_proc.returncode == 0:
+                    created_udid = c_proc.stdout.strip()
+                    udid = created_udid
+                    chosen_device = f"Created {cand_ident}"
+                    break
+                print(f"[{fmt_key}] WARN: create with {cand_ident} failed: {c_proc.stderr.strip()}")
+            if not udid:
+                print(f"[{fmt_key}] ERROR: could not create simulator (tried: {', '.join(tried) or 'none'})")
         except Exception as e:
             print(f"[{fmt_key}] ERROR: could not create simulator: {e}")
 
@@ -387,7 +440,9 @@ try:
     for w in windows:
         owner = w.get("kCGWindowOwnerName", "")
         # The window may be at normal level (layer 0) or elevated above the menu bar panel (layer 102).
-        if owner in ("Hog Hunter", "HogHunter") and 0 <= w.get("kCGWindowLayer", -1) <= 200:
+        # The Debug build shows its display name ("Hog Hunter Dev"); match it
+        # too, or the lane times out staring at the right window.
+        if (owner in ("Hog Hunter", "HogHunter") or owner.startswith("Hog Hunter")) and 0 <= w.get("kCGWindowLayer", -1) <= 200:
             b = w.get("kCGWindowBounds", {})
             # The Settings window is presented at 560x480 content (plus title bar).
             # A menu-bar-width strip (the 440x38 title-bar-only window from run
@@ -424,7 +479,7 @@ PYDUMP
       failures=$((failures + 1))
     else
       echo "  Capturing HogHunter window $win_id"
-      osascript -e 'tell application "Hog Hunter" to activate' 2>/dev/null || osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
+      osascript -e 'tell application "Hog Hunter Dev" to activate' 2>/dev/null || osascript -e 'tell application "Hog Hunter" to activate' 2>/dev/null || osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
       sleep 1
       screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
       if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then

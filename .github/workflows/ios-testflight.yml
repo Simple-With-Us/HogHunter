@@ -394,8 +394,11 @@ jobs:
       - name: Install xcodegen
         if: steps.gate.outputs.should_ship == '1'
         run: |
-          if ! command -v xcodegen >/dev/null 2>&1; then
-            NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          if ! command -v xcodegen >/dev/null 2>&1 || [[ "$(xcodegen --version 2>/dev/null)" != *2.46.0* ]]; then
+            curl -sSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+            ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
+            sudo mkdir -p /usr/local/bin
+            sudo mv -f /tmp/xcodegen/xcodegen /usr/local/bin/xcodegen
           fi
           xcodegen --version
 

@@ -217,7 +217,7 @@ struct CompanionRootView: View {
         case .offline:
             StatusPage(
                 title: "Mac Offline or Not Found",
-                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.  Off Wi-Fi or remote?  Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
+                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.\u{00A0} Off Wi-Fi or remote?\u{00A0} Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -230,7 +230,7 @@ struct CompanionRootView: View {
         case .looking, .code:
             StatusPage(
                 title: "Looking for Your Mac",
-                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.  Off Wi-Fi?  Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
+                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.\u{00A0} Both devices need the same Wi-Fi, or connect via Tailscale.\u{00A0} Off Wi-Fi?\u{00A0} Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -291,7 +291,7 @@ private struct StatusPage: View {
                 VStack(spacing: 6) {
                     Label("This iPhone is not on Wi-Fi", systemImage: "wifi.slash")
                         .font(.subheadline.weight(.semibold))
-                    Text("Do you use Tailscale or another route to your Mac?  Connect by address on port \(CompanionModel.defaultPort).")
+                    Text("Do you use Tailscale or another route to your Mac?\u{00A0} Connect by address on port \(CompanionModel.defaultPort).")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -407,7 +407,7 @@ private struct CodeEntryView: View {
                     }
                     .disabled(model.isWaitingForApproval || model.isSubmittingCode)
                 } footer: {
-                    Text("No code needed.  Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.")
+                    Text("No code needed.\u{00A0} Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.\u{00A0} Quit, tame, and clean work only on the same network or over Tailscale.")
                 }
                 if let codeError = model.codeError {
                     Section {
@@ -483,11 +483,12 @@ struct DashboardView: View {
     private func consumeCleanRequest() {
         guard model.takeCleanRequest() else { return }
         // The link never calls triggerRemoteClean.  Offer the destructive
-        // confirmation only when the Mac has opted in.
-        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) {
+        // confirmation only when the Mac has opted in and this link is one
+        // the Mac takes controls on.
+        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) && model.controlsReachable {
             showCleanConfirm = true
         } else {
-            model.controlError = CleanLinkPolicy.cleanOffNote
+            model.controlError = model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote)
         }
     }
 
@@ -503,8 +504,10 @@ struct DashboardView: View {
         showTameConfirm = true
     }
 
-    /// Exclusion and view changes exist only when the Mac owner turned them on.
-    private var canEdit: Bool { snapshot.remoteEditAllowed == true }
+    /// Exclusion and view changes exist only when the Mac owner turned them on
+    /// and this link is one the Mac takes controls on.  Anything else answers
+    /// 403, so the phone does not offer buttons that cannot work.
+    private var canEdit: Bool { snapshot.remoteEditAllowed == true && model.controlsReachable }
 
     /// The CPU rows' scale as the Mac reports it ("Per Core" or "Share of Machine").
     private var isMachineScale: Bool {
@@ -655,13 +658,25 @@ struct DashboardView: View {
                     Button("Exit Demo") {
                         model.exitDemoMode()
                     }
-                    .font(.caption2.weight(.medium))
+                    .font(.caption.weight(.medium))
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .frame(minHeight: 44)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
                 .background(Color.blue.opacity(0.12))
+            }
+            if model.snapshotVersionMismatch {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                    Text("This Mac and this app disagree about the snapshot version.\u{00A0} Update Hog Hunter on both to see everything.")
+                        .font(.caption.weight(.medium))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.12))
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -701,9 +716,10 @@ struct DashboardView: View {
         ) {
             Button("Run Safe Clean", role: .destructive) {
                 // The only place a Clean deep link can reach the Mac, and
-                // only after the Mac opt-in.  hoghunter://clean stops here.
-                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) else {
-                    model.controlError = CleanLinkPolicy.cleanOffNote
+                // only after the Mac opt-in on a link it takes controls on.
+                // hoghunter://clean stops here.
+                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) && model.controlsReachable else {
+                    model.controlError = model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote)
                     return
                 }
                 Task { await model.triggerRemoteClean() }
@@ -729,7 +745,7 @@ struct DashboardView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(isForceQuit
-                ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).  Any unsaved work will be lost."
+                ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).\u{00A0} Any unsaved work will be lost."
                 : "Quitting \(pendingQuitRow?.name ?? "this app") will ask it to close gracefully on \(snapshot.hostName).")
         }
         .confirmationDialog(
@@ -1013,7 +1029,7 @@ struct DashboardView: View {
             .padding(.vertical, 2)
             .disabled(!canEdit)
             if !canEdit {
-                Text(Self.editOffNote)
+                Text(model.controlOffNote(optedIn: snapshot.remoteEditAllowed == true, optInNote: Self.editOffNote))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1024,10 +1040,11 @@ struct DashboardView: View {
                 Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
                     .foregroundStyle(.secondary)
             } else {
-                // Quit and Tame exist only when the Mac owner turned them on.
-                // Without this the swipe and long-press actions showed on
-                // every row and answered 403 when used.
-                let controlsOn = snapshot.remoteQuitAllowed == true
+                // Quit and Tame exist only when the Mac owner turned them on and
+                // this link is one the Mac takes controls on.  Without this
+                // the swipe and long-press actions showed on every row and
+                // answered 403 when used.
+                let controlsOn = snapshot.remoteQuitAllowed == true && model.controlsReachable
                 ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
                     let rank = index + 1
                     HStack(spacing: 10) {
@@ -1045,7 +1062,7 @@ struct DashboardView: View {
                             HStack(spacing: 4) {
                                 Text(row.name)
                                     .font(.body.weight(.medium))
-                                    .lineLimit(1)
+                                    .lineLimit(2)
                                 if model.samplingRowId == row.id {
                                     ProgressView()
                                         .controlSize(.mini)
@@ -1069,7 +1086,7 @@ struct DashboardView: View {
                             Text(row.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                                .lineLimit(2)
                         }
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 2) {
@@ -1121,8 +1138,7 @@ struct DashboardView: View {
                     }
                     .contextMenu {
                         if !controlsOn {
-                            Text("Quit and Tame are off for \(snapshot.hostName).")
-                            Text("Turn them on in Hog Hunter Settings > iPhone.")
+                            Text(model.controlOffNote(optedIn: snapshot.remoteQuitAllowed == true, optInNote: "Quit and Tame are off for \(snapshot.hostName).\u{00A0} Turn them on in Hog Hunter Settings > iPhone."))
                         }
                         if controlsOn, row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
@@ -1204,22 +1220,22 @@ struct DashboardView: View {
         }
 
         Section {
-            if snapshot.remoteQuitAllowed == true {
+            if snapshot.remoteQuitAllowed == true && model.controlsReachable {
                 if snapshot.rows.contains(where: { $0.canQuit }) {
                     Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press to quit, tame or sample it on \(snapshot.hostName).\u{00A0} You confirm each one.\u{00A0} System processes and tasks owned by other users are protected.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else if sortedRows.isEmpty {
-                    Text("Remote control is enabled on \(snapshot.hostName).  Waiting for active process telemetry.")
+                    Text("Remote control is enabled on \(snapshot.hostName).\u{00A0} Waiting for active process telemetry.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("Remote control is enabled on \(snapshot.hostName).  All visible processes are protected system tasks and cannot be quit or tamed.")
+                    Text("Remote control is enabled on \(snapshot.hostName).\u{00A0} All visible processes are protected system tasks and cannot be quit or tamed.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text("Quitting from iPhone is off.  Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
+                Text(model.controlOffNote(optedIn: snapshot.remoteQuitAllowed == true, optInNote: "Quitting from iPhone is off.\u{00A0} Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1330,7 +1346,7 @@ struct DashboardView: View {
                     .font(.caption)
                 }
             } footer: {
-                Text("Top apps on \(snapshot.hostName), sorted by \(appStorageSortOrder.rawValue.lowercased()).  Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).  Open the Storage pane on the Mac for the full list and cleanup.")
+                Text("Top apps on \(snapshot.hostName), sorted by \(appStorageSortOrder.rawValue.lowercased()).\u{00A0} Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).\u{00A0} Open the Storage pane on the Mac for the full list and cleanup.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1494,10 +1510,10 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
+                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true || !model.controlsReachable)
 
-                if snapshot.remoteCleanAllowed != true {
-                    Text(CleanLinkPolicy.cleanOffNote)
+                if snapshot.remoteCleanAllowed != true || !model.controlsReachable {
+                    Text(model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1628,7 +1644,7 @@ struct DashboardView: View {
                 .disabled(!canEdit)
 
                 if !canEdit {
-                    Text(Self.editOffNote)
+                    Text(model.controlOffNote(optedIn: snapshot.remoteEditAllowed == true, optInNote: Self.editOffNote))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -2053,7 +2069,7 @@ struct RemoteConnectSheet: View {
                 } header: {
                     Text("Mac Address")
                 } footer: {
-                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net on port \(CompanionModel.defaultPort)), or a Cloudflare Tunnel hostname over HTTPS on port 443.  Over Tailscale this iPhone can do everything the Mac allows it.  Over a Cloudflare Tunnel it shows the Mac's figures only: type the pairing code, because quitting, taming, cleaning, the Robotic Vacuum and settings changes need your local network or Tailscale.")
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net on port \(CompanionModel.defaultPort)), or a Cloudflare Tunnel hostname over HTTPS on port 443.\u{00A0} Over Tailscale this iPhone can do everything the Mac allows it.\u{00A0} Over a Cloudflare Tunnel it shows the Mac's figures only: type the pairing code, because quitting, taming, cleaning, the Robotic Vacuum and settings changes need your local network or Tailscale.")
                 }
 
                 Section {
@@ -2066,7 +2082,7 @@ struct RemoteConnectSheet: View {
                 } header: {
                     Text("Pairing Code")
                 } footer: {
-                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.  Or type the code from Hog Hunter Settings > iPhone.")
+                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.\u{00A0} Or type the code from Hog Hunter Settings > iPhone.")
                 }
 
                 if model.isWaitingForApproval {

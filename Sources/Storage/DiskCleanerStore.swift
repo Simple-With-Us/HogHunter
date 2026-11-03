@@ -402,7 +402,7 @@ final class DiskCleanerStore: ObservableObject {
         reloadTempFilePolicy()
         guard let report else {
             if policyChanged && !isCleaning {
-                state = .failed("Temp file safety policy changed.  Scan again to clean with the new setting.")
+                state = .failed("Temp file safety policy changed.\u{00A0} Scan again to clean with the new setting.")
             }
             return
         }

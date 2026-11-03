@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check manual release scripts without signing credentials
         run: |
@@ -52,18 +52,18 @@ jobs:
 
   test:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
       TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # macOS exposes waitid/WNOWAIT in Python 3.13 and newer.  Keep the
       # supervisor and capture dependencies on the same explicit interpreter.
       - name: Set Up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.15'
 
@@ -72,7 +72,32 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install xcodegen
+          curl -sSL --fail --retry 3 --retry-all-errors -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          test -s /tmp/xcodegen.zip
+          rm -rf /tmp/xcodegen && ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
+          # The zip wraps the binary AND its SettingPresets
+          # (xcodegen/bin/xcodegen plus xcodegen/share/xcodegen).  The
+          # binary alone generates a preset-less project -- xcodebuild
+          # then resolves an empty PRODUCT_NAME and drops -enable-testing
+          # ("module name '' is not a valid identifier").  Install both,
+          # like the bundled install.sh does, tolerating layout drift.
+          BIN="$(find /tmp/xcodegen -path '*/bin/xcodegen' -type f | head -1)"
+          [ -n "$BIN" ] || BIN="$(find /tmp/xcodegen -maxdepth 2 -name xcodegen -type f | head -1)"
+          test -n "$BIN" && test -x "$BIN"
+          sudo mkdir -p /usr/local/bin
+          sudo rm -rf /usr/local/bin/xcodegen
+          sudo cp "$BIN" /usr/local/bin/xcodegen
+          SHARE="$(find /tmp/xcodegen -type d -path '*share/xcodegen' | head -1)"
+          if [ -n "$SHARE" ]; then
+            sudo rm -rf /usr/local/share/xcodegen
+            sudo mkdir -p /usr/local/share
+            sudo cp -r "$SHARE" /usr/local/share/
+          fi
+          # The runner shell does not always carry /usr/local/bin on PATH
+          # (non-login shell, image-dependent), so pin it for this step and
+          # every later one via GITHUB_PATH, and check by absolute path.
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          /usr/local/bin/xcodegen --version
           python3 -m pip install --break-system-packages pyobjc-framework-Quartz || python3 -m pip install pyobjc-framework-Quartz
 
       - name: Generate project
@@ -97,7 +122,7 @@ jobs:
       - name: Headless UI smoke test
         run: |
           set -o pipefail
-          xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build-ui \
+          xcodebuild -scheme HogHunter -configuration Release -destination 'platform=macOS' -derivedDataPath build-ui \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           # Drives the real views and the real NSApp window list with nobody
           # logged in, then exits non-zero on the first failed check.  This is
@@ -107,11 +132,14 @@ jobs:
 
       - name: Capture app screenshots
         if: ${{ !cancelled() }}
-        continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 35
         # The supervisor finishes when capture exits and kills its whole process
         # group, including orphan helpers that could retain runner output handles.
-        run: python3 scripts/bounded-process.py --timeout 480 --grace 2 -- bash scripts/capture-app-screenshots.sh
+        # Budget: the first iOS format alone takes ~6 min on these runners
+        # (simulator boot dominates), and five formats plus the macOS phase
+        # need ~25 min.  The old 480s cap always fired mid-way through the
+        # second format, after the required screens were already saved.
+        run: python3 scripts/bounded-process.py --timeout 1980 --grace 2 -- bash scripts/capture-app-screenshots.sh
 
       - name: Upload screenshots artifact
         timeout-minutes: 3

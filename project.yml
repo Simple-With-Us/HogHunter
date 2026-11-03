@@ -107,6 +107,9 @@ targets:
       # Foundation-only, so the Mac test bundle can compile the link rules
       # without the iOS app.
       - path: ios/Sources/CompanionDeepLink.swift
+      # Security-only token store, same reason: the phone-token round trip is
+      # worth a maintained test even though the phone ships no unit harness.
+      - path: ios/Sources/CompanionKeychain.swift
     dependencies:
       - target: HogHunter
     settings:

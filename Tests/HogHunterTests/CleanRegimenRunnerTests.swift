@@ -164,22 +164,126 @@ final class CleanRegimenRunnerTests: XCTestCase {
     }
 
     func testARunThatFinishedStartsTheIntervalClock() async {
-        // The counterpart: a run that decided (here, "no rules enabled") is a
-        // run, and the next one is a full interval out.
+        // The counterpart to the runs that stepped aside: a run that cleaned
+        // is a run, and the next one is a full interval out.
         let key = "hoghunter.cleaner.regimen.lastRunAt"
         let now = Date()
         let defaults = makeDefaults()
-        let regimen = makeRegimen(enabled: true, intervalHours: 4)
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"])
+        regimen.createSnapshotBeforeClean = false
 
-        let runner = makeRunner(now: now, defaults: defaults)
+        let item = CleanItem(
+            category: .userCaches,
+            title: "TestCache",
+            subtitle: "~/Library/Caches/TestCache",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestCache").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .userCaches,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report },
+            cleanProvider: { _, _, _ in
+                CleanResult(bytesReclaimed: 1_000, itemsRemoved: 1, errors: [], cleanedAt: now)
+            }
+        )
         await runner.runNow(regimen: regimen)?.value
 
-        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertNil(runner.lastRun?.skippedReason)
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 1)
         XCTAssertEqual((defaults.object(forKey: key) as? Date)?.timeIntervalSince1970 ?? 0,
                        now.timeIntervalSince1970, accuracy: 1)
         XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
                        now.addingTimeInterval(4 * 3600).timeIntervalSince1970,
                        accuracy: 1)
+    }
+
+    func testNoOpRunsDoNotStartTheIntervalClock() async {
+        // A run that cleaned nothing because there was nothing to do -- no
+        // enabled rules, or nothing matching them -- did not happen.
+        // Recording it would push a 24-hour regimen a whole day out for a
+        // no-op, so the stored clock stays where it was and the next check
+        // retries instead of waiting a full interval.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let lastRun = now.addingTimeInterval(-5 * 3600)
+        defaults.set(lastRun, forKey: key)
+
+        // No enabled rules: returns before the scan.
+        let emptyRunner = makeRunner(now: now, defaults: defaults)
+        await emptyRunner.runNow(regimen: makeRegimen(enabled: true, intervalHours: 4))?.value
+
+        XCTAssertEqual(emptyRunner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(defaults.object(forKey: key) as? Date, lastRun,
+                       "an empty-rules run did not happen")
+        XCTAssertTrue(emptyRunner.isDue(
+            regimen: makeRegimen(enabled: true, intervalHours: 4),
+            lastRunAt: defaults.object(forKey: key) as? Date),
+                      "the run is still due, so the next check retries")
+        XCTAssertEqual(emptyRunner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(15 * 60).timeIntervalSince1970,
+                       accuracy: 1)
+
+        // Rules enabled but nothing matched: the scan ran, nothing applied.
+        let item = CleanItem(
+            category: .logsAndDiagnostics,
+            title: "TestLog",
+            subtitle: "~/Library/Logs/TestLog",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestLog").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .logsAndDiagnostics,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+        let mismatchRunner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report }
+        )
+        await mismatchRunner.runNow(
+            regimen: makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"]))?.value
+
+        XCTAssertEqual(mismatchRunner.lastRun?.skippedReason, "Nothing matched the enabled rules.")
+        XCTAssertEqual(defaults.object(forKey: key) as? Date, lastRun,
+                       "a no-match run did not happen")
+        XCTAssertTrue(mismatchRunner.isDue(
+            regimen: makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"]),
+            lastRunAt: defaults.object(forKey: key) as? Date),
+                      "the run is still due, so the next check retries")
     }
 
     func testACancelledRunDoesNotStartTheIntervalClock() async {

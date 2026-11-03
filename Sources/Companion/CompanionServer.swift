@@ -14,6 +14,12 @@ final class CompanionServer: @unchecked Sendable {
     private var targets: [String: CompanionTarget] = [:]
     /// Wrong-credential counts per client address.  Touched only on `queue`.
     private var throttle = CompanionAuthThrottle()
+    /// Last successful enroll per client address.  Touched only on `queue`.
+    /// A loop handing the code back must not mint phones fast enough to push
+    /// the owner's phones past the 32-device LRU.  A person pairs once; a
+    /// repeat within the minute waits.
+    private var lastEnrollSuccess: [String: Date] = [:]
+    private static let enrollSuccessCooldown: TimeInterval = 60
     private var token = ""
     private var onStatus: (@Sendable (String) -> Void)?
 
@@ -68,12 +74,12 @@ final class CompanionServer: @unchecked Sendable {
                                 self?.activePort = p
                             }
                             self?.onStatus?("Sharing on port \(self?.activePort ?? Self.defaultPort)")
-                        case .failed(let error):
+                        case .failed:
                             self?.listener?.cancel()
                             self?.listener = nil
-                            self?.onStatus?("Could not share.  \(error.localizedDescription)")
-                        case .waiting(let error):
-                            self?.onStatus?("Waiting to share.  \(error.localizedDescription)")
+                            self?.onStatus?("Could not share.\u{00A0} Check the port and try again.")
+                        case .waiting:
+                            self?.onStatus?("Waiting to share.\u{00A0} Retrying.")
                         default:
                             break
                         }
@@ -85,7 +91,7 @@ final class CompanionServer: @unchecked Sendable {
                 listener.start(queue: self.queue)
                 self.listener = listener
             } catch {
-                onStatus("Could not share.  \(error.localizedDescription)")
+                onStatus("Could not share.\u{00A0} Check the port and try again.")
             }
         }
     }
@@ -123,7 +129,11 @@ final class CompanionServer: @unchecked Sendable {
         let first = host.split(separator: ".").first.map(String.init) ?? host
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "Hog Hunter" : trimmed
-        return String(name.prefix(63))
+        var result = name
+        while result.utf8.count > 63 {
+            result = String(result.dropLast())
+        }
+        return result
     }
 
     /// How long a client has to send a whole request.  A reply that is held
@@ -222,6 +232,14 @@ final class CompanionServer: @unchecked Sendable {
 
     /// Pairing waits on a person, so it is answered off the synchronous
     /// router and never holds the queue that serves snapshots.
+    ///
+    /// Repeat requesters wait per address before they may prompt the Mac
+    /// again.  Trusted peers count per key only, never toward the global
+    /// cap, so one spammer cannot lock out the owner.
+    func pairThrottleWait(for peerKey: String, now: Date = Date()) -> Int? {
+        throttle.retryAfter(for: peerKey, now: now, appliesGlobal: false)
+    }
+
     private func handlePair(_ connection: NWConnection, deviceName: String, peer: CompanionPeer) {
         let send: @Sendable (Data) -> Void = { response in
             connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
@@ -230,6 +248,15 @@ final class CompanionServer: @unchecked Sendable {
         // offered only on the local network and Tailscale.
         guard peer.isTrusted else {
             send(CompanionHTTP.untrustedNetworkReply())
+            return
+        }
+        // Pairing prompts interrupt the person at the Mac, so repeat
+        // requesters are throttled per address like any other credential
+        // route.  Trusted peers count per key only, never toward the
+        // global cap, so one spammer cannot lock out the owner.
+        let now = Date()
+        if let wait = pairThrottleWait(for: peer.key, now: now) {
+            send(CompanionHTTP.throttledReply(retryAfter: wait))
             return
         }
         guard let ask = onRemotePair else {
@@ -242,6 +269,7 @@ final class CompanionServer: @unchecked Sendable {
             pairPending = false
         }
         guard !pairPending, Date().timeIntervalSince(lastPairPromptAt) >= 5.0 else {
+            throttle.recordFailure(peer: peer.key, now: now, countsTowardGlobal: false)
             send(CompanionHTTP.pairBusyResponse())
             return
         }
@@ -514,6 +542,12 @@ final class CompanionServer: @unchecked Sendable {
             return CompanionHTTP.enrollRejectedReply()
         }
         throttle.recordSuccess(peer: peer.key)
+        if let last = lastEnrollSuccess[peer.key], now.timeIntervalSince(last) < Self.enrollSuccessCooldown {
+            let wait = Int((Self.enrollSuccessCooldown - now.timeIntervalSince(last)).rounded(.up))
+            return CompanionHTTP.throttledReply(retryAfter: wait)
+        }
+        lastEnrollSuccess[peer.key] = now
+        lastEnrollSuccess = lastEnrollSuccess.filter { now.timeIntervalSince($0.value) < Self.enrollSuccessCooldown }
         let issued = devices.issue(name: deviceName, now: now)
         return CompanionHTTP.enrollResponse(token: issued.token, deviceId: issued.device.id)
     }

@@ -76,6 +76,10 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
 final class CompanionModel {
     private(set) var discovered: [DiscoveredMac] = []
     private(set) var snapshot: CompanionSnapshot?
+    /// True when the Mac's snapshot schema is newer or older than this build
+    /// understands.  The version rides every snapshot but nothing read it, so
+    /// a Mac ahead of the phone silently showed whatever decoded.
+    private(set) var snapshotVersionMismatch = false
     private(set) var phase: Phase = .looking
     private(set) var saved: SavedMac?
     var codeDraft = ""
@@ -97,6 +101,14 @@ final class CompanionModel {
     /// find the Mac and fetch a snapshot before the dashboard exists, so this
     /// is generous -- but short enough that a link is not replayed much later.
     static let cleanRequestLifetime = CleanRequest.lifetime
+
+    /// Records a fetched snapshot, flagging a schema this build does not
+    /// understand.  The banner, not a silent decode, answers a version the
+    /// phone has never seen.
+    private func adoptSnapshot(_ fetched: CompanionSnapshot) {
+        snapshot = fetched
+        snapshotVersionMismatch = (fetched.version != CompanionService.version)
+    }
 
     /// Record a `hoghunter://clean` link as asking for the confirmation now.
     func requestCleanDialog() {
@@ -244,12 +256,24 @@ final class CompanionModel {
             return
         }
         saved = loadSaved()
+        // A pre-Keychain blob keeps its token copy until a save strips it.
+        // Strip it now, so the secret lives in one place after one launch.
+        if let current = saved,
+           let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let blob = try? JSONDecoder().decode(SavedMac.self, from: data),
+           !blob.token.isEmpty,
+           CompanionKeychain.readToken(peerID: current.peerID) == current.token {
+            persistSaved()
+        }
         startBrowser()
         startPathMonitor()
         poll = Task { [weak self] in
+            // Jittered so a roomful of phones paired to one Mac do not poll
+            // in lockstep and hammer the same second.
             while !Task.isCancelled {
                 await self?.refresh()
-                try? await Task.sleep(for: .seconds(3))
+                let jitter = Double.random(in: 2.5...3.5)
+                try? await Task.sleep(for: .seconds(jitter))
             }
         }
     }
@@ -334,7 +358,7 @@ final class CompanionModel {
             let next = try await Self.fetch(endpoint: mac.endpoint, token: credential)
             saved = SavedMac(peerID: mac.id, name: mac.name, token: credential)
             persistSaved()
-            snapshot = next
+            adoptSnapshot(next)
             codeError = nil
             codeFailure = nil
             pairingDismissed = false
@@ -368,14 +392,14 @@ final class CompanionModel {
         case .unauthorized?:
             return "That code does not match this Mac."
         case .busy?:
-            return "The Mac is already showing a pairing request.  Answer it there, then try again."
+            return "The Mac is already showing a pairing request.\u{00A0} Answer it there, then try again."
         case .timedOut?:
-            return "The Mac did not answer in time.  Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
+            return "The Mac did not answer in time.\u{00A0} Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
         case .throttled?, .forbidden?, .rejected?, .tooOld?, .untrustedNetwork?:
             return describe(error)
         default:
             if let hint = transportHint(error) { return hint }
-            return "The Mac did not answer.  Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
+            return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
         }
     }
 
@@ -388,7 +412,7 @@ final class CompanionModel {
             return
         }
         guard let mac = discovered.first(where: { $0.id == peerID }) else {
-            codeError = "That Mac is no longer on this Wi-Fi.  Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
+            codeError = "That Mac is no longer on this Wi-Fi.\u{00A0} Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
             codeFailure = .other
             return
         }
@@ -401,7 +425,7 @@ final class CompanionModel {
             let next = try await Self.fetch(endpoint: mac.endpoint, token: token)
             saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
             persistSaved()
-            snapshot = next
+            adoptSnapshot(next)
             phase = .live
         } catch {
             codeError = Self.approvalMessage(for: error)
@@ -434,12 +458,12 @@ final class CompanionModel {
     private static func approvalMessage(for error: Error) -> String {
         switch error as? CompanionClientError {
         case .forbidden(let reason)?: return reason
-        case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
-        case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
+        case .busy?: return "The Mac is already showing a pairing request.\u{00A0} Answer it there, then try again."
+        case .timedOut?: return "No one answered on the Mac.\u{00A0} Try again, or type the code from Hog Hunter Settings."
         case .throttled?, .tooOld?, .rejected?, .untrustedNetwork?: return describe(error)
         default:
             if let hint = transportHint(error) { return hint }
-            return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
+            return "The Mac did not answer.\u{00A0} Check that Hog Hunter is open and Share With iPhone is on."
         }
     }
 
@@ -452,16 +476,16 @@ final class CompanionModel {
         case .posix(let code):
             switch code {
             case .ECONNREFUSED:
-                return "The Mac refused the connection.  Open Hog Hunter on it and turn on Share With iPhone in Settings."
+                return "The Mac refused the connection.\u{00A0} Open Hog Hunter on it and turn on Share With iPhone in Settings."
             case .ETIMEDOUT:
-                return "Nothing answered at that address.  Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
+                return "Nothing answered at that address.\u{00A0} Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
             case .EHOSTUNREACH, .EHOSTDOWN, .ENETUNREACH, .ENETDOWN:
-                return "That address cannot be reached from here.  If you connect over Tailscale, check it is connected on both devices."
+                return "That address cannot be reached from here.\u{00A0} If you connect over Tailscale, check it is connected on both devices."
             default:
                 return nil
             }
         case .dns:
-            return "That name did not resolve.  Check the spelling of the Tailscale name or domain."
+            return "That name did not resolve.\u{00A0} Check the spelling of the Tailscale name or domain."
         default:
             return nil
         }
@@ -479,6 +503,9 @@ final class CompanionModel {
 
     func forget() {
         resetCleaner()
+        if let peerID = saved?.peerID {
+            CompanionKeychain.deleteToken(peerID: peerID)
+        }
         saved = nil
         snapshot = nil
         codeDraft = ""
@@ -919,6 +946,22 @@ final class CompanionModel {
         return nil
     }
 
+    /// True when the active link is one the Mac takes controls on: the local
+    /// network or Tailscale.  Anything else answers 403, so the phone does
+    /// not offer buttons that cannot work.
+    var controlsReachable: Bool {
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return false }
+        return CompanionPeer.isTrustedEndpoint(endpoint)
+    }
+
+    /// Why a control button is hidden.  The network reason when the Mac opted
+    /// in but this link is not one it takes controls on, else the opt-in note.
+    static let controlNetworkNote = "Controls work only on your local network or over Tailscale.\u{00A0} Connect that way, then try again."
+
+    func controlOffNote(optedIn: Bool, optInNote: String) -> String {
+        optedIn ? Self.controlNetworkNote : optInNote
+    }
+
     private var remoteConnectTask: Task<Void, Never>?
 
     func startRemoteConnect() {
@@ -970,7 +1013,7 @@ final class CompanionModel {
         let rawDraft = remoteTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let typed = rawDraft.isEmpty ? "" : CompanionToken.normalizeCode(rawDraft)
         guard typed.isEmpty || typed.count == 8 else {
-            remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
+            remoteConnectError = "The Pairing Code is 8 characters.\u{00A0} Leave it blank to approve on the Mac instead."
             return
         }
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(resolvedPort)) else {
@@ -1009,7 +1052,7 @@ final class CompanionModel {
             persistSaved()
             pairingDismissed = false
             codeFailure = nil
-            snapshot = fetched
+            adoptSnapshot(fetched)
             phase = .live
             statusLine = "\(displayName) (Remote)"
             isRemoteSheetPresented = false
@@ -1023,7 +1066,7 @@ final class CompanionModel {
             if let hint = Self.transportHint(error) {
                 remoteConnectError = hint
             } else {
-                remoteConnectError = "Could not reach \(host) on port \(resolvedPort).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale or Cloudflare Tunnel is connected."
+                remoteConnectError = "Could not reach \(host) on port \(resolvedPort).\u{00A0} Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale or Cloudflare Tunnel is connected."
             }
         }
     }
@@ -1077,6 +1120,9 @@ final class CompanionModel {
     /// Counts the fetches the phone has made, so the newest snapshot is the
     /// one on screen and a slow older fetch cannot undo it.
     private var refreshGeneration: Int = 0
+    /// When the on-screen snapshot last refreshed.  A failing poll leaves
+    /// the old snapshot up; past 30s the status says Reconnecting instead.
+    private var lastSuccessfulRefresh = Date.distantPast
 
     func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
@@ -1100,7 +1146,8 @@ final class CompanionModel {
             guard generation == refreshGeneration else { return }
             pairingDismissed = false
             codeFailure = nil
-            snapshot = fetched
+            lastSuccessfulRefresh = Date()
+            adoptSnapshot(fetched)
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
             storeSnapshotForWidgets(fetched)
@@ -1125,10 +1172,15 @@ final class CompanionModel {
             if snapshot == nil {
                 phase = .offline
                 if let host = saved.remoteHost {
-                    statusLine = "The Mac at \(host) did not answer.  Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
+                    statusLine = "The Mac at \(host) did not answer.\u{00A0} Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
                 } else {
                     statusLine = "The Mac did not answer."
                 }
+            } else if Date().timeIntervalSince(lastSuccessfulRefresh) > 30 {
+                // Polls keep failing but an older snapshot is on screen: say
+                // so, or the phone presents stale readings as live ones.  The
+                // 30s grace covers transient Wi-Fi drops without flicker.
+                statusLine = "\(saved.name) · Reconnecting…"
             }
         }
     }
@@ -1223,9 +1275,14 @@ final class CompanionModel {
             return
         }
         // A deep link can reach this only after the person taps Run Safe
-        // Clean.  Refuse here too when the Mac has not opted in.
+        // Clean.  Refuse here too when the Mac has not opted in, or when this
+        // link is not one the Mac takes controls on.
         guard snapshot?.remoteCleanAllowed == true else {
             controlError = CleanLinkPolicy.cleanOffNote
+            return
+        }
+        guard controlsReachable else {
+            controlError = Self.controlNetworkNote
             return
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
@@ -1329,13 +1386,35 @@ final class CompanionModel {
         statusLine = "Can't see \(saved?.name ?? "your Mac") on this Wi-Fi."
     }
 
+    /// The pairing token lives in the Keychain under the Mac's peer ID; the
+    /// UserDefaults blob carries everything else.  A blob that still holds a
+    /// token is a pre-Keychain install: the token moves to the Keychain on
+    /// first read.  A blob with no token and nothing in the Keychain means
+    /// the Keychain did not survive (a restore to a new device drops
+    /// ThisDeviceOnly items), so the phone re-pairs instead of failing.
     private func loadSaved() -> SavedMac? {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return nil }
-        return try? JSONDecoder().decode(SavedMac.self, from: data)
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              var stored = try? JSONDecoder().decode(SavedMac.self, from: data) else { return nil }
+        if let token = CompanionKeychain.readToken(peerID: stored.peerID), !token.isEmpty {
+            stored.token = token
+            return stored
+        }
+        // Pre-Keychain install: the blob still holds the token.  Move it
+        // over; the strip of the blob copy happens below in start().
+        guard !stored.token.isEmpty else { return nil }
+        CompanionKeychain.writeToken(stored.token, peerID: stored.peerID)
+        return stored
     }
 
     private func persistSaved() {
-        guard let saved, let data = try? JSONEncoder().encode(saved) else { return }
+        guard var saved else { return }
+        // The Keychain takes the token first.  When it accepts it, the blob
+        // keeps everything but the token; when it refuses, the blob keeps
+        // the token too, so a Keychain hiccup never logs the phone out.
+        if CompanionKeychain.writeToken(saved.token, peerID: saved.peerID) {
+            saved.token = ""
+        }
+        guard let data = try? JSONEncoder().encode(saved) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
     }
 

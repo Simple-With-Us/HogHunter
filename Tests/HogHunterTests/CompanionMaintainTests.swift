@@ -448,7 +448,7 @@ final class MaintainStoreInjectionTests: XCTestCase {
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
+        XCTAssertEqual(store.lastError, "Cleaning could not be started.\u{00A0} Check Logs for details.")
     }
 
     func testTheDefaultLauncherAlsoRefusesToChangeAStep() async throws {
@@ -460,7 +460,7 @@ final class MaintainStoreInjectionTests: XCTestCase {
         )
         store.setStepEnabled("npm_cache", enabled: false)
         for _ in 0..<200 where store.lastError == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
+        XCTAssertEqual(store.lastError, "That step setting could not be saved.\u{00A0} Check Logs for details.")
     }
 
     func testRunNowHandsTheLauncherTheFullRunAndOnlyOnce() async throws {
@@ -492,13 +492,14 @@ final class MaintainStoreInjectionTests: XCTestCase {
         XCTAssertFalse(message.contains(".  "), message)
     }
 
-    func testARunThatCannotStartReportsWhyAndFreesTheStore() async throws {
+    func testARunThatCannotStartReportsSafelyAndFreesTheStore() async throws {
         struct Boom: LocalizedError { var errorDescription: String? { "boom" } }
         let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { _ in throw Boom() }
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, "boom")
+        XCTAssertEqual(store.lastError, "Cleaning could not be started.\u{00A0} Check Logs for details.")
+        XCTAssertFalse(store.lastError?.contains("boom") ?? true, "the raw error must not leak")
         XCTAssertNotNil(store.runNow("full"), "the store is free to run again")
     }
 

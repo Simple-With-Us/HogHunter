@@ -336,6 +336,9 @@ enum SampleReport {
     /// heaviest first.  A dozen lines at most, each cut short, so a phone
     /// can show them and the report itself stays on the Mac.
     static func summary(of report: String, maxLines: Int = 12, maxLineLength: Int = 110) -> [String] {
+        // Call-site lines can carry the owner's absolute home directory, and
+        // this summary travels to the phone.  Fold the home directory to ~.
+        let home = NSHomeDirectory()
         var lines: [String] = []
         var inSection = false
         for raw in report.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -353,7 +356,7 @@ enum SampleReport {
             lines.append(trimmed.count > maxLineLength ? String(trimmed.prefix(maxLineLength - 1)) + "…" : trimmed)
             if lines.count >= maxLines { break }
         }
-        return lines
+        return lines.map { $0.replacingOccurrences(of: home, with: "~") }
     }
 
     /// The last `bytes` bytes of a report as text.  The call-site summary sits
@@ -403,7 +406,7 @@ enum SampleReport {
                     at: directory, withIntermediateDirectories: true
                 )
             } catch {
-                finish(.failed("Could not create the log folder: \(error.localizedDescription)"))
+                finish(.failed("Could not create the log folder.\u{00A0} Try again, and check disk space if it keeps failing."))
                 return
             }
 
@@ -419,7 +422,7 @@ enum SampleReport {
             do {
                 try process.run()
             } catch {
-                finish(.failed("Could not run sample: \(error.localizedDescription)"))
+                finish(.failed("Could not start sampling.\u{00A0} Try again."))
                 return
             }
             // `sample` ends itself after `seconds`; a hung one is stopped here
@@ -427,16 +430,13 @@ enum SampleReport {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Double(seconds) + 30) {
                 if process.isRunning { process.terminate() }
             }
-            let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+            // Drained so a chatty `sample` cannot block on a full pipe; the
+            // text itself stays out of the message, which names no paths.
+            _ = errors.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
 
             guard process.terminationStatus == 0 else {
-                let text = String(data: errorData, encoding: .utf8) ?? ""
-                let firstLine = text
-                    .split(separator: "\n")
-                    .first
-                    .map(String.init) ?? "sample exited with code \(process.terminationStatus)"
-                finish(.failed("Could not sample \(name): \(firstLine)"))
+                finish(.failed("Sampling \(name) did not finish.\u{00A0} Try again."))
                 return
             }
             finish(.written(url))

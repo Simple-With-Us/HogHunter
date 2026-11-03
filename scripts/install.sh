@@ -182,12 +182,34 @@ sign_adhoc() {
 }
 
 # DEVELOPER_ID_AVAILABLE is resolved above, before the Sparkle gate needs it.
+sign_developer_id_nested() {
+  # Inside-out like scripts/mac-release-build.sh: each nested bundle seals
+  # its own code, then the framework, then the app.  A single --deep seals
+  # whatever it finds instead of signing it, and --timestamp=none leaves
+  # the signature without a secure timestamp.  macOS has no `timeout`
+  # binary, so each step keeps the 20 second bound via perl's alarm.
+  local target
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
+      --sign "Developer ID Application" "$target" || return 1
+  done < <(
+    /usr/bin/find "$APP_PATH/Contents/Frameworks" -mindepth 1 \( -name '*.xpc' -o -name '*.app' \) -type d 2>/dev/null
+    /usr/bin/find "$APP_PATH/Contents/Frameworks" -mindepth 1 -type f -perm -u+x 2>/dev/null
+  )
+  local fw
+  for fw in "$APP_PATH"/Contents/Frameworks/*.framework; do
+    [[ -e "$fw" ]] || continue
+    perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
+      --sign "Developer ID Application" "$fw" || return 1
+  done
+  perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS_FILE" \
+    --sign "Developer ID Application" "$APP_PATH"
+}
 if [[ "$DEVELOPER_ID_AVAILABLE" -eq 1 ]]; then
-  echo "Signing with Developer ID Application.  20 second timeout."
-  # macOS has no `timeout` binary, so bound codesign with perl's alarm instead.
-  if perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --deep --options runtime --timestamp=none \
-      --entitlements "$ENTITLEMENTS_FILE" \
-      --sign "Developer ID Application" "$APP_PATH"; then
+  echo "Signing with Developer ID Application, nested code first.  20 second timeout per step."
+  if sign_developer_id_nested; then
     echo "Signed with Developer ID Application."
   else
     sign_adhoc "Developer ID signing failed or timed out"
