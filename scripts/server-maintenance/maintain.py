@@ -420,7 +420,7 @@ class Maintenance:
         op.unlink()
         self.lock.rmdir()
 
-    def execute(self, mode="scheduled", strategies=("package-cache", "rotated-logs", "docker-build-cache"), confirm=False, dry_run=False):
+    def execute(self, mode="scheduled", strategies=("package-cache", "rotated-logs", "docker-build-cache"), confirm=False, dry_run=False, manual=False):
         started = self.monotonic()
         before = self.disk()
         result = {"schema_version": VERSION, "tool": "hoghunter-server-maintenance", "mode": mode,
@@ -434,14 +434,17 @@ class Maintenance:
             if (type(mode) is not str or mode not in ("scan", "plan", "run", "scheduled")
                     or not isinstance(strategies, (tuple, list)) or any(type(s) is not str for s in strategies)
                     or not set(strategies).issubset(STRATEGIES) or len(set(strategies)) != len(strategies)
-                    or type(confirm) is not bool or type(dry_run) is not bool):
+                    or not strategies or type(confirm) is not bool or type(dry_run) is not bool
+                    or type(manual) is not bool or (manual and mode == "scheduled")):
                 raise ValueError("unknown mode or strategy")
+            if manual:
+                result["manual"] = True
             mutating = mode in ("run", "scheduled") and not dry_run
             if mode == "run" and not confirm and not dry_run:
                 raise ValueError("explicit run requires --confirm")
             pressure = before["used_percent"] >= 80 or before["free_bytes"] < 25 * 1024**3
             result["pressure"] = pressure
-            if not pressure:
+            if not pressure and not manual:
                 result["reason"] = "healthy root filesystem; no cleanup inventory needed"
                 return result
             if mutating:
@@ -485,7 +488,7 @@ class Maintenance:
                             if strategy == "docker-build-cache":
                                 self.verify_local_builder()
                             argv = (DOCKER + ["image", "rm", identity] if strategy == "docker-images" else
-                                    BUILD + ["prune", "--force", "--filter", "id=" + identity,
+                                    BUILD + ["prune", "--force", "--filter", "id=^" + identity + "$",
                                              "--filter", "until=168h", "--filter", "inuse=false",
                                              "--filter", "mutable=false", "--filter", "shared=false",
                                              "--filter", "type=regular"])
@@ -552,16 +555,19 @@ def main():
     parser.add_argument("--strategy", action="append", choices=STRATEGIES)
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--manual", action="store_true", help="explicit scan/plan/run even without disk pressure")
     args = parser.parse_args()
     if args.mode == "run" and not args.strategy:
         parser.error("run requires one or more --strategy values")
+    if args.manual and args.mode == "scheduled":
+        parser.error("--manual is only accepted for scan, plan or run")
     tool = Maintenance()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: setattr(tool, "cancelled", True))
     if os.geteuid() != 0:
         parser.error("requires root")
     defaults = tuple(s for s in STRATEGIES if s != "docker-images")
-    result = tool.execute(args.mode, args.strategy or defaults, args.confirm, args.dry_run)
+    result = tool.execute(args.mode, args.strategy or defaults, args.confirm, args.dry_run, args.manual)
     print(json.dumps(result, separators=(",", ":")))
     return 0 if result["status"] in ("ran", "skipped", "planned") else 1
 

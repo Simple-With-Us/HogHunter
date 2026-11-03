@@ -1,90 +1,124 @@
 import SwiftUI
 
-/// The one action the server scope of the panel can take.
-///
-/// The server scope used to be display-only:  the owner could read the
-/// server's CPU, memory and disks but could not act on them.  The remote
-/// maintenance step is the step that belongs to the server, and it is the same
-/// step the Mac's Maintenance tab runs, against the same configured host.
-///
-/// It stays off until the owner turns it on, and it asks before it runs,
-/// because it prunes containers, images and logs on a machine the owner is not
-/// sitting at.
+/// Manual server control is independent of whether Mac maintenance includes it.
 struct RemoteMaintenanceCard: View {
     @ObservedObject var maintain: MaintainStore
-    /// Set when the owner asks to run the maintenance, so the confirmation can
-    /// name the host the run will reach.
-    @State private var confirmRun = false
+    @StateObject private var control = ServerMaintenanceControl()
+    @State private var selected = Set(ServerMaintenanceStrategy.defaults)
+    @State private var pending: PendingMaintenanceRequest?
+    @State private var requestError: String?
 
-    private var host: String {
-        maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var isEnabled: Bool {
-        maintain.isStepEnabled("coolify_remote")
-    }
+    private var host: String { maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var busy: Bool { control.isWorking || maintain.isRunningNow }
 
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Remote Server Maintenance")
-                        .font(.system(size: 11, weight: .semibold))
+                    Text("Remote Server Maintenance").font(.system(size: 11, weight: .semibold))
                     Spacer()
-                    if maintain.isRunningNow {
-                        ProgressView().controlSize(.small)
-                            .accessibilityLabel("Running remote maintenance")
-                    }
+                    if busy { ProgressView().controlSize(.small).accessibilityLabel("Running server maintenance") }
                 }
                 if host.isEmpty {
-                    Text("No remote server is configured.\u{00A0} Set one in Settings, then run it from here.")
-                        .font(.system(size: 11))
+                    Text("No remote server is configured.\u{00A0} Set one in Settings, then scan or run it from here.")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(host)
-                        .font(.system(size: 11, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help("The remote server this runs against.")
-                    Toggle("Run on Schedule", isOn: Binding(
-                        get: { isEnabled },
+                    Text(host).font(.system(size: 11, design: .monospaced))
+                        .lineLimit(1).truncationMode(.middle)
+                    Toggle("Include in Mac Maintenance", isOn: Binding(
+                        get: { maintain.isStepEnabled("coolify_remote") },
                         set: { maintain.setStepEnabled("coolify_remote", enabled: $0) }
                     ))
-                    .toggleStyle(.switch)
-                    .font(.system(size: 11))
-                    .controlSize(.small)
-                    HStack(spacing: 8) {
-                        Button("Run Now") { confirmRun = true }
-                            .disabled(maintain.isRunningNow || !isEnabled || !maintain.stepTogglesPersisted)
-                        if !maintain.stepTogglesPersisted {
-                            Text("Saving…")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        } else if !isEnabled {
-                            Text("Turn on Run on Schedule or use Run Now.")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
+                    .toggleStyle(.switch).controlSize(.small)
+                    .help("Uses this Mac’s maintenance schedule; the server’s own schedule is unchanged.")
+                    if !maintain.stepTogglesPersisted { Text("Saving schedule preference…").foregroundStyle(.secondary) }
+                    Text("Manual actions work with this option off.\u{00A0} The server’s own schedule is unchanged.")
+                        .foregroundStyle(.secondary)
+                    ForEach(ServerMaintenanceStrategy.allCases) { strategy in
+                        Toggle(strategy.title, isOn: Binding(
+                            get: { selected.contains(strategy) },
+                            set: { if $0 { selected.insert(strategy) } else { selected.remove(strategy) } }
+                        )).toggleStyle(.checkbox).disabled(busy)
+                    }
+                    Text("Only age-qualified, unused items are eligible.\u{00A0} Containers, volumes and active logs are protected.")
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Scan") { startScan() }
+                        Button("Run Now") { pending = makeRequest(.run) }
+                    }.disabled(busy || selected.isEmpty)
+                }
+                if let message = requestError ?? control.message {
+                    Text(message).foregroundStyle(.secondary)
+                }
+                if let error = maintain.lastError {
+                    Text(error).foregroundStyle(.red)
+                }
+                if let result = control.result {
+                    ForEach(result.strategies) { row in
+                        let title = ServerMaintenanceStrategy(rawValue: row.id)?.title ?? "Selected Strategy"
+                        if row.id == "package-cache" || row.id == "rotated-logs" {
+                            Text("\(title): \(row.candidateCount) eligible files; \(row.removedCount) files removed")
+                        } else {
+                            Text("\(title): \(row.candidateCount) eligible records; \(row.attemptedCount) cleanup attempts")
                         }
                     }
-                }
-                if let err = maintain.lastError {
-                    Text(err)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
+                    Text("Removed file bytes (logical): \(HogFormat.memory(UInt64(result.removedFileBytes)))")
+                    Text("Observed available-space change: \(signedBytes(result.observedFreeDeltaBytes))")
+                    Text("Available space also changes with other server activity; Docker requests do not prove physical bytes reclaimed.")
+                        .foregroundStyle(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
+            .font(.system(size: 11))
+            .frame(maxWidth: .infinity, alignment: .leading).padding(4)
         }
-        .confirmationDialog(
-            "Run remote maintenance on \(host)?",
-            isPresented: $confirmRun,
-            titleVisibility: .visible
-        ) {
-            Button("Run on \(host)") { maintain.runStep("coolify_remote") }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This prunes unused containers, images and logs on \(host) over SSH.\u{00A0} It cannot be undone.")
+        .sheet(item: $pending) { request in
+            ServerMaintenanceConfirmation(request: request) { imageAcknowledged in
+                pending = nil
+                Task { await control.perform(request, confirmed: true, imageRemovalConfirmed: imageAcknowledged) }
+            } cancel: { pending = nil }
         }
+    }
+
+    private func makeRequest(_ mode: PendingMaintenanceRequest.Mode) -> PendingMaintenanceRequest? {
+        requestError = nil
+        do { return try PendingMaintenanceRequest(host: host, mode: mode, strategies: Array(selected)) }
+        catch { requestError = "Configure a valid SSH host and select at least one strategy."; return nil }
+    }
+
+    private func startScan() {
+        guard let request = makeRequest(.scan) else { return }
+        Task { await control.perform(request) }
+    }
+
+    private func signedBytes(_ bytes: Int64) -> String {
+        let magnitude = bytes.magnitude
+        return (bytes < 0 ? "−" : bytes > 0 ? "+" : "") + HogFormat.memory(magnitude)
+    }
+}
+
+private struct ServerMaintenanceConfirmation: View {
+    let request: PendingMaintenanceRequest
+    let confirm: (Bool) -> Void
+    let cancel: () -> Void
+    @State private var acknowledgeImages = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Run Server Maintenance?").font(.headline)
+            Text(request.host).font(.system(.body, design: .monospaced))
+            Text(request.strategies.map(\.title).joined(separator: ", "))
+            Text("This permanently removes eligible selected items, even when disk pressure is low.\u{00A0} The server rechecks age, current use, protection markers and the cleanup lock.")
+            if request.includesImages {
+                Text("Removing old untagged images can remove local rollback options and require downloading or rebuilding them again.")
+                Toggle("I Accept the Rollback and Download Consequences", isOn: $acknowledgeImages)
+                    .toggleStyle(.checkbox)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Button("Run Selected Maintenance") { confirm(acknowledgeImages) }
+                    .disabled(request.includesImages && !acknowledgeImages)
+            }
+        }.padding(20).frame(width: 440)
     }
 }

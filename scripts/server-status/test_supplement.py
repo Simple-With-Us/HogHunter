@@ -369,7 +369,7 @@ class SupplementTests(unittest.TestCase):
 
         output = module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
                                    lambda _: None, lambda _: 'unknown', containers=[],
-                                   processes=processes, coolify=coolify, collect_live=True, pressure=lambda: None)
+                                   processes=processes, coolify=coolify, collect_live=True, pressure=lambda: None, storage=lambda: {})
         # A sequential collector would time the barrier out; both results arrive.
         self.assertEqual(output['processes'], [{'name': 'fixture'}])
         self.assertEqual(output['coolify'], {'state': 'fixture'})
@@ -381,7 +381,7 @@ class SupplementTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
                               lambda _: None, lambda _: 'unknown', containers=[],
-                              processes=lambda: [], coolify=broken, collect_live=True, pressure=lambda: None)
+                              processes=lambda: [], coolify=broken, collect_live=True, pressure=lambda: None, storage=lambda: {})
 
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:

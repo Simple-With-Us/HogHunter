@@ -75,7 +75,7 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             module.bounded_run([sys.executable, '-c', 'import time; time.sleep(3)'], timeout=0.1)
         with self.assertRaises(ValueError):
-            module.bounded_run([sys.executable, '-c', "print('x' * 10000)"], timeout=2, max_output=1024)
+            module.bounded_run([sys.executable, '-c', "import time; print('x' * 10000, flush=True); time.sleep(3)"], timeout=2, max_output=1024)
 
     def test_exited_group_permission_race_still_reaps_and_closes_owned_child(self):
         reader, writer = os.pipe()

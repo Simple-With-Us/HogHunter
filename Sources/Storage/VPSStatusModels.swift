@@ -11,6 +11,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     let memory: VPSMemory?
     let swap: VPSSwap?
     let memoryPressure: VPSMemoryPressure?
+    let storageDiagnostics: VPSStorageDiagnostics?
     let largestDirs: [VPSDirectory]?
     let toolStatuses: [VPSToolStatus]?
     let databaseSamples: [VPSSizeSample]?
@@ -29,6 +30,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         case memory
         case swap
         case memoryPressure = "memory_pressure"
+        case storageDiagnostics = "storage_diagnostics"
         case largestDirs = "largest_dirs"
         case toolStatuses = "tool_statuses"
         case databaseSamples = "database_samples"
@@ -46,6 +48,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         memory: VPSMemory? = nil,
         swap: VPSSwap? = nil,
         memoryPressure: VPSMemoryPressure? = nil,
+        storageDiagnostics: VPSStorageDiagnostics? = nil,
         largestDirs: [VPSDirectory]? = nil,
         toolStatuses: [VPSToolStatus]? = nil,
         databaseSamples: [VPSSizeSample]? = nil,
@@ -61,6 +64,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         self.memory = memory
         self.swap = swap
         self.memoryPressure = memoryPressure
+        self.storageDiagnostics = storageDiagnostics
         self.largestDirs = largestDirs
         self.toolStatuses = toolStatuses
         self.databaseSamples = databaseSamples
@@ -482,5 +486,77 @@ struct VPSMemoryPressure: Codable, Equatable, Sendable {
         guard let date = sampledAtDate, durationSeconds > 0, durationSeconds <= 10 else { return false }
         let age = now.timeIntervalSince(date)
         return age >= -5 && age <= maximumAge
+    }
+}
+
+/// Docker categories overlap; engine-labelled reclaimability is not cleanup eligibility.
+struct VPSStorageDiagnostics: Codable, Equatable, Sendable {
+    let sampledAt: String
+    let durationSeconds: Double
+    let status: String
+    let daemon: VPSStorageDaemon
+    let categories: VPSStorageCategories
+    let blobs: VPSBlobStorage
+
+    enum CodingKeys: String, CodingKey {
+        case status, daemon, categories, blobs
+        case sampledAt = "sampled_at"
+        case durationSeconds = "duration_seconds"
+    }
+
+    func isFresh(relativeTo now: Date = Date()) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: sampledAt) ?? ISO8601DateFormatter().date(from: sampledAt),
+              durationSeconds.isFinite, durationSeconds >= 0, durationSeconds <= 15 else { return false }
+        let age = now.timeIntervalSince(date)
+        return age >= -5 && age <= 900
+    }
+}
+
+struct VPSStorageDaemon: Codable, Equatable, Sendable {
+    let status: String
+    let usesContainerd: Bool?
+    enum CodingKeys: String, CodingKey { case status; case usesContainerd = "uses_containerd" }
+}
+
+struct VPSStorageCategories: Codable, Equatable, Sendable {
+    let status: String
+    let items: [VPSStorageCategory]
+}
+
+struct VPSStorageCategory: Codable, Equatable, Sendable, Identifiable {
+    let id: String
+    let totalCount: Int
+    let activeCount: Int
+    let sizeBytes: Int64
+    let engineReclaimableBytes: Int64
+    enum CodingKeys: String, CodingKey {
+        case id
+        case totalCount = "total_count"
+        case activeCount = "active_count"
+        case sizeBytes = "size_bytes"
+        case engineReclaimableBytes = "engine_reclaimable_bytes"
+    }
+    var title: String {
+        switch id {
+        case "images": return "Images"
+        case "build_cache": return "Build Cache"
+        case "volumes": return "Volumes"
+        default: return "Writable Containers"
+        }
+    }
+}
+
+struct VPSBlobStorage: Codable, Equatable, Sendable {
+    let status: String
+    let allocatedBytes: Int64?
+    let changeBytes: Int64?
+    let baselineStatus: String?
+    enum CodingKeys: String, CodingKey {
+        case status
+        case allocatedBytes = "allocated_bytes"
+        case changeBytes = "change_bytes"
+        case baselineStatus = "baseline_status"
     }
 }

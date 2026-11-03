@@ -19,6 +19,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+import stat
+import sys
+from decimal import Decimal, InvalidOperation
 
 def control_policy():
     # Both source checkout and deployed standalone layout use the same policy.
@@ -481,7 +484,184 @@ def coolify_resources(run=subprocess.run):
     return sorted(rows, key=lambda row: (row['type'], row['name']))
 
 
-def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount, containers=None, processes=None, coolify=None, collect_live=False, pressure=None):
+STORAGE_BUDGET = 10.0
+BLOB_ROOT = Path('/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256')
+STORAGE_INFO_FORMAT = '{"root":{{json .DockerRootDir}},"driver":{{json .Driver}},"driver_status":{{json .DriverStatus}}}'
+STORAGE_DF_FORMAT = '{"type":{{json .Type}},"total":{{json .TotalCount}},"active":{{json .Active}},"size":{{json .Size}},"reclaimable":{{json .Reclaimable}}}'
+
+
+def docker_size(value):
+    """Docker display sizes use decimal SI; binary suffixes remain binary."""
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)(B|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)', value or '')
+    if not match:
+        raise ValueError('malformed size')
+    factors = {'B': 1, 'kB': 1000, 'KB': 1000, 'MB': 1000**2, 'GB': 1000**3, 'TB': 1000**4,
+               'KiB': 1024, 'MiB': 1024**2, 'GiB': 1024**3, 'TiB': 1024**4}
+    size = int(Decimal(match[1]) * factors[match[2]])
+    if not 0 <= size <= 2**63 - 1:
+        raise ValueError('size outside contract')
+    return size
+
+
+def blob_metadata(path=BLOB_ROOT, root=Path('/'), budget=1.5, limit=20000,
+                  monotonic=time.monotonic, clock=time.time, scandir=os.scandir):
+    """Flat allocated metadata only; parent runs this in a bounded child."""
+    started = monotonic()
+    result = dict(status='unavailable', reason='blob metadata unavailable', count=0,
+                  allocated_bytes=0, apparent_bytes=0, modified_hour_bytes=0, modified_day_bytes=0)
+    try:
+        if any(p.is_symlink() for p in [path, *path.parents]):
+            return result
+        identity = path.stat()
+        if not stat.S_ISDIR(identity.st_mode) or identity.st_dev != root.stat().st_dev:
+            return result
+        result.update(device=identity.st_dev, inode=identity.st_ino)
+        now = clock()
+        with scandir(path) as entries:
+            for entry in entries:
+                if monotonic() - started >= budget or result['count'] >= limit:
+                    result.update(status='incomplete', reason='blob metadata budget exceeded')
+                    return result
+                info = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_dev != identity.st_dev:
+                    result.update(status='incomplete', reason='blob directory contains unsupported entries')
+                    return result
+                allocated = info.st_blocks * 512
+                result['count'] += 1
+                result['allocated_bytes'] += allocated
+                result['apparent_bytes'] += info.st_size
+                # Cohorts describe current files, never net growth or a reclaim target.
+                if now - 3600 <= info.st_mtime <= now and now - 3600 <= info.st_ctime <= now:
+                    result['modified_hour_bytes'] += allocated
+                if now - 86400 <= info.st_mtime <= now and now - 86400 <= info.st_ctime <= now:
+                    result['modified_day_bytes'] += allocated
+        if (path.stat().st_dev, path.stat().st_ino) != (identity.st_dev, identity.st_ino):
+            result.update(status='incomplete', reason='blob directory identity changed')
+            return result
+        result.update(status='complete', reason=None)
+    except (OSError, ValueError):
+        result.update(status='unavailable', reason='blob metadata unavailable')
+    return result
+
+
+def storage_diagnostics(run=None, monotonic=time.monotonic,
+                        now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    started = monotonic()
+    deadline = started + STORAGE_BUDGET
+    result = dict(sampled_at=now().isoformat(), duration_seconds=0, status='unavailable',
+                  daemon=dict(status='unavailable', reason='Docker storage identity unavailable'),
+                  categories=dict(status='unavailable', reason='Docker storage totals unavailable', items=[]),
+                  blobs=dict(status='unavailable', reason='containerd blob metadata unavailable'))
+    run = run or (POLICY.bounded_run if POLICY is not None else None)
+    def command(arguments, budget):
+        remaining = deadline - monotonic()
+        if run is None or remaining <= 0:
+            raise ValueError('storage budget unavailable')
+        response = run(arguments, timeout=min(budget, remaining), max_output=65536,
+                       capture_output=True, text=True, check=False)
+        if response.returncode != 0 or len(response.stdout) > 65536:
+            raise ValueError('storage response unavailable')
+        return response.stdout
+    docker = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
+    try:
+        data = json.loads(command(docker + ['info', '--format', STORAGE_INFO_FORMAT], 2))
+        if (not isinstance(data, dict) or not isinstance(data.get('root'), str)
+                or not data['root'].startswith('/') or len(data['root']) > 512
+                or not isinstance(data.get('driver'), str) or len(data['driver']) > 64
+                or not isinstance(data.get('driver_status'), list)):
+            raise ValueError('invalid storage identity')
+        containerd = ['driver-type', 'io.containerd.snapshotter.v1'] in data['driver_status']
+        result['daemon'] = dict(status='complete', root=data['root'], driver=data['driver'], uses_containerd=containerd)
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        pass
+    try:
+        items = []
+        names = {'Images': 'images', 'Build Cache': 'build_cache', 'Local Volumes': 'volumes', 'Containers': 'containers'}
+        for line in command(docker + ['system', 'df', '--format', STORAGE_DF_FORMAT], 8).splitlines():
+            data = json.loads(line)
+            if not isinstance(data, dict) or data.get('type') not in names:
+                raise ValueError('invalid category')
+            total, active = data.get('total'), data.get('active')
+            if not isinstance(total, str) or not total.isdecimal() or not isinstance(active, str) or not active.isdecimal():
+                raise ValueError('invalid count')
+            total, active = int(total), int(active)
+            reclaimable = re.fullmatch(r'(.+?)(?: \(([0-9]{1,3})%\))?', data.get('reclaimable') or '')
+            if total > 2**31 - 1 or active > total or not reclaimable or int(reclaimable[2] or 0) > 100:
+                raise ValueError('invalid aggregate')
+            size, reclaim = docker_size(data.get('size')), docker_size(reclaimable[1])
+            if reclaim > size:
+                raise ValueError('reclaimable exceeds category size')
+            items.append(dict(id=names[data['type']], total_count=total, active_count=active,
+                              size_bytes=size, engine_reclaimable_bytes=reclaim))
+        if len(items) != 4 or len({row['id'] for row in items}) != 4:
+            raise ValueError('missing or duplicate categories')
+        result['categories'] = dict(status='complete', items=items)
+    except (OSError, ValueError, TypeError, InvalidOperation, subprocess.TimeoutExpired):
+        pass
+    if result['daemon'].get('uses_containerd') is True:
+        try:
+            data = json.loads(command(['/usr/bin/ionice', '-c', '3', '/usr/bin/nice', '-n', '19',
+                                       sys.executable, '-B', '-S', str(Path(__file__).resolve()), '--storage-blobs'], 2))
+            if (not isinstance(data, dict) or data.get('status') not in ('complete', 'incomplete', 'unavailable')
+                    or any(type(data.get(k)) is not int or not 0 <= data[k] <= 2**63-1 for k in
+                           ('count', 'allocated_bytes', 'apparent_bytes', 'modified_hour_bytes', 'modified_day_bytes'))
+                    or (data['status'] == 'complete' and any(type(data.get(k)) is not int or data[k] <= 0
+                                                            for k in ('device', 'inode')))):
+                raise ValueError('invalid blob metadata')
+            result['blobs'] = {key: data[key] for key in ('status', 'count', 'allocated_bytes', 'apparent_bytes',
+                               'modified_hour_bytes', 'modified_day_bytes', 'device', 'inode') if key in data}
+            if data['status'] != 'complete':
+                result['blobs']['reason'] = 'blob metadata incomplete' if data['status'] == 'incomplete' else 'blob metadata unavailable'
+            if data['status'] == 'unavailable':
+                result['blobs'] = dict(status='unavailable', reason='blob metadata unavailable')
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+            pass
+    elif result['daemon'].get('status') == 'complete':
+        result['blobs'] = dict(status='unavailable', reason='containerd image store not observed')
+    states = [result[k]['status'] for k in ('daemon', 'categories', 'blobs')]
+    result['status'] = 'complete' if all(s == 'complete' for s in states) else 'partial' if 'complete' in states else 'unavailable'
+    result['duration_seconds'] = round(monotonic() - started, 3)
+    return result
+
+
+def storage_baseline(diagnostics, state, host):
+    """Only complete allocated observations become a future baseline."""
+    blobs = diagnostics['blobs']
+    blobs['baseline_status'] = 'unavailable'
+    blobs.pop('change_bytes', None)
+    blobs.pop('baseline_sampled_at', None)
+    if blobs['status'] != 'complete':
+        return
+    path = state / 'hoghunter-storage-baseline.json'
+    try:
+        scope = dict(host=host, device=blobs['device'], inode=blobs['inode'])
+        previous = None
+        if path.exists():
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
+                return
+            previous = json.loads(path.read_text())
+            if (not isinstance(previous, dict) or set(previous) != {'scope', 'sampled_at', 'allocated_bytes'}
+                    or not isinstance(previous['scope'], dict)
+                    or type(previous['sampled_at']) not in (int, float) or not math.isfinite(previous['sampled_at'])
+                    or type(previous['allocated_bytes']) is not int or previous['allocated_bytes'] < 0):
+                raise ValueError('invalid baseline')
+        stamp = datetime.datetime.fromisoformat(diagnostics['sampled_at'].replace('Z', '+00:00')).timestamp()
+        if (isinstance(previous, dict) and previous.get('scope') == scope
+                and type(previous.get('sampled_at')) in (int, float) and previous['sampled_at'] < stamp
+                and type(previous.get('allocated_bytes')) is int and previous['allocated_bytes'] >= 0):
+            blobs['change_bytes'] = blobs['allocated_bytes'] - previous['allocated_bytes']
+            blobs['baseline_sampled_at'] = previous['sampled_at']
+            blobs['baseline_status'] = 'complete'
+        else:
+            blobs['baseline_status'] = 'first_observation'
+        atomic_write(path, dict(scope=scope, sampled_at=stamp, allocated_bytes=blobs['allocated_bytes']))
+    except (OSError, ValueError, TypeError, KeyError):
+        blobs.pop('change_bytes', None)
+        blobs.pop('baseline_sampled_at', None)
+        blobs['baseline_status'] = 'unavailable'
+
+
+def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount, containers=None, processes=None, coolify=None, collect_live=False, pressure=None, storage=None):
     result = dict(snapshot)
     devices = dict(snapshot.get('devices', {}))
     if extra_volume and ismount_func(str(extra_volume)):
@@ -531,10 +711,12 @@ def supplement(snapshot, home, measure=directory_bytes, inventory=None, services
         # The CPU tick window sleeps and the docker reads wait on the daemon;
         # neither needs the other, so they overlap and a slow daemon no longer
         # adds its time on top of the tick window.  Each keeps its own timeouts.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             processes_future = pool.submit(top_processes if processes is None else processes)
             coolify_future = pool.submit(coolify_resources if coolify is None else coolify)
             pressure_future = pool.submit(memory_pressure if pressure is None else pressure)
+            storage_future = pool.submit(storage_diagnostics if storage is None else storage)
+            result['storage_diagnostics'] = storage_future.result()
             result['memory_pressure'] = pressure_future.result()
             result['processes'] = processes_future.result()
             result['coolify'] = coolify_future.result()
@@ -628,15 +810,22 @@ def atomic_write(path, value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--snapshot', type=Path, required=True)
+    parser.add_argument('--storage-blobs', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--snapshot', type=Path)
     parser.add_argument('--history', type=Path, default=Path('/root/.vps-storage-watch'))
     parser.add_argument('--home', type=Path, default=Path.home())
     args = parser.parse_args()
+    if args.storage_blobs:
+        print(json.dumps(blob_metadata(), separators=(',', ':')))
+        return
+    if args.snapshot is None:
+        parser.error('--snapshot is required')
     original = json.loads(args.snapshot.read_text())
     # Prevent applying measurements to a snapshot published during the scan.
     output = supplement(original, args.home, collect_live=True)
     output['database_samples'] = database_samples(original, args.history)
     output['directory_samples'] = directory_samples(output, args.history)
+    storage_baseline(output['storage_diagnostics'], args.history, output.get('host', ''))
     current = json.loads(args.snapshot.read_text())
     if current != original:
         raise SystemExit('Snapshot changed during collection; leaving it untouched.')
