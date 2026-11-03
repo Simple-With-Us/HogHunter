@@ -16,6 +16,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set Up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.15'
+
       - name: Install xcodegen
         run: brew install xcodegen
 
@@ -51,6 +56,11 @@ jobs:
         run: |
           set -x
           mkdir -p screenshots
+          OCR_DIR=$(mktemp -d "$RUNNER_TEMP/hoghunter-screenshot-ocr.XXXXXX")
+          trap 'rm -rf "$OCR_DIR"' EXIT
+          export HOGHUNTER_SCREENSHOT_OCR_BINARY="$OCR_DIR/screenshot-text"
+          python3 scripts/ios_screenshot_checks.py --prepare-ocr "$HOGHUNTER_SCREENSHOT_OCR_BINARY" \
+            --report screenshots/ocr-compile.json
           APP_PATH="${{ steps.find-app.outputs.app_path }}"
           BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")
           echo "Bundle ID: $BUNDLE_ID"
@@ -85,6 +95,7 @@ jobs:
           # a later per-device step exits early.
           CREATED_UDIDS=""
           cleanup_created() {
+            rm -rf "$OCR_DIR"
             for id in $CREATED_UDIDS; do
               xcrun simctl shutdown "$id" >/dev/null 2>&1 || true
               xcrun simctl delete "$id" >/dev/null 2>&1 || true
@@ -125,28 +136,17 @@ jobs:
             local UDID="$1"
             local DEVICE_PATTERN="$2"
             local SAFE_NAME="$3"
-            # Boot (tolerate already-booted) and wait until the device
-            # reports Booted; a fixed sleep does not guarantee SpringBoard
-            # is up, which is how a pairing screen ends up in the shot.
-            xcrun simctl boot "$UDID" 2>/dev/null || true
-            local BOOTED=0
-            for _ in $(seq 1 20); do
-              if xcrun simctl list devices -j | python3 -c "
-          import json, sys
-          udid = sys.argv[1]
-          for devices in json.load(sys.stdin)['devices'].values():
-              for d in devices:
-                  if d['udid'] == udid and d['state'] == 'Booted':
-                      sys.exit(0)
-          sys.exit(1)
-          " "$UDID"; then
-                BOOTED=1
-                break
-              fi
-              sleep 6
-            done
-            if [ "$BOOTED" -ne 1 ]; then
-              echo "ERROR: simulator for $DEVICE_PATTERN did not reach Booted state"
+            # Reuse an already booted device; still require actual bootstatus readiness.
+            if ! python3 - "$UDID" <<'PYBOOT'
+          import sys
+          sys.path.insert(0, "scripts")
+          from ios_screenshot_checks import boot_simulator
+          problem = boot_simulator(sys.argv[1], timeout=120)
+          if problem:
+              print("ERROR: " + problem)
+          sys.exit(1 if problem else 0)
+          PYBOOT
+            then
               return 1
             fi
             # Baseline frame of the device *without* the app: wait for a
@@ -218,12 +218,19 @@ jobs:
             # separately and runs last on this simulator.
             if [[ ! -f screenshots/deep-link-verification.json ]]; then
               python3 scripts/ios_capture_scenes.py --udid "$UDID" --bundle-id "$BUNDLE_ID" \
-                --app-path "$APP_PATH" --output screenshots || return 1
+                --app-path "$APP_PATH" --output screenshots || return 2
             fi
             return 0
             }
             SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
-            if ! capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
+            if capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
+              :
+            else
+              CAPTURE_STATUS=$?
+              if [ "$CAPTURE_STATUS" -eq 2 ]; then
+                echo "ERROR: required scene verification failed; evidence retained without erasing the simulator"
+                exit 1
+              fi
               echo "First capture attempt failed on $DEVICE_PATTERN; erasing simulator and retrying once"
               rm -f screenshots/widget-small.png screenshots/clean-cold-start.png screenshots/clean-deep-link.png screenshots/cleaner-quick.png screenshots/cleaner-partial.png screenshots/scene-verification.json screenshots/deep-link-verification.json
               xcrun simctl shutdown "$UDID" || true
@@ -248,6 +255,7 @@ jobs:
           echo "OK: $DEVICE_SHOTS device screenshots captured"
 
       - name: Upload screenshots
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: hoghunter-screenshots-${{ inputs.version }}

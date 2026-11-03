@@ -7,6 +7,10 @@ the Clean widget lane must run.
 """
 
 import os
+import argparse
+import hashlib
+import time
+import sys
 import json
 import re
 import subprocess
@@ -34,14 +38,83 @@ REQUIRED_FRAMES = (
 )
 
 
-def recognize_text(path):
-    """OCR the saved pixels, not application state or a launch flag."""
+OCR_COMPILE_TIMEOUT_S = 180
+OCR_EXECUTION_TIMEOUT_S = 90
+
+
+def prepare_ocr_helper(binary, report, run=subprocess.run):
+    """Compile the trusted Vision source once, separately from image execution."""
     helper = Path(__file__).with_name("screenshot-text.swift")
-    result = subprocess.run(["swift", str(helper), str(path)], capture_output=True, text=True, timeout=90, check=True)
+    binary, report = Path(binary), Path(report)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    binary.unlink(missing_ok=True)
+    started = time.monotonic()
+    result = {"phase": "compile", "verified": False,
+              "sourceSHA256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+              "timeoutSeconds": OCR_COMPILE_TIMEOUT_S}
+    try:
+        supervisor = Path(__file__).with_name("bounded-process.py")
+        run([sys.executable, str(supervisor), "--timeout", str(OCR_COMPILE_TIMEOUT_S),
+             "--grace", "2", "--", "xcrun", "swiftc", str(helper), "-o", str(binary)],
+            capture_output=True, text=True, timeout=OCR_COMPILE_TIMEOUT_S + 15, check=True)
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise RuntimeError("compiler did not produce an executable")
+        result["verified"] = True
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        result["problem"] = "OCR helper compilation failed: " + str(error)
+        binary.unlink(missing_ok=True)
+        raise RuntimeError(result["problem"]) from error
+    finally:
+        result["elapsedSeconds"] = round(time.monotonic() - started, 3)
+        report.write_text(json.dumps(result, indent=2) + "\n")
+    return binary
+
+
+def recognize_text(path, run=subprocess.run, binary=None):
+    """Run the prepared Vision binary on saved pixels; never compile per frame."""
+    binary = binary or os.environ.get("HOGHUNTER_SCREENSHOT_OCR_BINARY")
+    if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
+        raise RuntimeError("OCR helper not prepared; compile it once before capture")
+    try:
+        result = run([str(binary), str(path)], capture_output=True, text=True,
+                     timeout=OCR_EXECUTION_TIMEOUT_S, check=True)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"Vision OCR execution exceeded {OCR_EXECUTION_TIMEOUT_S}s") from error
     lines = json.loads(result.stdout)
     if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
         raise ValueError("invalid screenshot OCR response")
     return "\n".join(lines)
+
+
+def boot_simulator(udid, run=subprocess.run, timeout=420):
+    """Reuse a booted/booting device and verify readiness without a second boot."""
+    stage, budget = "device listing", 30
+    try:
+        listing = run(["xcrun", "simctl", "list", "-j", "devices", "available"],
+                      capture_output=True, text=True, timeout=30, check=True)
+        devices = [d for group in json.loads(listing.stdout)["devices"].values() for d in group]
+        state = next((d.get("state") for d in devices if d.get("udid") == udid), None)
+        if state not in ("Booted", "Booting"):
+            stage, budget = "boot request", 30
+            boot = run(["xcrun", "simctl", "boot", udid], capture_output=True, text=True, timeout=30)
+            if boot.returncode != 0 and "current state: Booted" not in (boot.stderr or ""):
+                return "boot failed: " + (boot.stderr or boot.stdout or str(boot.returncode)).strip()
+        stage, budget = "bootstatus", timeout
+        status = run(["xcrun", "simctl", "bootstatus", udid, "-b"],
+                     capture_output=True, text=True, timeout=timeout)
+        if status.returncode != 0:
+            return "bootstatus failed: " + (status.stderr or status.stdout or str(status.returncode)).strip()
+    except subprocess.TimeoutExpired:
+        return f"{stage} timed out after {budget}s"
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        return "simulator readiness unavailable: " + str(error)
+    return None
+
+
+def preferred_device(candidates, available_devices, device_states):
+    """Prefer an already booted compatible device without changing its format."""
+    return sorted(candidates, key=lambda name: device_states.get(available_devices.get(name)) != "Booted")
 
 
 def scene_problem(scene, text):
@@ -52,7 +125,9 @@ def scene_problem(scene, text):
             return "unexpected alert: " + alert
     required = {
         "widget-preview": ("hog hunter widget", "cpu", "ram", "clean mac"),
-        "clean-confirmation": ("clean this mac", "run safe clean", "cancel"),
+        # Confirmation dialogs can use a dismiss-outside popover with no Cancel
+        # row.  Require the real safety explanation, title and destructive action.
+        "clean-confirmation": ("clean this mac", "run safe clean", "standard clean", "snapshot", "moved to trash"),
         "cleaner-quick": ("disk cleaner", "estimated to move or remove", "rescan", "clean selected"),
         "cleaner-partial": ("disk cleaner", "partial scan", "lower bounds", "scan deeper", "clean selected"),
         "cleaner-extreme": ("disk cleaner", "extreme clean", "estimated to move or remove", "rescan"),
@@ -200,3 +275,11 @@ def screenshot_unchanged_problem(before_path, after_path):
         return "screen unchanged after launch (%.2f%% of image bytes differ)" % (
             100.0 * changed / total)
     return None
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Prepare the screenshot OCR helper once per capture job")
+    parser.add_argument("--prepare-ocr", required=True)
+    parser.add_argument("--report", required=True)
+    args = parser.parse_args()
+    prepare_ocr_helper(args.prepare_ocr, args.report)

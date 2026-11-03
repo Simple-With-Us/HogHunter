@@ -8,6 +8,7 @@ import unittest
 import zlib
 import json
 import subprocess
+from unittest.mock import patch
 from pathlib import Path
 
 import ios_screenshot_checks as checks
@@ -85,7 +86,89 @@ class FrameChecks(unittest.TestCase):
         self.assertIn("scripts/capture-app-screenshots.sh", ci)
 
 
-CONFIRMATION = "Clean This Mac? Run Safe Clean Cancel"
+class OCRAndSimulatorBoundaries(unittest.TestCase):
+    def test_compile_once_and_execute_prepared_binary_for_multiple_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary, report = Path(tmp) / "ocr", Path(tmp) / "compile.json"
+            calls = []
+            def run(command, **kwargs):
+                calls.append((command, kwargs))
+                if "swiftc" in command:
+                    binary.write_text("fixture executable")
+                    binary.chmod(0o700)
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(command, 0, '["Saved pixel text"]', "")
+            checks.prepare_ocr_helper(binary, report, run=run)
+            for frame in ("first.png", "second.png"):
+                self.assertEqual(checks.recognize_text(frame, run=run, binary=binary), "Saved pixel text")
+            self.assertEqual(sum("swiftc" in c for c, _ in calls), 1)
+            self.assertEqual([c for c, _ in calls[1:]], [[str(binary), "first.png"], [str(binary), "second.png"]])
+            self.assertEqual([k["timeout"] for _, k in calls[1:]], [90, 90])
+            metadata = json.loads(report.read_text())
+            self.assertTrue(metadata["verified"])
+            self.assertEqual(metadata["phase"], "compile")
+            self.assertIn("bounded-process.py", calls[0][0][1])
+
+    def test_compilation_failure_is_distinct_and_cannot_leave_stale_binary(self):
+        for failure in (subprocess.TimeoutExpired("compiler", 180), subprocess.CalledProcessError(124, "compiler")):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                binary, report = Path(tmp) / "ocr", Path(tmp) / "compile.json"
+                binary.touch()
+                def run(command, **kwargs):
+                    binary.touch()
+                    raise failure
+                with self.assertRaisesRegex(RuntimeError, "compilation failed"):
+                    checks.prepare_ocr_helper(binary, report, run=run)
+                self.assertFalse(binary.exists())
+                metadata = json.loads(report.read_text())
+                self.assertFalse(metadata["verified"])
+                self.assertEqual(metadata["phase"], "compile")
+
+    def test_vision_timeout_is_distinct_from_compilation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "ocr"
+            binary.touch()
+            binary.chmod(0o700)
+            def run(command, **kwargs):
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            with self.assertRaisesRegex(RuntimeError, "Vision OCR execution exceeded 90s"):
+                checks.recognize_text("frame.png", run=run, binary=binary)
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "not prepared"):
+                checks.recognize_text("frame.png")
+
+    def test_simulator_reuse_readiness_and_shutdown_boot_are_distinct(self):
+        for state in ("Booted", "Booting", "Shutdown"):
+            with self.subTest(state=state):
+                commands = []
+                def run(command, **kwargs):
+                    commands.append(command)
+                    value = json.dumps({"devices": {"iOS": [{"udid": "U", "state": state}]}}) if "list" in command else ""
+                    return subprocess.CompletedProcess(command, 0, value, "")
+                self.assertIsNone(checks.boot_simulator("U", run=run))
+                self.assertEqual(sum("boot" in c for c in commands), int(state == "Shutdown"))
+                self.assertEqual(sum("bootstatus" in c for c in commands), 1)
+        self.assertEqual(checks.preferred_device(["A", "B"], {"A": "a", "B": "b"}, {"a": "Shutdown", "b": "Booted"}), ["B", "A"])
+
+    def test_simulator_readiness_failure_remains_failure(self):
+        def run(command, **kwargs):
+            if "list" in command:
+                return subprocess.CompletedProcess(command, 0, '{"devices":{"iOS":[{"udid":"U","state":"Booted"}]}}', "")
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        self.assertIn("timed out", checks.boot_simulator("U", run=run, timeout=420))
+
+    def test_both_job_entrypoints_prepare_once_and_do_not_erase_scene_failures(self):
+        for name in ("scripts/capture-app-screenshots.sh", ".github/workflows/screenshots.yml"):
+            text = (ROOT / name).read_text()
+            self.assertEqual(text.count("--prepare-ocr"), 1)
+            self.assertIn("HOGHUNTER_SCREENSHOT_OCR_BINARY", text)
+            self.assertIn("boot_simulator", text)
+        workflow = (ROOT / ".github/workflows/screenshots.yml").read_text()
+        self.assertIn('if [ "$CAPTURE_STATUS" -eq 2 ]', workflow)
+        self.assertNotIn('"shutdown", "all"', (ROOT / "scripts/capture-app-screenshots.sh").read_text())
+
+
+CONFIRMATION = "Clean This Mac? This will safely trigger a Standard Clean on This Mac. An APFS local snapshot will be taken first, and deleted items are moved to Trash. Run Safe Clean"
 QUICK = "Disk Cleaner 9.8 GB estimated to move or remove Rescan Clean Selected"
 PARTIAL = "Disk Cleaner Partial scan; listed sizes are lower bounds Scan Deeper Clean Selected"
 
@@ -101,16 +184,24 @@ class SceneChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             checks.scene_problem("unknown", QUICK)
 
+    def test_confirmation_sheet_and_popover_preserve_the_same_safety_proof(self):
+        self.assertIsNone(checks.scene_problem("clean-confirmation", CONFIRMATION))
+        self.assertIsNone(checks.scene_problem("clean-confirmation", CONFIRMATION + " Cancel"))
+        for missing in ("Standard Clean", "snapshot", "moved to Trash", "Run Safe Clean"):
+            with self.subTest(missing=missing):
+                self.assertIn("missing intended text", checks.scene_problem("clean-confirmation", CONFIRMATION.replace(missing, "")))
+        self.assertIn("unexpected alert", checks.scene_problem("clean-confirmation", CONFIRMATION + " Open in Hog Hunter?"))
+
     def test_clipped_mac_labels_do_not_pass(self):
         full = "Sampling & Display Active Refresh (When Open) Background Refresh (When Closed) Menu Bar Shows Show Percentage in Menu Bar CPU Rows Show"
         self.assertIsNone(checks.scene_problem("mac-settings", full))
         clipped = full.replace("Sampling & Display", "g & Display").replace("Active Refresh", "efresh")
         self.assertIn("missing intended text", checks.scene_problem("mac-settings", clipped))
 
-    def run_capture(self, root, route_text, failure=None, command_failure=None, blank_frame=False):
+    def run_capture(self, root, route_text, failure=None, command_failure=None, blank_frame=False, scene_failures=None, commands_sink=None):
         app = root / "App.app"
         (app / "PlugIns" / checks.WIDGET_APPEX_NAME).mkdir(parents=True, exist_ok=True)
-        commands = []
+        commands = commands_sink if commands_sink is not None else []
         def run(command, **kwargs):
             commands.append(command)
             if command_failure and command_failure in command:
@@ -120,6 +211,8 @@ class SceneChecks(unittest.TestCase):
                 Path(command[-1]).write_bytes(png(400, 800, payload))
             return subprocess.CompletedProcess(command, 0, "", "")
         def recognize(path):
+            if scene_failures and path.stem in scene_failures:
+                raise scene_failures[path.stem]
             if failure:
                 raise failure
             return {"widget-small": "Hog Hunter Widget CPU RAM Clean Mac", "clean-cold-start": CONFIRMATION, "cleaner-quick": QUICK, "cleaner-partial": PARTIAL, "clean-deep-link": route_text}[path.stem]
@@ -160,10 +253,28 @@ class SceneChecks(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, stage + " failed"):
                     self.run_capture(root, CONFIRMATION, command_failure=failure, blank_frame=blank)
                 scenes = json.loads((root / "screens/scene-verification.json").read_text())
-                self.assertEqual(len(scenes), 1)
+                self.assertEqual(len(scenes), 4)
                 self.assertFalse(scenes[0]["verified"])
                 self.assertEqual(scenes[0]["stage"], stage)
                 self.assertEqual(scenes[0]["frame"], "widget-small.png")
+
+    def test_independent_scene_failures_are_collected_before_gate_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            commands = []
+            with self.assertRaisesRegex(RuntimeError, "required scenes failed"):
+                self.run_capture(root, CONFIRMATION, scene_failures={
+                    "widget-small": RuntimeError("OCR denied"),
+                    "cleaner-quick": RuntimeError("OCR unavailable"),
+                }, commands_sink=commands)
+            scenes = json.loads((root / "screens/scene-verification.json").read_text())
+            self.assertEqual([x["verified"] for x in scenes], [False, True, False, True])
+            self.assertEqual(len([x for x in commands if "screenshot" in x]), 4)
+            self.assertFalse(any("openurl" in x for x in commands))
+            self.assertTrue(all((root / "screens" / x["frame"]).exists() for x in scenes))
+            route = json.loads((root / "screens/deep-link-verification.json").read_text())
+            self.assertFalse(route["verified"])
+            self.assertIn("not attempted", route["problem"])
 
     def test_successful_retry_removes_stale_unverified_route_frame(self):
         with tempfile.TemporaryDirectory() as tmp:

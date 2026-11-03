@@ -15,3 +15,15 @@ Validation requires hermetic scene/alert/unknown-OCR tests, rejection of the his
 Each attempt clears only its known scene and route evidence before capture.  Launch, capture/blank-frame and OCR failures write a failed scene entry with the failing stage before exiting; an early failure leaves the route explicitly not attempted.  A successful retry cannot retain an earlier unverified route PNG.
 
 Ordinary native rendering tests remain usable without an export environment and still require rendered PNG bytes.  Hosted CI sets both render-directory variables and separately requires the named nonempty server maintenance PNG immediately after native tests.  Hermetic checks exercise missing/empty/present artifact gating and failed/successful retry transitions.
+
+The actual hosted iOS 26 cold-start frame showed an unobstructed system confirmation popover with its safety explanation and Run Safe Clean, but no Cancel row.  Apple documents dismiss-outside popovers for confirmation dialogs, so confirmation OCR requires the title, destructive action and Standard Clean/snapshot/Trash explanation rather than a platform-dependent Cancel label.  Sheet and popover fixtures both retain overlay rejection; production confirmation behavior is unchanged.
+
+Reference: [Apple confirmationDialog documentation](https://developer.apple.com/documentation/swiftui/view/confirmationDialog%28_%3AisPresented%3AtitleVisibility%3Aactions%3A%29).
+
+Independent inert direct-launch scenes all attempt and record their own outcomes before the required-scene gate fails.  An earlier rejected frame cannot hide later cleaner/partial evidence; any rejection still fails the gate, and the URL attempt starts only after every required scene verifies.  Global missing-widget preflight still aborts before launches.
+
+Both capture entrypoints compile the trusted Vision helper once per job into a fresh temporary directory, under the existing process-group supervisor with a 180-second compile deadline.  A separate compile report records success/failure, source hash and elapsed time; each saved-frame binary execution has its own 90-second deadline and never invokes the Swift interpreter.  A compile failure aborts preflight, while an execution/OCR failure remains a rejected scene.
+
+Simulator readiness now preserves compatible booted devices, skips redundant boot commands for Booted/Booting state, and still requires successful bootstatus.  Missing or timed-out readiness remains a failure.  The standalone workflow retains its one infrastructure retry, but a required scene rejection exits with retained evidence rather than erasing and recapturing the simulator.
+
+The saved-frame binary probe separated the observed costs: compilation succeeded in 5.04 seconds, first Vision execution took 65.636 seconds, and the next frame took 0.515 seconds.  Both actual unobstructed confirmation and Extreme cleaner PNGs passed their scene criteria; this proves cold Vision work also matters and does not attribute the earlier combined 90-second timeout solely to compilation.  Full current-head hosted screenshots remain required.

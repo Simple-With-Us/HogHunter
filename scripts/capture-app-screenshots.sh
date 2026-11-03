@@ -10,6 +10,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 mkdir -p screenshots/ios screenshots/macos
+ocr_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/hoghunter-screenshot-ocr.XXXXXX")" || exit 1
+trap 'rm -rf "$ocr_dir"' EXIT
+export HOGHUNTER_SCREENSHOT_OCR_BINARY="$ocr_dir/screenshot-text"
+python3 scripts/ios_screenshot_checks.py --prepare-ocr "$HOGHUNTER_SCREENSHOT_OCR_BINARY" \
+  --report screenshots/ocr-compile.json || exit 1
 failures=0
 
 # 1. iOS Companion Screenshots
@@ -30,35 +35,11 @@ import json, os, re, subprocess, sys, time
 sys.path.insert(0, "scripts")
 from ios_screenshot_checks import (  # noqa: E402
     screenshot_problem,
-    widget_appex_present, recognize_text, scene_problem,
+    widget_appex_present, recognize_text, scene_problem, boot_simulator, preferred_device,
 )
 from ios_capture_scenes import capture_scenes
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
-
-# First boots on hosted runners take minutes (dyld caches on a cold disk);
-# 180s starved the 13-inch iPad even though its device type was valid.
-BOOT_TIMEOUT_S = 420
-
-
-def boot_simulator(udid):
-    """Boot and WAIT for the simulator, never a blind sleep.  `bootstatus`
-    only blocks until boot completes with -b; without it, it prints the
-    current state and returns at once.
-    Returns None when it is booted, else the reason it is not."""
-    boot = subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True, text=True)
-    if boot.returncode != 0 and "current state: Booted" not in (boot.stderr or ""):
-        return f"boot failed: {(boot.stderr or boot.stdout or '').strip() or f'exit {boot.returncode}'}"
-    try:
-        status = subprocess.run(
-            ["xcrun", "simctl", "bootstatus", udid, "-b"], capture_output=True, text=True, timeout=BOOT_TIMEOUT_S
-        )
-    except subprocess.TimeoutExpired:
-        return f"not booted after {BOOT_TIMEOUT_S}s"
-    if status.returncode != 0:
-        return f"bootstatus failed: {(status.stderr or status.stdout or '').strip() or f'exit {status.returncode}'}"
-    return None
-
 
 def app_pid_from_launch(output):
     """`simctl launch` prints `<bundle id>: <pid>`."""
@@ -141,11 +122,8 @@ else:
     print("  OK widget extension embedded: HogHunterWidgets.appex")
 
 try:
-    # A simulator left Booting by an earlier cancelled run never finishes;
-    # the first format then burns its whole boot wait on a wedged device and
-    # the run exceeds the supervisor deadline after the required screens are
-    # already saved.  Start from every device shut down so each boot is fresh.
-    subprocess.run(["xcrun", "simctl", "shutdown", "all"], capture_output=True)
+    # Preserve already booted compatible devices.  Each selected device still
+    # passes bootstatus readiness, and its actual boot failure remains fatal.
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
     devices_data = json.loads(proc.stdout).get("devices", {})
 except Exception as e:
@@ -154,12 +132,14 @@ except Exception as e:
 
 # Build a lookup of available device name and deviceType -> udid
 available_devices = {}
+device_states = {}
 for runtime, dlist in devices_data.items():
     for d in dlist:
         if d.get("isAvailable", False):
             name = d.get("name")
             dtype = d.get("deviceTypeIdentifier", "")
             udid = d.get("udid")
+            device_states[udid] = d.get("state")
             if name and name not in available_devices:
                 available_devices[name] = udid
             if dtype and dtype not in available_devices:
@@ -235,7 +215,7 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
     created_udid = None
     out_file = f"screenshots/ios/{out_name}.png"
 
-    for cand in candidates:
+    for cand in preferred_device(candidates, available_devices, device_states):
         if cand in available_devices:
             udid = available_devices[cand]
             chosen_device = cand

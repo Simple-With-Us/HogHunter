@@ -65,8 +65,15 @@ def capture_scenes(udid, bundle_id, app_path, output, run=subprocess.run, settle
         results.append({"frame": path.name, "scene": scene, "verified": problem is None, "stage": stage, "problem": problem, "recognizedText": text})
         (output / "scene-verification.json").write_text(json.dumps(results, indent=2) + "\n")
         if problem:
-            raise RuntimeError(path.name + ": " + problem)
-        print("Verified intended frame: " + str(path), flush=True)
+            print("Rejected intended frame: " + path.name + ": " + problem, flush=True)
+        else:
+            print("Verified intended frame: " + str(path), flush=True)
+
+    failed = [item for item in results if not item["verified"]]
+    if failed:
+        raise RuntimeError("required scenes failed: " + "; ".join(
+            item["frame"] + ": " + item["problem"] for item in failed
+        ))
 
     # The OS may ask the user to approve opening the URL.  Never auto-accept it,
     # never count it as destination proof, and run this LAST so it cannot cover
