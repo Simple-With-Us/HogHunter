@@ -66,7 +66,7 @@ struct DiskCleanerView: View {
             isPresented: $store.showConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
+            Button("Clean Selected (\(store.selectedTier.title))", role: .destructive) {
                 store.cleanSelected(createSnapshot: true)
             }
             Button("Cancel", role: .cancel) {}
@@ -270,7 +270,7 @@ struct DiskCleanerView: View {
                             Text("\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))")
                                 .font(.system(size: 22, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.primary)
-                            Text("ready to reclaim")
+                            Text("selected (estimated)")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
@@ -300,8 +300,18 @@ struct DiskCleanerView: View {
                         .frame(width: 152)
                 }
 
+                if report.isPartial {
+                    HStack {
+                        Text("Partial scan — discovered sizes are lower bounds; some locations remain unmeasured.")
+                            .font(.system(size: 11)).foregroundStyle(.orange)
+                        Spacer()
+                        Button("Scan Deeper") { store.scan(depth: .deeper) }
+                    }
+                    Text("A deeper scan restarts with larger limits; slow or unavailable locations can still remain partial.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
                 if let last = store.lastCleanup {
-                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)) — freed \(last.formattedBytesReclaimed)")
+                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)) — moved or removed \(last.formattedBytesReclaimed) (estimated)")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -354,14 +364,18 @@ struct DiskCleanerView: View {
                     .foregroundStyle(.green)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Reclaimed \(result.formattedBytesReclaimed)!")
+                    Text("\(result.formattedBytesReclaimed) moved or removed (estimated)")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Cleaned \(result.itemsRemoved) items safely.")
+                    Text("Cleaned \(result.itemsRemoved) items.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
+                    Text(freeSpaceObservation(result))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("Trash and APFS snapshots can retain blocks; available space also changes with other activity.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
                     if !result.errors.isEmpty {
-                        Text("\(result.errors.count) items could not be deleted (system locked).")
+                        Text("\(result.errors.count) cleanup issues reported.")
                             .font(.system(size: 10))
                             .foregroundStyle(.orange)
                     }
@@ -397,9 +411,8 @@ struct DiskCleanerView: View {
         }
     }
 
-    /// Free space on the startup volume, and how much of it this clean would
-    /// hand back.  `DiskSpace` is the same reading the panel's Storage card
-    /// uses, so the two can never disagree.
+    /// Current startup-volume availability uses the same metric as the Storage card.
+    /// Item sizes do not forecast a free-space gain because undo protections retain blocks.
     private var volumeGauge: some View {
         VStack(alignment: .trailing, spacing: 4) {
             Text("Startup Volume")
@@ -413,7 +426,7 @@ struct DiskCleanerView: View {
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
-        .help("Reclaiming everything selected would take free space from this to the number below.  macOS counts purgeable space as available, so a healthy disk can look nearly full here and still be fine.")
+        .help("Available space includes macOS purgeable capacity.\u{00A0} Selected item sizes do not predict a free-space gain: Trash and safety snapshots can retain blocks.")
     }
 
     private var volumeSpace: DiskSpace? { DiskSpace.current() }
@@ -427,8 +440,14 @@ struct DiskCleanerView: View {
 
     private var volumeDetail: String {
         guard let volumeSpace else { return "" }
-        let after = max(0, volumeSpace.freeBytes) + store.totalSelectedBytes()
-        return "→ \(HogFormat.memory(after)) of \(HogFormat.memory(volumeSpace.totalBytes))"
+        return "of \(HogFormat.memory(volumeSpace.totalBytes)) total"
+    }
+
+    private func freeSpaceObservation(_ result: CleanResult) -> String {
+        guard let delta = result.observedFreeBytesChange else { return "Available-space change could not be measured." }
+        if delta == 0 { return "No available-space change observed during this run." }
+        let direction = delta > 0 ? "increased" : "decreased"
+        return "Available space \(direction) by \(HogFormat.memory(UInt64(delta.magnitude))) during this run."
     }
 
     // MARK: - Content Body
@@ -505,8 +524,7 @@ struct DiskCleanerView: View {
             Button {
                 store.showConfirmation = true
             } label: {
-                let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(selectedBytes))")
+                Text("Clean Selected")
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 4)
             }
