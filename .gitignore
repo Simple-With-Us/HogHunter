@@ -9,7 +9,7 @@ xcuserdata/
 *.xcuserstate
 .idea/
 dist/
-screenshots/
+/screenshots/
 __pycache__/
 *.pyc
 build_test_ios/
