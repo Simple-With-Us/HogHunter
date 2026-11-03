@@ -224,6 +224,7 @@ class VacuumEngine:
                                      if work_budget_seconds is None else work_budget_seconds)
         self._active_record = None
         self._step_freed = 0
+        self._step_incomplete = False
         # Called after every step with the run so far, so a tick the watchdog
         # kills still leaves a record of what it reclaimed.
         self._on_step = on_step
@@ -269,6 +270,28 @@ class VacuumEngine:
             monotonic=self._monotonic,
         )
 
+    def _elapsed_ms(self, started: float) -> int:
+        elapsed = self._monotonic() - started
+        if not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError("maintenance monotonic clock moved backwards")
+        return int(elapsed * 1000)
+
+    def _finish_record(self, record: RunRecord, started: float, *args, **kwargs) -> None:
+        elapsed_ms = self._elapsed_ms(started)
+        # Millisecond rounding across independent step clocks can differ by a
+        # millisecond; a backwards clock is rejected above, never clamped away.
+        record.overhead_duration_ms = max(0, elapsed_ms - sum(s.duration_ms for s in record.steps))
+        record.finish(*args, **kwargs)
+
+    def _sample(self, record: RunRecord, dry_run: bool) -> dict[str, Any]:
+        sample = sample_mac()
+        if sample.get("sample_complete", True) is False:
+            record.steps.append(StepResult("resource_sample", "Check disk and memory", StepStatus.RAN,
+                                           reason="host observation incomplete; unavailable readings are unknown",
+                                           incomplete=True))
+            self._emit_partial(record, dry_run=dry_run)
+        return sample
+
     @work.bounded_run
     def run(
         self,
@@ -277,6 +300,7 @@ class VacuumEngine:
         band: str = "cheap",
         dry_run: bool = False,
     ) -> RunRecord:
+        started = self._monotonic()
         record = RunRecord(
             run_id=uuid.uuid4().hex[:12],
             trigger=trigger,
@@ -290,7 +314,7 @@ class VacuumEngine:
         self._lane_report_cache = None
         try:
             with HousekeeperLock(self.lock_path), self._child_barrier(record, dry_run):
-                sample = sample_mac()
+                sample = self._sample(record, dry_run)
                 mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
                 for step_id in step_ids:
                     if not step_enabled(self.cfg, step_id):
@@ -308,23 +332,13 @@ class VacuumEngine:
                         )
                         self._emit_partial(record, dry_run=dry_run)
                         continue
-                    record.current_step = step_id
-                    record.current_target = ""
-                    self._emit_partial(record, dry_run=dry_run)
-                    failure = self._plan_step(step_id, dry_run)
-                    if failure is not None:
-                        record.steps.append(failure)
-                        self._emit_partial(record, dry_run=dry_run)
-                        continue
-                    result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
-                    record.steps.append(result)
-                    self._emit_partial(record, dry_run=dry_run)
-            record.finish()
+                    self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
+            self._finish_record(record, started)
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
             )
-            record.finish(0, summary="skipped; peer holds lock")
+            self._finish_record(record, started, 0, summary="skipped; peer holds lock")
         finally:
             self._planned_retire_plan = None
             self._lane_report_cache = None
@@ -349,6 +363,9 @@ class VacuumEngine:
         The record is a manual run: it is not a cadence, so it carries no cadence of its own and the
         scheduler clock is left alone by the caller.  A dry run plans only and deletes nothing.
         """
+        started = self._monotonic()
+        finish_exit = None
+        finish_summary = ""
         record = RunRecord(
             run_id=uuid.uuid4().hex[:12],
             trigger=TriggerKind.MANUAL,
@@ -367,34 +384,23 @@ class VacuumEngine:
                     record.steps.append(
                         StepResult(step_id, title, StepStatus.SKIPPED, reason="step is off")
                     )
-                    record.finish(2, summary="skipped; step is off")
-                    return record
-                sample = sample_mac()
-                mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
-                if mode == "hard" and step_id in _HEAVY_LANE_STEPS:
-                    record.steps.append(
-                        StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
-                    )
-                    # Nothing ran, so this is not a successful run:  the exit code is how the
-                    # caller learns that the step it asked for was refused, the same way the
-                    # "step is off" refusal above reports itself.
-                    record.finish(2, summary="skipped; host under extreme load")
-                    return record
-                record.current_step = step_id
-                record.current_target = ""
-                self._emit_partial(record, dry_run=dry_run)
-                failure = self._plan_step(step_id, dry_run)
-                if failure is not None:
-                    record.steps.append(failure)
+                    finish_exit, finish_summary = 2, "skipped; step is off"
                 else:
-                    result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
-                    record.steps.append(result)
-            record.finish()
+                    sample = self._sample(record, dry_run)
+                    mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
+                    if mode == "hard" and step_id in _HEAVY_LANE_STEPS:
+                        record.steps.append(
+                            StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
+                        )
+                        finish_exit, finish_summary = 2, "skipped; host under extreme load"
+                    else:
+                        self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
+            self._finish_record(record, started, finish_exit, summary=finish_summary)
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
             )
-            record.finish(0, summary="skipped; peer holds lock")
+            self._finish_record(record, started, 0, summary="skipped; peer holds lock")
         finally:
             self._planned_retire_plan = None
             self._lane_report_cache = None
@@ -428,28 +434,33 @@ class VacuumEngine:
     def run_watch_tick(
         self, rw_state: dict[str, Any], prev_free: Optional[float], dry_run: bool = False
     ) -> tuple[RunRecord, list[dict[str, Any]], bool]:
-        sample = sample_mac()
-        hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
-        # Only a sample that really came back from df is worth keeping.  A df
-        # that failed reads as zero free, and writing that here would report a
-        # critical shortage the disk does not have until the next tick lands.
-        if sample.get("disk_sample_ok", True):
-            rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
+        started = self._monotonic()
         record = RunRecord(
             run_id=uuid.uuid4().hex[:12],
             trigger=TriggerKind.WATCH,
             started_at=time.time(),
         )
         self._active_record = record
+        hits = []
         should_clean = False
         try:
             with HousekeeperLock(self.lock_path), self._child_barrier(record, dry_run):
+                sample = sample_mac()
+                hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
+                # Only a sample that really came back from df is worth keeping.  A df
+                # that failed reads as zero free, and writing that here would report a
+                # critical shortage the disk does not have until the next tick lands.
+                if sample.get("disk_sample_ok", True):
+                    rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
                 record.steps.append(
                     StepResult(
                         "resource_sample",
                         "Check disk and memory",
                         StepStatus.RAN,
-                        reason=_plural(len(hits), "threshold hit") if hits else "within limits",
+                        reason=((_plural(len(hits), "threshold hit") if hits else "within limits")
+                                if sample.get("sample_complete", True) else
+                                "host observation incomplete; unavailable readings are unknown"),
+                        incomplete=sample.get("sample_complete", True) is False,
                     )
                 )
                 self._emit_partial(record, dry_run=dry_run)
@@ -473,15 +484,15 @@ class VacuumEngine:
                             # cleanup.  Keeping it makes the status this same
                             # tick publishes report the shortage the run just
                             # resolved, so measure the disk again afterwards.
-                            after = sample_mac()
+                            after = self._sample(record, dry_run)
                             if after.get("disk_sample_ok", True):
                                 rw_state["prev_disk_free_gb"] = after.get("disk_free_gb")
-            record.finish(summary="watch tick")
+            self._finish_record(record, started, summary="watch tick")
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
             )
-            record.finish(0, summary="watch skipped; lock held")
+            self._finish_record(record, started, 0, summary="watch skipped; lock held")
         return record, hits, should_clean
 
     def _run_step(
@@ -495,25 +506,34 @@ class VacuumEngine:
     ) -> StepResult:
         meta = STEP_CATALOG.get(step_id, {})
         title = str(meta.get("title", step_id))
-        started = time.time()
+        started = self._monotonic()
         self._step_freed = 0
+        self._step_incomplete = False
         if self._active_record is not None:
             self._active_record.current_step = step_id
             self._active_record.current_target = ""
             self._emit_partial(self._active_record, dry_run=dry_run)
         try:
             work.check()
-            freed, reason, status = self._dispatch(step_id, pressure, band, sample, mode, dry_run)
-            dur = int((time.time() - started) * 1000)
-            return StepResult(step_id, title, status, reason=reason, bytes_freed=freed, duration_ms=dur)
+            result = self._plan_step(step_id, dry_run)
+            if result is None:
+                freed, reason, status = self._dispatch(step_id, pressure, band, sample, mode, dry_run)
+                result = StepResult(step_id, title, status, reason=reason, bytes_freed=freed,
+                                    incomplete=self._step_incomplete)
         except work.BudgetExceeded as exc:
-            dur = int((time.time() - started) * 1000)
-            return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc),
-                              bytes_freed=self._step_freed, duration_ms=dur)
+            result = StepResult(step_id, title, StepStatus.FAILED, reason=str(exc),
+                                bytes_freed=self._step_freed, incomplete=self._step_incomplete)
         except Exception as exc:  # noqa: BLE001 — step boundary; record failure
-            dur = int((time.time() - started) * 1000)
-            return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200],
-                              bytes_freed=self._step_freed, duration_ms=dur)
+            result = StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200],
+                                bytes_freed=self._step_freed, incomplete=self._step_incomplete)
+        result.duration_ms = self._elapsed_ms(started)
+        if self._active_record is not None:
+            self._active_record.steps.append(result)
+            self._emit_partial(self._active_record, dry_run=dry_run)
+        # The checkpoint describes the instant it began; the final history
+        # (or next checkpoint) also includes this checkpoint's own latency.
+        result.duration_ms = self._elapsed_ms(started)
+        return result
 
     def _dispatch(
         self,
@@ -932,9 +952,10 @@ class VacuumEngine:
         else:
             reason = f"band={band}: removed {applied} of {_plural(total, 'item')}, {lanes.format_size(freed)}"
         if report.get("scan_truncated"):
-            reason += "; the scan hit its budget share, more may be left"
+            reason += "; scan incomplete, unscanned remainder unknown"
         if report.get("budget_exhausted"):
-            reason += f"; time budget spent, {int(report.get('remaining_count') or 0)} left for the next run"
+            reason += f"; {int(report.get('remaining_count') or 0)} discovered candidates left for the next run"
+        self._step_incomplete = bool(report.get("scan_truncated") or report.get("budget_exhausted") or failed)
         if failed:
             reason += f"; {failed} could not be removed"
         if failed and not applied:

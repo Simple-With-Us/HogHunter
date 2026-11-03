@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import re
+import math
 import subprocess
 import sys
 import time
 from typing import Any, Optional
+
+from . import budget
 
 
 def _run(cmd: list[str], timeout: int = 20) -> str:
     if sys.platform != "darwin":
         return ""
     try:
-        return subprocess.check_output(cmd, text=True, timeout=timeout, stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        result = budget.run_process(cmd, text=True, timeout=timeout,
+                                    capture_output=True, stdin=subprocess.DEVNULL)
+        return result.stdout if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError, budget.BudgetExceeded):
         return ""
 
 
@@ -42,13 +47,15 @@ def sample_mac() -> dict[str, Any]:
     for line in df.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 5:
-            avail_k = float(parts[3])
-            cap = parts[4].rstrip("%")
-            disk_free_gb = avail_k / 1024 / 1024
             try:
-                disk_used_pct = float(cap)
+                avail_k = float(parts[3])
+                used = float(parts[4].rstrip("%"))
             except ValueError:
-                disk_used_pct = 0.0
+                continue
+            if not math.isfinite(avail_k) or not math.isfinite(used) or min(avail_k, used) < 0:
+                continue
+            disk_free_gb = avail_k / 1024 / 1024
+            disk_used_pct = used
             disk_ok = True
             break
 
@@ -68,6 +75,7 @@ def sample_mac() -> dict[str, Any]:
 
     return {
         "at": int(time.time()),
+        "sample_complete": bool(disk_ok and m and lm),
         "disk_sample_ok": disk_ok,
         "disk_free_gb": round(disk_free_gb, 2),
         "disk_used_pct": round(disk_used_pct, 1),
