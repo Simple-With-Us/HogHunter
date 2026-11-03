@@ -16,6 +16,9 @@ struct RemoteCleanScan: Sendable {
     var refs: [String: CleanItem]
     var totalBytes: UInt64
     var totalItems: Int
+    var isPartial: Bool = false
+    var incompleteCategories: [String] = []
+    var scanDepth: String = "quick"
 
     /// The references the Mac's own cleaner would start with ticked.
     var defaultRefs: Set<String> {
@@ -45,7 +48,7 @@ enum CompanionCleanerReport {
     /// Largest first, capped, with a reference per item.  An item starts
     /// ticked when the Mac's cleaner would tick it: its category is selected
     /// by default and the item itself is.
-    static func build(from report: CleanScanReport, id: String, now: Date = Date()) -> RemoteCleanScan {
+    static func build(from report: CleanScanReport, id: String, now: Date = Date(), depth: String = "quick") -> RemoteCleanScan {
         var categories: [CompanionCleanCategory] = []
         var refs: [String: CleanItem] = [:]
         let included = report.categories.filter { phoneMayClean($0.category) }
@@ -86,7 +89,10 @@ enum CompanionCleanerReport {
             categories: categories,
             refs: refs,
             totalBytes: included.reduce(0) { $0 + $1.totalBytes },
-            totalItems: included.reduce(0) { $0 + $1.itemCount }
+            totalItems: included.reduce(0) { $0 + $1.itemCount },
+            isPartial: report.anyApproximate,
+            incompleteCategories: report.incompleteCategories.filter { phoneMayClean($0) }.map(\.title),
+            scanDepth: depth
         )
     }
 
@@ -155,6 +161,9 @@ enum CompanionCleanerReport {
 
     /// Whether a scan request may start: Extreme needs the acknowledgement.
     static func validate(_ request: CompanionCleanScanRequest) -> Result<CleanTier, Refusal> {
+        guard ["quick", "deeper"].contains(request.depth) else {
+            return .failure(Refusal(status: 400, message: "That scan depth is not one the Mac offers."))
+        }
         guard let tier = CleanTier(rawValue: request.tier) else {
             return .failure(Refusal(status: 400, message: "That clean level is not one the Mac offers."))
         }

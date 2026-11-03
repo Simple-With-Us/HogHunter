@@ -657,7 +657,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
         runner.finish(result, regimen: makeRegimen())
 
         XCTAssertEqual(runner.lastSummary,
-                       "Reclaimed 1 MB from 12 items. 1 item could not be removed.")
+                       "Moved or removed 1 MB from 12 items (estimated).\u{00A0} 1 item could not be removed.")
         XCTAssertFalse((runner.lastSummary ?? "").contains("/Users/jay"),
                        "the panel must not name a path")
     }
@@ -688,7 +688,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
         runner.finish(result, regimen: makeRegimen())
 
         XCTAssertEqual(runner.lastSummary,
-                       "The cleanup was stopped before it finished. 1 item could not be removed.")
+                       "The cleanup was stopped before it finished.\u{00A0} 1 item could not be removed.")
         XCTAssertFalse((runner.lastSummary ?? "").contains("/Users/jay"),
                        "the panel must not name a path")
     }
@@ -707,7 +707,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         XCTAssertEqual(
             runner.lastSummary,
-            "Reclaimed 1 MB from 3 items. The cleanup snapshot could not be created, so the rest of the regimen did not run."
+            "Moved or removed 1 MB from 3 items (estimated).\u{00A0} The cleanup snapshot could not be created, so the rest of the regimen did not run."
         )
     }
 

@@ -1442,7 +1442,7 @@ struct DashboardView: View {
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 if progress.bytesReclaimed > 0 {
-                                    Text("Reclaimed \(progress.formattedBytesReclaimed)")
+                                    Text("Estimated moved/removed: \(progress.formattedBytesReclaimed)")
                                         .font(.caption2.weight(.medium))
                                         .foregroundStyle(.green)
                                 }
@@ -1458,9 +1458,11 @@ struct DashboardView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Reclaimed \(progress.formattedBytesReclaimed) (\(progress.itemsCleaned) items)")
+                            Text("Estimated moved/removed: \(progress.formattedBytesReclaimed) (\(progress.itemsCleaned) items)")
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(.green)
+                            Text(CleanerSpaceObservation.text(progress.observedFreeBytesChange))
+                                .font(.caption2).foregroundStyle(.secondary)
                             if let snap = progress.snapshotName {
                                 Text("APFS Snapshot: \(snap)")
                                     .font(.caption2)
@@ -1473,9 +1475,12 @@ struct DashboardView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                        Text("Reclaimed \(result.formattedBytesReclaimed) (\(result.itemsRemoved) items) with APFS snapshot.")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Estimated moved/removed: \(result.formattedBytesReclaimed) (\(result.itemsRemoved) items)")
+                                .font(.caption.weight(.medium)).foregroundStyle(.green)
+                            Text(CleanerSpaceObservation.text(result.observedFreeBytesChange))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.vertical, 2)
                 }

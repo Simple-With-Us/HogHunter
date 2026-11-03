@@ -52,6 +52,21 @@ struct CompanionCleanResponse: Codable, Equatable, Sendable {
     var snapshotCreated: Bool
     var snapshotName: String?
     var tier: String
+    var observedFreeBytesChange: Int64? = nil
+}
+
+enum CleanerSpaceObservation {
+    static func text(_ bytes: Int64?) -> String {
+        guard let bytes else { return "Available-space change unavailable" }
+        var value = Double(bytes.magnitude)
+        let units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"]
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 { value /= 1024; unit += 1 }
+        let amount = unit == 0 ? "\(bytes.magnitude) B" : String(format: "%.1f %@", value, units[unit])
+        if bytes > 0 { return "Available space increased by " + amount }
+        if bytes < 0 { return "Available space decreased by " + amount }
+        return "Available space unchanged"
+    }
 }
 
 /// What the disk cleaner tells the person.  One copy, shared by the Mac's
@@ -162,6 +177,10 @@ struct CompanionCleanReport: Codable, Equatable, Sendable {
     var totalItems: Int = 0
     var categories: [CompanionCleanCategory] = []
     var history: [CompanionCleanupRecord] = []
+    /// Nil from older Macs; true means the listed totals are lower bounds.
+    var isPartial: Bool? = nil
+    var incompleteCategories: [String]? = nil
+    var scanDepth: String? = nil
 }
 
 /// A request to clean, from a scan the Mac is holding, sent to
@@ -182,6 +201,7 @@ struct CompanionCleanScanRequest: Equatable, Sendable {
     /// `standard` or `extreme`.
     var tier: String
     var acknowledgedExtreme: Bool = false
+    var depth: String = "quick"
 }
 
 struct CompanionCleanScanResponse: Codable, Equatable, Sendable {
@@ -205,6 +225,7 @@ struct CompanionCleanProgress: Codable, Equatable, Sendable {
     var formattedBytesReclaimed: String
     var snapshotName: String?
     var error: String?
+    var observedFreeBytesChange: Int64? = nil
 }
 
 extension Notification.Name {
