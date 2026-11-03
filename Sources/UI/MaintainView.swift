@@ -23,6 +23,9 @@ struct MaintainView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     statusCard
+                    if let partial = store.status?.partialRun {
+                        incompleteRunCard(partial)
+                    }
                     stepsSection
                     historySection
                 }
@@ -85,6 +88,31 @@ struct MaintainView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.red)
                 }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+    }
+
+    /// A persisted checkpoint can survive a killed process, so it is not a running indicator.
+    private func incompleteRunCard(_ run: MaintainRun) -> some View {
+        GroupBox("Incomplete Run") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Last saved progress.\u{00A0} This run has not recorded completion; it may still be running or may have stopped.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                gridRow("Run ID", run.runId)
+                if let stage = run.currentStep, !stage.isEmpty {
+                    gridRow("Stage", stage)
+                }
+                if let target = run.currentTarget, !target.isEmpty {
+                    gridRow("Target", target)
+                }
+                gridRow("Completed Steps", String(run.steps.count))
+                ForEach(run.steps) { step in
+                    gridRow(step.title, step.statusLabel)
+                }
+                gridRow("Reclaimed So Far", HogFormat.memory(UInt64(max(0, run.bytesFreed))))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
@@ -308,9 +336,10 @@ struct MaintainView: View {
                                     if let mark = run.result.markLabel {
                                         Text(mark)
                                             .font(.system(size: 10, weight: .semibold))
-                                            .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
+                                            .foregroundStyle(run.result == .failed ? Color.red : run.result == .skipped ? Color.secondary : Color.orange)
                                             .help(run.result == .failed
                                                 ? "The run did not finish cleanly."
+                                                : run.result == .skipped ? "The run stepped aside without doing work."
                                                 : "A step failed, and the other steps still did their work.")
                                     }
                                 }

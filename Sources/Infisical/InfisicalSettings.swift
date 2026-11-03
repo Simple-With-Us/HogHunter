@@ -159,6 +159,10 @@ enum InfisicalError: Error, CustomStringConvertible {
     case invalidConfiguration
     case configurationChanged
     case saveInProgress
+    case invalidScope
+    case readOnly
+    case ambiguousKey
+    case credentialStorage
 
     var description: String {
         switch self {
@@ -166,28 +170,116 @@ enum InfisicalError: Error, CustomStringConvertible {
         case .httpStatus(let code, _): return "Infisical request failed (HTTP \(code))"
         case .decoding(let what): return "could not decode \(what)"
         case .notConfigured: return "Infisical is not configured (no credential in Keychain)"
-        case .invalidConfiguration: return "Enter a Client ID, Client Secret, and valid Project ID"
+        case .invalidConfiguration: return "Enter a valid Project ID, folder, and credentials for the selected authentication mode"
         case .configurationChanged: return "The Infisical connection changed; try again"
         case .saveInProgress: return "An Infisical connection save is already in progress"
+        case .invalidScope: return "Service token metadata must match its project and one exact prod folder with the selected permissions"
+        case .readOnly: return "No verified write token is configured for this settings folder"
+        case .ambiguousKey: return "Settings keys overlap across folders; choose non-overlapping read routes"
+        case .credentialStorage: return "Could not save the Infisical credential securely in Keychain"
         }
     }
 }
 
 // MARK: - Universal-auth credential
 
+enum InfisicalAuthMode: String, Codable, CaseIterable, Identifiable {
+    case machineIdentity
+    case serviceTokens
+    var id: String { rawValue }
+    var title: String { self == .machineIdentity ? "Machine Identity" : "Service Tokens" }
+}
+
+/// Secrets remain inside the Mac's Keychain record, never UserDefaults or the companion snapshot.
+struct InfisicalServiceToken: Codable, Identifiable {
+    var id = UUID()
+    var label = ""
+    var projectId = ""
+    var secretPath = "/"
+    var token = ""
+    var reads = true
+    var writes = false
+}
+
 struct InfisicalCredential: Codable {
     var clientId: String
     var clientSecret: String
     /// Older records without this field remain unconfigured until explicitly saved.
     var projectId: String? = nil
+    var mode: InfisicalAuthMode? = nil
+    var secretPath: String? = nil
+    var serviceTokens: [InfisicalServiceToken]? = nil
 
+    /// A mode-less inherited record is an editor draft, never a runtime login.
+    var isOperational: Bool { mode != nil && isComplete }
+    var effectiveMode: InfisicalAuthMode { mode ?? .machineIdentity }
     var effectiveProjectId: String { (projectId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-
-    var isComplete: Bool {
-        !clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && UUID(uuidString: effectiveProjectId) != nil
+    var effectivePath: String { secretPath ?? "/" }
+    var cacheTargetId: String {
+        if effectiveMode == .machineIdentity && effectivePath == "/" { return effectiveProjectId }
+        let folders = effectiveMode == .machineIdentity ? [effectivePath] : activeTokens.filter(\.reads).map(\.secretPath).sorted()
+        return effectiveProjectId + "|" + effectiveMode.rawValue + "|" + folders.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
     }
+    var activeTokens: [InfisicalServiceToken] {
+        (serviceTokens ?? []).filter { $0.projectId.lowercased() == effectiveProjectId }
+    }
+    static func validPath(_ path: String) -> Bool {
+        path == "/" || (path.hasPrefix("/") && !path.hasSuffix("/") && !path.contains("//")
+            && !path.contains("*") && !path.contains("?") && !path.contains("\\")
+            && !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." })
+            && !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }))
+    }
+    var isComplete: Bool {
+        guard UUID(uuidString: effectiveProjectId) != nil, Self.validPath(effectivePath) else { return false }
+        switch effectiveMode {
+        case .machineIdentity:
+            return !clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .serviceTokens:
+            let entries = serviceTokens ?? []
+            return !entries.isEmpty && activeTokens.contains(where: \.reads) && entries.allSatisfy {
+                UUID(uuidString: $0.projectId) != nil && Self.validPath($0.secretPath)
+                    && !$0.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && ($0.reads || $0.writes)
+            }
+        }
+    }
+}
+
+struct InfisicalTokenMetadata {
+    struct Scope { var environment: String; var secretPath: String }
+    var projectId: String
+    var scopes: [Scope]
+    var permissions: Set<String>
+
+    /// Legacy bulk reads use token scopes rather than the query path.  Require one
+    /// exact scope so a successful HTTP response cannot masquerade as another folder.
+    func validates(_ entry: InfisicalServiceToken, environment: String) -> Bool {
+        projectId.lowercased() == entry.projectId.lowercased() && scopes.count == 1
+            && scopes[0].environment == environment && scopes[0].secretPath == entry.secretPath
+            && (!entry.reads || permissions.contains("read"))
+            && (!entry.writes || permissions.contains("write"))
+    }
+}
+
+/// Nonsecret migration marker, separate from credential storage so a missing
+/// Keychain item can never redisplay retired legacy machine-identity drafts.
+struct InfisicalLegacyCredentialMigration {
+    var isRetired: () -> Bool
+    var retire: () -> Void
+
+    static var persistent: Self { persistence(in: .standard) }
+
+    static func persistence(in defaults: UserDefaults) -> Self {
+        let key = "hoghunter.infisical.legacyFileCredentialRetired"
+        return Self(isRetired: { defaults.bool(forKey: key) }, retire: {
+            defaults.set(true, forKey: key)
+            defaults.synchronize()
+        })
+    }
+
+    /// Tests inject their own migration state; the default test host never
+    /// mutates the installed app's persisted retirement state.
+    static var inert: Self { Self(isRetired: { false }, retire: {}) }
 }
 
 /// One Keychain lookup.  `terminal` is true only when the Keychain answered:
@@ -196,12 +288,29 @@ struct InfisicalCredential: Codable {
 struct KeychainCredentialRead {
     var credential: InfisicalCredential?
     var terminal: Bool
+    /// Only errSecItemNotFound permits looking for a file draft in the editor.
+    var absent = false
 }
 
 protocol InfisicalServing {
     func login(clientId: String, clientSecret: String) async throws -> String
+    func tokenMetadata(token: String) async throws -> InfisicalTokenMetadata
+    func fetchSecrets(accessToken: String, environment: String, projectId: String, secretPath: String) async throws -> [String: String]
+    func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String, secretPath: String) async throws
     func fetchSecrets(accessToken: String, environment: String, projectId: String) async throws -> [String: String]
     func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String) async throws
+}
+
+extension InfisicalServing {
+    func tokenMetadata(token: String) async throws -> InfisicalTokenMetadata { throw InfisicalError.invalidScope }
+    func fetchSecrets(accessToken: String, environment: String, projectId: String, secretPath: String) async throws -> [String: String] {
+        guard secretPath == "/" else { throw InfisicalError.invalidScope }
+        return try await fetchSecrets(accessToken: accessToken, environment: environment, projectId: projectId)
+    }
+    func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String, secretPath: String) async throws {
+        guard secretPath == "/" else { throw InfisicalError.invalidScope }
+        try await upsertSecret(accessToken: accessToken, environment: environment, key: key, value: value, projectId: projectId)
+    }
 }
 
 // MARK: - REST client
@@ -212,7 +321,6 @@ protocol InfisicalServing {
 /// network without touching the real service.
 final class InfisicalClient: InfisicalServing {
     static let baseURL = URL(string: "https://app.infisical.com")!
-    static let projectId = "c1df65f2-adb5-4d64-93c0-f47f969feea1"
 
     private let session: URLSession
     private let baseURL: URL
@@ -246,8 +354,30 @@ final class InfisicalClient: InfisicalServing {
         return token
     }
 
+    func tokenMetadata(token: String) async throws -> InfisicalTokenMetadata {
+        var request = URLRequest(url: baseURL.appendingPathComponent("/api/v2/service-token"))
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await perform(request)
+        try check(response, data: data)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let project = (json["projectId"] ?? json["workspace"]) as? String,
+              let scopes = json["scopes"] as? [[String: String]],
+              let permissions = json["permissions"] as? [String] else { throw InfisicalError.invalidScope }
+        let parsed = scopes.compactMap { scope -> InfisicalTokenMetadata.Scope? in
+            guard let environment = scope["environment"], let path = scope["secretPath"] else { return nil }
+            return .init(environment: environment, secretPath: path)
+        }
+        guard parsed.count == scopes.count else { throw InfisicalError.invalidScope }
+        if let workspace = json["workspace"] as? String, workspace.lowercased() != project.lowercased() { throw InfisicalError.invalidScope }
+        return .init(projectId: project, scopes: parsed, permissions: Set(permissions))
+    }
+
     /// Full settings set for the environment, as key -> value.
     func fetchSecrets(accessToken: String, environment: String, projectId: String) async throws -> [String: String] {
+        try await fetchSecrets(accessToken: accessToken, environment: environment, projectId: projectId, secretPath: "/")
+    }
+
+    func fetchSecrets(accessToken: String, environment: String, projectId: String, secretPath: String) async throws -> [String: String] {
         var components = URLComponents(
             url: baseURL.appendingPathComponent("/api/v3/secrets/raw"),
             resolvingAgainstBaseURL: false
@@ -255,6 +385,9 @@ final class InfisicalClient: InfisicalServing {
         components.queryItems = [
             URLQueryItem(name: "workspaceId", value: projectId),
             URLQueryItem(name: "environment", value: environment),
+            URLQueryItem(name: "secretPath", value: secretPath),
+            URLQueryItem(name: "include_imports", value: "false"),
+            URLQueryItem(name: "recursive", value: "false"),
         ]
         var request = URLRequest(url: components.url!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -280,6 +413,10 @@ final class InfisicalClient: InfisicalServing {
     /// in the path (PATCH /api/v3/secrets/raw/{name}), falling back to POST
     /// with `type: "shared"` on a 404 if the secret does not exist yet.
     func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String) async throws {
+        try await upsertSecret(accessToken: accessToken, environment: environment, key: key, value: value, projectId: projectId, secretPath: "/")
+    }
+
+    func upsertSecret(accessToken: String, environment: String, key: String, value: String, projectId: String, secretPath: String) async throws {
         var url = baseURL.appendingPathComponent("/api/v3/secrets/raw")
         url.appendPathComponent(key)
         var request = URLRequest(url: url)
@@ -289,7 +426,7 @@ final class InfisicalClient: InfisicalServing {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "workspaceId": projectId,
             "environment": environment,
-            "secretPath": "/",
+            "secretPath": secretPath,
             "secretValue": value,
         ])
         let (data, response) = try await perform(request)
@@ -301,7 +438,7 @@ final class InfisicalClient: InfisicalServing {
             postRequest.httpBody = try JSONSerialization.data(withJSONObject: [
                 "workspaceId": projectId,
                 "environment": environment,
-                "secretPath": "/",
+                "secretPath": secretPath,
                 "secretValue": value,
                 "type": "shared",
             ])
@@ -446,11 +583,37 @@ final class InfisicalSettings: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isSaving = false
     @Published private(set) var projectId = ""
+    @Published private(set) var authMode: InfisicalAuthMode = .machineIdentity
+    private var keyPaths: [String: String] = [:]
+    private var hasLoadedRoutes = false
+
+    @Published private(set) var hasCredentialDraft = false
+
+    /// Only the editor may inspect inherited credentials, without authenticating.
+    /// Operational paths never invoke the file reader or promote these drafts.
+    var editingCredential: InfisicalCredential? {
+        guard !credentialWasCleared else { return nil }
+        // A prior terminal miss is cached for background work only.  Recheck
+        // silently before the editor may read a file draft, since Keychain
+        // availability or presence may have changed since bootstrap.
+        if inMemoryCredential == nil, credentialProvider == nil { keychainReadAttempted = false }
+        if let current = credential() { hasCredentialDraft = false; return current }
+        guard let read = lastKeychainRead, read.terminal else { return nil }
+        if let inherited = read.credential {
+            hasCredentialDraft = true
+            return inherited
+        }
+        guard read.absent, !legacyMigration.isRetired(), let draft = legacyDraftReader(),
+              draft.effectiveMode == .machineIdentity else { return nil }
+        hasCredentialDraft = true
+        return draft
+    }
 
     private let client: InfisicalServing
     private let store: InfisicalStore
     private let credentialWriter: (InfisicalCredential) throws -> Void
     private let credentialRemover: () throws -> Void
+    private let legacyMigration: InfisicalLegacyCredentialMigration
     private var generation = UUID()
     private var activeSave: UUID?
 
@@ -463,6 +626,9 @@ final class InfisicalSettings: ObservableObject {
     /// Injectable for tests.  Production reads the Keychain with
     /// authentication UI suppressed, so a retry cannot raise a prompt.
     var keychainReader: @MainActor () -> KeychainCredentialRead
+    /// Editor-only, injectable legacy file reader; never called by bootstrap or refresh.
+    private let legacyDraftReader: @MainActor () -> InfisicalCredential?
+    private var lastKeychainRead: KeychainCredentialRead?
     private var timer: Timer?
     private var bootstrapped = false
     private var becomeActiveObserver: NSObjectProtocol?
@@ -472,12 +638,17 @@ final class InfisicalSettings: ObservableObject {
         store: InfisicalStore = .shared,
         credentialProvider: (() -> InfisicalCredential?)? = nil,
         credentialWriter: ((InfisicalCredential) throws -> Void)? = nil,
-        credentialRemover: (() throws -> Void)? = nil
+        credentialRemover: (() throws -> Void)? = nil,
+        legacyMigration: InfisicalLegacyCredentialMigration? = nil,
+        legacyDraftReader: (@MainActor () -> InfisicalCredential?)? = nil
     ) {
         self.client = client
         self.store = store
         self.credentialProvider = credentialProvider
-        self.keychainReader = { InfisicalSettings.readCredential() }
+        let migration = legacyMigration ?? (MaintainStore.isRunningUnderTest ? .inert : .persistent)
+        self.legacyMigration = migration
+        self.keychainReader = { InfisicalSettings.readCredentialFromKeychainSilently() }
+        self.legacyDraftReader = legacyDraftReader ?? (MaintainStore.isRunningUnderTest ? { nil } : Self.readLegacyDraft)
         self.credentialWriter = credentialWriter ?? Self.writeCredential
         self.credentialRemover = credentialRemover ?? Self.removeCredential
     }
@@ -493,9 +664,10 @@ final class InfisicalSettings: ObservableObject {
         if let credential = credential() {
             isConfigured = true
             projectId = credential.effectiveProjectId
+            authMode = credential.effectiveMode
             // Reconcile persisted effective values before the first network suspension.
             // This also protects a launch after a Keychain save interrupted by process exit.
-            store.selectProject(projectId)
+            store.selectProject(credential.cacheTargetId)
             NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
             await refresh()
         } else {
@@ -532,18 +704,12 @@ final class InfisicalSettings: ObservableObject {
         let requestGeneration = generation
         defer { if generation == requestGeneration { isRefreshing = false } }
         do {
-            let token = try await client.login(
-                clientId: credential.clientId,
-                clientSecret: credential.clientSecret
-            )
+            let result = try await fetchConfiguration(credential, expectedGeneration: requestGeneration)
+            let secrets = result.values
             guard generation == requestGeneration else { return }
-            let secrets = try await client.fetchSecrets(
-                accessToken: token,
-                environment: Self.environment,
-                projectId: credential.effectiveProjectId
-            )
-            guard generation == requestGeneration else { return }
-            store.replace(secrets, projectId: credential.effectiveProjectId)
+            store.replace(secrets, projectId: credential.cacheTargetId)
+            keyPaths = result.paths
+            hasLoadedRoutes = true
             lastRefresh = Date()
             lastError = nil
             NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
@@ -564,18 +730,74 @@ final class InfisicalSettings: ObservableObject {
         guard let credential = credential() else { throw InfisicalError.notConfigured }
         let requestGeneration = generation
         do {
-            let token = try await client.login(clientId: credential.clientId, clientSecret: credential.clientSecret)
+            let path = keyPaths[key] ?? credential.effectivePath
+            let token: String
+            switch credential.effectiveMode {
+            case .machineIdentity:
+                token = try await client.login(clientId: credential.clientId, clientSecret: credential.clientSecret)
+            case .serviceTokens:
+                // Offline relaunch has no key-to-folder provenance yet.  Never guess.
+                guard hasLoadedRoutes else { throw InfisicalError.invalidScope }
+                let matches = credential.activeTokens.filter { $0.writes && $0.secretPath == path }
+                guard matches.count == 1, let entry = matches.first else { throw InfisicalError.readOnly }
+                let metadata = try await client.tokenMetadata(token: entry.token)
+                guard metadata.validates(entry, environment: Self.environment) else { throw InfisicalError.invalidScope }
+                token = entry.token
+            }
             guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
             try await client.upsertSecret(
                 accessToken: token, environment: Self.environment, key: key, value: value,
-                projectId: credential.effectiveProjectId
+                projectId: credential.effectiveProjectId, secretPath: path
             )
             guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
             store.set(value, forKey: key)
+            keyPaths[key] = path
         } catch {
             if generation == requestGeneration { lastError = Self.safeMessage(for: error) }
             throw error
         }
+    }
+
+    /// Validate authority before reads; never infer scope from a secrets response.
+    private func fetchConfiguration(_ credential: InfisicalCredential, expectedGeneration: UUID, validateAllTokens: Bool = false) async throws -> (values: [String: String], paths: [String: String]) {
+        if credential.effectiveMode == .machineIdentity {
+            let token = try await client.login(clientId: credential.clientId, clientSecret: credential.clientSecret)
+            guard generation == expectedGeneration else { throw InfisicalError.configurationChanged }
+            let values = try await client.fetchSecrets(accessToken: token, environment: Self.environment,
+                projectId: credential.effectiveProjectId, secretPath: credential.effectivePath)
+            return (values, Dictionary(uniqueKeysWithValues: values.keys.map { ($0, credential.effectivePath) }))
+        }
+        // Candidate saves verify every entry; routine refreshes use only the active project.
+        let tokensToValidate = validateAllTokens ? (credential.serviceTokens ?? []) : credential.activeTokens
+        for entry in tokensToValidate {
+            guard generation == expectedGeneration else { throw InfisicalError.configurationChanged }
+            let metadata = try await client.tokenMetadata(token: entry.token)
+            guard metadata.validates(entry, environment: Self.environment) else { throw InfisicalError.invalidScope }
+        }
+        let entries = credential.activeTokens
+        let reads = entries.filter(\.reads)
+        guard !reads.isEmpty,
+              Set(reads.map(\.secretPath)).count == reads.count,
+              Set(entries.filter(\.writes).map(\.secretPath)).count == entries.filter(\.writes).count
+        else { throw InfisicalError.invalidScope }
+        // Write folders must also be readable so a saved value cannot vanish at refresh.
+        let writers = entries.filter(\.writes)
+        guard writers.allSatisfy({ entry in reads.contains { $0.secretPath == entry.secretPath } }),
+              writers.isEmpty || writers.contains(where: { $0.secretPath == credential.effectivePath })
+        else { throw InfisicalError.invalidScope }
+        var values: [String: String] = [:]
+        var paths: [String: String] = [:]
+        for entry in reads {
+            guard generation == expectedGeneration else { throw InfisicalError.configurationChanged }
+            let fetched = try await client.fetchSecrets(accessToken: entry.token, environment: Self.environment,
+                projectId: credential.effectiveProjectId, secretPath: entry.secretPath)
+            for (key, value) in fetched {
+                guard paths[key] == nil else { throw InfisicalError.ambiguousKey }
+                values[key] = value
+                paths[key] = entry.secretPath
+            }
+        }
+        return (values, paths)
     }
 
     /// Do not expose response bodies, transport details, or arbitrary errors.
@@ -616,7 +838,7 @@ final class InfisicalSettings: ObservableObject {
     /// or interaction suppressed) stays retryable so unlock can recover.
     private var backgroundRefreshAllowed: Bool {
         if let provider = credentialProvider {
-            return provider() != nil
+            return provider()?.isOperational == true
         }
         if inMemoryCredential != nil { return true }
         return !keychainReadAttempted
@@ -631,20 +853,23 @@ final class InfisicalSettings: ObservableObject {
         if credentialWasCleared { return nil }
         if let cached = inMemoryCredential { return cached }
         if let provider = credentialProvider {
-            guard let loaded = provider(), loaded.isComplete else { return nil }
+            let loaded = provider()
+            lastKeychainRead = .init(credential: loaded, terminal: true, absent: loaded == nil)
+            guard let loaded, loaded.isOperational else { return nil }
             inMemoryCredential = loaded
             return loaded
         }
         guard !keychainReadAttempted else { return nil }
         let read = keychainReader()
-        inMemoryCredential = read.credential
+        lastKeychainRead = read
+        inMemoryCredential = read.credential.flatMap { $0.isOperational ? $0 : nil }
         // Latch only after the Keychain answers.  A transient status must
         // stay retryable; latching before the read made a locked launch
         // or a suppressed prompt permanent for the process lifetime.
         if read.terminal {
             keychainReadAttempted = true
         }
-        guard let loaded = read.credential, loaded.isComplete else { return nil }
+        guard let loaded = read.credential, loaded.isOperational else { return nil }
         return loaded
     }
 
@@ -655,13 +880,23 @@ final class InfisicalSettings: ObservableObject {
     /// then stored in the Keychain.  Never in the binary, never in
     /// UserDefaults, never in a file.
     func saveCredential(clientId: String, clientSecret: String, projectId: String) async throws {
+        try await saveConfiguration(InfisicalCredential(clientId: clientId.trimmingCharacters(in: .whitespacesAndNewlines),
+            clientSecret: clientSecret, projectId: projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), mode: .machineIdentity))
+    }
+
+    func saveConfiguration(_ configuration: InfisicalCredential) async throws {
         guard !isSaving else { throw InfisicalError.saveInProgress }
-        let clientId = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let projectId = projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !clientId.isEmpty,
-              !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              UUID(uuidString: projectId) != nil else { throw InfisicalError.invalidConfiguration }
-        let candidate = InfisicalCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
+        var candidate = configuration
+        candidate.projectId = configuration.effectiveProjectId
+        candidate.mode = configuration.effectiveMode
+        if candidate.effectiveMode == .serviceTokens {
+            candidate.clientId = ""
+            candidate.clientSecret = ""
+        } else {
+            candidate.clientId = candidate.clientId.trimmingCharacters(in: .whitespacesAndNewlines)
+            candidate.serviceTokens = nil
+        }
+        guard candidate.isComplete else { throw InfisicalError.invalidConfiguration }
         let requestGeneration = generation
         let saveID = UUID()
         activeSave = saveID
@@ -673,24 +908,26 @@ final class InfisicalSettings: ObservableObject {
             }
         }
         do {
-            // A valid identity alone is insufficient: verify project + prod read access.
-            let token = try await client.login(clientId: candidate.clientId, clientSecret: candidate.clientSecret)
-            guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
-            let secrets = try await client.fetchSecrets(
-                accessToken: token, environment: Self.environment, projectId: candidate.effectiveProjectId
-            )
+            let result = try await fetchConfiguration(candidate, expectedGeneration: requestGeneration, validateAllTokens: true)
+            let secrets = result.values
             guard generation == requestGeneration else { throw InfisicalError.configurationChanged }
             // Update the existing record atomically; a failed save keeps the working connection.
             try credentialWriter(candidate)
+            legacyMigration.retire()
             generation = UUID()
             inMemoryCredential = candidate
+            lastKeychainRead = .init(credential: candidate, terminal: true)
+            hasCredentialDraft = false
             keychainReadAttempted = false
             credentialWasCleared = false
             self.projectId = candidate.effectiveProjectId
+            authMode = candidate.effectiveMode
+            keyPaths = result.paths
+            hasLoadedRoutes = true
             isConfigured = true
             isRefreshing = false
             // Replace, never merge: nothing from the previous target survives.
-            store.replace(secrets, projectId: candidate.effectiveProjectId)
+            store.replace(secrets, projectId: candidate.cacheTargetId)
             lastRefresh = Date()
             lastError = nil
             NotificationCenter.default.post(name: .infisicalSettingsDidRefresh, object: self)
@@ -700,7 +937,7 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    // MARK: - Credential Storage (App Group & Secure File with Silent Keychain Migration)
+    // MARK: - Keychain Storage And Editor-Only Legacy Drafts
 
     private static let appGroupIdentifier = "group.com.simplewithus.hoghunter"
     private static let fileName = "infisical.json"
@@ -717,58 +954,46 @@ final class InfisicalSettings: ObservableObject {
     }
 
     private static func writeCredential(_ credential: InfisicalCredential) throws {
-        try writeCredentialToFile(credential)
-        // Clean up any legacy Keychain item so it doesn't cause ACL partition mismatch prompts
-        try? removeCredentialFromKeychain()
-    }
-
-    private static func writeCredentialToFile(_ credential: InfisicalCredential) throws {
         let data = try JSONEncoder().encode(credential)
-        var wroteAtLeastOne = false
-
-        if let appGroupURL = appGroupStorageURL {
-            do {
-                try writeToFile(data, at: appGroupURL)
-                wroteAtLeastOne = true
-            } catch {
-                // If App Group container directory cannot be written, fall back to Application Support
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+        ]
+        let attributes: [String: Any] = [kSecValueData as String: data]
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else { throw InfisicalError.credentialStorage }
+        // Retire file copies only after Keychain confirms the replacement.
+        for url in [appGroupStorageURL, applicationSupportStorageURL].compactMap({ $0 }) {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
             }
         }
-
-        let appSupportURL = applicationSupportStorageURL
-        let dir = appSupportURL.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
-        }
-        try writeToFile(data, at: appSupportURL)
-        wroteAtLeastOne = true
-
-        guard wroteAtLeastOne else {
-            throw InfisicalError.decoding("Could not save credential to App Group or Application Support")
-        }
-    }
-
-    private static func writeToFile(_ data: Data, at url: URL) throws {
-        let parentDir = url.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: parentDir.path) {
-            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true, attributes: nil)
-        }
-        try data.write(to: url, options: .atomic)
-        // Set POSIX permissions 0600 (owner read/write only)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     func clearCredential() throws {
         try credentialRemover()
+        legacyMigration.retire()
         generation = UUID()
         credentialWasCleared = true
         activeSave = nil
         isSaving = false
         inMemoryCredential = nil
+        lastKeychainRead = .init(credential: nil, terminal: true, absent: true)
+        hasCredentialDraft = false
         keychainReadAttempted = true
         isConfigured = false
         isRefreshing = false
         projectId = ""
+        authMode = .machineIdentity
+        keyPaths = [:]
+        hasLoadedRoutes = false
         store.replace([:], projectId: InfisicalStore.localProjectId)
         lastRefresh = nil
         lastError = nil
@@ -776,11 +1001,12 @@ final class InfisicalSettings: ObservableObject {
     }
 
     private static func removeCredential() throws {
-        if let appGroupURL = appGroupStorageURL {
-            try? FileManager.default.removeItem(at: appGroupURL)
+        // A failed Keychain removal remains a failed clear.  Once it succeeds,
+        // the caller retires file drafts permanently even if unlink fails.
+        try removeCredentialFromKeychain()
+        for url in [appGroupStorageURL, applicationSupportStorageURL].compactMap({ $0 }) {
+            try? FileManager.default.removeItem(at: url)
         }
-        try? FileManager.default.removeItem(at: applicationSupportStorageURL)
-        try? removeCredentialFromKeychain()
     }
 
     private static func removeCredentialFromKeychain() throws {
@@ -803,43 +1029,13 @@ final class InfisicalSettings: ObservableObject {
         status == errSecSuccess || status == errSecItemNotFound
     }
 
-    private static func readCredential() -> KeychainCredentialRead {
-        // 1. Check App Group container file
-        if let appGroupURL = appGroupStorageURL,
-           let data = try? Data(contentsOf: appGroupURL),
-           let cred = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
-           cred.isComplete {
-            return KeychainCredentialRead(credential: cred, terminal: true)
+    private static func readLegacyDraft() -> InfisicalCredential? {
+        for url in [appGroupStorageURL, applicationSupportStorageURL].compactMap({ $0 }) {
+            if let data = try? Data(contentsOf: url),
+               let draft = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
+               draft.effectiveMode == .machineIdentity { return draft }
         }
-
-        // 2. Check Application Support file
-        let appSupportURL = applicationSupportStorageURL
-        if let data = try? Data(contentsOf: appSupportURL),
-           let cred = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
-           cred.isComplete {
-            // Mirror to App Group if possible
-            if let appGroupURL = appGroupStorageURL {
-                try? writeToFile(data, at: appGroupURL)
-            }
-            return KeychainCredentialRead(credential: cred, terminal: true)
-        }
-
-        // 3. Fallback to Keychain read strictly without UI (interactionNotAllowed = true)
-        let legacyRead = readCredentialFromKeychainSilently()
-        if let cred = legacyRead.credential, cred.isComplete {
-            // Migrate to secure file storage and purge the legacy Keychain item so it never prompts again.
-            // Purge only after the file write succeeded: if it throws, the Keychain item is the only copy,
-            // so it stays and the next launch retries the migration.
-            do {
-                try writeCredentialToFile(cred)
-                try? removeCredentialFromKeychain()
-            } catch {
-                // Keep the Keychain copy; the credential is still returned for this launch.
-            }
-            return KeychainCredentialRead(credential: cred, terminal: true)
-        }
-
-        return legacyRead
+        return nil
     }
 
     private static func readCredentialFromKeychainSilently() -> KeychainCredentialRead {
@@ -859,18 +1055,15 @@ final class InfisicalSettings: ObservableObject {
         guard isTerminalKeychainStatus(status) else {
             return KeychainCredentialRead(credential: nil, terminal: false)
         }
+        if status == errSecItemNotFound { return KeychainCredentialRead(credential: nil, terminal: true, absent: true) }
         guard status == errSecSuccess,
               let data = item as? Data,
-              var credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data)
+              let credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data)
         else {
             return KeychainCredentialRead(credential: nil, terminal: true)
         }
-        if credential.projectId == nil || credential.effectiveProjectId.isEmpty {
-            credential.projectId = InfisicalClient.projectId
-        }
-        guard credential.isComplete else {
-            return KeychainCredentialRead(credential: nil, terminal: true)
-        }
+        // Retain decoded inherited/incomplete data only for the secure editor.
+        // credential() separately requires an explicit validated mode to activate it.
         return KeychainCredentialRead(credential: credential, terminal: true)
     }
 }

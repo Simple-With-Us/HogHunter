@@ -27,6 +27,7 @@ class RunOutcome(str, enum.Enum):
     OK = "ok"
     PARTIAL = "partial"
     FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 # A step that only reads the host never counts as the work that rescued a run.
@@ -37,14 +38,17 @@ def run_outcome(steps: list["StepResult"]) -> RunOutcome:
     """ok: no step failed.  partial: a step failed, and another step ran.  failed: a step failed and nothing
     else did any work (skips and the sampler do not count)."""
     if not any(s.status == StepStatus.FAILED for s in steps):
+        if any(s.step_id == "housekeeper_lock" and s.status == StepStatus.SKIPPED for s in steps):
+            if not any(s.status == StepStatus.RAN for s in steps):
+                return RunOutcome.SKIPPED
         return RunOutcome.OK
-    worked = any(s.status == StepStatus.RAN and s.step_id not in _PROBE_ONLY_STEPS for s in steps)
+    worked = any(s.bytes_freed > 0 or (s.status == StepStatus.RAN and s.step_id not in _PROBE_ONLY_STEPS) for s in steps)
     return RunOutcome.PARTIAL if worked else RunOutcome.FAILED
 
 
 def outcome_summary(steps: list["StepResult"], outcome: RunOutcome) -> str:
     """One line for the CLI and the log: which steps failed, out of how many."""
-    if outcome == RunOutcome.OK:
+    if outcome in (RunOutcome.OK, RunOutcome.SKIPPED):
         return ""
     failed = [s.step_id for s in steps if s.status == StepStatus.FAILED]
     return f"{outcome.value}: {len(failed)} of {len(steps)} step(s) failed ({', '.join(failed)})"
@@ -90,6 +94,8 @@ class RunRecord:
     summary: str = ""
     # ok, partial or failed (RunOutcome).  `partial` exits 0: the failed step stays visible on the step.
     outcome: str = RunOutcome.OK.value
+    current_step: str = ""
+    current_target: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +109,8 @@ class RunRecord:
             "bytes_freed": self.bytes_freed,
             "summary": self.summary,
             "outcome": self.outcome,
+            "current_step": self.current_step,
+            "current_target": self.current_target,
             "steps": [s.as_dict() for s in self.steps],
         }
 
@@ -121,7 +129,9 @@ class RunRecord:
             steps=steps,
             summary=str(raw.get("summary", "")),
             # A record written before the field existed was failed exactly when it exited non-zero.
-            outcome=str(raw.get("outcome") or (RunOutcome.FAILED.value if int(raw.get("exit_code", 0)) else RunOutcome.OK.value)),
+            outcome=str(raw.get("outcome") or (RunOutcome.FAILED.value if int(raw.get("exit_code", 0)) else run_outcome(steps).value)),
+            current_step=str(raw.get("current_step") or ""),
+            current_target=str(raw.get("current_target") or ""),
         )
 
     def finish(self, exit_code: Optional[int] = None, summary: str = "") -> None:

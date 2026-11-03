@@ -68,9 +68,9 @@ gh workflow run mac-release.yml --ref main
 
 Names only; no value is ever printed:
 
-- `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD` — the Developer ID Application certificate for team `CC8UTF7ATG`, in Fleet-OPS ("Fleet Secrets") `prod` at path `/mac-certs`, read at workflow runtime with the org Infisical credentials (`INFISICAL_FLEET_OPS_PROJECT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID` / `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET`); same-named GitHub repository secrets as fallback.
-- `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` — the App Store Connect API key; `notarytool` signs in with it.
-- `SPARKLE_ED_PRIVATE_KEY` — the EdDSA private key (base64 of the 32-byte seed) that signs each update archive; in the HogHunter Infisical project (`prod`), same-named repository secret as fallback.  Generated 2026-10-14 for Hog Hunter; the matching public key is committed above.
+- `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD` — the Developer ID Application certificate for team `CC8UTF7ATG`, in Fleet-OPS ("Fleet Secrets") `prod` at path `/mac-certs`, read at workflow runtime with `INFISICAL_MAC_CERTS_READ_TOKEN`, restricted to the selected Fleet-OPS project, `prod`, `/mac-certs`, read-only; same-named GitHub repository secrets as fallback.
+- `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` — the App Store Connect API key; `notarytool` signs in with it.  The required fetch uses `INFISICAL_ASC_READ_TOKEN`, restricted to Fleet-OPS `prod` `/asc`, read-only, with no repository-secret fallback.
+- `SPARKLE_ED_PRIVATE_KEY` — the EdDSA private key (base64 of the 32-byte seed) that signs each update archive; in the HogHunter Infisical project (`prod` `/`), read with `INFISICAL_HOGHUNTER_READ_TOKEN`, same-named repository secret as fallback.  Generated 2026-10-14 for Hog Hunter; the matching public key is committed above.
 
 With any of them missing the job still builds the bundle and verifies its signature, then skips publishing with a notice that names what is missing.
 

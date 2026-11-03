@@ -43,6 +43,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+from . import budget
 from .config import DEFAULT_LANES, MAX_RETIRE_DAYS, MIN_RETIRE_DAYS, parse_retire_min_days
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -207,20 +208,23 @@ _STRIPPED_GIT_ENV = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GI
 
 
 def _default_runner(argv: list, **kwargs: Any) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(argv, **kwargs)
+    return budget.run_process(argv, **kwargs)
 
 
 def call(runner: Runner, argv: list, timeout: float, env: Optional[dict] = None):
     """Run argv through the injected runner.  Returns (completed process or None, error text)."""
+    timeout = budget.timeout(timeout)
     kwargs: dict = {"capture_output": True, "text": True, "timeout": timeout}
     if env is not None:
         kwargs["env"] = env
     try:
         res = runner(argv, **kwargs)
     except subprocess.TimeoutExpired:
+        budget.check()
         return None, f"{argv[0]} timed out after {timeout:g}s"
     except (OSError, ValueError) as exc:  # missing binary, permission, undecodable output
         return None, f"{argv[0]} could not run ({type(exc).__name__})"
+    budget.check()
     return res, ""
 
 
@@ -231,30 +235,8 @@ def _git(runner: Runner, path: str, args: list, timeout: float = 60.0):
 
 def run_doctor_process(argv: list, timeout: float) -> "subprocess.CompletedProcess[str]":
     """Default doctor runner: no shell, its own session so a timeout kills the whole process group."""
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        try:
-            proc.communicate(timeout=5)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            pass
-        raise
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    return budget.run_process(argv, timeout=timeout, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True)
 
 
 # --------------------------------------------------------------------------- the report
@@ -447,10 +429,11 @@ def load_report(
         return _fail(f"doctor command missing: {exe}", command=tuple(argv))
     runner = doctor_runner or run_doctor_process
     started = clock()
-    timeout = adaptive_doctor_timeout(settings, cache_file)
+    timeout = budget.timeout(adaptive_doctor_timeout(settings, cache_file))
     try:
         res = runner(argv, timeout)
     except subprocess.TimeoutExpired:
+        budget.check()
         seconds = max(clock() - started, 0.0)
         if cache_file is not None:
             cached = _load_cached_report(cache_file, settings, home, clock)
@@ -468,6 +451,7 @@ def load_report(
                 cached.seconds = seconds
                 return cached
         return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv), seconds=seconds)
+    budget.check()
     seconds = max(clock() - started, 0.0)
     if res.returncode != 0:
         if cache_file is not None:
@@ -881,16 +865,25 @@ def _walk_dirs(root: str, cap: int, skip_names: frozenset = frozenset()):
     seen = 0
     stack = [root]
     while stack:
+        budget.check()
         current = stack.pop()
         with os.scandir(current) as listing:
-            entries = list(listing)
-        seen += len(entries)
-        if seen > cap:
-            raise _WalkCap(cap)
-        yield current, entries
-        for entry in entries:
-            if entry.name not in skip_names and entry.is_dir(follow_symlinks=False):
-                stack.append(entry.path)
+            # Incremental batches bound memory and allow cancellation even in
+            # a single directory containing millions of entries.
+            entries = []
+            for entry in listing:
+                budget.check()
+                seen += 1
+                if seen > cap:
+                    raise _WalkCap(cap)
+                entries.append(entry)
+                if entry.name not in skip_names and entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                if len(entries) == 128:
+                    yield current, entries
+                    entries = []
+            if entries:
+                yield current, entries
 
 
 class _WalkCap(Exception):
@@ -917,6 +910,8 @@ def nested_repo_blocker(folder: str, cap: int = NESTED_WALK_CAP) -> str:
             for entry in entries:
                 if entry.name.casefold() == ".git":
                     return f"a nested git repository at {entry.path}"
+                if entry.name.casefold() == KEEP_SENTINEL:
+                    return f"keep marker at {entry.path}"
     except _WalkCap:
         return f"more than {cap} entries under {folder}, too many to prove no nested git repository is inside"
     except OSError as exc:
@@ -1394,6 +1389,7 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
         return scan
     seen = set()
     for item in listed:
+        budget.check()
         if not isinstance(item, str) or not item:
             scan.refused.append({"path": repr(item)[:120], "reason": "candidate is not a path string"})
             continue
@@ -1439,6 +1435,7 @@ def dependency_candidates(report: LaneReport, ctx: LaneContext) -> tuple:
     passing: list = []
     refused: list = []
     for path in sorted(report.by_real):
+        budget.check()
         co = report.by_real[path]
         why = report_gate_deps(co, ctx)
         if why:
@@ -1528,6 +1525,53 @@ def deletable_target(lane: str, rel: str) -> tuple:
     if why:
         return "", why
     return full, ""
+
+
+def remove_dependency_tree(path: str, on_bytes=None) -> int:
+    """Delete cooperatively through directory descriptors, never following links.
+
+    The caller proves lane safety before entry.  A changing tree or new keep/git
+    marker refuses further deletion; already removed files are counted exactly.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    removed = 0
+
+    def clear(fd):
+        nonlocal removed
+        with os.scandir(fd) as listing:
+            for entry in listing:
+                budget.check()
+                if entry.name.casefold() in {".git", KEEP_SENTINEL}:
+                    raise OSError("protected marker appeared during dependency cleanup")
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    child = os.open(entry.name, flags, dir_fd=fd)
+                    try:
+                        clear(child)
+                    finally:
+                        os.close(child)
+                    budget.check()
+                    os.rmdir(entry.name, dir_fd=fd)
+                else:
+                    budget.check()
+                    os.unlink(entry.name, dir_fd=fd)
+                    removed += st.st_size
+                    if on_bytes is not None:
+                        on_bytes(removed)
+    budget.check()
+    parent = os.open(os.path.dirname(path), flags)
+    try:
+        name = os.path.basename(path)
+        fd = os.open(name, flags, dir_fd=parent)
+        try:
+            clear(fd)
+        finally:
+            os.close(fd)
+        budget.check()
+        os.rmdir(name, dir_fd=parent)
+    finally:
+        os.close(parent)
+    return removed
 
 
 # --------------------------------------------------------------------------- the action log

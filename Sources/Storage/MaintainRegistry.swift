@@ -42,21 +42,32 @@ enum MaintainRegistryStore {
     }
 
     /// Loads the script entries from `registry.json` plus any standalone scripts discovered in `scripts/`.
-    static func loadScripts() -> [MaintainScriptEntry] {
+    static func loadScripts(baseDirectory: URL? = nil, fileManager: FileManager = .default,
+                            mountPaths: [String]? = nil) -> [MaintainScriptEntry] {
+        let base = baseDirectory ?? self.baseDirectory
+        let registryURL = base.appendingPathComponent("registry.json")
+        let scriptsDirectory = base.appendingPathComponent("scripts", isDirectory: true)
+        let mounts = mountPaths ?? MountedDriveStore.cachedMountRecords().map(\.path)
+        func safeURL(_ url: URL) -> URL? {
+            DirectorySizeWalker.automaticCanonicalPath(url.path, mountPaths: mounts)
+                .map { URL(fileURLWithPath: $0) }
+        }
         var registered: [MaintainScriptEntry] = []
-        if let data = try? Data(contentsOf: registryURL),
+        if let safeRegistry = safeURL(registryURL), let data = try? Data(contentsOf: safeRegistry),
            let parsed = try? JSONDecoder().decode(MaintainRegistryData.self, from: data) {
             registered = parsed.scripts
         }
 
         // Auto-discover any scripts dropped into ~/.hoghunter/maintenance/scripts/
-        ensureDirectoriesExist()
-        if let items = try? FileManager.default.contentsOfDirectory(at: scriptsDirectory, includingPropertiesForKeys: nil) {
+        // Folder creation is an explicit Open Scripts Folder action, never a polling side effect.
+        if let safeScripts = safeURL(scriptsDirectory),
+           let items = try? fileManager.contentsOfDirectory(at: safeScripts, includingPropertiesForKeys: nil) {
             let existingPaths = Set(registered.map { URL(fileURLWithPath: $0.path).standardized.path })
             for item in items {
                 guard !item.lastPathComponent.hasPrefix(".") else { continue }
                 let stdPath = item.standardized.path
-                if !existingPaths.contains(stdPath) && FileManager.default.isExecutableFile(atPath: stdPath) {
+                if !existingPaths.contains(stdPath), let safeItem = safeURL(item),
+                   fileManager.isExecutableFile(atPath: safeItem.path) {
                     let entry = MaintainScriptEntry(
                         id: item.deletingPathExtension().lastPathComponent,
                         path: stdPath,

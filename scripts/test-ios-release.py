@@ -321,14 +321,17 @@ class ReleaseContractTests(unittest.TestCase):
     def test_asc_key_comes_from_fleet_ops_asc_only(self):
         # The Fleet-OPS project id comes from the shared org secret;  this public
         # file never carries it as a literal.
-        self.assertIn("ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}", self.code)
-        self.assertNotRegex(self.code, r"ASC_INFISICAL_PROJECT_ID:\s*[0-9a-f]{8}-")
-        self.assertIn("--path=/asc", self.code)
+        self.assertIn("project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}", self.code)
+        self.assertNotRegex(self.code, r"project-id:\s*[0-9a-f]{8}-")
+        self.assertEqual(self.code.count("secret-path: /asc"), 2)
+        self.assertEqual(self.code.count("service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}"), 2)
+        self.assertNotIn("INFISICAL_CLIENT_SECRET", self.code)
+        self.assertNotIn("universal-auth", self.code)
         for name in ("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"):
             self.assertNotRegex(self.code, rf"secrets\.{name}\b")
         # The multiline key never goes through GITHUB_ENV.
         self.assertNotRegex(self.code, r"for name in .*ASC_KEY_P8")
-        self.assertIn("scripts/ios-stage-asc-key.sh", self.code)
+        self.assertEqual(self.code.count('asc-mode: "true"'), 2)
         # The certificate stays out of GITHUB_ENV.
         self.assertNotRegex(self.code, r">>\s*\"?\$GITHUB_ENV\"?.*IOS_DIST")
 
@@ -359,7 +362,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(self.code.count("scheduled-ship-gate.sh"), 2)
         plan_job = self.code.split("plan-build:", 1)[1].split("\n  ship:", 1)[0]
         gate_at = plan_job.index("scheduled-ship-gate.sh")
-        self.assertLess(gate_at, plan_job.index("infisical login"))
+        self.assertLess(gate_at, plan_job.index("uses: ./.github/actions/infisical-secrets"))
         self.assertLess(gate_at, plan_job.index("--plan-build-only"))
         self.assertIn("actions/cache/restore@", plan_job)
         self.assertRegex(plan_job, r"(?s)Load ASC credentials.*steps\.gate\.outputs\.should_ship == '1'")

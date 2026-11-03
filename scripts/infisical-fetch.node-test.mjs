@@ -25,17 +25,14 @@ function tempGithubEnv() {
   return { dir, path: join(dir, "github_env") };
 }
 
-/** A stub fetch standing in for Infisical: login always succeeds, the list
+/** A stub fetch standing in for Infisical: metadata matches the exact scope, the list
  * call returns exactly the fixture secrets given. Neither ever touches the
  * network. */
 function stubFetch(vaultSecrets) {
   return async (url) => {
     const u = String(url);
-    if (u.includes("/api/v1/auth/universal-auth/login")) {
-      return {
-        ok: true,
-        json: async () => ({ accessToken: "test-token", expiresIn: 3600 }),
-      };
+    if (u.includes("/api/v2/service-token")) {
+      return { ok: true, json: async () => ({ projectId: "proj", scopes: [{ environment: "prod", secretPath: "/" }], permissions: ["read"] }) };
     }
     if (u.includes("/api/v3/secrets/raw")) {
       return {
@@ -62,8 +59,7 @@ test("a name present in the vault is masked and written to GITHUB_ENV", async ()
       env: {
         INFISICAL_NAMES: "FOO",
         INFISICAL_PROJECT_ID: "proj",
-        INFISICAL_CLIENT_ID: "id",
-        INFISICAL_CLIENT_SECRET: "secret",
+        INFISICAL_SERVICE_TOKEN: "synthetic-token",
         GITHUB_ENV: path,
       },
       fetchImpl: stubFetch({ FOO: SENTINEL_PRESENT }),
@@ -94,8 +90,7 @@ test("a name missing from the vault falls back to GH_FALLBACK_<NAME>", async () 
       env: {
         INFISICAL_NAMES: "BAR",
         INFISICAL_PROJECT_ID: "proj",
-        INFISICAL_CLIENT_ID: "id",
-        INFISICAL_CLIENT_SECRET: "secret",
+        INFISICAL_SERVICE_TOKEN: "synthetic-token",
         GH_FALLBACK_BAR: SENTINEL_FALLBACK,
         GITHUB_ENV: path,
       },
@@ -120,8 +115,7 @@ test("a name missing from both the vault and the fallback warns and is absent", 
       env: {
         INFISICAL_NAMES: "BAZ",
         INFISICAL_PROJECT_ID: "proj",
-        INFISICAL_CLIENT_ID: "id",
-        INFISICAL_CLIENT_SECRET: "secret",
+        INFISICAL_SERVICE_TOKEN: "synthetic-token",
         GITHUB_ENV: path,
       },
       fetchImpl: stubFetch({}),
@@ -156,8 +150,7 @@ test("a missing required name rejects instead of silently continuing", async () 
             INFISICAL_NAMES: "QUX",
             INFISICAL_REQUIRED: "QUX",
             INFISICAL_PROJECT_ID: "proj",
-            INFISICAL_CLIENT_ID: "id",
-            INFISICAL_CLIENT_SECRET: "secret",
+            INFISICAL_SERVICE_TOKEN: "synthetic-token",
             GITHUB_ENV: path,
           },
           fetchImpl: stubFetch({}),
@@ -181,8 +174,7 @@ test("every line in a mixed run is either an add-mask carrier or a warning, neve
       env: {
         INFISICAL_NAMES: "FOO BAZ",
         INFISICAL_PROJECT_ID: "proj",
-        INFISICAL_CLIENT_ID: "id",
-        INFISICAL_CLIENT_SECRET: "secret",
+        INFISICAL_SERVICE_TOKEN: "synthetic-token",
         GITHUB_ENV: path,
       },
       fetchImpl: stubFetch({ FOO: SENTINEL_PRESENT }),
@@ -200,7 +192,7 @@ test("every line in a mixed run is either an add-mask carrier or a warning, neve
   }
 });
 
-test("no configured identity resolves purely from GH_FALLBACK_<NAME>, with no fetch call", async () => {
+test("no configured token resolves purely from GH_FALLBACK_<NAME>, with no fetch call", async () => {
   const { dir, path } = tempGithubEnv();
   try {
     const { lines, log } = collectLines();
@@ -232,8 +224,7 @@ test("every line of a multi-line value gets its own ::add-mask:: and is never pr
       env: {
         INFISICAL_NAMES: "MAC_CERT_P12_BASE64",
         INFISICAL_PROJECT_ID: "proj",
-        INFISICAL_CLIENT_ID: "id",
-        INFISICAL_CLIENT_SECRET: "secret",
+        INFISICAL_SERVICE_TOKEN: "synthetic-token",
         GITHUB_ENV: path,
       },
       fetchImpl: stubFetch({ MAC_CERT_P12_BASE64: SENTINEL_MULTILINE }),
@@ -335,4 +326,100 @@ test("CLI entry exits zero when every name is best-effort and absent", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function tokenFetch(metadata, secrets, calls = []) {
+  return async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes('/api/v2/service-token')) return { ok: true, json: async () => metadata };
+    if (String(url).includes('/api/v3/secrets/raw')) return { ok: true, json: async () => ({ secrets: Object.entries(secrets).map(([secretKey, secretValue]) => ({ secretKey, secretValue })) }) };
+    throw new Error('Unexpected auth endpoint');
+  };
+}
+const exactMetadata = { projectId: 'proj', scopes: [{ environment: 'prod', secretPath: '/' }], permissions: ['read'] };
+const tokenEnv = { INFISICAL_PROJECT_ID: 'proj', INFISICAL_SERVICE_TOKEN: 'synthetic-token', INFISICAL_NAMES: 'FOO' };
+
+test('wrong project, environment, folder, multi-folder, and write tokens fail before any secret read or fallback', async () => {
+  for (const metadata of [
+    { ...exactMetadata, projectId: 'other' },
+    { ...exactMetadata, scopes: [{ environment: 'dev', secretPath: '/' }] },
+    { ...exactMetadata, scopes: [{ environment: 'prod', secretPath: '/asc' }] },
+    { ...exactMetadata, scopes: [...exactMetadata.scopes, { environment: 'prod', secretPath: '/asc' }] },
+    { ...exactMetadata, permissions: ['read', 'write'] },
+    { ...exactMetadata, permissions: [] },
+  ]) {
+    const calls = [], lines = [];
+    await assert.rejects(run({ env: { ...tokenEnv, GH_FALLBACK_FOO: 'synthetic-fallback' }, fetchImpl: tokenFetch(metadata, { FOO: 'synthetic-vault' }, calls), log: l => lines.push(l) }), /exactly the requested/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(lines, []);
+  }
+});
+
+test('legacy machine credentials alone never initiate a login', async () => {
+  await run({ env: { INFISICAL_NAMES: 'FOO', INFISICAL_CLIENT_ID: 'old-id', INFISICAL_CLIENT_SECRET: 'old-secret' }, fetchImpl: () => { throw new Error('No API permitted'); }, log: () => {} });
+});
+
+test('ASC token stages the multiline key without raw key environment or logs', async () => {
+  const { dir, path } = tempGithubEnv();
+  try {
+    const lines = [];
+    const key = 'SYNTHETIC-HEADER\nSYNTHETIC-BODY\nSYNTHETIC-FOOTER\n';
+    await run({ env: { ...tokenEnv, INFISICAL_ASC_MODE: 'true', INFISICAL_SECRET_PATH: '/asc', GITHUB_ENV: path, ASC_STAGING_ROOT: dir, PATH: process.env.PATH }, fetchImpl: tokenFetch({ ...exactMetadata, scopes: [{ environment: 'prod', secretPath: '/asc' }] }, { ASC_KEY_ID: 'synthetic-id', ASC_ISSUER_ID: 'synthetic-issuer', ASC_KEY_P8: key }), log: l => lines.push(l) });
+    const written = readFileSync(path, 'utf8');
+    const staged = written.match(/^ASC_KEY_PATH=(.+)$/m)[1];
+    assert.equal(readFileSync(staged, 'utf8'), key);
+    assert.ok(!written.includes('SYNTHETIC-BODY'));
+    assert.ok(!lines.join('\n').includes('SYNTHETIC-BODY'));
+    assert.match(written, /APPLE_API_KEY_ID<</);
+    assert.match(written, /APPLE_API_KEY_P8_BASE64<</);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ASC missing fields, references, and multiline IDs fail before writing anything', async () => {
+  for (const fields of [{}, { ASC_KEY_ID: 'bad\nid', ASC_ISSUER_ID: 'issuer', ASC_KEY_P8: 'synthetic-p8' }, { ASC_KEY_ID: 'id', ASC_ISSUER_ID: 'issuer', ASC_KEY_P8: '${prod.other.KEY}' }]) {
+    const { dir, path } = tempGithubEnv();
+    try {
+      const lines = [];
+      await assert.rejects(run({ env: { ...tokenEnv, INFISICAL_ASC_MODE: 'true', INFISICAL_SECRET_PATH: '/asc', GITHUB_ENV: path, GH_FALLBACK_ASC_KEY_ID: 'stale' }, fetchImpl: tokenFetch({ ...exactMetadata, scopes: [{ environment: 'prod', secretPath: '/asc' }] }, fields), log: l => lines.push(l) }));
+      assert.deepEqual(lines, []);
+      assert.throws(() => readFileSync(path));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('cloud export safely quotes shell metacharacters and preserves multiline values', async () => {
+  const { dir, path } = tempGithubEnv();
+  try {
+    const value = "quote' $(touch SHOULD_NOT_EXIST)\nsecond line";
+    await run({ env: { ...tokenEnv, INFISICAL_SHELL_FILE: path }, fetchImpl: tokenFetch(exactMetadata, { SAFE_VALUE: value }), log: () => {} });
+    const result = spawnSync('bash', ['-c', '. "$1"; printf %s "$SAFE_VALUE"', 'test', path], { encoding: 'utf8', cwd: dir, env: { PATH: process.env.PATH } });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, value);
+    assert.throws(() => readFileSync(join(dir, 'SHOULD_NOT_EXIST')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Cursor boot without token clears stale files even when legacy machine credentials exist', () => {
+  const { dir } = tempGithubEnv();
+  try {
+    const result = spawnSync('bash', ['-c', 'mkdir -p "$HOME/.cursor-cloud-env"; printf stale > "$HOME/.cursor-cloud-env/HogHunter.env"; printf stale > "$HOME/.cursor-cloud-env/HogHunter.source.sh"; bash "$1"; test ! -e "$HOME/.cursor-cloud-env/HogHunter.env"; test ! -e "$HOME/.cursor-cloud-env/HogHunter.source.sh"', 'test', join(ROOT, 'scripts/cursor-cloud-start.sh')], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: dir, INFISICAL_CLIENT_ID: 'old-id', INFISICAL_CLIENT_SECRET: 'old-secret', INFISICAL_HOGHUNTER_READ_TOKEN: '' } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /continuing without secret export/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('metadata transport errors cannot echo credentials', async () => {
+  const sentinel = 'synthetic-secret-must-not-leak';
+  await assert.rejects(run({ env: tokenEnv, fetchImpl: async () => { throw new Error(sentinel); }, log: () => {} }), e => !e.message.includes(sentinel) && /metadata unavailable/.test(e.message));
+});
+
+test('both release workflows use only the three declared service token scopes', () => {
+  const ios = readFileSync(join(ROOT, '.github/workflows/ios-testflight.yml'), 'utf8');
+  const mac = readFileSync(join(ROOT, '.github/workflows/mac-release.yml'), 'utf8');
+  for (const workflow of [ios, mac]) {
+    assert.doesNotMatch(workflow, /INFISICAL_(?:UNIVERSAL_AUTH_|CLIENT_)|secrets\.ASC_(?:KEY_ID|ISSUER_ID|KEY_P8)\b/);
+    assert.match(workflow, /secret-path: \/asc\n\s+service-token: \$\{\{ secrets.INFISICAL_ASC_READ_TOKEN \}\}/);
+    assert.match(workflow, /service-token: \$\{\{ secrets.INFISICAL_HOGHUNTER_READ_TOKEN \}\}/);
+  }
+  assert.match(mac, /secret-path: \/mac-certs\n\s+service-token: \$\{\{ secrets.INFISICAL_MAC_CERTS_READ_TOKEN \}\}/);
 });

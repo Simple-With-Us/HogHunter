@@ -416,21 +416,23 @@ def _owner_is_gone(owner: dict, lock_path: Path, owner_path: Path) -> bool:
         # The start time could not be read:  the record cannot speak for the
         # lock, and the age rule decides.
         return False
-    if current == owner["start"]:
-        return False
     current_epoch = _start_token_epoch(current)
     recorded_civil_epoch = _start_token_epoch(owner["start"])
     if current_epoch is None or recorded_civil_epoch is None:
         return False
+    # No timezone change can explain this gap, even if acquisition metadata
+    # is unusable.  This ordering matches AFC's two readers.
+    if abs(recorded_civil_epoch - current_epoch) > 24 * 60 * 60:
+        return True
     if not _owner_acquired_at_is_sane(
         owner["acquired_at"], lock_mtime, owner_mtime
     ):
         return False
     # A legacy local token may differ only by its zone's UTC offset.  The
     # acquisition bound prevents a newly reused pid from being accepted as
-    # the prior holder merely because its start is within one day.
-    return (current_epoch > owner["acquired_at"]
-            or abs(recorded_civil_epoch - current_epoch) > 24 * 60 * 60)
+    # the prior holder merely because its start is within one day, including
+    # when the legacy local token exactly equals the new UTC token.
+    return current_epoch > owner["acquired_at"]
 
 
 def _write_owner(owner_path: Path, lock_path: Path) -> None:

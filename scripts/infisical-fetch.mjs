@@ -1,27 +1,7 @@
-// Copied from Simple-With-Us/BotFleet scripts/infisical-fetch.mjs, in step with
-// BotFleet's main at b91fa490e7e7 on 2026-10-21, together with
-// .github/actions/infisical-secrets, so the Mac release workflow reads its
-// signing certificate the way BotFleet's release.yml does.  Keep the two copies
-// in step until the fleet has a shared action.
-//
-// CI-side Infisical fetch: universal-auth login, one bulk secrets list, then
-// per requested name mask + export into $GITHUB_ENV -- falling back to a
-// same-named GH_FALLBACK_<NAME> step env var, warning when a name stays
-// empty everywhere, and failing only for a name listed in `required`.
-//
-// Runs unmodified on GitHub-hosted macOS, Windows and Linux runners: no CLI
-// install (ios-ship.yml's `brew install infisical/get-cli/infisical` is
-// macOS-only), no dependency (`@infisical/sdk` is in neither package.json
-// nor pnpm-lock.yaml) -- just global `fetch`, which every GitHub runner's
-// Node ships with.
-//
-// Never prints a secret value except as the payload of an `::add-mask::`
-// workflow command, which is the mechanism GitHub uses to scrub it from the
-// rendered log from that point on -- one command per LINE of the value, see
-// `maskValue` below, because the runner's parser stops at the first newline.
-// A login/list failure never crashes the job -- callers still get their
-// GH_FALLBACK_<NAME> values, or the missing-name warning/error below.
-import { appendFileSync, realpathSync } from "node:fs";
+// CI and cloud fetches use explicitly scoped, read-only service tokens only.
+import { appendFileSync, realpathSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -36,46 +16,38 @@ function stripTrailingSlash(url) {
   return String(url ?? "").replace(/\/+$/, "");
 }
 
-/** POST .../api/v1/auth/universal-auth/login -- returns the bearer token
- * string only.  Body is built with JSON.stringify, never string
- * interpolation, so a client secret containing a quote cannot break the
- * request shape. */
-export async function loginUniversalAuth({ siteUrl, clientId, clientSecret, fetchImpl = fetch, timeoutMs = 30_000 }) {
-  const res = await fetchImpl(`${siteUrl}/api/v1/auth/universal-auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ clientId, clientSecret }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    throw new Error(`Infisical login failed: HTTP ${res.status}`);
+/** Verify the token's authority before a bulk endpoint that may ignore secretPath. */
+export async function validateServiceToken({ siteUrl, token, projectId, environment, secretPath, fetchImpl = fetch, timeoutMs = 30_000 }) {
+  if (!projectId || !token || /[\r\n]/.test(token)) throw new Error("Missing or invalid scoped Infisical service token configuration");
+  let body;
+  try {
+    const res = await fetchImpl(`${siteUrl}/api/v2/service-token`, {
+      method: "GET", headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new Error(`Infisical service token metadata failed: HTTP ${res.status}`);
+    body = await res.json();
+  } catch {
+    throw new Error("Infisical service token metadata unavailable");
   }
-  const body = await res.json();
-  const token = body && body.accessToken;
-  if (!token) {
-    throw new Error("Infisical login response carried no accessToken");
+  const project = body?.projectId ?? (typeof body?.workspace === "string" ? body.workspace : body?.workspace?._id ?? body?.workspace?.id);
+  const scopes = body?.scopes;
+  if (project !== projectId || !Array.isArray(scopes) || scopes.length !== 1 ||
+      scopes[0].environment !== environment || scopes[0].secretPath !== secretPath ||
+      !Array.isArray(body.permissions) || body.permissions.length !== 1 || body.permissions[0] !== "read") {
+    throw new Error("Infisical service token must have exactly the requested project, environment, folder and read-only permission");
   }
-  return token;
 }
 
-/** GET .../api/v3/secrets/raw for the whole path in one call -- returns a
- * Map<secretKey, secretValue>.  viewSecretValue is always "true" here; this
- * script only ever runs where values are needed (it exists to populate
- * GITHUB_ENV), unlike the probe path in server/infisical.ts.
- *
- * expandSecretReferences is "true": a secret whose stored value is a bare
- * reference such as ${prod.some-folder.NAME} (the Fleet-OPS root, OPS-818) comes
- * back as the referenced value.  With "false" the literal reference string
- * would land in GITHUB_ENV as if it were the credential.  Expanding needs the
- * reading identity to be able to read the referenced folder too. */
+/** Read only this declared scope, with server reference expansion disabled. */
 export async function listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl = fetch, timeoutMs = 30_000 }) {
   const qs = new URLSearchParams({
     workspaceId: projectId,
     environment,
     secretPath,
     viewSecretValue: "true",
-    expandSecretReferences: "true",
+    expandSecretReferences: "false",
     include_imports: "false",
+    recursive: "false",
   });
   const res = await fetchImpl(`${siteUrl}/api/v3/secrets/raw?${qs.toString()}`, {
     method: "GET",
@@ -122,7 +94,7 @@ export function maskValue(value, log) {
   for (const line of String(value).split(/\r?\n/)) {
     if (!line.trim() || seen.has(line)) continue;
     seen.add(line);
-    log(`::add-mask::${line}`);
+    log(`::add-mask::${line.replaceAll("%", "%25").replaceAll("\r", "%0D")}`);
   }
 }
 
@@ -135,34 +107,47 @@ export function writeGithubEnvValue(path, name, value, appendFileImpl = appendFi
   appendFileImpl(path, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
 }
 
-/** A value that is still a bare Infisical reference such as
- * ${prod.some-folder.NAME}: the server did not expand it (target missing, or
- * the reading identity cannot read the referenced folder).  Exporting it would
- * hand a workflow the literal reference string as if it were the credential. */
-export const UNRESOLVED_REFERENCE = /^\$\{[^}]+\}$/;
+/** References are never expanded across scopes or passed as credentials. */
+export const UNRESOLVED_REFERENCE = /\$\{[^}]+\}/;
 
 export function isUnresolvedReference(value) {
   return UNRESOLVED_REFERENCE.test(String(value ?? "").trim());
 }
 
-/** Resolves the vault snapshot (empty map when unconfigured or the fetch
- * failed) -- never throws; a failure is reported through `log` and the
- * caller proceeds on GH_FALLBACK_<NAME> alone. */
-async function resolveVaultValues({ siteUrl, projectId, clientId, clientSecret, environment, secretPath, fetchImpl, log }) {
-  if (!projectId || !clientId || !clientSecret) {
-    return new Map();
-  }
+/** Missing tokens permit explicit GH fallbacks; invalid scope always fails closed. */
+export async function resolveVaultValues({ siteUrl, projectId, token, environment, secretPath, fetchImpl, log = () => {} }) {
+  if (!token) return new Map();
+  // Scope errors fail closed rather than disguising a broad token as a fallback.
+  await validateServiceToken({ siteUrl, token, projectId, environment, secretPath, fetchImpl });
   try {
-    const token = await loginUniversalAuth({ siteUrl, clientId, clientSecret, fetchImpl });
     return await listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl });
-  } catch (err) {
-    // Never interpolate the raw error body -- Infisical error payloads have
-    // echoed request fields on some 4xx responses in the past, and none of
-    // that belongs in a public Actions log.
-    const reason = err instanceof Error ? err.message : "unknown error";
-    log(`::warning::Infisical ${environment} fetch unavailable (${reason}); using GitHub secret fallbacks only.`);
+  } catch {
+    log(`::warning::Infisical fetch unavailable; using GitHub secret fallbacks only.`);
     return new Map();
   }
+}
+
+export function exportAscCredentials(values, { env, log }) {
+  for (const name of ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"]) {
+    const value = values.get(name);
+    if (!value || isUnresolvedReference(value)) throw new Error(`Missing or unresolved ${name} in Fleet-OPS prod /asc`);
+    if (name !== "ASC_KEY_P8" && /[\r\n]/.test(value)) throw new Error(`Signing field ${name} must be single-line`);
+  }
+  const key = values.get("ASC_KEY_P8");
+  // Staging receives the key on stdin, never argv or a persisted shell command.
+  const staged = spawnSync("bash", [join(dirname(fileURLToPath(import.meta.url)), "ios-stage-asc-key.sh")], {
+    input: key.endsWith("\n") ? key : `${key}\n`, env, encoding: "utf8",
+  });
+  if (staged.status !== 0) throw new Error("ASC key staging failed");
+  for (const name of ["ASC_KEY_ID", "ASC_ISSUER_ID"]) {
+    const value = values.get(name);
+    maskValue(value, log);
+    writeGithubEnvValue(env.GITHUB_ENV, name, value);
+    writeGithubEnvValue(env.GITHUB_ENV, `APPLE_API_${name.slice(4)}`, value);
+  }
+  const encoded = Buffer.from(key).toString("base64");
+  maskValue(encoded, log);
+  writeGithubEnvValue(env.GITHUB_ENV, "APPLE_API_KEY_P8_BASE64", encoded);
 }
 
 export async function run({ env = process.env, fetchImpl = fetch, log = (line) => console.log(line) } = {}) {
@@ -172,11 +157,29 @@ export async function run({ env = process.env, fetchImpl = fetch, log = (line) =
   const projectId = env.INFISICAL_PROJECT_ID || "";
   const environment = env.INFISICAL_ENVIRONMENT || "prod";
   const secretPath = env.INFISICAL_SECRET_PATH || "/";
-  const clientId = env.INFISICAL_CLIENT_ID || "";
-  const clientSecret = env.INFISICAL_CLIENT_SECRET || "";
+  const token = env.INFISICAL_SERVICE_TOKEN || "";
   const githubEnvPath = env.GITHUB_ENV || "";
 
-  const vaultValues = await resolveVaultValues({ siteUrl, projectId, clientId, clientSecret, environment, secretPath, fetchImpl, log });
+  const vaultValues = await resolveVaultValues({ siteUrl, projectId, token, environment, secretPath, fetchImpl, log });
+
+  if (env.INFISICAL_SHELL_FILE) {
+    if (!token || !projectId) throw new Error("Cloud export requires a scoped service token");
+    const entries = [];
+    for (const [name, value] of vaultValues) {
+      if (isUnresolvedReference(value)) throw new Error("Cloud export contains an unresolved secret reference");
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+      entries.push(`export ${name}='${String(value).replaceAll("'", "'\\''")}'`);
+    }
+    if (entries.length === 0) throw new Error("No shell-compatible secrets fetched");
+    writeFileSync(env.INFISICAL_SHELL_FILE, `${entries.join("\n")}\n`, { mode: 0o600 });
+    return;
+  }
+
+  if (env.INFISICAL_ASC_MODE === "true") {
+    if (!token || secretPath !== "/asc" || environment !== "prod") throw new Error("ASC requires a scoped service token for Fleet-OPS prod /asc");
+    exportAscCredentials(vaultValues, { env, log });
+    return;
+  }
 
   const missingRequired = [];
   const unresolved = [];
@@ -198,7 +201,7 @@ export async function run({ env = process.env, fetchImpl = fetch, log = (line) =
     if (isUnresolvedReference(value)) {
       // Name the KEY only -- never the value, even though it is a reference.
       unresolved.push(name);
-      log(`::error::${name} is still an unresolved Infisical secret reference after the ${environment} export; check the target exists and the CI identity can read the referenced folder.`);
+      log(`::error::${name} is still an unresolved Infisical secret reference after the ${environment} export; check the target exists and use a separate scoped token for the target folder.`);
       continue;
     }
     maskValue(value, log);

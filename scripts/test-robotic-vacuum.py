@@ -599,6 +599,14 @@ class TestRunOutcome(unittest.TestCase):
         self.assertEqual(run_outcome([_step("a", ran), _step("b", failed)]), RunOutcome.PARTIAL)
         self.assertEqual(run_outcome([_step("a", skipped), _step("b", failed)]), RunOutcome.FAILED)
         self.assertEqual(run_outcome([_step("b", failed)]), RunOutcome.FAILED)
+        lock_skip = _step("housekeeper_lock", skipped)
+        self.assertEqual(run_outcome([_step("b", failed), lock_skip]), RunOutcome.FAILED)
+        self.assertEqual(run_outcome([_step("a", ran), _step("b", failed), lock_skip]), RunOutcome.PARTIAL)
+        from vacuum.scheduler import run_skipped_for_lock
+        broken = RunRecord("broken", TriggerKind.FULL, started_at=1,
+                           steps=[_step("b", failed), lock_skip])
+        broken.finish()
+        self.assertFalse(run_skipped_for_lock(broken))
         # The sampler only reads the host.  It never counts as the work that rescued a run.
         self.assertEqual(run_outcome([_step("resource_sample", ran), _step("b", failed)]), RunOutcome.FAILED)
         self.assertEqual(
@@ -641,7 +649,7 @@ class TestRunOutcome(unittest.TestCase):
         clean = RunRecord("y", TriggerKind.WATCH, started_at=time.time())
         clean.steps.append(_step("housekeeper_lock", StepStatus.SKIPPED, "held"))
         clean.finish(0, summary="watch skipped; lock held")
-        self.assertEqual((clean.exit_code, clean.outcome, clean.summary), (0, "ok", "watch skipped; lock held"))
+        self.assertEqual((clean.exit_code, clean.outcome, clean.summary), (0, "skipped", "watch skipped; lock held"))
         odd = RunRecord("z", TriggerKind.FULL, started_at=time.time())
         odd.steps.append(_step("a", StepStatus.FAILED))
         odd.finish(0)
@@ -1207,23 +1215,40 @@ class TestRunInOwnGroupErrors(unittest.TestCase):
         proc = Mock()
         proc.pid = 4242
         proc.communicate.side_effect = [OSError(errno.EIO, "Input/output error"), ("", "")]
-        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch("vacuum.engine.os.killpg") as killpg:
+        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch("vacuum.engine.os.killpg") as killpg, patch("vacuum.budget.group_stopped", return_value=True):
             with self.assertRaises(OSError):
                 _run_in_own_group(["/bin/true"], 5)
-        killpg.assert_called_once_with(4242, signal.SIGKILL)
+        self.assertIn(unittest.mock.call(4242, signal.SIGKILL), killpg.call_args_list)
 
-    def test_a_missing_group_falls_back_to_killing_the_child(self):
+    def test_a_missing_group_is_reaped_without_a_second_pipe_read(self):
         from vacuum.engine import _run_in_own_group
 
         proc = Mock()
         proc.pid = 4242
-        proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("partial", "")]
+        proc.communicate.side_effect = subprocess.TimeoutExpired("x", 1, output=b"partial")
         with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch(
             "vacuum.engine.os.killpg", side_effect=ProcessLookupError
         ):
             code, out, _err, timed_out = _run_in_own_group(["/bin/true"], 1)
-        proc.kill.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=5)
         self.assertEqual((code, out, timed_out), (-1, "partial", True))
+
+    def test_timeout_does_not_retry_a_broken_pipe_read_or_leave_registry(self):
+        from vacuum import budget
+        from vacuum.engine import _run_in_own_group
+        for read_error in (OSError(errno.EIO, "read failed"), ValueError("closed pipe")):
+            proc = Mock()
+            proc.pid = 4242
+            proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1, output=b"partial"), read_error]
+            with patch("vacuum.engine.subprocess.Popen", return_value=proc), \
+                 patch("vacuum.engine.os.killpg"), \
+                 patch("vacuum.budget.group_stopped", return_value=True):
+                code, out, _err, timed_out = _run_in_own_group(["unused"], 1)
+            self.assertEqual((code, out, timed_out), (-1, "partial", True))
+            proc.communicate.assert_called_once_with(timeout=1)
+            proc.wait.assert_called_once_with(timeout=5)
+            self.assertNotIn(proc.pid, budget._children)
+
 
 
 class TestSpotlightStep(_EngineHome):
@@ -1249,7 +1274,7 @@ class TestSpotlightStep(_EngineHome):
 
     def test_a_macos_refusal_is_a_skip_and_touches_no_daemon(self):
         for code in (errno.EPERM, errno.EACCES):
-            with self.denied_listing(code), patch("vacuum.engine.subprocess.run") as run:
+            with self.denied_listing(code), patch("vacuum.engine.work.run_process") as run:
                 freed, reason, status = self.engine._spotlight_journals()
             self.assertEqual((freed, status), (0, StepStatus.SKIPPED), code)
             self.assertIn("Full Disk Access", reason)
@@ -1262,7 +1287,7 @@ class TestSpotlightStep(_EngineHome):
         for step_id in self.cfg["steps"]:
             self.cfg["steps"][step_id] = {"enabled": step_id in ("spotlight_journals", "pm2_logs")}
         engine = VacuumEngine(self.cfg, home=self.home)
-        with self.denied_listing(errno.EPERM), patch("vacuum.engine.subprocess.run"), patch.object(
+        with self.denied_listing(errno.EPERM), patch("vacuum.engine.work.run_process"), patch.object(
             sys, "platform", "darwin"
         ), patch("vacuum.engine.sample_mac", return_value={"disk_free_gb": 100.0, "load1": 0.0, "swap_used_pct": 0.0}):
             record = engine.run(TriggerKind.FULL)
@@ -1271,7 +1296,7 @@ class TestSpotlightStep(_EngineHome):
         self.assertEqual((record.exit_code, record.outcome), (0, "ok"))
 
     def test_a_refusal_after_the_probe_is_still_a_skip(self):
-        with patch("vacuum.engine.subprocess.run"), patch.object(
+        with patch("vacuum.engine.work.run_process"), patch.object(
             Path, "mkdir", side_effect=PermissionError(errno.EPERM, "Operation not permitted")
         ):
             _freed, reason, status = self.engine._spotlight_journals()
@@ -1291,7 +1316,7 @@ class TestSpotlightStep(_EngineHome):
             self.engine._spotlight_journals()
 
     def test_with_access_it_resets_the_journals_and_counts_the_bytes(self):
-        with patch("vacuum.engine.subprocess.run") as run:
+        with patch("vacuum.engine.work.run_process") as run:
             freed, reason, status = self.engine._spotlight_journals()
         run.assert_called_once()
         self.assertEqual((freed, reason, status), (2000, "journals reset", StepStatus.RAN))
@@ -1549,10 +1574,46 @@ class TestTickWatchdog(unittest.TestCase):
     def test_the_watchdog_exits_the_process_when_the_tick_overruns(self):
         import maintain
 
-        with patch.object(maintain.os, "_exit", create=True) as exit_mock:
+        with patch.object(maintain.os, "_exit", create=True) as exit_mock, patch.object(maintain.work_budget, "terminate_all", return_value=True):
             with patch.object(maintain.time, "sleep"):
                 maintain._watchdog_exit(0.01)
         exit_mock.assert_called_once_with(3)
+
+    def test_watchdog_retains_serialization_until_owned_groups_have_stopped(self):
+        import maintain
+
+        events = []
+        def terminate():
+            events.append("terminate")
+            return events.count("terminate") > 1
+        with patch.object(maintain.work_budget, "terminate_all", side_effect=terminate), \
+             patch.object(maintain.housekeeper_lock, "force_release", side_effect=lambda: events.append("release")), \
+             patch.object(maintain.os, "_exit", side_effect=lambda code: events.append("exit")), \
+             patch.object(maintain.time, "sleep"):
+            maintain._watchdog_exit(0.01)
+        self.assertEqual(events, ["terminate", "terminate", "exit"])
+
+    def test_a_hard_exit_keeps_owner_until_death_then_allows_immediate_recovery(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with tempfile.TemporaryDirectory() as td:
+            lock_path = Path(td) / ".housekeeper.lock"
+            code = (
+                "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+                "from vacuum.lock import HousekeeperLock; import maintain; "
+                "holder = HousekeeperLock(Path(sys.argv[2])); holder.__enter__(); "
+                "maintain._watchdog_exit(0.01)"
+            )
+            child = subprocess.run(
+                [sys.executable, "-c", code, str(REPO / "scripts"), str(lock_path)],
+                capture_output=True, text=True, timeout=15,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": td, "LC_ALL": "C"},
+            )
+            self.assertEqual(child.returncode, 3, child.stderr)
+            self.assertTrue(owner_path_for(lock_path).is_file())
+            with HousekeeperLock(lock_path):
+                self.assertTrue(lock_path.is_dir())
+            self.assertFalse(lock_path.exists())
 
     def test_a_zero_budget_arms_nothing(self):
         import maintain
@@ -1758,6 +1819,37 @@ class TestPartialRunRecord(unittest.TestCase):
         self.assertEqual(partial["run_id"], self.seen[-1].run_id)
         self.assertTrue(partial["steps"])
 
+    def test_a_peer_lock_skip_cannot_erase_or_hide_the_holders_checkpoint(self):
+        holder = RunRecord("holder", TriggerKind.FULL, started_at=100)
+        holder.current_step = "pressure_apps_deps"
+        holder.current_target = "lane/build"
+        holder.steps.append(StepResult("cache", "Cache", StepStatus.RAN, bytes_freed=123))
+        holder.bytes_freed = 123
+        self.store.write_partial_run(holder)
+        peer = RunRecord("peer", TriggerKind.WATCH, started_at=200)
+        peer.steps.append(StepResult("housekeeper_lock", "Lock", StepStatus.SKIPPED))
+        peer.finish()
+        self.store.append_run(peer)
+        self.store.clear_partial_run(peer.run_id)
+        self.assertEqual(self.store.load_partial_run()["run_id"], "holder")
+        self.assertIsNone(self.store.last_run_for("watch"))
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=201)
+        self.assertEqual(status["partial_run"]["run_id"], "holder")
+        self.assertEqual(status["partial_run"]["current_step"], "pressure_apps_deps")
+        self.assertEqual(status["partial_run"]["bytes_freed"], 123)
+
+    def test_legacy_ok_lock_skip_does_not_replace_the_completed_cadence(self):
+        done = RunRecord("done", TriggerKind.FULL, started_at=100)
+        done.finish()
+        self.store.append_run(done)
+        peer = RunRecord("peer", TriggerKind.FULL, started_at=200)
+        peer.steps.append(StepResult("housekeeper_lock", "Lock", StepStatus.SKIPPED))
+        peer.finish()
+        peer.outcome = "ok"  # Older writers used ok for this skipped run.
+        self.store.append_run(peer)
+        self.assertEqual(self.store.last_run_for("full")["run_id"], "done")
+
     def test_a_dry_run_writes_no_partial_record(self):
         # The dry-run contract: a plan reports what it would do and writes
         # nothing.  A plan has reclaimed nothing, so there is nothing to
@@ -1943,6 +2035,34 @@ class TestHousekeeperLock(unittest.TestCase):
 
         self.addCleanup(cleanup)
         return child.pid
+
+    def test_exact_utc_token_still_checks_acquisition_time(self):
+        from vacuum import lock
+
+        token = "Tue Nov  3 12:00:00 2026"
+        started = lock._start_token_epoch(token)
+        owner = self._owner_record(pid=12345, start=token)
+        self.lock_path.mkdir()
+        owner_path = lock.owner_path_for(self.lock_path)
+        for recorded, acquired, sane, expected in [
+            (token, started - 10, True, True),
+            (token, started + 10, True, False),
+            (token, started - 10, False, False),
+            ("Sun Nov  1 12:00:00 2026", started - 10, False, True),
+        ]:
+            with self.subTest(acquired=acquired, sane=sane):
+                owner["acquired_at"] = acquired
+                owner["start"] = recorded
+                owner_path.write_text(json.dumps(owner))
+                # The acquisition matches its filesystem publication, except
+                # for the deliberate invalid-metadata fallback case.
+                mtime = acquired if sane else acquired + 100
+                os.utime(self.lock_path, (mtime, mtime))
+                os.utime(owner_path, (mtime + 1, mtime + 1))
+                with patch.object(lock, "_pid_alive", return_value=True), \
+                     patch.object(lock, "_process_start_token", return_value=token), \
+                     patch.object(lock.time, "time", return_value=started + 100):
+                    self.assertEqual(lock._owner_is_gone(owner, self.lock_path, owner_path), expected)
 
     def test_acquire_writes_an_owner_file_beside_the_lock(self):
         from vacuum.lock import HousekeeperLock, owner_path_for
@@ -3070,7 +3190,7 @@ class TestOccupancyClaimFallback(unittest.TestCase):
             occupancy["at"] = now - (occupancy_claim_lifetime(store.cfg) - 1)
             store.merge_scheduler_state({"tick_occupancy": occupancy})
             self.assertIsNotNone(
-                current_occupancy(store, store.cfg),
+                current_occupancy(store, store.cfg, now=now),
                 "a claim inside its lifetime must still be believable",
             )
 # A fixed host sample, so nothing here reads the disk or the load of the machine the tests run on.

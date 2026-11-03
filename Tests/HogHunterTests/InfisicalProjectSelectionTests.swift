@@ -61,7 +61,7 @@ private final class ProjectFixture {
 
     let client = ProjectClient()
     let cache = InfisicalStore()
-    var persisted: InfisicalCredential? = InfisicalCredential(clientId: "synthetic-id", clientSecret: "synthetic-secret", projectId: ProjectFixture.a)
+    var persisted: InfisicalCredential? = InfisicalCredential(clientId: "synthetic-id", clientSecret: "synthetic-secret", projectId: ProjectFixture.a, mode: .machineIdentity)
     var writes = 0
     var writeError: Error?
     var removeError: Error?

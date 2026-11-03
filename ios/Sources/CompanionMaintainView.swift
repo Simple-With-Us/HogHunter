@@ -109,7 +109,7 @@ private struct MaintainRunRow: View {
                 if let mark = run.result.markLabel {
                     Text(mark)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(run.result == .failed ? Color.red : Color.orange)
+                        .foregroundStyle(run.result == .failed ? Color.red : run.result == .skipped ? Color.secondary : Color.orange)
                 }
                 Spacer()
                 Text(run.bytesFreed > 0 ? "Freed \(MaintainFormat.bytes(run.bytesFreed))" : "Nothing freed")

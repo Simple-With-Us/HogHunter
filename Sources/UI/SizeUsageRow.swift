@@ -73,11 +73,22 @@ struct CodingDirectoriesView: View {
                 }
             }
             ForEach(store.rows) { row in
-                SizeUsageRow(name: row.title == "Derived Data" ? row.title : displayPath(row.displayPath), bytes: row.bytes,
-                             percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10,
-                             detail: status(row))
-                    .help(detail(row))
-                    .accessibilityHint(detail(row))
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    SizeUsageRow(name: row.title == "Derived Data" ? row.title : displayPath(row.displayPath), bytes: row.bytes,
+                                 percentChange: row.percentChange, unavailable: row.isUnavailable, fontSize: 10,
+                                 detail: status(row))
+                        .help(detail(row))
+                        .accessibilityHint(detail(row))
+                    if row.requiresManualMeasurement {
+                        Button("Measure Now") {
+                            Task { await store.measureNow(id: row.id) }
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10))
+                        .disabled(store.isRefreshing || row.scanStartedAt != nil)
+                        .help("Measure this directory once; macOS may ask for access")
+                    }
+                }
             }
         }
         .padding(9)
