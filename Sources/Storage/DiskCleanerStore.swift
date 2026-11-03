@@ -519,7 +519,8 @@ final class DiskCleanerStore: ObservableObject {
                     bytesReclaimed: result.bytesReclaimed,
                     formattedBytesReclaimed: result.formattedBytesReclaimed,
                     snapshotName: result.snapshotName,
-                    error: result.errors.isEmpty ? nil : result.errors.joined(separator: ", ")
+                    error: result.errors.isEmpty ? nil : "\(result.errors.count) items could not be removed.\u{00A0} Details are on the Mac.",
+                    observedFreeBytesChange: result.observedFreeBytesChange
                 )
                 let completedUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: completedProg)
                 NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedUpdate)

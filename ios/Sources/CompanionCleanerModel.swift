@@ -105,9 +105,9 @@ extension CompanionModel {
     }
 
     /// Starts a scan as work the screen can stop: leaving the screen cancels it.
-    func beginCleanScan() {
+    func beginCleanScan(depth: String = "quick") {
         cleanScanTask?.cancel()
-        cleanScanTask = Task { await startCleanScan() }
+        cleanScanTask = Task { await startCleanScan(depth: depth) }
     }
 
     func cancelCleanerPolling() {
@@ -133,7 +133,7 @@ extension CompanionModel {
     // MARK: - Scan
 
     /// Asks the Mac to scan for the chosen tier and follows it until it is done.
-    func startCleanScan() async {
+    func startCleanScan(depth: String = "quick") async {
         guard !cleanScanIsRunning, !isCleaningSelection else { return }
         cleanerError = nil
         if cleanTier == "extreme", !extremeAcknowledged {
@@ -155,7 +155,8 @@ extension CompanionModel {
                 token: saved.token,
                 tier: cleanTier,
                 acknowledgedExtreme: extremeAcknowledged,
-                useTLS: isUsingTLS(for: saved)
+                useTLS: isUsingTLS(for: saved),
+                depth: depth
             )
             isStartingScan = false
             if response.status == "scanning" {

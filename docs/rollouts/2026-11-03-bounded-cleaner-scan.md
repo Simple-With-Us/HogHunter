@@ -36,3 +36,12 @@ The Mac completion panel labels moved/removed estimates and observed available-s
 Focused XCTest fixtures cover provisional report cancellation, partial simulator cleaning, nested-link accounting, partial-regimen retry, child-command deadlines, synthetic snapshots, depth and directory-entry caps, package contents, target and global deadlines, incremental reports, external mount aliases, internal aliases, cancellation, partial-age eligibility, primary simulator identity, per-scan cache lifetime, and signed free-space observations.  The isolated fixture compiles the real cleaner, directory walker, keep sentinel, and temp safety policy with inert app-inventory/capacity stubs; it never scans the real home or invokes cleanup commands.
 
 The exact-source isolated fixture passed all 23 XCTest cases with zero failures; store/view Swift parsing and the diff check also passed.  Native UI integration and the complete app test suite remain CI checks.  No app was installed or quit, and no system cleanup ran during this work.
+
+
+## Companion Parity
+
+The existing phone cleaner opt-in and device-token checks also gate `depth=deeper` on `POST /v1/clean/scan`; omitted depth keeps the quick scan.  Unknown, empty or repeated depths are refused, and direct store requests validate depth before starting work.  The scanner still accepts no phone-supplied filesystem path or category scope.
+
+The report adds optional `isPartial`, `incompleteCategories` and `scanDepth` fields; older payloads remain readable.  Partial totals carry lower-bound text and the iPhone offers Scan Deeper.  The response and final progress add optional signed `observedFreeBytesChange`, separate from the legacy estimated item-byte fields; iPhone copy labels the estimate and observed change separately.  No new cleanup permission, automatic Trash removal, snapshot removal or secret is introduced.
+
+Shared companion snapshot/HTTP/peer sources passed standalone typechecking, all changed phone/store sources passed parsing, and new app-module tests cover legacy decoding, signed observations, partial/deeper propagation and existing device-token authorization.  Complete native tests, iOS compilation and UI verification remain required CI/delivery checks.
