@@ -52,7 +52,7 @@ jobs:
 
   test:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
       TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
@@ -97,10 +97,13 @@ jobs:
           # Plain platform=macOS plus a forced single arch, no index store
           # (CI never reads it).  Plain output, no xcpretty pipe and no
           # -quiet: the module-name failure needs per-file attribution to
-          # diagnose, which filtered output strips.
+          # diagnose, which filtered output strips.  Serialized with -jobs 1:
+          # the empty-module failure reads like two concurrent writers on
+          # one swiftmodule (same path reported with different mismatches
+          # milliseconds apart), so rule parallelism out before anything else.
           set -o pipefail
           xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
-            ONLY_ACTIVE_ARCH=YES ARCHS=arm64 COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" 2>&1 | tail -c 2000000
+            -jobs 1 ONLY_ACTIVE_ARCH=YES ARCHS=arm64 COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" 2>&1 | tail -c 2000000
 
       - name: Build iOS companion
         run: |
