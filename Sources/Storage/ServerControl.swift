@@ -187,7 +187,7 @@ enum SSHCommand {
                         // stdout and exits non-zero.  That answer belongs to
                         // the caller, which reports the reason, so hand it
                         // back instead of failing with the bare exit status.
-                        if !outText.isEmpty, Self.isControlAnswer(outText) {
+                        if !outText.isEmpty, Self.isControlAnswer(outText, refusalOnly: true) {
                             continuation.resume(returning: outText)
                             return
                         }
@@ -240,11 +240,11 @@ enum SSHCommand {
 
     /// Whether stdout is the control script's JSON answer (`{"ok": ...}`),
     /// rather than stray output around a transport failure.
-    static func isControlAnswer(_ text: String) -> Bool {
+    static func isControlAnswer(_ text: String, refusalOnly: Bool = false) -> Bool {
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ok = object["ok"] as? NSNumber,
               CFGetTypeID(ok) == CFBooleanGetTypeID() else { return false }
-        return true
+        return !refusalOnly || !ok.boolValue
     }
 }

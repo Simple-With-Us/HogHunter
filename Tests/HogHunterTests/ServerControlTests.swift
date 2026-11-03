@@ -131,6 +131,8 @@ final class ServerControlTests: XCTestCase {
         XCTAssertTrue(SSHCommand.isControlAnswer("{\"ok\":true}"))
         XCTAssertFalse(SSHCommand.isControlAnswer(""))
         XCTAssertFalse(SSHCommand.isControlAnswer("SSH connection failed"))
+        XCTAssertFalse(SSHCommand.isControlAnswer("{\"ok\":true}", refusalOnly: true))
+        XCTAssertTrue(SSHCommand.isControlAnswer("{\"ok\":false}", refusalOnly: true))
     }
 }
 
