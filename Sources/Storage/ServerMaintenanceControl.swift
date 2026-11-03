@@ -160,6 +160,13 @@ struct ServerMaintenanceResult: Decodable, Equatable, Sendable {
                   value.strategies.allSatisfy { $0.removedCount == 0 && $0.attemptedCount == 0 }) else {
             throw ServerMaintenanceFailure.invalid
         }
+        if successful {
+            let allowedRows = value.status == "ran" ? ["ran", "skipped"] :
+                value.status == "planned" ? ["planned", "skipped"] : ["skipped"]
+            guard value.strategies.allSatisfy({ allowedRows.contains($0.status) && $0.inventoryComplete != false }) else {
+                throw ServerMaintenanceFailure.invalid
+            }
+        }
         let emptyBusy = request.mode == .run && value.status == "skipped" && value.strategies.isEmpty &&
             value.reason == "shared remote cleanup lock busy; no work started" && !value.lock.acquired &&
             value.lock.released == nil && !value.cancellation.requested && value.candidateCount == 0 &&
