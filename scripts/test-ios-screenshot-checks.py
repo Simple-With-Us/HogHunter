@@ -342,6 +342,7 @@ class SceneChecks(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         command = ci.split("- name: Require server maintenance render\n        run: ")[1].splitlines()[0]
         self.assertIn("hh207-server-maintenance-schedule-off.png", command)
+        self.assertIn("hh207-server-maintenance-incomplete-inventory.png", command)
         self.assertIn("HOGHUNTER_RENDER_DIR:", ci)
         self.assertIn("TEST_RUNNER_HOGHUNTER_RENDER_DIR:", ci)
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,7 +354,14 @@ class SceneChecks(unittest.TestCase):
             image.touch()
             self.assertNotEqual(gate(), 0)
             image.write_bytes(png(400, 800, os.urandom(8000)))
+            self.assertNotEqual(gate(), 0)
+            incomplete = Path(tmp) / "hh207-server-maintenance-incomplete-inventory.png"
+            incomplete.touch()
+            self.assertNotEqual(gate(), 0)
+            incomplete.write_bytes(png(400, 800, os.urandom(8000)))
             self.assertEqual(gate(), 0)
+            image.unlink()
+            self.assertNotEqual(gate(), 0)
 
     def test_sample_safety_and_shared_mac_size_contract(self):
         model = (ROOT / "ios/Sources/CompanionModel.swift").read_text()
