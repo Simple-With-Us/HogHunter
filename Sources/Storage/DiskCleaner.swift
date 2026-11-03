@@ -2029,10 +2029,16 @@ final class DiskCleaner: @unchecked Sendable {
             // Resolve a symlink target before the category-prefix and
             // exclusion checks: a link inside an allowed prefix must not
             // smuggle deletes outside it (e.g. a Caches link into Documents).
+            // A trash resident is deleted by unlinking the link itself, which
+            // never touches the target, so the target-scope check below is
+            // skipped for it: every trash link points outside the trash by
+            // definition, and checking the target would refuse the whole
+            // category.  The link's own trash location is still validated by
+            // the guard that follows.
             let linkTarget = item.url.resolvingSymlinksInPath()
             let itemIsLink = item.isSymlink
                 || ((try? item.url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false)
-            if itemIsLink, linkTarget.path != item.url.path {
+            if itemIsLink, item.category != .trash, linkTarget.path != item.url.path {
                 let targetPath = denormalizedCleanPath(linkTarget.path)
                 let targetURL = URL(fileURLWithPath: targetPath)
                 if exclusions.isPathExcluded(targetPath) || isHandsOff(targetURL) {
@@ -2060,26 +2066,37 @@ final class DiskCleaner: @unchecked Sendable {
                     reclaimed &+= item.bytes
                     removedCount += 1
                     noteSuccess(item)
-                } else if item.isSymlink {
+                } else if itemIsLink {
                     // Safe removal for symlinks: preserve the symlink itself, clean its target contents.
                     // Moving the symlink itself to Trash would sever the external offload link.
                     // Every child is re-checked: an exclusion, a hands-off marker, or a
                     // category-scope escape on any child keeps that child in place.
-                    let targetURL = item.url.resolvingSymlinksInPath()
-                    if targetURL.path != item.url.path, fileManager.fileExists(atPath: targetURL.path) {
-                        if let contents = try? fileManager.contentsOfDirectory(at: targetURL, includingPropertiesForKeys: nil, options: []) {
+                    // The gate above uses the same live link test, so a link the
+                    // scan missed (stale isSymlink flag) still takes this branch.
+                    // Use the validated resolution, never a fresh one: resolving
+                    // again here would let a swapped link redirect the clean to
+                    // a target the gate above never approved.
+                    var trashedChild = false
+                    if linkTarget.path != item.url.path, fileManager.fileExists(atPath: linkTarget.path) {
+                        if let contents = try? fileManager.contentsOfDirectory(at: linkTarget, includingPropertiesForKeys: nil, options: []) {
                             for child in contents {
                                 let checkURL = URL(fileURLWithPath: denormalizedCleanPath(child.path))
                                 guard !exclusions.isPathExcluded(checkURL.path),
                                       isSafeToDelete(url: checkURL, category: item.category) else { continue }
                                 var trashedURL: NSURL?
-                                try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)
+                                if (try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)) != nil {
+                                    trashedChild = true
+                                }
                             }
                         }
                     }
-                    reclaimed &+= item.bytes
-                    removedCount += 1
-                    noteSuccess(item)
+                    if trashedChild {
+                        reclaimed &+= item.bytes
+                        removedCount += 1
+                        noteSuccess(item)
+                    } else {
+                        errors.append("Safety check failed for path: \(item.url.path) (symlink target has no removable contents: every child was skipped or already gone)")
+                    }
                 } else if item.url.standardizedFileURL.path == userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true).standardizedFileURL.path {
                     // Aggregate simulator devices item: trash child devices individually so the primary iOS 27
                     // simulator is preserved unless explicitly selected as its own item in activeItems.
