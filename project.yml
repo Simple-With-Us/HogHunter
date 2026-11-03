@@ -103,17 +103,13 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources:
-      # DIAGNOSTIC BISECT (module-name failure): the batch-9 Keychain helper
-      # and its test are temporarily out of the test target to isolate
-      # whether they are the trigger.  Both files stay on disk; the
-      # pre-existing DeepLink cross-target line is untouched.  Restore after
-      # the bisect reads green or red.
       - path: Tests/HogHunterTests
-        excludes:
-          - CompanionKeychainTests.swift
       # Foundation-only, so the Mac test bundle can compile the link rules
       # without the iOS app.
       - path: ios/Sources/CompanionDeepLink.swift
+      # Security-only token store, same reason: the phone-token round trip is
+      # worth a maintained test even though the phone ships no unit harness.
+      - path: ios/Sources/CompanionKeychain.swift
     dependencies:
       - target: HogHunter
     settings:

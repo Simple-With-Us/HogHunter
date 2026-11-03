@@ -75,13 +75,24 @@ jobs:
           curl -sSL --fail --retry 3 --retry-all-errors -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
           test -s /tmp/xcodegen.zip
           rm -rf /tmp/xcodegen && ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
-          # The zip wraps the binary (xcodegen/bin/xcodegen), not a bare
-          # binary, so locate it instead of assuming the layout.
-          BIN="$(find /tmp/xcodegen -name xcodegen -type f | head -1)"
+          # The zip wraps the binary AND its SettingPresets
+          # (xcodegen/bin/xcodegen plus xcodegen/share/xcodegen).  The
+          # binary alone generates a preset-less project -- xcodebuild
+          # then resolves an empty PRODUCT_NAME and drops -enable-testing
+          # ("module name '' is not a valid identifier").  Install both,
+          # like the bundled install.sh does, tolerating layout drift.
+          BIN="$(find /tmp/xcodegen -path '*/bin/xcodegen' -type f | head -1)"
+          [ -n "$BIN" ] || BIN="$(find /tmp/xcodegen -maxdepth 2 -name xcodegen -type f | head -1)"
           test -n "$BIN" && test -x "$BIN"
           sudo mkdir -p /usr/local/bin
           sudo rm -rf /usr/local/bin/xcodegen
-          sudo mv "$BIN" /usr/local/bin/xcodegen
+          sudo cp "$BIN" /usr/local/bin/xcodegen
+          SHARE="$(find /tmp/xcodegen -type d -path '*share/xcodegen' | head -1)"
+          if [ -n "$SHARE" ]; then
+            sudo rm -rf /usr/local/share/xcodegen
+            sudo mkdir -p /usr/local/share
+            sudo cp -r "$SHARE" /usr/local/share/
+          fi
           # The runner shell does not always carry /usr/local/bin on PATH
           # (non-login shell, image-dependent), so pin it for this step and
           # every later one via GITHUB_PATH, and check by absolute path.
@@ -94,16 +105,14 @@ jobs:
 
       - name: Build and test
         run: |
-          # Plain platform=macOS plus a forced single arch, no index store
-          # (CI never reads it).  Plain output, no xcpretty pipe and no
-          # -quiet: the module-name failure needs per-file attribution to
-          # diagnose, which filtered output strips.  Serialized with -jobs 1:
-          # the empty-module failure reads like two concurrent writers on
-          # one swiftmodule (same path reported with different mismatches
-          # milliseconds apart), so rule parallelism out before anything else.
-          set -o pipefail
-          xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
-            -jobs 1 ONLY_ACTIVE_ARCH=YES ARCHS=arm64 COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" 2>&1 | tail -c 2000000
+          if command -v xcpretty >/dev/null 2>&1; then
+            set -o pipefail
+            xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" | xcpretty
+          else
+            xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
+          fi
 
       - name: Build iOS companion
         run: |
