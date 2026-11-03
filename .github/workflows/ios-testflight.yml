@@ -348,13 +348,16 @@ jobs:
       - name: Install xcodegen
         if: steps.gate.outputs.should_ship == '1'
         run: |
-          if ! command -v xcodegen >/dev/null 2>&1 || [[ "$(xcodegen --version 2>/dev/null)" != *2.46.0* ]]; then
-            curl -sSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
-            ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
-            sudo mkdir -p /usr/local/bin
-            sudo mv -f /tmp/xcodegen/xcodegen /usr/local/bin/xcodegen
-          fi
-          xcodegen --version
+          xcodegen_root="$(mktemp -d "${RUNNER_TEMP}/xcodegen-2.46.0.XXXXXX")"
+          curl --fail --silent --show-error --location \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$xcodegen_root/xcodegen.zip"
+          ditto -xk "$xcodegen_root/xcodegen.zip" "$xcodegen_root"
+          xcodegen_bin="$xcodegen_root/xcodegen/bin"
+          test -x "$xcodegen_bin/xcodegen"
+          test -d "$xcodegen_root/xcodegen/share/xcodegen/SettingPresets"
+          "$xcodegen_bin/xcodegen" --version | grep -Fx 'Version: 2.46.0'
+          echo "$xcodegen_bin" >> "$GITHUB_PATH"
 
       # Do not use `secrets.*` in `if:` -- GitHub's dispatch parser rejects it
       # (`Unrecognized named-value: secrets`) and the whole workflow dies at 0s.
