@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Acting on the server: stopping a process, or stopping a Coolify workload.
 ///
@@ -60,6 +61,10 @@ final class ServerControl: ObservableObject {
     }
 
     private func run(host: String, arguments: [String], describe: String) async {
+        guard !isWorking else {
+            lastOutcome = .refused("Another server action is already running.")
+            return
+        }
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             lastOutcome = .failed("No remote server configured.")
@@ -76,7 +81,7 @@ final class ServerControl: ObservableObject {
             case .some(false):
                 lastOutcome = .refused(Self.reason(from: output) ?? "The server refused that.")
             case .none:
-                lastOutcome = .acted(describe)
+                lastOutcome = .failed("The server returned an invalid control response.")
             }
         } catch {
             lastOutcome = .failed((error as NSError).localizedDescription)
@@ -89,8 +94,9 @@ final class ServerControl: ObservableObject {
     static func parse(_ output: String) -> Bool? {
         guard let data = output.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let ok = object["ok"] as? Bool else { return nil }
-        return ok
+              let ok = object["ok"] as? NSNumber,
+              CFGetTypeID(ok) == CFBooleanGetTypeID() else { return nil }
+        return ok.boolValue
     }
 
     static func reason(from output: String) -> String? {
@@ -237,7 +243,8 @@ enum SSHCommand {
     static func isControlAnswer(_ text: String) -> Bool {
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["ok"] is Bool else { return false }
+              let ok = object["ok"] as? NSNumber,
+              CFGetTypeID(ok) == CFBooleanGetTypeID() else { return false }
         return true
     }
 }

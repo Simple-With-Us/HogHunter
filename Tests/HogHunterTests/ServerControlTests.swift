@@ -20,6 +20,38 @@ final class ServerControlTests: XCTestCase {
         XCTAssertNil(ServerControl.parse(""))
     }
 
+    func testInvalidShapesAndNumericBooleansCannotReportActed() async {
+        for output in ["", "permission denied", "[]", "null", "{}", "{\"ok\":1}",
+                       "{\"ok\":0}", "{\"ok\":\"true\"}", "{\"ok\":null}",
+                       "{\"ok\":[]}", "{\"ok\":true} trailing"] {
+            XCTAssertNil(ServerControl.parse(output), output)
+            XCTAssertFalse(SSHCommand.isControlAnswer(output), output)
+            let control = ServerControl(runner: { _, _ in output })
+            await control.stopContainer(named: "workload", host: "server.example")
+            guard case .failed = control.lastOutcome else {
+                XCTFail("Invalid response must fail: \(output)")
+                continue
+            }
+        }
+    }
+
+    func testConcurrentActionIsRefusedWhileFirstRunnerIsSuspended() async {
+        let gate = ControlGate()
+        let control = ServerControl(runner: { _, _ in
+            await gate.wait()
+            return "{\"ok\":true}"
+        })
+        let first = Task { await control.stopContainer(named: "first", host: "server.example") }
+        while !control.isWorking { await Task.yield() }
+        await control.stopContainer(named: "second", host: "server.example")
+        XCTAssertEqual(control.lastOutcome, .refused("Another server action is already running."))
+        await gate.release()
+        await first.value
+        let count = await gate.count
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(control.lastOutcome, .acted("Stopped first"))
+    }
+
     func testTheReasonIsReadFromTheAnswer() {
         XCTAssertEqual(ServerControl.reason(from: "{\"ok\":false,\"reason\":\"that process changed since it was sampled\"}"),
                        "that process changed since it was sampled")
@@ -113,5 +145,23 @@ private actor CommandRecorder {
 
     func record(host: String, arguments: [String]) {
         command = Command(host: host, arguments: arguments)
+    }
+}
+
+private actor ControlGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private(set) var count = 0
+
+    func wait() async {
+        count += 1
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Compatibility entry point for existing schedulers and fleet callers.
+exec /usr/local/sbin/hoghunter-maintain scheduled "$@"
