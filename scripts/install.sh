@@ -78,8 +78,9 @@ version_of() {
 echo "Generating the Xcode project."
 xcodegen generate
 
-BUILD_COUNT="$(git rev-list --count HEAD 2>/dev/null || echo "1")"
-MARKETING_VERSION="1.0.${BUILD_COUNT}"
+BUILD_COUNT="${HOGHUNTER_BUILD_NUMBER:-1000}"
+[[ "$BUILD_COUNT" =~ ^[1-9][0-9]{3,11}$ ]] || { echo "Invalid build number; expected an integer of at least1000." >&2; exit 1; }
+MARKETING_VERSION="0.1.0"
 echo "Building Release version $MARKETING_VERSION (build $BUILD_COUNT)."
 # SENTRY_DSN_MACOS wins when both are set (fleet split).  The value is passed
 # as an xcodebuild setting and never printed.  Empty keeps Sentry inert.

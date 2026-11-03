@@ -35,6 +35,8 @@ jobs:
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           bash scripts/ios-fleet/test-next-shared-build.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
+          node --test scripts/release-inventory.test.mjs
+          node --test scripts/release-build-policy.test.mjs
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-ci-report.py

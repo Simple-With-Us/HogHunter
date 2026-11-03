@@ -70,3 +70,16 @@ export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complet
   }
   return {build: String(next)};
 }
+
+// Current policy: start at 1000 and increment the observed inventory floor.
+// Existing larger builds remain floors; a timestamp is never generated here.
+export function nextIncrementalBuild({iosBuilds, macBuilds, extraFloors = [], complete}) {
+  if (complete !== true || !Array.isArray(iosBuilds) || !Array.isArray(macBuilds)) {
+    throw new Error('complete build inventory required');
+  }
+  const highest = [999n, maxFirstComponent(iosBuilds), maxFirstComponent(macBuilds), maxExtraFloor(extraFloors)]
+    .reduce((a, b) => a > b ? a : b);
+  const next = highest + 1n;
+  if (next > 999999999999n) throw new Error(`planned build exceeds verified platform range: ${next}`);
+  return {build: String(next)};
+}

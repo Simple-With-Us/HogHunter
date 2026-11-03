@@ -11,25 +11,15 @@ A copy of the Mac fleet tooling (the `ios-fleet` directory on the fleet Mac) tha
 - `test-asc-key.test.mjs`, `test-asc-credentials.sh`, `test-asc-credentials.mjs`:  the credential suites (AFC-459).  `test-asc-key.test.mjs` is the module's own test; the other two are the client and shell precedence tests.
 - `apps.json`:  the `hoghunter` row only (`xcodegenDir` is `.`).
 
-## Version numbering
+## Current Hog Hunter Version Policy
 
-Owner directive 2026-10-24 (AFC-517 / CT-2444), which replaces the `1.0.<commit_count>` scheme unified in #2801 on 2026-10-18.  The rule lives in `version-plan.mjs` and is applied in `ship-testflight.sh`:
+HH-205 ports the current fleet policy: marketing version `0.1.0`, with one independent counter starting at `1000` and incrementing complete observed floors.  Earlier accepted larger build numbers remain lower bounds; no timestamp or git count generates the new counter.
 
-- `MARKETING_VERSION` (CFBundleShortVersionString) is `<prefix>.<P+1>`.  `<prefix>` is the train from `marketingVersionDefault` (`1.0`).  `P` is the highest patch App Store Connect already holds on that train, counting both the App Store versions (`appStoreVersions.versionString`) and the TestFlight trains (`preReleaseVersions.version`) for the app's platform.  A TestFlight train that holds a build named after its own patch (a `1.0.N` train holding build `N`, the "drift train" the retired scheme produced) is ignored, so those uploads no longer push the version forward.  App Store versions are never ignored.
-- `CURRENT_PROJECT_VERSION` (CFBundleVersion) is the repo commit count, raised when needed so it is strictly greater than every build already in the target train (the retired 12-digit UTC stamps included) and than the app's highest plain-integer build below 1000000000 on that platform.  On macOS every build counts, because macOS build numbers must grow across all trains.
-- The two numbers are **independent**.  The build number never names the marketing version and the marketing version never names the build, which is what stops App Store Connect from rendering `1.0.2358 (2358)`.  The one coupling is a safety rule:  a build that happens to equal the patch number moves one up.
-- `--version X.Y.Z` is an exact marketing override and `--build N` an exact build override.  `--build` does not move the marketing version any more.
-- App Store Connect is the only record that shipping advances, so an unreachable App Store Connect is fatal unless `--allow-unverified-seq` is passed;  with it, `P` is 0, the floors are 0 and the log says so loudly.
+The existing serialized Mac publisher calls `../release-build-policy.mjs` with the existing scoped ASC binding, chooses the counter once, and publishes `release-plan.json` beside the signed archive under a unique build-bearing tag.  The iPhone workflow reuses its exact source SHA and counter.  A pending Mac publication starts no archive or upload; a docs-only descendant can reuse the ancestor plan after verifying ancestry and release-relevant changed paths.  Existing release assets are immutable, so a rerun that reaches an already-published tag fails closed instead of replacing them.
 
-`ship-testflight.sh` logs the plan on every run:
+The `hoghunter` row sets `buildNumberPolicy` to `paired-release`.  In `ship-testflight.sh`, `asc_next_shared_build` reads that published source plan, and `assert_paired_release_identity` checks actual uploads even when `--build` is explicit.  An explicit export-only preview computes an unused plan without requiring a published Mac release; it never uploads or advances state.  Both workflows keep the existing upload opt-in, rate gate and scoped credential bindings.
 
-```
-[ios-ship] version plan: asc_patch=236 -> marketing=1.0.237; build floors: train=0 app=2358 commit_count=2360 -> build=2360
-[ios-ship] marketing=1.0.237 build=2360
-[ios-ship] App Store Connect will show this as: 1.0.237 (2360)
-```
-
-Apps with a `fixedMarketingVersion` in `apps.json` (Hog Hunter: `0.1.0`) do not count the marketing version up per ship.  Their build is one shared merge-timestamp value per release, max(S, M + 1):  S is the committer date of the commit being built in America/Chicago as YYYYMMDDHHMM, and M is the highest first build component across the app's iOS and macOS builds on App Store Connect, the paired app's builds, and the `pairedBuildFeed` Sparkle max.  The CI plan-build job computes it once per release (`ship-testflight.sh --plan-build-only`) and hands the one value to every ship job through `--build`;  a local fixed-mode run without `--build` plans the same value itself.  A `--build` value must be a 12-digit stamp above this platform's highest build, so the paired platform can reuse the same value.  A rebuild of the same commit still goes up, because the first upload joined M.
+Preserve this HH-specific port when refreshing the shared tools: `shared-build.mjs` adds `nextIncrementalBuild`; `ship-testflight.sh` adds the paired-release planner and upload identity check; `apps.json` selects the policy; and the repository-owned `../release-build-policy.mjs` plus its tests implement the manifest contract.  The older `nextSharedBuild`, merge-stamp planner and `version-plan.mjs` remain for legacy vendor compatibility tests; the Hog Hunter workflow does not select them.
 
 `asc-key.mjs`, the credential block of `asc-api.mjs` and the `load_secrets` layer of `ship-testflight.sh` carry the AFC-459 change:  they are not the canonical copy, so re-copying the canonical `ship-testflight.sh` over this one drops the credential rule.  The same goes for the AFC-517 version scheme:  re-copying the canonical `ship-testflight.sh` or `asc-api.mjs` over these drops it, so re-apply the port from `version-plan.mjs`.
 

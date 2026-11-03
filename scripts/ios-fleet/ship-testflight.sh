@@ -593,9 +593,23 @@ project_marketing_seq() {
 # shape is refused with a message naming it, never shipped or silently
 # dropped:  an App Store Connect build or feed floor above 999999999999
 # leaves no shippable build for this release.
+assert_paired_release_identity() {
+  [[ "${BUILD_NUMBER_POLICY:-}" == "paired-release" && "${EXPORT_ONLY:-0}" -ne 1 ]] || return 0
+  local published
+  published="$(asc_next_shared_build)" || return 1
+  [[ "$MARKETING" == "$FIXED_MARKETING" && "$BUILD_NUM" == "$published" ]]
+}
+
 asc_next_shared_build() {
   local out rc mac_id feed feed_xml max floor curl_err curl_stderr rev _plat _is_mac stamp
   command -v "$ASC_NODE" >/dev/null 2>&1 || return 1
+  if [[ "${BUILD_NUMBER_POLICY:-}" == "paired-release" ]]; then
+    local source plan
+    source="$(git -C "${REPO_ROOT:-.}" rev-parse HEAD)" || return 1
+    plan="$("$ASC_NODE" "$FLEET_DIR/../release-build-policy.mjs" --read-plan "$source" "${REPO_ROOT:-.}")" || return 1
+    printf '%s' "$plan" | "$ASC_NODE" -e 'let s="";process.stdin.on("data",x=>s+=x);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).build))'
+    return
+  fi
   # Read-only query: the node client resolves the credential itself, so no key
   # file is staged here. load_secrets must not run in this path: callers use
   # $(...), which would strand its ASC_TMP_DIR outside the parent's cleanup.
@@ -1107,6 +1121,8 @@ DEFAULT_MARKETING="$(json_get "$APP_KEY" marketingVersionDefault)"
 # id: an iOS entry names its Mac app, a macOS entry names its iOS app.  Absent
 # fixedMarketingVersion keeps the next-patch behaviour.
 FIXED_MARKETING="$(json_get "$APP_KEY" fixedMarketingVersion)"
+BUILD_NUMBER_POLICY="$(json_get "$APP_KEY" buildNumberPolicy)"
+[[ -z "$BUILD_NUMBER_POLICY" || "$BUILD_NUMBER_POLICY" == "paired-release" ]] || die "unknown buildNumberPolicy for ${APP_KEY}; nothing planned"
 
 if [[ -z "$PLATFORM" ]]; then
   if [[ "$APP_KEY" == *-mac || "$SCHEME" == *[Mm]ac* ]]; then
@@ -1310,7 +1326,11 @@ sys.exit(0 if a>b else 1)' "$FIXED_MARKETING" "$_rel"; then
   # ---- the build number ---------------------------------------------------
   if [[ -n "$FORCE_BUILD" ]]; then
     if [[ "$FIXED_MODE" -eq 1 ]]; then
-      [[ "$FORCE_BUILD" =~ ^[1-9][0-9]{11}$ ]] || die "fixed mode requires a 12-digit merge-timestamp build (YYYYMMDDHHMM, no leading zero); nothing shipped"
+      if [[ "$BUILD_NUMBER_POLICY" == "paired-release" ]]; then
+        [[ "$FORCE_BUILD" =~ ^[1-9][0-9]{3,11}$ ]] || die "paired-release mode requires an integer build of at least1000 within the verified platform range; nothing shipped"
+      else
+        [[ "$FORCE_BUILD" =~ ^[1-9][0-9]{11}$ ]] || die "fixed mode requires a 12-digit merge-timestamp build (YYYYMMDDHHMM, no leading zero); nothing shipped"
+      fi
       _platform_max="$(asc_platform_max_build)" || die "cannot read this platform's builds in App Store Connect, so the requested build cannot be verified; nothing shipped"
       build_exceeds "$FORCE_BUILD" "$_platform_max" || die "requested build ${FORCE_BUILD} is at or below this platform's highest build ${_platform_max}; nothing shipped"
     fi
@@ -1389,6 +1409,8 @@ sys.exit(0 if a>b else 1)' "$FIXED_MARKETING" "$_rel"; then
     fi
   fi
 fi
+
+assert_paired_release_identity || die "requested version/build does not match the published release source plan; nothing uploaded"
 
 # The project file and the shipped version must never disagree silently. The
 # version above is passed on the xcodebuild command line and overrides whatever

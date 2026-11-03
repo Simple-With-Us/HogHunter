@@ -324,17 +324,24 @@ class ReleaseContractTests(unittest.TestCase):
         # file never carries it as a literal.
         self.assertIn("project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}", self.code)
         self.assertNotRegex(self.code, r"project-id:\s*[0-9a-f]{8}-")
-        self.assertEqual(self.code.count("secret-path: /asc"), 2)
-        self.assertEqual(self.code.count("service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}"), 2)
+        self.assertEqual(self.code.count("secret-path: /asc"), 3)
+        self.assertEqual(self.code.count("service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}"), 3)
         self.assertNotIn("INFISICAL_CLIENT_SECRET", self.code)
         self.assertNotIn("universal-auth", self.code)
         for name in ("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"):
             self.assertNotRegex(self.code, rf"secrets\.{name}\b")
         # The multiline key never goes through GITHUB_ENV.
         self.assertNotRegex(self.code, r"for name in .*ASC_KEY_P8")
-        self.assertEqual(self.code.count('asc-mode: "true"'), 2)
+        self.assertEqual(self.code.count('asc-mode: "true"'), 3)
         # The certificate stays out of GITHUB_ENV.
         self.assertNotRegex(self.code, r">>\s*\"?\$GITHUB_ENV\"?.*IOS_DIST")
+
+    def test_inventory_only_cannot_plan_archive_or_upload(self):
+        inventory = self.code.split("  inventory:\n", 1)[1].split("  plan-build:\n", 1)[0]
+        self.assertIn("inputs.inventory_only", inventory)
+        self.assertIn("node scripts/release-inventory.mjs", inventory)
+        self.assertNotIn("ship-testflight.sh", inventory)
+        self.assertEqual(self.code.count("inputs.inventory_only != true"), 2)
 
     def test_triggers_and_dispatch_inputs(self):
         self.assertIn("workflow_dispatch:", self.code)
@@ -364,7 +371,7 @@ class ReleaseContractTests(unittest.TestCase):
         plan_job = self.code.split("plan-build:", 1)[1].split("\n  ship:", 1)[0]
         gate_at = plan_job.index("scheduled-ship-gate.sh")
         self.assertLess(gate_at, plan_job.index("uses: ./.github/actions/infisical-secrets"))
-        self.assertLess(gate_at, plan_job.index("--plan-build-only"))
+        self.assertLess(gate_at, plan_job.index("mode=--read-plan"))
         self.assertIn("actions/cache/restore@", plan_job)
         self.assertRegex(plan_job, r"(?s)Load ASC credentials.*steps\.gate\.outputs\.should_ship == '1'")
         self.assertRegex(plan_job, r"(?s)Plan the release build.*steps\.gate\.outputs\.should_ship == '1'")

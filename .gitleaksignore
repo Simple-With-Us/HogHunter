@@ -1,0 +1,3 @@
+# Historical code-expression false positive; no credential literal was present.
+# The obsolete adapter selected environment property names and is absent at HEAD.
+74f0dc5997cdcfd9e03d769d62d71e18b6ae82b2:scripts/release-inventory.mjs:generic-api-key:16
