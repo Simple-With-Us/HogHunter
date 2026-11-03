@@ -116,6 +116,28 @@ final class DiskCleanerScanBudgetTests: XCTestCase {
         XCTAssertTrue(cleaner.scanSimulatorDevices(at: base).isEmpty)
     }
 
+    func testEarlierPartialContainerDoesNotHideCompleteSupportFolder() throws {
+        _ = try write("Library/Containers/com.removed.partial/root.bin")
+        _ = try write("Library/Containers/com.removed.partial/" + Array(repeating: "deep", count: 34).joined(separator: "/") + "/payload.bin")
+        _ = try write("Library/Application Support/RemovedProduct/payload.bin")
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let apps = [StorageScanner.InstalledApp(bundleId: "com.fixture.installed", name: "Installed",
+            url: sandbox.appendingPathComponent("Installed.app"), groupContainers: [])]
+        let items = cleaner.scanOrphanedData(installedApps: apps)
+        XCTAssertTrue(items.contains { $0.title == "com.removed.partial" && $0.isApproximate })
+        XCTAssertTrue(items.contains { $0.title == "RemovedProduct" })
+    }
+
+    func testUnreadableSupportChildCannotEstablishOrphanIdentity() throws {
+        _ = try write("Library/Application Support/UnknownProduct/payload.bin")
+        let unread = sandbox.appendingPathComponent("Library/Application Support/UnknownProduct/unread-child")
+        try FileManager.default.createSymbolicLink(at: unread, withDestinationURL: sandbox.appendingPathComponent("missing-target"))
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let apps = [StorageScanner.InstalledApp(bundleId: "com.fixture.installed", name: "Installed",
+            url: sandbox.appendingPathComponent("Installed.app"), groupContainers: [])]
+        XCTAssertFalse(cleaner.scanOrphanedData(installedApps: apps).contains { $0.title == "UnknownProduct" })
+    }
+
     func testSyntheticSnapshotRowsSurviveFilesystemPreflight() async {
         let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] },
             listSnapshots: { _ in ["com.apple.TimeMachine.fixture"] }, purgeableProvider: { _ in 4096 })

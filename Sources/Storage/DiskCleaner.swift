@@ -738,12 +738,19 @@ final class DiskCleaner: @unchecked Sendable {
     private func scanContentsOfDirectory(at url: URL, includingPropertiesForKeys: [URLResourceKey]?,
                                          options: FileManager.DirectoryEnumerationOptions = [],
                                          requireComplete: Bool = false) throws -> [URL] {
-        guard scanAllows(url) else { return [] }
+        guard scanAllows(url) else {
+            if requireComplete { throw CocoaError(.fileReadUnknown) }
+            return []
+        }
         var incomplete = false
         guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: nil,
             options: options.union(.skipsSubdirectoryDescendants), errorHandler: { [self] _, _ in
                 incomplete = true; markScanIncomplete(); return false
-            }) else { markScanIncomplete(); return [] }
+            }) else {
+                markScanIncomplete()
+                if requireComplete { throw CocoaError(.fileReadUnknown) }
+                return []
+            }
         let deadline = scanUptime() + (Self.scanContext?.depth.targetDuration ?? 0.15)
         var urls: [URL] = []
         while true {
@@ -1551,9 +1558,11 @@ final class DiskCleaner: @unchecked Sendable {
                     if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
                     if Self.isSharedVendorContainer(name) { continue }
                     if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
-                    let childNames = (try? scanContentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.map(\.lastPathComponent) ?? []
                     // An unread installed-product child must never become an orphan suggestion.
-                    guard Self.scanContext?.incomplete != true else { continue }
+                    // Completeness belongs to this folder, not an earlier category target.
+                    guard let children = try? scanContentsOfDirectory(at: url, includingPropertiesForKeys: nil,
+                        options: [.skipsHiddenFiles], requireComplete: true) else { continue }
+                    let childNames = children.map(\.lastPathComponent)
                     if Self.holdsInstalledProduct(childNames: childNames, knownBundleIds: knownBundleIds, knownNames: knownNames) { continue }
 
                     let stats = directoryStats(at: url)
