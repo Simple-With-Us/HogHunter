@@ -56,6 +56,16 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(states['recall']['count'], 1)
         self.assertIn('container', states['recall']['reason'])
 
+    def test_a_container_is_the_honest_identity_for_the_listener(self):
+        """The listener is the Operator now: it runs as a Coolify workload, so
+        the workload name is the only identity that can answer for it."""
+        rows = module.tool_statuses([{'python3'}], True, lambda _: '/fixture/bin', installed=lambda _: True,
+                                    containers={'operator-listener-server'})
+        states = {row['id']: row for row in rows}
+        self.assertEqual(states['fleet-listener']['state'], 'running')
+        self.assertEqual(states['fleet-listener']['count'], 1)
+        self.assertIn('container', states['fleet-listener']['reason'])
+
     def test_every_tool_row_carries_a_reason(self):
         """A dot with no explanation is a dot the owner cannot act on."""
         rows = module.tool_statuses([{'codex'}], True, lambda _: '/fixture/bin', installed=lambda _: True)

@@ -25,8 +25,8 @@ TOOLS = (
     # command name.  Both are the same tool, and matching only one of them
     # made a running seat read as unknown.
     ('minimax', 'MiniMax Code', ('mcode', 'minimax-code')),
-    ('fleet-cli', 'Fleet CLI', ('agent-sync', 'board')),
-    ('fleet-listener', 'Fleet Listener', ('agent-sync-listener',)),
+    ('fleet-cli', 'Fleet CLI', ('simple-board', 'simple-chat', 'board')),
+    ('fleet-listener', 'Fleet Listener', ('operator',)),
     ('recall', 'Fleet Recall', ('recall',)),
     ('shellular', 'Shellular', ('shellular',)),
     ('docker', 'Docker', ('dockerd',)),
@@ -43,7 +43,7 @@ CONTAINER_TOOLS = {
     # The listener runs as a Coolify workload here, not as a systemd unit, so
     # the workload is the only identity that can answer for it.  Its container
     # is named after the deployment, so the workload's own name is matched too.
-    'agent-sync-listener': 'fleet-listener',
+    'operator': 'fleet-listener',
 }
 
 # Tools that run under an interpreter.  For these, "not seen in the process
@@ -192,7 +192,7 @@ def tool_statuses(inventory, complete, which=shutil.which, installed=installed_c
 
 # Named service metadata can identify interpreted daemons without inspecting argv.
 SERVICE_UNITS = {
-    'fleet-listener': 'agent-sync-listener.service',
+    'fleet-listener': 'operator.service',
     'recall': 'fleet-recall.service',
     'shellular': 'shellular.service',
     # Claude Code reaches this host as a named service; its unit answers the
