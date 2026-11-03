@@ -94,15 +94,17 @@ jobs:
 
       - name: Build and test
         run: |
-          # Pin arch=arm64: the runner advertises both an arm64 and a Rosetta
-          # x86_64 "My Mac", and an unpinned platform=macOS let the test
-          # bundle compile x86_64 against an arm64 app module.
+          # Plain platform=macOS: the runner's first "My Mac" match is the
+          # native arm64 slice and ONLY_ACTIVE_ARCH narrows the build to it.
+          # (An explicit arch=arm64 pin was tried: Xcode 26.6 stopped
+          # resolving "My Mac" at all and fell back to a universal build,
+          # which broke explicit-module resolution with module name "".)
           if command -v xcpretty >/dev/null 2>&1; then
             set -o pipefail
-            xcodebuild -scheme HogHunter -destination 'platform=macOS,arch=arm64' -derivedDataPath build test \
+            xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" | xcpretty
           else
-            xcodebuild -scheme HogHunter -destination 'platform=macOS,arch=arm64' -derivedDataPath build test \
+            xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           fi
 
@@ -114,7 +116,7 @@ jobs:
       - name: Headless UI smoke test
         run: |
           set -o pipefail
-          xcodebuild -scheme HogHunter -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath build-ui \
+          xcodebuild -scheme HogHunter -configuration Release -destination 'platform=macOS' -derivedDataPath build-ui \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           # Drives the real views and the real NSApp window list with nobody
           # logged in, then exits non-zero on the first failed check.  This is
