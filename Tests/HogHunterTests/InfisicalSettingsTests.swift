@@ -123,7 +123,7 @@ final class InfisicalSettingsTests: XCTestCase {
         return InfisicalSettings(
             client: client,
             store: store,
-            credentialProvider: { InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444") }
+            credentialProvider: { InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444", mode: .machineIdentity) }
         )
     }
 
@@ -488,7 +488,8 @@ final class InfisicalSettingsTests: XCTestCase {
         credential = InfisicalCredential(
             clientId: "id",
             clientSecret: "secret",
-            projectId: "00000000-1111-2222-3333-444444444444"
+            projectId: "00000000-1111-2222-3333-444444444444",
+            mode: .machineIdentity
         )
         StubURLProtocol.handler = loginHandler()
         await settings.refreshIfDue()

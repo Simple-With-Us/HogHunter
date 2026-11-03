@@ -1234,6 +1234,10 @@ private struct AdvancedSettingsTab: View {
                         serviceTokens.append(InfisicalServiceToken(projectId: projectId))
                     }
                 }
+                if infisical.hasCredentialDraft {
+                    Text("Inherited credentials are a draft.\u{00A0} No connection runs until you confirm the identity and save, or choose service tokens.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
                 Text(InfisicalSettings.credentialNotice)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -1241,7 +1245,7 @@ private struct AdvancedSettingsTab: View {
                     Button("Save Credential") { saveCredential() }
                         .disabled(!candidate.isComplete || isWorking || infisical.isSaving)
                     Button("Clear") { clearCredential() }
-                        .disabled(!infisical.isConfigured || isWorking)
+                        .disabled((!infisical.isConfigured && !infisical.hasCredentialDraft) || isWorking)
                     Spacer()
                     Button("Sync Now") { syncNow() }
                         .disabled(!infisical.isConfigured || infisical.isRefreshing || infisical.isSaving || isWorking)

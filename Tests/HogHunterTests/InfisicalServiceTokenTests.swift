@@ -259,20 +259,21 @@ final class InfisicalServiceTokenTests: XCTestCase {
             func make() -> InfisicalSettings {
                 let owner = InfisicalSettings(client: client, store: InfisicalStore(),
                     credentialWriter: { secured = $0 }, credentialRemover: { secured = nil },
-                    legacyMigration: migration)
-                owner.keychainReader = {
-                    InfisicalSettings.resolveCredential(secured: .init(credential: secured, terminal: true),
-                        legacyRetired: migration.isRetired()) {
-                            fileReads += 1
-                            return legacy // Simulate a legacy file that cannot be unlinked.
-                        }
-                }
+                    legacyMigration: migration, legacyDraftReader: {
+                        fileReads += 1
+                        return legacy // Simulate a legacy file that cannot be unlinked.
+                    })
+                owner.keychainReader = { .init(credential: secured, terminal: true, absent: secured == nil) }
                 return owner
             }
             let initial = make()
             await initial.bootstrap()
-            XCTAssertTrue(initial.isConfigured, "The first legacy read remains available before explicit migration")
+            XCTAssertFalse(initial.isConfigured)
+            XCTAssertEqual(fileReads, 0, "Startup must not inspect legacy files")
+            XCTAssertEqual(initial.editingCredential?.clientId, legacy.clientId)
+            XCTAssertTrue(initial.hasCredentialDraft)
             XCTAssertEqual(fileReads, 1)
+            XCTAssertEqual(client.loginCount, 0)
             XCTAssertFalse(migration.isRetired())
             if action == "save" {
                 let reader = entry("synthetic-migration-reader")
@@ -287,12 +288,13 @@ final class InfisicalServiceTokenTests: XCTestCase {
             let relaunched = make()
             await relaunched.bootstrap()
             XCTAssertFalse(relaunched.isConfigured)
+            XCTAssertNil(relaunched.editingCredential)
             XCTAssertEqual(fileReads, 1, "Retired credentials must never be read again")
             XCTAssertEqual(client.loginCount, before, "No legacy machine-identity fallback")
         }
     }
 
-    func testFailedExplicitSaveDoesNotRetireInitialLegacyRead() async throws {
+    func testFailedExplicitSaveDoesNotRetireLegacyDraft() async throws {
         var retired = false
         let reader = entry("synthetic-failed-migration")
         let owner = InfisicalSettings(client: client, store: InfisicalStore(), credentialProvider: { nil },
@@ -300,6 +302,133 @@ final class InfisicalServiceTokenTests: XCTestCase {
             legacyMigration: .init(isRetired: { retired }, retire: { retired = true }))
         do { try await owner.saveConfiguration(configuration([reader])); XCTFail("Persistence must fail") } catch {}
         XCTAssertFalse(retired)
+    }
+
+    func testFileDraftNeverAuthenticatesUntilExplicitMachineIdentitySave() async throws {
+        let legacy = InfisicalCredential(clientId: "synthetic-inherited-id", clientSecret: "synthetic-inherited-secret", projectId: Self.project)
+        var secured: InfisicalCredential?
+        var retired = false
+        var fileReads = 0
+        let owner = InfisicalSettings(client: client, store: cache,
+            credentialWriter: { secured = $0 }, credentialRemover: { secured = nil },
+            legacyMigration: .init(isRetired: { retired }, retire: { retired = true }),
+            legacyDraftReader: { fileReads += 1; return legacy })
+        owner.keychainReader = { .init(credential: secured, terminal: true, absent: secured == nil) }
+        await owner.bootstrap()
+        await owner.refreshIfDue()
+        await owner.refresh() // The Sync Now path must remain inert too.
+        XCTAssertFalse(owner.isConfigured)
+        XCTAssertEqual(fileReads, 0)
+        XCTAssertEqual(client.loginCount, 0)
+        XCTAssertTrue(client.reads.isEmpty)
+        let draft = try XCTUnwrap(owner.editingCredential)
+        XCTAssertTrue(owner.hasCredentialDraft)
+        XCTAssertEqual(fileReads, 1)
+        await owner.refreshIfDue()
+        await owner.refresh()
+        XCTAssertEqual(client.loginCount, 0, "Opening the editor cannot activate a draft")
+        try await owner.saveConfiguration(draft)
+        XCTAssertEqual(secured?.mode, .machineIdentity)
+        XCTAssertTrue(secured?.isOperational == true)
+        XCTAssertTrue(owner.isConfigured)
+        XCTAssertFalse(owner.hasCredentialDraft)
+        XCTAssertTrue(retired)
+        let restarted = InfisicalSettings(client: client, store: InfisicalStore(),
+            credentialWriter: { _ in }, credentialRemover: {},
+            legacyDraftReader: { XCTFail("Explicit Keychain connection must not inspect files"); return nil })
+        restarted.keychainReader = { .init(credential: secured, terminal: true) }
+        await restarted.bootstrap()
+        XCTAssertTrue(restarted.isConfigured)
+        XCTAssertEqual(client.loginCount, 2, "Only explicit save and the confirmed relaunch authenticate")
+    }
+
+    func testModelessKeychainIdentityIsOnlyAnEditorDraft() async throws {
+        let inherited = InfisicalCredential(clientId: "synthetic-old-id", clientSecret: "synthetic-old-secret", projectId: Self.project)
+        var secured: InfisicalCredential? = inherited
+        let owner = InfisicalSettings(client: client, store: cache,
+            credentialWriter: { secured = $0 }, credentialRemover: { secured = nil },
+            legacyDraftReader: { XCTFail("A present Keychain item must not inspect legacy files"); return nil })
+        owner.keychainReader = { .init(credential: secured, terminal: true) }
+        await owner.bootstrap()
+        await owner.refreshIfDue()
+        await owner.refresh()
+        XCTAssertFalse(owner.isConfigured)
+        XCTAssertEqual(client.loginCount, 0)
+        XCTAssertEqual(owner.editingCredential?.clientId, inherited.clientId)
+        XCTAssertTrue(owner.hasCredentialDraft)
+        try await owner.saveCredential(clientId: inherited.clientId, clientSecret: inherited.clientSecret, projectId: Self.project)
+        XCTAssertEqual(secured?.mode, .machineIdentity)
+        XCTAssertTrue(owner.isConfigured)
+        XCTAssertEqual(client.loginCount, 1)
+    }
+
+    func testDraftFilesRequireDefinitiveKeychainAbsenceAndUnretiredState() async {
+        for read in [KeychainCredentialRead(credential: nil, terminal: false),
+                     KeychainCredentialRead(credential: nil, terminal: true, absent: false)] {
+            var fileReads = 0
+            let owner = InfisicalSettings(client: client, store: InfisicalStore(),
+                credentialWriter: { _ in }, credentialRemover: {},
+                legacyDraftReader: { fileReads += 1; return nil })
+            owner.keychainReader = { read }
+            await owner.bootstrap()
+            XCTAssertNil(owner.editingCredential)
+            await owner.refreshIfDue()
+            XCTAssertEqual(fileReads, 0)
+            XCTAssertEqual(client.loginCount, 0)
+        }
+        var fileReads = 0
+        let retired = InfisicalSettings(client: client, store: InfisicalStore(),
+            credentialWriter: { _ in }, credentialRemover: {},
+            legacyMigration: .init(isRetired: { true }, retire: {}),
+            legacyDraftReader: { fileReads += 1; return nil })
+        retired.keychainReader = { .init(credential: nil, terminal: true, absent: true) }
+        await retired.bootstrap()
+        XCTAssertNil(retired.editingCredential)
+        XCTAssertEqual(fileReads, 0)
+    }
+
+    func testEditorRechecksCachedAbsenceBeforeReadingLegacyFile() async {
+        var read = KeychainCredentialRead(credential: nil, terminal: true, absent: true)
+        var fileReads = 0
+        let owner = InfisicalSettings(client: client, store: cache,
+            credentialWriter: { _ in }, credentialRemover: {},
+            legacyDraftReader: { fileReads += 1; return nil })
+        owner.keychainReader = { read }
+        await owner.bootstrap()
+        read = .init(credential: nil, terminal: false) // Keychain locked after bootstrap.
+        XCTAssertNil(owner.editingCredential)
+        XCTAssertEqual(fileReads, 0)
+        read = .init(credential: nil, terminal: true, absent: false) // Present but undecodable.
+        XCTAssertNil(owner.editingCredential)
+        XCTAssertEqual(fileReads, 0)
+        read = .init(credential: nil, terminal: true, absent: true)
+        XCTAssertNil(owner.editingCredential)
+        XCTAssertEqual(fileReads, 1)
+        XCTAssertEqual(client.loginCount, 0)
+    }
+
+    func testFailedDraftSavePreservesLocalSettingsAndUnconfirmedDraft() async throws {
+        let draft = InfisicalCredential(clientId: "synthetic-old-id", clientSecret: "synthetic-old-secret", projectId: Self.project)
+        var retired = false
+        var persisted = 0
+        let owner = InfisicalSettings(client: client, store: cache,
+            credentialWriter: { _ in persisted += 1; throw InfisicalError.credentialStorage }, credentialRemover: {},
+            legacyMigration: .init(isRetired: { retired }, retire: { retired = true }), legacyDraftReader: { draft })
+        owner.keychainReader = { .init(credential: nil, terminal: true, absent: true) }
+        await owner.bootstrap()
+        cache.set("9", forKey: InfisicalKey.refreshInterval)
+        let candidate = try XCTUnwrap(owner.editingCredential)
+        do { try await owner.saveConfiguration(candidate); XCTFail("Keychain persistence failure") } catch {}
+        XCTAssertFalse(owner.isConfigured)
+        XCTAssertTrue(owner.hasCredentialDraft)
+        XCTAssertFalse(retired)
+        XCTAssertEqual(persisted, 1)
+        XCTAssertEqual(cache.int(for: InfisicalKey.refreshInterval), 9)
+        let before = client.loginCount
+        await owner.refreshIfDue()
+        await owner.refresh()
+        XCTAssertEqual(client.loginCount, before, "A failed save must not activate inherited identity")
+        XCTAssertNotNil(owner.editingCredential)
     }
 
     func testSameProjectFolderChangeHasDistinctCacheIdentity() async throws {

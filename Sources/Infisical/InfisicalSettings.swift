@@ -210,6 +210,8 @@ struct InfisicalCredential: Codable {
     var secretPath: String? = nil
     var serviceTokens: [InfisicalServiceToken]? = nil
 
+    /// A mode-less inherited record is an editor draft, never a runtime login.
+    var isOperational: Bool { mode != nil && isComplete }
     var effectiveMode: InfisicalAuthMode { mode ?? .machineIdentity }
     var effectiveProjectId: String { (projectId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
     var effectivePath: String { secretPath ?? "/" }
@@ -260,7 +262,7 @@ struct InfisicalTokenMetadata {
 }
 
 /// Nonsecret migration marker, separate from credential storage so a missing
-/// Keychain item can never reactivate retired legacy machine-identity files.
+/// Keychain item can never redisplay retired legacy machine-identity drafts.
 struct InfisicalLegacyCredentialMigration {
     var isRetired: () -> Bool
     var retire: () -> Void
@@ -286,6 +288,8 @@ struct InfisicalLegacyCredentialMigration {
 struct KeychainCredentialRead {
     var credential: InfisicalCredential?
     var terminal: Bool
+    /// Only errSecItemNotFound permits looking for a file draft in the editor.
+    var absent = false
 }
 
 protocol InfisicalServing {
@@ -583,8 +587,27 @@ final class InfisicalSettings: ObservableObject {
     private var keyPaths: [String: String] = [:]
     private var hasLoadedRoutes = false
 
-    /// Loaded only for the local secure editor, never exposed to a snapshot or log.
-    var editingCredential: InfisicalCredential? { credential() }
+    @Published private(set) var hasCredentialDraft = false
+
+    /// Only the editor may inspect inherited credentials, without authenticating.
+    /// Operational paths never invoke the file reader or promote these drafts.
+    var editingCredential: InfisicalCredential? {
+        guard !credentialWasCleared else { return nil }
+        // A prior terminal miss is cached for background work only.  Recheck
+        // silently before the editor may read a file draft, since Keychain
+        // availability or presence may have changed since bootstrap.
+        if inMemoryCredential == nil, credentialProvider == nil { keychainReadAttempted = false }
+        if let current = credential() { hasCredentialDraft = false; return current }
+        guard let read = lastKeychainRead, read.terminal else { return nil }
+        if let inherited = read.credential {
+            hasCredentialDraft = true
+            return inherited
+        }
+        guard read.absent, !legacyMigration.isRetired(), let draft = legacyDraftReader(),
+              draft.effectiveMode == .machineIdentity else { return nil }
+        hasCredentialDraft = true
+        return draft
+    }
 
     private let client: InfisicalServing
     private let store: InfisicalStore
@@ -603,6 +626,9 @@ final class InfisicalSettings: ObservableObject {
     /// Injectable for tests.  Production reads the Keychain with
     /// authentication UI suppressed, so a retry cannot raise a prompt.
     var keychainReader: @MainActor () -> KeychainCredentialRead
+    /// Editor-only, injectable legacy file reader; never called by bootstrap or refresh.
+    private let legacyDraftReader: @MainActor () -> InfisicalCredential?
+    private var lastKeychainRead: KeychainCredentialRead?
     private var timer: Timer?
     private var bootstrapped = false
     private var becomeActiveObserver: NSObjectProtocol?
@@ -613,14 +639,16 @@ final class InfisicalSettings: ObservableObject {
         credentialProvider: (() -> InfisicalCredential?)? = nil,
         credentialWriter: ((InfisicalCredential) throws -> Void)? = nil,
         credentialRemover: (() throws -> Void)? = nil,
-        legacyMigration: InfisicalLegacyCredentialMigration? = nil
+        legacyMigration: InfisicalLegacyCredentialMigration? = nil,
+        legacyDraftReader: (@MainActor () -> InfisicalCredential?)? = nil
     ) {
         self.client = client
         self.store = store
         self.credentialProvider = credentialProvider
         let migration = legacyMigration ?? (MaintainStore.isRunningUnderTest ? .inert : .persistent)
         self.legacyMigration = migration
-        self.keychainReader = { InfisicalSettings.readCredential(legacyMigration: migration) }
+        self.keychainReader = { InfisicalSettings.readCredentialFromKeychainSilently() }
+        self.legacyDraftReader = legacyDraftReader ?? (MaintainStore.isRunningUnderTest ? { nil } : Self.readLegacyDraft)
         self.credentialWriter = credentialWriter ?? Self.writeCredential
         self.credentialRemover = credentialRemover ?? Self.removeCredential
     }
@@ -810,7 +838,7 @@ final class InfisicalSettings: ObservableObject {
     /// or interaction suppressed) stays retryable so unlock can recover.
     private var backgroundRefreshAllowed: Bool {
         if let provider = credentialProvider {
-            return provider() != nil
+            return provider()?.isOperational == true
         }
         if inMemoryCredential != nil { return true }
         return !keychainReadAttempted
@@ -825,20 +853,23 @@ final class InfisicalSettings: ObservableObject {
         if credentialWasCleared { return nil }
         if let cached = inMemoryCredential { return cached }
         if let provider = credentialProvider {
-            guard let loaded = provider(), loaded.isComplete else { return nil }
+            let loaded = provider()
+            lastKeychainRead = .init(credential: loaded, terminal: true, absent: loaded == nil)
+            guard let loaded, loaded.isOperational else { return nil }
             inMemoryCredential = loaded
             return loaded
         }
         guard !keychainReadAttempted else { return nil }
         let read = keychainReader()
-        inMemoryCredential = read.credential.flatMap { $0.isComplete ? $0 : nil }
+        lastKeychainRead = read
+        inMemoryCredential = read.credential.flatMap { $0.isOperational ? $0 : nil }
         // Latch only after the Keychain answers.  A transient status must
         // stay retryable; latching before the read made a locked launch
         // or a suppressed prompt permanent for the process lifetime.
         if read.terminal {
             keychainReadAttempted = true
         }
-        guard let loaded = read.credential, loaded.isComplete else { return nil }
+        guard let loaded = read.credential, loaded.isOperational else { return nil }
         return loaded
     }
 
@@ -850,13 +881,14 @@ final class InfisicalSettings: ObservableObject {
     /// UserDefaults, never in a file.
     func saveCredential(clientId: String, clientSecret: String, projectId: String) async throws {
         try await saveConfiguration(InfisicalCredential(clientId: clientId.trimmingCharacters(in: .whitespacesAndNewlines),
-            clientSecret: clientSecret, projectId: projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()))
+            clientSecret: clientSecret, projectId: projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), mode: .machineIdentity))
     }
 
     func saveConfiguration(_ configuration: InfisicalCredential) async throws {
         guard !isSaving else { throw InfisicalError.saveInProgress }
         var candidate = configuration
         candidate.projectId = configuration.effectiveProjectId
+        candidate.mode = configuration.effectiveMode
         if candidate.effectiveMode == .serviceTokens {
             candidate.clientId = ""
             candidate.clientSecret = ""
@@ -884,6 +916,8 @@ final class InfisicalSettings: ObservableObject {
             legacyMigration.retire()
             generation = UUID()
             inMemoryCredential = candidate
+            lastKeychainRead = .init(credential: candidate, terminal: true)
+            hasCredentialDraft = false
             keychainReadAttempted = false
             credentialWasCleared = false
             self.projectId = candidate.effectiveProjectId
@@ -903,7 +937,7 @@ final class InfisicalSettings: ObservableObject {
         }
     }
 
-    // MARK: - Keychain Storage And Read-Only Legacy Machine-Identity Support
+    // MARK: - Keychain Storage And Editor-Only Legacy Drafts
 
     private static let appGroupIdentifier = "group.com.simplewithus.hoghunter"
     private static let fileName = "infisical.json"
@@ -951,6 +985,8 @@ final class InfisicalSettings: ObservableObject {
         activeSave = nil
         isSaving = false
         inMemoryCredential = nil
+        lastKeychainRead = .init(credential: nil, terminal: true, absent: true)
+        hasCredentialDraft = false
         keychainReadAttempted = true
         isConfigured = false
         isRefreshing = false
@@ -966,7 +1002,7 @@ final class InfisicalSettings: ObservableObject {
 
     private static func removeCredential() throws {
         // A failed Keychain removal remains a failed clear.  Once it succeeds,
-        // the caller retires file fallback permanently even if unlink fails.
+        // the caller retires file drafts permanently even if unlink fails.
         try removeCredentialFromKeychain()
         for url in [appGroupStorageURL, applicationSupportStorageURL].compactMap({ $0 }) {
             try? FileManager.default.removeItem(at: url)
@@ -993,26 +1029,13 @@ final class InfisicalSettings: ObservableObject {
         status == errSecSuccess || status == errSecItemNotFound
     }
 
-    /// Pure selection seam for tests: the legacy reader is never called once
-    /// retired, including when the Keychain record has subsequently disappeared.
-    static func resolveCredential(secured: KeychainCredentialRead, legacyRetired: Bool,
-                                  loadLegacy: () -> InfisicalCredential?) -> KeychainCredentialRead {
-        if secured.credential != nil || !secured.terminal || legacyRetired { return secured }
-        guard let credential = loadLegacy(), credential.effectiveMode == .machineIdentity,
-              credential.isComplete else { return secured }
-        return KeychainCredentialRead(credential: credential, terminal: true)
-    }
-
-    private static func readCredential(legacyMigration: InfisicalLegacyCredentialMigration) -> KeychainCredentialRead {
-        resolveCredential(secured: readCredentialFromKeychainSilently(), legacyRetired: legacyMigration.isRetired()) {
-            // Only previously saved machine identities can use the one-time legacy read.
-            for url in [appGroupStorageURL, applicationSupportStorageURL].compactMap({ $0 }) {
-                if let data = try? Data(contentsOf: url),
-                   let credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
-                   credential.effectiveMode == .machineIdentity, credential.isComplete { return credential }
-            }
-            return nil
+    private static func readLegacyDraft() -> InfisicalCredential? {
+        for url in [appGroupStorageURL, applicationSupportStorageURL].compactMap({ $0 }) {
+            if let data = try? Data(contentsOf: url),
+               let draft = try? JSONDecoder().decode(InfisicalCredential.self, from: data),
+               draft.effectiveMode == .machineIdentity { return draft }
         }
+        return nil
     }
 
     private static func readCredentialFromKeychainSilently() -> KeychainCredentialRead {
@@ -1032,15 +1055,15 @@ final class InfisicalSettings: ObservableObject {
         guard isTerminalKeychainStatus(status) else {
             return KeychainCredentialRead(credential: nil, terminal: false)
         }
+        if status == errSecItemNotFound { return KeychainCredentialRead(credential: nil, terminal: true, absent: true) }
         guard status == errSecSuccess,
               let data = item as? Data,
               let credential = try? JSONDecoder().decode(InfisicalCredential.self, from: data)
         else {
             return KeychainCredentialRead(credential: nil, terminal: true)
         }
-        guard credential.isComplete else {
-            return KeychainCredentialRead(credential: nil, terminal: true)
-        }
+        // Retain decoded inherited/incomplete data only for the secure editor.
+        // credential() separately requires an explicit validated mode to activate it.
         return KeychainCredentialRead(credential: credential, terminal: true)
     }
 }

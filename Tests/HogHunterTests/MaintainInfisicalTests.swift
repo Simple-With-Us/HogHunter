@@ -68,7 +68,7 @@ final class MaintainInfisicalTests: XCTestCase {
             client: client,
             store: cache,
             credentialProvider: {
-                InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444")
+                InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444", mode: .machineIdentity)
             }
         )
         await infisical.refresh()
