@@ -34,6 +34,7 @@ final class ServerControl: ObservableObject {
 
     @Published private(set) var lastOutcome: Outcome?
     @Published private(set) var isWorking = false
+    @Published private(set) var lastSampleText: String?
 
     private let runner: Runner
 
@@ -41,32 +42,80 @@ final class ServerControl: ObservableObject {
         self.runner = runner ?? Self.sshRunner()
     }
 
-    /// Stop one process on the server.
-    func stop(process: VPSProcess, host: String) async {
-        await run(host: host, arguments: [
-            "/usr/local/sbin/hoghunter-control", "stop-process",
-            "--pid", String(process.pid),
-            "--start-time", String(process.startTime ?? 0),
-            "--confirm",
-        ], describe: "Stopped \(process.name)")
+    /// Each mutation is confirmed by the calling UI, then rechecked on the host.
+    func stop(process: VPSProcess, host: String, force: Bool = false,
+              allowWorkloadInterruption: Bool = false) async {
+        await processAction(force ? "force-quit" : "quit", process: process, host: host,
+                            allowWorkloadInterruption: allowWorkloadInterruption)
     }
 
-    /// Stop one Coolify workload on the server.
+    func tame(process: VPSProcess, host: String, allowWorkloadInterruption: Bool = false) async {
+        await processAction("tame", process: process, host: host, allowWorkloadInterruption: allowWorkloadInterruption)
+    }
+
+    func untame(process: VPSProcess, host: String, allowWorkloadInterruption: Bool = false) async {
+        await processAction("untame", process: process, host: host, allowWorkloadInterruption: allowWorkloadInterruption)
+    }
+
+    func sample(process: VPSProcess, host: String) async {
+        lastSampleText = nil
+        await processAction("sample", process: process, host: host, allowWorkloadInterruption: false)
+    }
+
+    private func processAction(_ action: String, process: VPSProcess, host: String,
+                               allowWorkloadInterruption: Bool) async {
+        guard process.can(action: action), let bootID = process.bootID, let start = process.startTime else {
+            lastOutcome = .refused(process.protectionReason ?? "Refresh the server snapshot for a current process identity.")
+            return
+        }
+        let verb = ["quit": "stop-process", "force-quit": "stop-process", "tame": "tame-process",
+                    "untame": "untame-process", "sample": "sample-process"][action]!
+        var arguments = ["sudo", "-n", "/usr/local/sbin/hoghunter-control", verb,
+                         "--pid", String(process.pid), "--start-time", String(start), "--boot-id", bootID, "--confirm"]
+        if action == "force-quit" { arguments.append("--force") }
+        if allowWorkloadInterruption { arguments.append("--allow-workload-interruption") }
+        let descriptions = ["quit": "Asked \(process.name) to quit", "force-quit": "Force quit \(process.name)",
+                            "tame": "Tamed \(process.name)", "untame": "Restored priority for \(process.name)",
+                            "sample": "Sampled \(process.name) for 3 seconds"]
+        await run(host: host, arguments: arguments, describe: descriptions[action]!, sample: action == "sample")
+    }
+
+    func stop(resource: VPSCoolifyResource, host: String, allowWorkloadInterruption: Bool = false) async {
+        await workloadAction("stop", resource: resource, host: host, allowWorkloadInterruption: allowWorkloadInterruption)
+    }
+
+    func restart(resource: VPSCoolifyResource, host: String, allowWorkloadInterruption: Bool = false) async {
+        await workloadAction("restart", resource: resource, host: host, allowWorkloadInterruption: allowWorkloadInterruption)
+    }
+
+    private func workloadAction(_ action: String, resource: VPSCoolifyResource, host: String,
+                                allowWorkloadInterruption: Bool) async {
+        guard allowWorkloadInterruption else {
+            lastOutcome = .refused("Confirm that this action interrupts the server workload.")
+            return
+        }
+        guard resource.can(action: action), let identity = resource.containerID, let started = resource.startedAt else {
+            lastOutcome = .refused(resource.protectionReason ?? "Refresh the server snapshot for a current workload identity.")
+            return
+        }
+        await run(host: host, arguments: ["sudo", "-n", "/usr/local/sbin/hoghunter-control", action + "-container",
+                                         "--name", resource.stopName, "--container-id", identity, "--started-at", started,
+                                         "--confirm", "--allow-workload-interruption"],
+                  describe: action == "stop" ? "Stopped \(resource.name)" : "Restarted \(resource.name)")
+    }
+
+    /// Legacy name-only calls cannot authorize a mutation after this upgrade.
     func stopContainer(named name: String, host: String) async {
-        await run(host: host, arguments: [
-            "/usr/local/sbin/hoghunter-control", "stop-container",
-            "--name", name,
-            "--confirm",
-        ], describe: "Stopped \(name)")
+        lastOutcome = .refused("Refresh the server snapshot for a current workload identity.")
     }
 
-    private func run(host: String, arguments: [String], describe: String) async {
+    private func run(host: String, arguments: [String], describe: String, sample: Bool = false) async {
         guard !isWorking else {
             lastOutcome = .refused("Another server action is already running.")
             return
         }
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("-"), trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
             lastOutcome = .failed("No remote server configured.")
             return
         }
@@ -77,6 +126,13 @@ final class ServerControl: ObservableObject {
             let parsed = Self.parse(output)
             switch parsed {
             case .some(true):
+                if sample {
+                    guard let text = Self.sampleText(from: output) else {
+                        lastOutcome = .failed("The server returned an invalid process sample.")
+                        return
+                    }
+                    lastSampleText = text
+                }
                 lastOutcome = .acted(describe)
             case .some(false):
                 lastOutcome = .refused(Self.reason(from: output) ?? "The server refused that.")
@@ -92,7 +148,7 @@ final class ServerControl: ObservableObject {
     /// "reason": "..."}`.  Anything else is treated as a refusal rather than
     /// as a success.
     static func parse(_ output: String) -> Bool? {
-        guard let data = output.data(using: .utf8),
+        guard let data = output.data(using: .utf8), data.count <= 1_048_576,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ok = object["ok"] as? NSNumber,
               CFGetTypeID(ok) == CFBooleanGetTypeID() else { return nil }
@@ -104,6 +160,18 @@ final class ServerControl: ObservableObject {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let reason = object["reason"] as? String else { return nil }
         return reason
+    }
+
+    static func sampleText(from output: String) -> String? {
+        guard let data = output.data(using: .utf8), data.count <= 65_536,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["action"] as? String == "sample",
+              let sample = object["sample"] as? [String: Any],
+              let pid = sample["pid"] as? NSNumber, CFGetTypeID(pid) != CFBooleanGetTypeID(), pid.intValue > 1,
+              let duration = sample["duration_seconds"] as? NSNumber,
+              CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue >= 0.1, duration.doubleValue <= 10,
+              let formatted = try? JSONSerialization.data(withJSONObject: sample, options: [.prettyPrinted, .sortedKeys]) else { return nil }
+        return String(data: formatted, encoding: .utf8)
     }
 
     /// Runs the command over the same SSH path the readings use.

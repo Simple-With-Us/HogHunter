@@ -136,8 +136,14 @@ class MaintenanceTests(unittest.TestCase):
                     Mutable=False, Shared=False, Type="regular")
         records = [base] + [dict(base, **changes) for changes in [dict(Mutable=True), dict(Shared=True),
                    dict(Reclaimable=False), dict(Type="exec.cachemount"), dict(LastUsedAt="2035-01-01T00:00:00Z")]]
-        self.tool.runner = lambda _: (0, "\n".join(map(json.dumps, records)))
+        self.tool.runner = lambda argv: (0, "Driver: docker\nEndpoint: default\n" if argv[-1] == "inspect" else "\n".join(map(json.dumps, records)))
         self.assertEqual(self.tool.docker_candidates("docker-build-cache"), [base["ID"]])
+
+    def test_remote_or_unknown_builder_refuses_without_prune(self):
+        for output in ["Driver: docker-container\nEndpoint: default\n", "Driver: docker\nEndpoint: ssh://remote.example\n", "unrecognized"]:
+            self.tool.runner = lambda _: (0, output)
+            with self.assertRaises(ValueError):
+                self.tool.docker_candidates("docker-build-cache")
 
     def test_no_candidates_means_no_prune_and_failure_not_ran(self):
         self.tool.runner = lambda _: (1, "unsupported")
@@ -174,6 +180,24 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(self.tool.lock.exists())
         with patch.object(m.os, "kill", side_effect=ProcessLookupError):
             self.assertFalse(self.tool.acquire_lock())
+
+    def test_partial_file_failure_keeps_successful_unlink_evidence(self):
+        first = self.cache("first.deb")
+        second = self.cache("second.deb")
+        unlink = m.os.unlink
+        removed = []
+        def fail_second(path, *args, **kwargs):
+            if kwargs.get('dir_fd') is not None:
+                if removed:
+                    raise PermissionError()
+                removed.append(path)
+            return unlink(path, *args, **kwargs)
+        with patch.object(m.os, 'unlink', side_effect=fail_second):
+            result = self.tool.execute("run", ["package-cache"], True)
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['strategies'][0]['removed_count'], 1)
+        self.assertEqual(result['removed_file_bytes'], 5)
+        self.assertNotEqual(first.exists(), second.exists())
 
     def test_deployment_plan_is_read_only_and_symlinks_refused(self):
         spec = importlib.util.spec_from_file_location("server_deploy", HERE / "deploy.py")

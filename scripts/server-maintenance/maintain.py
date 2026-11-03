@@ -176,6 +176,16 @@ class Maintenance:
             raise ValueError("timestamp requires zone")
         return parsed.timestamp()
 
+    def verify_local_builder(self):
+        code, out = self.runner(BUILD + ["inspect"])
+        if code or len(out) > 65536:
+            raise ValueError("local builder identity unavailable")
+        lines = [line.strip() for line in out.splitlines()]
+        drivers = [line.split(":", 1)[1].strip() for line in lines if line.startswith("Driver:")]
+        endpoints = [line.split(":", 1)[1].strip() for line in lines if line.startswith("Endpoint:")]
+        if drivers != ["docker"] or not endpoints or any(e not in ("default", "unix:///var/run/docker.sock") for e in endpoints):
+            raise ValueError("default builder is not the local Docker driver")
+
     def docker_candidates(self, strategy):
         # Do not traverse Docker storage or any volume.  Respect parent keep markers.
         if self.protected(self.path("/var/lib/docker")):
@@ -204,6 +214,7 @@ class Maintenance:
                 if self.clock() - self.timestamp(created) >= AGE:
                     result.append(image)
             return result
+        self.verify_local_builder()
         code, out = self.runner(BUILD + ["du", "--format=json"])
         if code:
             raise ValueError("age-qualified build cache inventory unavailable")
@@ -224,7 +235,7 @@ class Maintenance:
                 result.append(identity)
         return result[:20]
 
-    def remove_files(self, strategy, candidates):
+    def remove_files(self, strategy, candidates, progress=None):
         directory = self.path("/var/cache/apt/archives" if strategy == "package-cache" else "/var/log/fleet-backup")
         if self.protected(directory):
             raise ValueError("directory became protected")
@@ -249,6 +260,8 @@ class Maintenance:
                 os.unlink(name, dir_fd=fd)
                 removed += 1
                 self.removed_file_bytes += after.st_size
+                if progress is not None:
+                    progress(removed)
         finally:
             if lockfd is not None:
                 os.close(lockfd)
@@ -388,7 +401,8 @@ class Maintenance:
                         item.update(status="planned", reason="age-qualified candidates; no changes")
                         continue
                     if strategy in STRATEGIES[:2]:
-                        item["removed_count"] = self.remove_files(strategy, candidates)
+                        item["removed_count"] = self.remove_files(strategy, candidates,
+                            progress=lambda count: item.update(removed_count=count))
                     else:
                         for identity in candidates:
                             self.check()
@@ -397,6 +411,8 @@ class Maintenance:
                                 raise ValueError("Docker storage became protected")
                             if strategy == "docker-images" and identity not in self.docker_candidates(strategy):
                                 continue
+                            if strategy == "docker-build-cache":
+                                self.verify_local_builder()
                             argv = (DOCKER + ["image", "rm", identity] if strategy == "docker-images" else
                                     BUILD + ["prune", "--force", "--filter", "id=" + identity,
                                              "--filter", "until=168h", "--filter", "inuse=false",

@@ -10,4 +10,16 @@ Hog Hunter's remote maintenance step now invokes the fixed root tool through non
 
 Validation: hermetic maintenance/caller tests, Python compilation, shell syntax, Swift source parsing and diff whitespace checks.  XCTest regressions cover malformed control output and overlapping requests; hosted XCTest execution remains an integration check.  Server dry-run, root/non-root caller permission checks, installed hash verification and external cron behavior remain deployment checks for the parent session.  Physical reclaimed bytes stay unclaimed until an authoritative attribution source exists; observed free-space delta is a separate metric.
 
-Refs HH-203.  Server Activity process identity, action parity, sampled telemetry, operator-facing history and sustained memory-pressure alerting remain separate work.
+Refs HH-203.  Operator-facing history and sustained memory-pressure alert delivery remain follow-up work.
+
+## Server Activity Extension
+
+The same source unit now connects Mac Server Activity menus to guarded Quit, Force Quit, Tame, Restore Priority, three-second kernel-counter sampling, and Coolify workload Stop/Restart.  Current boot/process/container identities are mandatory and every mutation receives an explicit UI confirmation.  Container-process changes and workload changes carry a separate interruption acknowledgement.  Legacy snapshots still decode and their identity-less controls stay disabled.  Protected host, database, Docker, network and fleet infrastructure remains visible with its refusal reason.
+
+Telemetry adds optional per-process anonymous swap/nice/action limits and source-stamped paging/PSI.  Process retention includes CPU, resident-memory and swap leaders, and a reused PID cannot inherit the preceding process's CPU rate.  Kernel sampling reads a fixed set of counters; no argv, environment, stack attachment, database access, new companion control route or production interruption is introduced.
+
+Signalling uses pidfds after live identity checks.  Priority changes retain the original nice level and validate before and after, but Linux setpriority remains PID-based and has a race window that pidfd signalling does not; this limit is documented in the server-status README.  Workload identity is rechecked before passing the full container ID to Docker; Docker offers no conditional compare-and-swap on the process start timestamp.
+
+Read-only runtime checks verified that the existing SSH account and jay can use noninteractive sudo, the host supports pidfd signalling/setpriority, memory PSI and paging counters exist, and the default Docker builder uses the local Docker driver.  A read-only build-cache query accepted the exact planned ID/age/in-use/mutable/shared/type filters and returned no matching records.  No prune, process signal, priority update, workload action or deployment was run during those checks.  The maintenance tool now repeats local-builder verification before cache inventory and each attempted cache prune; partial file-removal failures preserve successful unlink counts and logical-byte evidence.
+
+Validation of the Activity extension: 58 hermetic server tests and 21 maintenance tests passed, including harmless real-child runner success, nonzero exit, timeout and output-cap checks.  The final combined Debug XCTest selection for ServerControlTests and VPSActivityTests passed all 19 cases, compiling the frozen confirmation target and verifying boot/PID/start-derived row identity.  Production remains untouched by this source unit.

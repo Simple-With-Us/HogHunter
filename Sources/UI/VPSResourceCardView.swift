@@ -41,12 +41,7 @@ struct VPSResourceCardView: View {
     @Environment(\.openSettings) private var openSettings
     /// Which part of the snapshot this card shows.
     var section: VPSResourceSection = .all
-    /// The one action the owner can take on the server from here.
     @StateObject private var control = ServerControl()
-    /// The process waiting for a confirmation.
-    @State private var pendingProcess: VPSProcess?
-    /// The workload waiting for a confirmation.
-    @State private var pendingContainer: VPSCoolifyResource?
 
     var body: some View {
         GroupBox {
@@ -64,40 +59,6 @@ struct VPSResourceCardView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
-        }
-        .confirmationDialog(
-            "Stop \(pendingProcess?.name ?? "this process") on the server?",
-            isPresented: Binding(
-                get: { pendingProcess != nil },
-                set: { if !$0 { pendingProcess = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Stop it", role: .destructive) {
-                guard let process = pendingProcess else { return }
-                pendingProcess = nil
-                Task { await control.stop(process: process, host: store.configuredHost) }
-            }
-            Button("Cancel", role: .cancel) { pendingProcess = nil }
-        } message: {
-            Text("The server stops it by its process identity, so a process that has changed since the reading is left alone.")
-        }
-        .confirmationDialog(
-            "Stop \(pendingContainer?.name ?? "this workload") on the server?",
-            isPresented: Binding(
-                get: { pendingContainer != nil },
-                set: { if !$0 { pendingContainer = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Stop it", role: .destructive) {
-                guard let container = pendingContainer else { return }
-                pendingContainer = nil
-                Task { await control.stopContainer(named: container.stopName, host: store.configuredHost) }
-            }
-            Button("Cancel", role: .cancel) { pendingContainer = nil }
-        } message: {
-            Text("Coolify will restart a workload it is set to keep alive.")
         }
         .overlay(alignment: .bottomLeading) {
             if let outcome = control.lastOutcome {
@@ -210,6 +171,10 @@ struct VPSResourceCardView: View {
                 }
             }
 
+            if section.showsHeadline, let pressure = snapshot.memoryPressure {
+                pagingReadings(pressure)
+            }
+
             // A section only carries the readings it owns, so two sections
             // never show the same rows.
             let dbs = section.showsDatabases ? (snapshot.appDbs ?? [:]) : [:]
@@ -235,6 +200,29 @@ struct VPSResourceCardView: View {
                 if !dirs.isEmpty { largestDirsView(dirs) }
             }
         }
+    }
+
+    private func pagingReadings(_ pressure: VPSMemoryPressure) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(pressure.isFresh() ? "Paging Activity" : "Paging Activity · Earlier Reading")
+                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 12) {
+                Text("Swap in: " + pagingRate(pressure.swapInBytesPerSecond))
+                Text("Swap out: " + pagingRate(pressure.swapOutBytesPerSecond))
+                if let stalls = pressure.memoryFullAvg10, stalls.isFinite, stalls >= 0 {
+                    Text(String(format: "Memory stalls: %.1f%%", stalls))
+                }
+            }.font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
+            if let sampledAt = pressure.sampledAtDate {
+                Text("Measured " + sampledAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func pagingRate(_ bytes: Double?) -> String {
+        guard let bytes, bytes.isFinite, bytes >= 0, bytes < Double(UInt64.max) else { return "unavailable" }
+        return HogFormat.memory(UInt64(bytes)) + "/s"
     }
 
     private func supportingReadings(dbs: [String: Int64], tools: [VPSToolStatus]) -> some View {
@@ -434,11 +422,8 @@ struct VPSResourceCardView: View {
                                 .font(.system(size: 10).monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
-                        Button("Stop") { pendingContainer = resource }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .font(.system(size: 9))
-                            .help("Stop this workload on the server")
+                        ServerWorkloadActions(resource: resource, host: store.configuredHost, control: control,
+                                              didAct: { store.fetch(force: true) })
                     }
                     .help("\(resource.name): \(resource.status)")
                 }
@@ -479,11 +464,13 @@ struct VPSResourceCardView: View {
                                 .font(.system(size: 10).monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
-                        Button("Stop") { pendingProcess = process }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .font(.system(size: 9))
-                            .help("Stop this process on the server")
+                        if let swap = process.swapBytes {
+                            Text("Swap " + HogFormat.memory(UInt64(max(0, swap))))
+                                .font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        if process.isTamed { Text("Tamed").font(.system(size: 9)).foregroundStyle(.secondary) }
+                        ServerProcessActions(process: process, host: store.configuredHost, control: control,
+                                             didAct: { store.fetch(force: true) })
                     }
                 }
                 if processes.isEmpty {
