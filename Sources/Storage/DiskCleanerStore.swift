@@ -219,11 +219,13 @@ final class DiskCleanerStore: ObservableObject {
     }
 
     /// Initiates a full disk clutter scan for the active tier.
-    func scan() {
+    func scan(depth: DiskCleaner.ScanDepth = .quick) {
         guard ApplicationRunMode.current != .uiHarness else { return }
         cancelScan()
         reloadExclusions()
         reloadTempFilePolicy()
+        report = nil
+        selectedItemIds.removeAll()
         isScanInFlight = true
         let scanId = UUID()
         currentScanId = scanId
@@ -233,7 +235,16 @@ final class DiskCleanerStore: ObservableObject {
         let cleaner = self.cleaner
         let activeExclusions = exclusions
         scanTask = Task.detached(priority: .utility) { [weak self, cleaner] in
-            let scanReport = await cleaner.scan(tier: currentTier, exclusions: activeExclusions) { categoryTitle in
+            let scanReport = await cleaner.scan(tier: currentTier, exclusions: activeExclusions,
+                depth: depth, partialReport: { partial in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.currentScanId == scanId, self.isScanInFlight,
+                              (self.report?.categories.count ?? 0) <= partial.categories.count else { return }
+                        self.report = partial
+                        // Suggestions are visible during scanning, but only a finalized report
+                        // supplies default selections or cleaning authority.
+                    }
+                }) { categoryTitle in
                 Task { @MainActor [weak self] in
                     guard let self, self.currentScanId == scanId else { return }
                     self.state = .scanning(category: categoryTitle)
@@ -390,7 +401,7 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Executes cleaning on all selected items with APFS snapshot preservation.
     func cleanSelected(createSnapshot: Bool = true) {
-        guard !isCleaning else { return }
+        guard !isCleaning, !isScanInFlight else { return }
         // A policy edit since the scan voids its temp rows.  Note the mismatch
         // before the reload discards the report, so a clean that cannot run
         // says why instead of silently emptying the panel.
@@ -486,7 +497,7 @@ final class DiskCleanerStore: ObservableObject {
                     isCleaning: false,
                     phase: "completed",
                     progress: 1.0,
-                    statusText: "Clean complete: Reclaimed \(result.formattedBytesReclaimed)",
+                    statusText: "Clean complete: \(result.formattedBytesReclaimed) moved or removed (estimated)",
                     currentItem: nil,
                     itemsCleaned: result.itemsRemoved,
                     totalItems: totalItems,
