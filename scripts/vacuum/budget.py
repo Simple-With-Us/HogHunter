@@ -154,17 +154,30 @@ def group_stopped(pgid) -> bool:
 
 
 @contextmanager
-def child_barrier():
-    """Enter inside the housekeeper lock so live/unknown children retain it."""
+def child_barrier(on_wait=None, monotonic=time.monotonic, sleep=time.sleep):
+    """Retain the lock for live/unknown children; report each 30s of drain."""
     try:
         yield
     finally:
+        started = monotonic()
+        last_notice = started
         while True:
             with _children_lock:
                 children = list(_children.values())
-            if all([kill_group(proc) for proc in children]):
+            stopped = True
+            for index, proc in enumerate(children):
+                stopped = kill_group(proc) and stopped
+                now = monotonic()
+                pending = not stopped or index + 1 < len(children)
+                if pending and on_wait is not None and now - last_notice >= 30:
+                    last_notice = now
+                    try:
+                        on_wait(max(0.0, now - started))
+                    except Exception:
+                        pass  # observability failure must never release a live group
+            if stopped:
                 break
-            time.sleep(.1)
+            sleep(.1)
 
 
 def unregister(proc):

@@ -189,6 +189,24 @@ class VacuumEngine:
         except Exception:  # noqa: BLE001 — bookkeeping must never kill a cleaning run
             pass
 
+    def _child_drain_checkpoint(self, record: RunRecord, dry_run: bool, seconds: float) -> None:
+        record.current_step = "child_shutdown"
+        record.current_target = ""
+        notice = next((s for s in record.steps if s.step_id == "child_shutdown"), None)
+        if notice is None:
+            notice = StepResult("child_shutdown", "Stop Cleanup Processes", StepStatus.FAILED,
+                                reason="owned cleanup shutdown is unconfirmed; lock retained")
+            record.steps.append(notice)
+        notice.duration_ms = int(seconds * 1000)
+        record.bytes_freed = sum(s.bytes_freed for s in record.steps)
+        self._emit_partial(record, dry_run=dry_run)
+
+    def _child_barrier(self, record: RunRecord, dry_run: bool):
+        return work.child_barrier(
+            on_wait=lambda seconds: self._child_drain_checkpoint(record, dry_run, seconds),
+            monotonic=self._monotonic,
+        )
+
     @work.bounded_run
     def run(
         self,
@@ -209,7 +227,7 @@ class VacuumEngine:
         self._planned_retire_plan = None
         self._lane_report_cache = None
         try:
-            with HousekeeperLock(self.lock_path), work.child_barrier():
+            with HousekeeperLock(self.lock_path), self._child_barrier(record, dry_run):
                 sample = sample_mac()
                 mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
                 for step_id in step_ids:
@@ -239,7 +257,7 @@ class VacuumEngine:
                     result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
                     record.steps.append(result)
                     self._emit_partial(record, dry_run=dry_run)
-                record.finish()
+            record.finish()
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
@@ -282,7 +300,7 @@ class VacuumEngine:
         self._planned_retire_plan = None
         self._lane_report_cache = None
         try:
-            with HousekeeperLock(self.lock_path), work.child_barrier():
+            with HousekeeperLock(self.lock_path), self._child_barrier(record, dry_run):
                 if not step_enabled(self.cfg, step_id):
                     record.steps.append(
                         StepResult(step_id, title, StepStatus.SKIPPED, reason="step is off")
@@ -306,11 +324,10 @@ class VacuumEngine:
                 failure = self._plan_step(step_id, dry_run)
                 if failure is not None:
                     record.steps.append(failure)
-                    record.finish()
-                    return record
-                result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
-                record.steps.append(result)
-                record.finish()
+                else:
+                    result = self._run_step(step_id, pressure=pressure, band=band, sample=sample, mode=mode, dry_run=dry_run)
+                    record.steps.append(result)
+            record.finish()
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))
@@ -364,7 +381,7 @@ class VacuumEngine:
         self._active_record = record
         should_clean = False
         try:
-            with HousekeeperLock(self.lock_path), work.child_barrier():
+            with HousekeeperLock(self.lock_path), self._child_barrier(record, dry_run):
                 record.steps.append(
                     StepResult(
                         "resource_sample",
@@ -397,7 +414,7 @@ class VacuumEngine:
                             after = sample_mac()
                             if after.get("disk_sample_ok", True):
                                 rw_state["prev_disk_free_gb"] = after.get("disk_free_gb")
-                record.finish(summary="watch tick")
+            record.finish(summary="watch tick")
         except LockHeld as exc:
             record.steps.append(
                 StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED, reason=str(exc))

@@ -2761,6 +2761,69 @@ class TestBoundedWork(unittest.TestCase):
             self.assertFalse(one.exists())
             self.assertTrue((two / "blob").exists())
 
+    def test_drain_checkpoint_keeps_lock_and_finishes_after_children_stop(self):
+        from vacuum import budget
+        for worked, dry_run, expected in ((True, False, "partial"), (False, False, "failed"),
+                                          (True, True, "partial")):
+            with tempfile.TemporaryDirectory() as td:
+                home = Path(td)
+                lock = home / "lock"
+                ticks = [0.0]
+                snapshots = []
+                cfg = {"housekeeper_lock": str(lock), "steps": {"pm2_logs": {"enabled": True}}}
+                def checkpoint(record):
+                    self.assertTrue(lock.is_dir())
+                    self.assertEqual(record.ended_at, 0)
+                    snapshots.append(record.as_dict())
+                engine = VacuumEngine(cfg, home, monotonic=lambda: ticks[0], on_step=checkpoint)
+                proc = unittest.mock.Mock(pid=4242)
+                attempts = []
+                def drain(_proc):
+                    self.assertTrue(lock.is_dir())
+                    self.assertEqual(engine._active_record.ended_at, 0)
+                    attempts.append(_proc)
+                    ticks[0] += 31
+                    if len(attempts) == 1:
+                        return False
+                    budget._children.pop(proc.pid)
+                    return True
+                real_barrier = budget.child_barrier
+                def barrier(**kwargs):
+                    return real_barrier(sleep=lambda seconds: None, **kwargs)
+                with patch.object(budget, "_children", {proc.pid: proc}), \
+                     patch("vacuum.budget.kill_group", side_effect=drain), \
+                     patch("vacuum.budget.child_barrier", side_effect=barrier), \
+                     patch("vacuum.engine.sample_mac", return_value={"load1": 0, "swap_used_pct": 0}), \
+                     patch.object(engine, "_dispatch", return_value=(0, "fixture", StepStatus.RAN if worked else StepStatus.SKIPPED)):
+                    record = engine.run_single_step("pm2_logs", dry_run=dry_run)
+                self.assertEqual(len(attempts), 2)
+                self.assertFalse(lock.exists())
+                self.assertGreater(record.ended_at, 0)
+                self.assertEqual(record.outcome, expected)
+                notices = [s for s in record.steps if s.step_id == "child_shutdown"]
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(notices[0].status, StepStatus.FAILED)
+                self.assertIn("lock retained", notices[0].reason)
+                if dry_run:
+                    self.assertEqual(snapshots, [])
+                else:
+                    self.assertEqual(snapshots[-1]["current_step"], "child_shutdown")
+                    self.assertEqual(snapshots[-1]["ended_at"], 0)
+
+    def test_drain_wait_notices_are_rate_limited(self):
+        from vacuum import budget
+        ticks = [0.0]
+        notices = []
+        moments = iter((31, 32, 61, 62, 63))
+        def drain(proc):
+            ticks[0] = next(moments)
+            return ticks[0] == 63
+        with patch.object(budget, "_children", {4242: object()}), \
+             patch("vacuum.budget.kill_group", side_effect=drain):
+            with budget.child_barrier(on_wait=notices.append, monotonic=lambda: ticks[0], sleep=lambda _: None):
+                pass
+        self.assertEqual(notices, [31, 61])
+
     def test_watchdog_shutdown_refuses_new_children(self):
         from vacuum import budget
         with patch.object(budget, "_shutdown", False), patch.object(budget, "_children", {}):
