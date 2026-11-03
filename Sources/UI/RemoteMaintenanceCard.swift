@@ -3,10 +3,16 @@ import SwiftUI
 /// Manual server control is independent of whether Mac maintenance includes it.
 struct RemoteMaintenanceCard: View {
     @ObservedObject var maintain: MaintainStore
-    @StateObject private var control = ServerMaintenanceControl()
+    @StateObject private var control: ServerMaintenanceControl
     @State private var selected = Set(ServerMaintenanceStrategy.defaults)
     @State private var pending: PendingMaintenanceRequest?
     @State private var requestError: String?
+
+    @MainActor
+    init(maintain: MaintainStore, control: ServerMaintenanceControl? = nil) {
+        self.maintain = maintain
+        _control = StateObject(wrappedValue: control ?? ServerMaintenanceControl())
+    }
 
     private var host: String { maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var busy: Bool { control.isWorking || maintain.isRunningNow }
@@ -56,10 +62,13 @@ struct RemoteMaintenanceCard: View {
                 if let result = control.result {
                     ForEach(result.strategies) { row in
                         let title = ServerMaintenanceStrategy(rawValue: row.id)?.title ?? "Selected Strategy"
+                        let eligibilityKnown = row.eligibilityIsKnown(in: result.status)
                         if row.id == "package-cache" || row.id == "rotated-logs" {
-                            Text("\(title): \(row.candidateCount) eligible files; \(row.removedCount) files removed")
+                            let eligibility = eligibilityKnown ? "\(row.candidateCount) eligible files" : "eligibility not determined"
+                            Text("\(title): \(eligibility); \(row.removedCount) files removed")
                         } else {
-                            Text("\(title): \(row.candidateCount) eligible records; \(row.attemptedCount) cleanup attempts")
+                            let eligibility = eligibilityKnown ? "\(row.candidateCount) eligible records" : "eligibility not determined"
+                            Text("\(title): \(eligibility); \(row.attemptedCount) cleanup attempts")
                         }
                     }
                     Text("Removed file bytes (logical): \(HogFormat.memory(UInt64(result.removedFileBytes)))")

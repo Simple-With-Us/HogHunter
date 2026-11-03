@@ -121,6 +121,86 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(self.tool.execute("run", ["package-cache"], confirm=True, manual=True)["status"], "partial")
         self.assertTrue(p.exists())
 
+    def test_manual_busy_stays_empty_but_uncertain_lock_accounts_for_selections(self):
+        selected = ["package-cache", "rotated-logs", "docker-build-cache"]
+        def acquire():
+            self.tool.lock_state = "busy"
+            return False
+        self.tool.acquire_lock = acquire
+        busy = self.tool.execute("run", selected, confirm=True, manual=True)
+        self.assertEqual(busy["status"], "skipped")
+        self.assertEqual(busy["strategies"], [])
+        self.assertEqual(busy["reason"], "shared remote cleanup lock busy; no work started")
+        self.assertEqual(busy["lock"], {"path": "/run/fleet-housekeeper.lock", "acquired": False})
+        def uncertain():
+            self.tool.lock_state = "unknown"
+            return False
+        self.tool.acquire_lock = uncertain
+        result = self.tool.execute("run", selected, confirm=True, manual=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual([row["id"] for row in result["strategies"]], selected)
+        self.assertTrue(all(not row["inventory_complete"] and row["status"] == "partial"
+                            and row["candidate_count"] == row["removed_count"] == row["attempted_count"] == 0
+                            for row in result["strategies"]))
+
+    def test_manual_stop_before_first_inventory_accounts_for_all_requested_work(self):
+        selected = ["package-cache", "rotated-logs"]
+        self.tool.files = lambda _: self.fail("stopped request inventoried")
+        for cancelled in (False, True):
+            self.tool.cancelled = cancelled
+            with patch.object(self.tool, "check", side_effect=m.StopWork("synthetic stop")):
+                result = self.tool.execute("scan", selected, manual=True)
+            self.assertEqual(result["status"], "cancelled" if cancelled else "partial")
+            self.assertEqual([row["id"] for row in result["strategies"]], selected)
+            self.assertTrue(all(row["inventory_complete"] is False and row["candidate_count"] == 0
+                                and "not attempted" in row["reason"] for row in result["strategies"]))
+            self.assertEqual(result["cancellation"]["requested"], cancelled)
+
+    def test_manual_cancellation_after_applied_work_preserves_known_and_unattempted_rows(self):
+        cache = self.cache()
+        selected = ["package-cache", "rotated-logs", "docker-build-cache"]
+        remove = self.tool.remove_files
+        def remove_then_cancel(*args, **kwargs):
+            count = remove(*args, **kwargs)
+            self.tool.cancelled = True
+            return count
+        self.tool.remove_files = remove_then_cancel
+        events = []
+        self.tool.audit = events.append
+        result = self.tool.execute("run", selected, confirm=True, manual=True)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertFalse(cache.exists())
+        self.assertEqual(result["removed_file_bytes"], 5)
+        self.assertEqual([row["id"] for row in result["strategies"]], selected)
+        first, *unattempted = result["strategies"]
+        self.assertTrue(first["inventory_complete"])
+        self.assertEqual((first["status"], first["removed_count"]), ("ran", 1))
+        self.assertTrue(all(row["inventory_complete"] is False and row["status"] == "partial" for row in unattempted))
+        self.assertEqual(events[-1]["event"], "finished")
+        self.assertEqual(events[-1]["strategies"], result["strategies"])
+
+    def test_manual_inventory_failure_is_unknown_but_completed_empty_inventory_is_known(self):
+        def files(strategy):
+            if strategy == "package-cache":
+                raise OSError("synthetic inventory failure")
+            return []
+        self.tool.files = files
+        result = self.tool.execute("run", ["package-cache", "rotated-logs"], confirm=True, manual=True)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual([(row["id"], row["status"], row["inventory_complete"]) for row in result["strategies"]],
+                         [("package-cache", "failed", False), ("rotated-logs", "skipped", True)])
+
+    def test_busy_final_observation_failure_is_partial_with_unknown_full_coverage(self):
+        def busy():
+            self.tool.lock_state = "busy"
+            return False
+        self.tool.acquire_lock = busy
+        with patch.object(self.tool, "disk", side_effect=[dict(self.pressure), OSError("synthetic disk failure")]):
+            result = self.tool.execute("run", ["package-cache"], confirm=True, manual=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(len(result["strategies"]), 1)
+        self.assertFalse(result["strategies"][0]["inventory_complete"])
+
     def test_cli_rejects_manual_scheduled_before_constructing_tool(self):
         with patch.object(sys, "argv", ["hoghunter-maintain", "scheduled", "--manual"]), \
                 patch.object(m, "Maintenance", side_effect=AssertionError("invalid CLI constructed tool")), \
