@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('control', Path(__file__).with_name('control.py'))
 module = importlib.util.module_from_spec(spec)
@@ -76,6 +76,20 @@ class ControlTests(unittest.TestCase):
             module.bounded_run([sys.executable, '-c', 'import time; time.sleep(3)'], timeout=0.1)
         with self.assertRaises(ValueError):
             module.bounded_run([sys.executable, '-c', "print('x' * 10000)"], timeout=2, max_output=1024)
+
+    def test_exited_group_permission_race_still_reaps_and_closes_owned_child(self):
+        reader, writer = os.pipe()
+        os.write(writer, b'over limit')
+        os.close(writer)
+        stream = os.fdopen(reader, 'rb')
+        child = Mock(pid=123456, stdout=stream, returncode=0)
+        child.poll.return_value = 0
+        with patch.object(module.subprocess, 'Popen', return_value=child), \
+             patch.object(module.os, 'killpg', side_effect=PermissionError):
+            with self.assertRaisesRegex(ValueError, 'output limit'):
+                module.bounded_run(['harmless-mocked-command'], max_output=1)
+        child.wait.assert_called_once_with(timeout=5)
+        self.assertTrue(stream.closed)
 
     def test_quit_force_and_priority_use_identity(self):
         self.assertTrue(self.action()['ok'])
@@ -193,13 +207,32 @@ class ControlTests(unittest.TestCase):
             self.assertTrue(module.container_action('worker-box', 'restart', CID, STARTED, run)['ok'])
         self.assertEqual(commands, [module.DOCKER + ['restart', '--time', '10', CID]])
 
+    def test_workload_classification_refuses_generic_stateful_and_unknown_rows(self):
+        for kind in ('database', 'standalone-postgresql', 'service', None, '', 'Application', 'unknown'):
+            with self.subTest(kind=kind):
+                row = self.row(container='production-data', name='production-data', resource='primary', type=kind)
+                def run(args, **_):
+                    self.assertTrue('ps' in args or 'inspect' in args, 'mutation reached Docker')
+                    return subprocess.CompletedProcess(args, 0, CID if 'ps' in args else json.dumps(row), '')
+                inspected = module.coolify_containers(run)
+                self.assertEqual(inspected[0]['allowed_actions'], [])
+                self.assertTrue(inspected[0]['protection_reason'])
+                for action in ('stop', 'restart'):
+                    self.assertFalse(module.container_action('production-data', action, CID, STARTED, run)['ok'])
+                # Even injected/cached rows with no refusal reason must recheck type.
+                with patch.object(module, 'coolify_containers', return_value=[row]):
+                    self.assertFalse(module.container_action('production-data', 'stop', CID, STARTED,
+                        lambda *a, **_: self.fail('unclassified mutation ran'))['ok'])
+                (self.proc / '4242/cgroup').write_text('0::/system.slice/docker-' + CID + '.scope')
+                self.assertFalse(self.action(containers=[row], allow_workload=True)['ok'])
+
     def test_container_infrastructure_unknown_verb_and_name_changes_refused(self):
         protected = self.row(protection_reason='protected')
         for action, name in [('delete', 'worker-box'), ('stop', 'different'), ('stop', 'worker-box')]:
             with patch.object(module, 'coolify_containers', return_value=[protected]):
                 result = module.container_action(name, action, CID, STARTED, lambda *a, **_: self.fail('mutation ran'))
             self.assertFalse(result['ok'])
-        for name in ('coolify-db', 'operator-listener-server', 'qdrant-production', 'postgres-main'):
+        for name in ('coolify-db', 'operator-listener-server', 'agent-sync-listener-server', 'qdrant-production', 'postgres-main'):
             self.assertIsNotNone(module.protected_container(self.row(container=name)))
 
     def test_audit_json_escapes_newlines_and_is_private(self):

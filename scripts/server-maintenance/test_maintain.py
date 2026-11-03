@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -126,6 +127,106 @@ class MaintenanceTests(unittest.TestCase):
             self.tool.release_lock()
         self.tool.owner = owner
         self.tool.release_lock()
+
+    def test_dispatch_record_precedes_runner_and_only_success_clears_it(self):
+        self.assertTrue(self.tool.acquire_lock())
+        marker = self.tool.lock / 'dispatch.json'
+        def runner(argv):
+            record = json.loads(marker.read_text())
+            self.assertEqual(record['owner'], self.tool.owner)
+            self.assertEqual(record['strategy'], 'docker-build-cache')
+            self.assertEqual(record['identity'], 'cache-record')
+            self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+            contender = m.Maintenance(root=self.root)
+            with patch.object(m.os, 'kill', side_effect=ProcessLookupError):
+                self.assertFalse(contender.acquire_lock())
+            return 0, 'completed'
+        self.tool.runner = runner
+        self.assertEqual(self.tool.mutation(['harmless-injected-command'], 'docker-build-cache', 'cache-record'),
+                         (0, 'completed'))
+        self.assertFalse(marker.exists())
+        self.tool.release_lock()
+
+    def test_nonzero_or_exception_retains_dispatch_and_refuses_dead_owner_recovery(self):
+        for failure in (False, True):
+            with self.subTest(exception=failure):
+                self.assertTrue(self.tool.acquire_lock())
+                def runner(_):
+                    if failure:
+                        raise OSError('transport failed')
+                    return 1, ''
+                self.tool.runner = runner
+                with self.assertRaises(m.StopWork):
+                    self.tool.mutation(['harmless-injected-command'], 'docker-build-cache', 'cache-record')
+                self.assertTrue((self.tool.lock / 'dispatch.json').exists())
+                with self.assertRaises(OSError):
+                    self.tool.release_lock()
+                with patch.object(m.os, 'kill', side_effect=ProcessLookupError):
+                    self.assertFalse(self.tool.acquire_lock())
+                # Test fixture retirement only; production requires operator review.
+                (self.tool.lock / 'dispatch.json').unlink()
+                self.tool.release_lock()
+
+    def test_execute_wraps_each_external_mutation_and_clears_confirmed_dispatch(self):
+        self.tool.docker_candidates = lambda _: ['first-record', 'second-record']
+        self.tool.verify_local_builder = lambda: None
+        records = []
+        def runner(_):
+            records.append(json.loads((self.tool.lock / 'dispatch.json').read_text())['identity'])
+            return 0, ''
+        self.tool.runner = runner
+        result = self.tool.execute('run', ['docker-build-cache'], True)
+        self.assertEqual(records, ['first-record', 'second-record'])
+        self.assertEqual(result['status'], 'ran')
+        self.assertEqual(result['strategies'][0]['attempted_count'], 2)
+        self.assertTrue(result['lock']['released'])
+
+    def test_uncertain_dispatch_stops_before_later_cleanup_and_retains_lock(self):
+        cache = self.cache()
+        self.tool.docker_candidates = lambda _: ['cache-record']
+        self.tool.verify_local_builder = lambda: None
+        self.tool.runner = lambda _: (1, '')
+        result = self.tool.execute('run', ['docker-build-cache', 'package-cache'], True)
+        self.assertEqual(result['status'], 'partial')
+        self.assertFalse(result['lock']['released'])
+        self.assertTrue(cache.exists())
+        self.assertTrue((self.tool.lock / 'dispatch.json').exists())
+        with patch.object(m.os, 'kill', side_effect=ProcessLookupError):
+            self.assertFalse(self.tool.acquire_lock())
+
+    def test_sigkill_parent_leaves_detached_harmless_child_and_unrecoverable_dispatch(self):
+        child_file = self.root / 'owned-child-pid'
+        fixture = '''
+import importlib.util, os, pathlib, signal, subprocess, sys
+spec = importlib.util.spec_from_file_location('fixture_maintain', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+tool = m.Maintenance(root=pathlib.Path(sys.argv[2]))
+tool.process_start = lambda _: 1234
+assert tool.acquire_lock()
+def runner(_):
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    pathlib.Path(sys.argv[3]).write_text(str(child.pid))
+    os.kill(os.getpid(), signal.SIGKILL)
+tool.runner = runner
+tool.mutation(['harmless-injected-command'], 'docker-build-cache', 'cache-record')
+'''
+        try:
+            result = subprocess.run([sys.executable, '-c', fixture, str(HERE / 'maintain.py'),
+                                     str(self.root), str(child_file)], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+            os.kill(int(child_file.read_text()), 0)
+            self.assertTrue((self.tool.lock / 'dispatch.json').exists())
+            # The real recorded owner is dead; its detached child is still alive.
+            self.assertFalse(self.tool.acquire_lock())
+            self.assertTrue((self.tool.lock / 'owner.json').exists())
+        finally:
+            if child_file.exists():
+                try:
+                    os.kill(int(child_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_scheduled_does_not_opt_into_image_removal(self):
         self.tool.execute()

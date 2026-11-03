@@ -288,6 +288,45 @@ class Maintenance:
         text = (self.path("/proc") / str(pid) / "stat").read_text()
         return int(text[text.rfind(")") + 2:].split()[19])
 
+    def sync_lock_directory(self):
+        fd = os.open(self.lock, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(fd).st_ino != self.owner["inode"]:
+                raise OSError("lock changed")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def mutation(self, argv, strategy, identity):
+        """Write durable dispatch intent before a CLI can send daemon-side work.
+
+        Parent death, CLI failure and ambiguous completion leave an extra lock
+        file that automatic dead-owner recovery must never remove.
+        """
+        self.check()
+        if self.owner is None or json.loads((self.lock / "owner.json").read_text()) != self.owner:
+            raise OSError("lock owner changed")
+        marker = self.lock / "dispatch.json"
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"owner": self.owner, "strategy": strategy, "identity": identity}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.sync_lock_directory()
+        try:
+            code, output = self.runner(argv)
+        except StopWork:
+            raise
+        except Exception as exc:
+            raise StopWork("cleanup dispatch completion unconfirmed; operator inspection required") from exc
+        if code or self.uncertain_child:
+            raise StopWork("cleanup dispatch completion unconfirmed; operator inspection required")
+        # Success is the only automatic evidence that the synchronous daemon
+        # request finished; a nonzero/exception/kill keeps the dispatch record.
+        marker.unlink()
+        self.sync_lock_directory()
+        return code, output
+
     def acquire_lock(self):
         # All new-tool callers share this guard; legacy/unknown locks are left alone.
         guard = os.open(self.lock.with_suffix(".guard"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -349,6 +388,8 @@ class Maintenance:
         op = self.lock / "owner.json"
         if op.is_symlink() or json.loads(op.read_text()) != self.owner:
             raise OSError("lock owner changed")
+        if set(x.name for x in self.lock.iterdir()) != {"owner.json"}:
+            raise OSError("outstanding dispatch or unknown lock evidence")
         op.unlink()
         self.lock.rmdir()
 
@@ -418,9 +459,7 @@ class Maintenance:
                                              "--filter", "until=168h", "--filter", "inuse=false",
                                              "--filter", "mutable=false", "--filter", "shared=false",
                                              "--filter", "type=regular"])
-                            code, _ = self.runner(argv)
-                            if code:
-                                raise ValueError("cleanup command failed; identity may now be active")
+                            self.mutation(argv, strategy, identity)
                             item["attempted_count"] += 1
                     item.update(status="ran" if item["removed_count"] or item["attempted_count"] else "skipped", reason="completed bounded eligible work")
                 except (OSError, ValueError, json.JSONDecodeError) as exc:

@@ -216,6 +216,20 @@ class SupplementTests(unittest.TestCase):
         self.assertIsNone(rows[0]['cpu_percent'])
         self.assertIsNone(rows[0]['memory_bytes'])
 
+    def test_collector_exposes_database_service_and_unknown_classification_refusals(self):
+        identity = 'a' * 64
+        for kind in ('database', 'standalone-postgresql', 'service', None, ''):
+            with self.subTest(kind=kind):
+                metadata = dict(id=identity, container='/production-data', name='production-data',
+                                resource='primary', service=None, project='example', type=kind,
+                                status='running', started_at='2026-11-03T00:00:00Z')
+                def run(args, **_):
+                    return subprocess.CompletedProcess(args, 0,
+                        identity if 'ps' in args else json.dumps(metadata) if 'inspect' in args else '', '')
+                row = module.coolify_resources(run)[0]
+                self.assertEqual(row['allowed_actions'], [])
+                self.assertTrue(row['protection_reason'])
+
     def test_fleet_extra_volume_monitored_when_mounted(self):
         with tempfile.TemporaryDirectory() as directory:
             extra_path = Path(directory) / 'mnt' / 'fleet-extra'

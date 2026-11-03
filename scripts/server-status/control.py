@@ -36,7 +36,8 @@ PROTECTED_UNITS = {'operator.service', 'fleet-recall.service', 'claude-remote-co
                    'smbd.service', 'smb-tailnet-firewall.service', 'docker.service',
                    'containerd.service', 'tailscaled.service', 'ssh.service', 'sshd.service'}
 PROTECTED_CONTAINERS = {'coolify', 'coolify-db', 'coolify-redis', 'coolify-proxy', 'coolify-sentinel',
-                        'traefik', 'datadog-agent', 'operator-listener', 'fleet-recall', 'recall-api'}
+                        'traefik', 'datadog-agent', 'operator-listener', 'agent-sync-listener-server',
+                        'fleet-recall', 'recall-api'}
 DOCKER = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
 AUDIT_LOG = Path('/var/log/hoghunter-control.log')
 LOCK_PATH = Path('/run/hoghunter-control.lock')
@@ -80,13 +81,22 @@ def bounded_run(argv, timeout=20, max_output=1024 * 1024, **_kwargs):
         completed = True
         return subprocess.CompletedProcess(argv, process.returncode, out.decode('utf-8'), '')
     finally:
-        if not completed or process.poll() is None:
+        try:
+            if not completed or process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # macOS can report EPERM when the owned group exited between
+                    # reading output and killing it; never ignore a live child.
+                    if process.poll() is None:
+                        raise
+        finally:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        process.wait(timeout=5)
-        process.stdout.close()
+                process.wait(timeout=5)
+            finally:
+                process.stdout.close()
 
 
 def process_stat_fields(pid, proc=Path('/proc')):
@@ -138,6 +148,10 @@ def protected_container(row):
             return 'this workload keeps the host or fleet running'
         if re.search(r'(^|[-_/ .])(postgres|redis|qdrant|mysql|mariadb|mongodb|minio)([-_/ .]|$)', lower):
             return 'stateful infrastructure requires its own service runbook'
+    # Coolify application is the only reviewed eligible classification.  Service
+    # bundles may hold databases under opaque names; unknown labels grant nothing.
+    if row.get('type') != 'application':
+        return 'only explicitly classified Coolify applications allow workload changes'
     return None
 
 
@@ -214,8 +228,10 @@ def inspect_process(pid, start_time, boot_id, proc=Path('/proc'), ancestors=None
         segments = {part for line in cgroup.splitlines() for part in line.split(':', 2)[-1].split('/')}
         if any(unit in segments for unit in PROTECTED_UNITS):
             return None, 'this named service keeps the host or fleet running'
-        if matched and matched.get('protection_reason'):
-            return None, matched['protection_reason']
+        if matched:
+            reason = protected_container(matched) or matched.get('protection_reason')
+            if reason:
+                return None, reason
     return dict(pid=pid, start_time=start_time, boot_id=boot_id, name=executable,
                 owner=owner, container=matched['container'] if matched else None,
                 container_id=matched['id'] if matched else None, fields=fields), None
@@ -405,8 +421,9 @@ def container_action(name, action, container_id=None, started_at=None, run=bound
     row = next((row for row in rows if row['id'] == container_id and row['container'] == name), None)
     if row is None or row['started_at'] != started_at:
         return {'ok': False, 'reason': 'that workload changed since it was sampled'}
-    if row['protection_reason']:
-        return {'ok': False, 'reason': row['protection_reason']}
+    reason = protected_container(row) or row.get('protection_reason')
+    if reason:
+        return {'ok': False, 'reason': reason}
     try:
         result = run(DOCKER + [action, '--time', '10', container_id], timeout=20, capture_output=True, text=True, check=False)
         if result.returncode != 0:

@@ -23,3 +23,9 @@ Signalling uses pidfds after live identity checks.  Priority changes retain the
 Read-only runtime checks verified that the existing SSH account and jay can use noninteractive sudo, the host supports pidfd signalling/setpriority, memory PSI and paging counters exist, and the default Docker builder uses the local Docker driver.  A read-only build-cache query accepted the exact planned ID/age/in-use/mutable/shared/type filters and returned no matching records.  No prune, process signal, priority update, workload action or deployment was run during those checks.  The maintenance tool now repeats local-builder verification before cache inventory and each attempted cache prune; partial file-removal failures preserve successful unlink counts and logical-byte evidence.
 
 Validation of the Activity extension: 58 hermetic server tests and 21 maintenance tests passed, including harmless real-child runner success, nonzero exit, timeout and output-cap checks.  The final combined Debug XCTest selection for ServerControlTests and VPSActivityTests passed all 19 cases, compiling the frozen confirmation target and verifying boot/PID/start-derived row identity.  Production remains untouched by this source unit.
+
+## Deployment Blocker Corrections
+
+Workload changes now require the exact inspected Coolify application classification; database, service and unknown classifications remain protected regardless of display names.  Read-only host label inspection verified this distinction, and the actual fleet listener application name is guarded too.
+
+External maintenance mutations now fsync dispatch evidence before launch and clear it only after confirmed success.  A killed parent therefore leaves an unrecoverable lock while detached CLI or daemon work may continue.  Regression coverage includes per-dispatch success, nonzero/exception retention, prevention of later cleanup after uncertainty, and a real killed-parent fixture with a harmless detached child.
