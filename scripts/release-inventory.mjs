@@ -10,11 +10,12 @@ const APP_ID = '6816633156';
 const BUNDLE_ID = 'com.simplewithus.hoghunter.ios';
 
 export function scopedToken(env) {
-  const keyId = env.APPLE_API_KEY_ID;
-  const issuer = env.APPLE_API_ISSUER_ID;
-  const encoded = env.APPLE_API_KEY_P8_BASE64;
-  if (!keyId || !issuer || !encoded) throw new Error('Scoped workflow ASC environment is required');
-  const pem = normalizePrivateKey(Buffer.from(encoded, 'base64').toString('utf8'));
+  const apple = Boolean(env.APPLE_API_KEY_ID || env.APPLE_API_ISSUER_ID || env.APPLE_API_KEY_P8_BASE64);
+  const keyId = apple ? env.APPLE_API_KEY_ID : env.ASC_KEY_ID;
+  const issuer = apple ? env.APPLE_API_ISSUER_ID : env.ASC_ISSUER_ID;
+  const supplied = apple ? env.APPLE_API_KEY_P8_BASE64 : env.ASC_KEY_P8;
+  if (!keyId || !issuer || !supplied) throw new Error('Scoped workflow ASC environment is required');
+  const pem = normalizePrivateKey(apple ? Buffer.from(supplied, 'base64').toString('utf8') : supplied);
   if (!pem) throw new Error('Scoped workflow ASC private key is invalid');
   const now = Math.floor(Date.now() / 1000);
   const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64url');

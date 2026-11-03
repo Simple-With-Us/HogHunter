@@ -17,12 +17,10 @@ name: Hog Hunter iOS TestFlight
 # The ship goes through the fleet script (scripts/ios-fleet/ship-testflight.sh,
 # via scripts/ios-ship-testflight.sh), the same path Socratic.Trade,
 # Congress.Trade, Usage Monitor and Clutch use.  It owns:
-#   * the marketing version and the build number:  the fixed 0.1.0 marketing
-#     version and one shared merge-timestamp build per release, max(S, M + 1),
-#     computed ONCE by the plan-build job below (ship-testflight.sh
-#     --plan-build-only, read-only over App Store Connect and the merge stamp
-#     of HEAD) and handed to the ship through --build, so a version string is
-#     never uploaded twice;
+#   * marketing version 0.1.0 and the counter selected once by the serialized
+#     Mac publisher from complete ASC and Sparkle floors (at least1000).
+#     The published release-plan.json ties both platforms to one source SHA;
+#     a missing matching Mac release defers the iOS archive until a later tick.
 #   * the rate gate (one upload per hour) and the same-HEAD skip.  This file
 #     never sets IOS_TF_MIN_INTERVAL_SEC and never passes --force-ship;
 #   * ensure-tf-ready, which declares export compliance on the exact build and
@@ -85,6 +83,8 @@ on:
       - '.github/workflows/ios-testflight.yml'
       - '.github/actions/infisical-secrets/**'
       - 'scripts/infisical-fetch.mjs'
+      - 'scripts/release-build-policy.mjs'
+      - 'scripts/release-inventory.mjs'
       - 'scripts/ios-*.sh'
       - 'scripts/ios-fleet/**'
       - '!scripts/ios-fleet/test-*.sh'
@@ -142,14 +142,9 @@ jobs:
           path: release-inventory.json
           retention-days: 14
 
-  # The release build, computed ONCE per release (owner 2026-10-29).  Every
-  # ship job of the release reuses this one value through --build, so two
-  # platforms can never compute different builds.  Read-only: it queries App
-  # Store Connect and the merge stamp of HEAD, plans nothing when the
-  # inventory is incomplete, and consumes nothing.  The scheduled gate runs
-  # first, so a tick with nothing to ship plans nothing and queries nothing:
-  # without it every hourly tick would pay a full ASC inventory, and a
-  # transient ASC hiccup would red a run that had nothing to ship.
+  # Reuse the published counter and source identity instead of allocating a
+  # second counter after the Mac upload advanced the shared floor.
+  # An explicit upload=false branch preview only computes an unused plan.
   plan-build:
     name: Plan release build
     if: >-
@@ -162,6 +157,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       build: ${{ steps.plan.outputs.build }}
+      ready: ${{ steps.plan.outputs.ready }}
+      source_head: ${{ steps.plan.outputs.source_head }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -202,6 +199,8 @@ jobs:
             --path-prefix '.github/workflows/ios-testflight.yml' \
             --path-prefix '.github/actions/infisical-secrets/**' \
             --path-prefix 'scripts/infisical-fetch.mjs' \
+            --path-prefix 'scripts/release-build-policy.mjs' \
+            --path-prefix 'scripts/release-inventory.mjs' \
             --path-prefix 'scripts/ios-*.sh' \
             --path-prefix 'scripts/ios-fleet/**' \
             --path-prefix '!scripts/ios-fleet/test-*.sh' \
@@ -209,11 +208,10 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             hoghunter
 
-      # ASC key from Fleet-OPS prod /asc.  Same block as the ship job:  the
-      # planner queries App Store Connect, so it loads the credential the
-      # same way (names only;  values are never printed).
+      # Only an explicit export-only preview needs a fresh ASC inventory;
+      # normal uploads reuse the Mac publisher's immutable plan.
       - name: Load ASC credentials (Fleet-OPS prod /asc)
-        if: steps.gate.outputs.should_ship == '1'
+        if: steps.gate.outputs.should_ship == '1' && github.event_name == 'workflow_dispatch' && inputs.upload == false
         uses: ./.github/actions/infisical-secrets
         with:
           names: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
@@ -226,15 +224,27 @@ jobs:
       - name: Plan the release build
         id: plan
         if: steps.gate.outputs.should_ship == '1'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          UPLOAD: ${{ inputs.upload }}
         run: |
           set -euo pipefail
-          build="$(bash "$GITHUB_WORKSPACE/scripts/ios-fleet/ship-testflight.sh" hoghunter --plan-build-only --repo-root "$GITHUB_WORKSPACE")"
-          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
-            echo "::error::plan-build produced a malformed build." >&2
-            exit 1
+          mode=--read-plan
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$UPLOAD" = false ]; then
+            mode=--preview-plan
           fi
-          echo "build=$build" >> "$GITHUB_OUTPUT"
-          echo "::notice title=Release build::Planned build $build for this release."
+          set +e
+          node scripts/release-build-policy.mjs "$mode" "$GITHUB_SHA" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/release-plan.json"
+          rc=$?
+          set -e
+          if [ "$rc" = 3 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Waiting for the matching Mac release; no archive or upload started."
+            exit 0
+          fi
+          [ "$rc" = 0 ] || exit "$rc"
+          # shellcheck disable=SC2016
+          node -e 'const fs=require("node:fs"),p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`build=${p.build}\nsource_head=${p.sourceHead}\nready=true\n`)' "$RUNNER_TEMP/release-plan.json"
 
   ship:
     name: TestFlight archive + upload
@@ -242,6 +252,7 @@ jobs:
     if: >-
       github.event.repository.fork == false &&
       inputs.inventory_only != true &&
+      needs.plan-build.outputs.ready == 'true' &&
       vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
       (github.ref == 'refs/heads/main' ||
        (github.event_name == 'workflow_dispatch' && inputs.upload == false))
@@ -254,6 +265,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          ref: ${{ needs.plan-build.outputs.source_head }}
           # The scheduled gate diffs HEAD against the sha recorded by the last
           # successful ship, and the release notes list the commits since it.
           # A shallow clone makes both ranges uncomputable.
@@ -309,6 +321,8 @@ jobs:
             --path-prefix '.github/workflows/ios-testflight.yml' \
             --path-prefix '.github/actions/infisical-secrets/**' \
             --path-prefix 'scripts/infisical-fetch.mjs' \
+            --path-prefix 'scripts/release-build-policy.mjs' \
+            --path-prefix 'scripts/release-inventory.mjs' \
             --path-prefix 'scripts/ios-*.sh' \
             --path-prefix 'scripts/ios-fleet/**' \
             --path-prefix '!scripts/ios-fleet/test-*.sh' \

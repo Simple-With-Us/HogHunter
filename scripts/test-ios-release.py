@@ -370,7 +370,7 @@ class ReleaseContractTests(unittest.TestCase):
         plan_job = self.code.split("plan-build:", 1)[1].split("\n  ship:", 1)[0]
         gate_at = plan_job.index("scheduled-ship-gate.sh")
         self.assertLess(gate_at, plan_job.index("uses: ./.github/actions/infisical-secrets"))
-        self.assertLess(gate_at, plan_job.index("--plan-build-only"))
+        self.assertLess(gate_at, plan_job.index("mode=--read-plan"))
         self.assertIn("actions/cache/restore@", plan_job)
         self.assertRegex(plan_job, r"(?s)Load ASC credentials.*steps\.gate\.outputs\.should_ship == '1'")
         self.assertRegex(plan_job, r"(?s)Plan the release build.*steps\.gate\.outputs\.should_ship == '1'")

@@ -22,7 +22,17 @@ on:
     branches: [main]
     paths:
       - 'Sources/**'
-      - 'Assets.xcassets'
+      - 'Assets.xcassets/**'
+      - 'ios/**'
+      - 'scripts/ios-*.sh'
+      - 'scripts/ios-fleet/**'
+      - '!scripts/ios-fleet/test-*.sh'
+      - '!scripts/ios-fleet/README.md'
+      - 'scripts/release-build-policy.mjs'
+      - 'scripts/release-inventory.mjs'
+      - '.github/workflows/ios-testflight.yml'
+      - '.github/actions/infisical-secrets/**'
+      - 'scripts/infisical-fetch.mjs'
       - 'macos/**'
       - 'project.yml'
       - 'HogHunter.entitlements'
@@ -60,8 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # CFBundleVersion is `git rev-list --count HEAD`, which needs the
-          # whole history.  A shallow clone would make every build number 1.
+          # Full history preserves release-source ancestry and provenance.
           fetch-depth: 0
 
       - name: Load shared Developer ID certificate (Fleet Secrets via Infisical)
@@ -188,7 +197,11 @@ jobs:
           NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
           NOTARY_KEY_ID: ${{ env.ASC_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ env.ASC_ISSUER_ID }}
-        run: scripts/mac-release-build.sh --release
+        run: |
+          mkdir -p dist
+          node scripts/release-build-policy.mjs --plan "$GITHUB_SHA" > dist/release-plan.json
+          build="$(node -p 'JSON.parse(require("node:fs").readFileSync("dist/release-plan.json", "utf8")).build')"
+          HOGHUNTER_BUILD_NUMBER="$build" scripts/mac-release-build.sh --release
 
       - name: Upload Sentry debug files
         if: steps.gate.outputs.publish == 'true'
@@ -223,7 +236,7 @@ jobs:
           {
             echo "short=$short"
             echo "build=$build"
-            echo "tag=v$short"
+            echo "tag=v$short-build.$build"
             echo "feed=$feed"
           } >> "$GITHUB_OUTPUT"
           echo "Hog Hunter $short (build $build), feed $feed"
@@ -254,7 +267,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           TITLE: Hog Hunter ${{ steps.version.outputs.short }} (build ${{ steps.version.outputs.build }})
         run: |
-          assets=(dist/HogHunter.zip dist/HogHunter.zip.sha256 dist/HogHunter.dmg dist/HogHunter.dmg.sha256 dist/appcast.xml)
+          assets=(dist/HogHunter.zip dist/HogHunter.zip.sha256 dist/HogHunter.dmg dist/HogHunter.dmg.sha256 dist/appcast.xml dist/release-plan.json)
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
             gh release edit "$TAG" --latest

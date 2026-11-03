@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {generateKeyPairSync} from 'node:crypto';
 import {allRows, inventory, scopedToken, readOnlyAPI} from './release-inventory.mjs';
 
 test('credentialed requests use GET and refuse redirects', async () => {
@@ -19,6 +20,17 @@ test('credentialed requests use GET and refuse redirects', async () => {
 test('inventory requires the workflow environment without a credential bootstrap', () => {
   assert.throws(() => scopedToken({}), /Scoped workflow ASC environment is required/);
   assert.throws(() => scopedToken({ASC_KEY_ID: 'fixture', ASC_ISSUER_ID: 'fixture', ASC_KEY_PATH: '/never/read'}), /Scoped workflow ASC environment is required/);
+});
+
+test('either complete scoped workflow representation works and partial Apple input cannot fall back', () => {
+  const {privateKey} = generateKeyPairSync('ec', {namedCurve: 'prime256v1'});
+  const pem = privateKey.export({format: 'pem', type: 'pkcs8'});
+  const raw = {ASC_KEY_ID: 'fixture', ASC_ISSUER_ID: 'fixture', ASC_KEY_P8: pem};
+  const apple = {APPLE_API_KEY_ID: 'fixture', APPLE_API_ISSUER_ID: 'fixture', APPLE_API_KEY_P8_BASE64: Buffer.from(pem).toString('base64')};
+  assert.equal(scopedToken(raw).split('.').length, 3);
+  assert.equal(scopedToken(apple).split('.').length, 3);
+  assert.throws(() => scopedToken({...raw, APPLE_API_KEY_ID: 'partial'}), /Scoped workflow ASC environment is required/);
+  assert.throws(() => scopedToken({...apple, APPLE_API_KEY_P8_BASE64: 'invalid'}), /private key is invalid/);
 });
 
 test('all pages are required and foreign pagination is refused before a request', async () => {

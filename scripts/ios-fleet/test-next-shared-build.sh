@@ -192,7 +192,7 @@ run_helper() {
   : > "$CLIENT_ARGS_FILE"
   set +e
   env -u FLEET_SECRETS "APP_KEY=$app" "BUNDLE_ID=$bundle" "$@" \
-    /usr/bin/bash "${tmp}/run.sh" >"${tmp}/stdout" 2>"${tmp}/stderr"
+    "$BASH" "${tmp}/run.sh" >"${tmp}/stdout" 2>"${tmp}/stderr"
   printf '%s' "$?" >"${tmp}/rc"
   set -e
 }
