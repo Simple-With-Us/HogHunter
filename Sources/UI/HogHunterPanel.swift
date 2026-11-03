@@ -952,6 +952,7 @@ struct HogHunterPanel: View {
     }
 
     @State private var activityScope: ActivityScope = .mac
+    @StateObject private var serverActivityControl = ServerControl()
 
     /// The server's processes, as its own collector saw them.
     private var serverProcesses: [VPSProcess] {
@@ -1011,6 +1012,8 @@ struct HogHunterPanel: View {
                             Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
                                 .font(.system(size: 9).monospacedDigit())
                                 .foregroundStyle(.secondary)
+                            ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
+                                                 control: serverActivityControl)
                         }
                     }
                     if serverProcesses.isEmpty {
@@ -1026,6 +1029,10 @@ struct HogHunterPanel: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             .onHover { inside in
                 withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
+            }
+
+            if activityScope == .server, let outcome = serverActivityControl.lastOutcome {
+                Text(outcome.message).font(.system(size: 9)).foregroundStyle(.secondary)
             }
 
             // The toggle sits at the bottom of the list it belongs to: the same

@@ -3445,7 +3445,7 @@ class TestRunSingleStep(_RunStepCase):
 
 
 def load_tests(loader, tests, pattern):
-    """CI runs only this file, so load the lane doctor tests beside the others."""
+    """CI runs this file, including lane and hermetic server maintenance coverage."""
     import importlib.util
 
     path = Path(__file__).resolve().parent / "test-vacuum-lanes.py"
@@ -3454,6 +3454,12 @@ def load_tests(loader, tests, pattern):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     tests.addTests(loader.loadTestsFromModule(module))
+    server_path = Path(__file__).resolve().parent / "server-maintenance" / "test_maintain.py"
+    server_spec = importlib.util.spec_from_file_location("test_server_maintenance", server_path)
+    server_module = importlib.util.module_from_spec(server_spec)
+    sys.modules[server_spec.name] = server_module
+    server_spec.loader.exec_module(server_module)
+    tests.addTests(loader.loadTestsFromModule(server_module))
     return tests
 
 
