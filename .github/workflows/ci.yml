@@ -95,18 +95,19 @@ jobs:
       - name: Build and test
         run: |
           # Plain platform=macOS plus a forced single arch: the runner
-          # otherwise schedules x86_64 test compiles next to the arm64 ones
-          # (ONLY_ACTIVE_ARCH does not narrow it), and the mixed-arch
-          # explicit-module graph fails with module name "" plus
-          # incompatible-target swiftmodules.  The green runs built arm64
-          # only; force that explicitly.
+          # otherwise schedules x86_64 test compiles next to the arm64 ones,
+          # and the mixed-arch explicit-module graph fails with module name
+          # "" plus incompatible-target swiftmodules.  The green runs built
+          # arm64 only; force that explicitly.  Indexing is off: CI never
+          # reads the index, and index-while-building is a second concurrent
+          # Swift module writer on the same outputs.
           if command -v xcpretty >/dev/null 2>&1; then
             set -o pipefail
             xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
-              ONLY_ACTIVE_ARCH=YES ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" | xcpretty
+              ONLY_ACTIVE_ARCH=YES ARCHS=arm64 COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" | xcpretty
           else
             xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
-              ONLY_ACTIVE_ARCH=YES ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
+              ONLY_ACTIVE_ARCH=YES ARCHS=arm64 COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           fi
 
       - name: Build iOS companion
