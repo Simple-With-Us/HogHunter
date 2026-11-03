@@ -79,8 +79,18 @@ struct ServerMaintenanceResult: Decodable, Equatable, Sendable {
         let candidateCount: Int64
         let removedCount: Int64
         let attemptedCount: Int64
+        let inventoryComplete: Bool?
         enum CodingKeys: String, CodingKey {
             case id, status, candidateCount = "candidate_count", removedCount = "removed_count", attemptedCount = "attempted_count"
+            case inventoryComplete = "inventory_complete"
+        }
+
+        func eligibilityIsKnown(in resultStatus: String) -> Bool {
+            if let inventoryComplete { return inventoryComplete }
+            // Legacy error rows have no completeness proof, even with a zero
+            // count.  Retain only established successful/planned compatibility.
+            return ["ran", "skipped", "planned"].contains(resultStatus) &&
+                ["ran", "skipped", "planned"].contains(status)
         }
     }
     let schemaVersion: Int
@@ -90,6 +100,7 @@ struct ServerMaintenanceResult: Decodable, Equatable, Sendable {
     let dryRun: Bool
     let pressure: Bool
     let status: String
+    private let reason: String?
     let before: Disk
     let after: Disk
     let reclaimedBytes: Int64
@@ -102,7 +113,7 @@ struct ServerMaintenanceResult: Decodable, Equatable, Sendable {
     let durationSeconds: Double
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion = "schema_version", tool, mode, manual, dryRun = "dry_run", pressure, status, before, after
+        case schemaVersion = "schema_version", tool, mode, manual, dryRun = "dry_run", pressure, status, reason, before, after
         case reclaimedBytes = "reclaimed_bytes", observedFreeDeltaBytes = "observed_free_delta_bytes"
         case removedFileBytes = "removed_file_bytes", candidateCount = "candidate_count", strategies, lock, cancellation
         case durationSeconds = "duration_seconds"
@@ -133,6 +144,12 @@ struct ServerMaintenanceResult: Decodable, Equatable, Sendable {
                   row.removedCount <= row.candidateCount, row.attemptedCount <= row.candidateCount else {
                 throw ServerMaintenanceFailure.invalid
             }
+            if row.inventoryComplete == false {
+                guard ["partial", "failed"].contains(row.status), row.candidateCount == 0,
+                      row.removedCount == 0, row.attemptedCount == 0 else {
+                    throw ServerMaintenanceFailure.invalid
+                }
+            }
             total += row.candidateCount
         }
         guard total == value.candidateCount,
@@ -143,7 +160,11 @@ struct ServerMaintenanceResult: Decodable, Equatable, Sendable {
                   value.strategies.allSatisfy { $0.removedCount == 0 && $0.attemptedCount == 0 }) else {
             throw ServerMaintenanceFailure.invalid
         }
-        if successful && !(request.mode == .run && value.status == "skipped" && value.strategies.isEmpty) {
+        let emptyBusy = request.mode == .run && value.status == "skipped" && value.strategies.isEmpty &&
+            value.reason == "shared remote cleanup lock busy; no work started" && !value.lock.acquired &&
+            value.lock.released == nil && !value.cancellation.requested && value.candidateCount == 0 &&
+            value.removedFileBytes == 0 && value.reclaimedBytes == 0
+        if !emptyBusy {
             guard Set(value.strategies.map(\.id)) == Set(request.strategies.map(\.rawValue)) else {
                 throw ServerMaintenanceFailure.invalid
             }

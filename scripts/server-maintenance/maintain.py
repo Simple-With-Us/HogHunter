@@ -430,6 +430,8 @@ class Maintenance:
                   "cancellation": {"requested": False}, "duration_seconds": 0}
         held = False
         lock_inode = None
+        requested_strategies = ()
+        healthy_skip = busy_skip = False
         try:
             if (type(mode) is not str or mode not in ("scan", "plan", "run", "scheduled")
                     or not isinstance(strategies, (tuple, list)) or any(type(s) is not str for s in strategies)
@@ -437,6 +439,7 @@ class Maintenance:
                     or not strategies or type(confirm) is not bool or type(dry_run) is not bool
                     or type(manual) is not bool or (manual and mode == "scheduled")):
                 raise ValueError("unknown mode or strategy")
+            requested_strategies = tuple(strategies)
             if manual:
                 result["manual"] = True
             mutating = mode in ("run", "scheduled") and not dry_run
@@ -445,6 +448,7 @@ class Maintenance:
             pressure = before["used_percent"] >= 80 or before["free_bytes"] < 25 * 1024**3
             result["pressure"] = pressure
             if not pressure and not manual:
+                healthy_skip = True
                 result["reason"] = "healthy root filesystem; no cleanup inventory needed"
                 return result
             if mutating:
@@ -452,6 +456,7 @@ class Maintenance:
                     raise ValueError("lock parent protected")
                 if not self.acquire_lock():
                     if self.lock_state == "busy":
+                        busy_skip = True
                         result["reason"] = "shared remote cleanup lock busy; no work started"
                     else:
                         result.update(status="partial", reason="shared remote cleanup lock requires inspection; no work started")
@@ -463,11 +468,13 @@ class Maintenance:
                 self.audit({"event": "started", "owner": self.owner, "mode": mode, "strategies": list(strategies)})
             for strategy in strategies:
                 self.check()
-                item = {"id": strategy, "status": "skipped", "candidate_count": 0, "removed_count": 0, "attempted_count": 0, "reason": "no eligible candidates"}
+                item = {"id": strategy, "status": "skipped", "inventory_complete": False,
+                        "candidate_count": 0, "removed_count": 0, "attempted_count": 0, "reason": "no eligible candidates"}
                 result["strategies"].append(item)
                 try:
                     candidates = self.files(strategy) if strategy in STRATEGIES[:2] else self.docker_candidates(strategy)
                     item["candidate_count"] = len(candidates)
+                    item["inventory_complete"] = True
                     result["candidate_count"] += len(candidates)
                     if not candidates:
                         continue
@@ -508,7 +515,7 @@ class Maintenance:
         except StopWork as exc:
             result.update(status="cancelled" if self.cancelled else "partial", reason=str(exc))
             for item in result["strategies"]:
-                if item["candidate_count"] and item["status"] == "skipped":
+                if item["status"] == "skipped" and (item["candidate_count"] or not item["inventory_complete"]):
                     item.update(status="partial", reason=str(exc))
         except (OSError, ValueError) as exc:
             result.update(status="failed", reason=type(exc).__name__)
@@ -541,6 +548,18 @@ class Maintenance:
             except OSError:
                 result.update(status="partial", reason="final disk measurement unavailable")
             result["duration_seconds"] = round(self.monotonic() - started, 3)
+            # A terminal response accounts for every validated selection even
+            # when a budget/cancellation/lock failure stopped before inventory.
+            # Zero here is only a known count, not proof of zero eligibility.
+            if not (result["status"] == "skipped" and (healthy_skip or busy_skip)):
+                covered = {item["id"] for item in result["strategies"]}
+                missing = [s for s in requested_strategies if s not in covered]
+                for strategy in missing:
+                    result["strategies"].append({"id": strategy, "status": "partial", "inventory_complete": False,
+                        "candidate_count": 0, "removed_count": 0, "attempted_count": 0,
+                        "reason": "not attempted; run ended before strategy inventory"})
+                if missing and result["status"] in ("ran", "skipped", "planned"):
+                    result["status"] = "partial"
             if held:
                 try:
                     self.audit(dict(result, event="finished"))

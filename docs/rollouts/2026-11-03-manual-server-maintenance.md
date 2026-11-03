@@ -21,3 +21,11 @@ Hermetic fixtures cover healthy automatic skipping, explicit manual scan/plan an
 This change is source-only until independent review and explicit release of the new backend hash.  Existing c3, exact-ID guard and collector deployment receipts describe earlier frozen sources and remain unchanged.  Native client compilation and hosted required checks remain delivery gates.
 
 The actual-source standalone SwiftPM fixture passed all 12 tests, including harmless local-child reap checks; all 43 maintenance Python cases passed.  Swift source parsing and diff checks passed.  Full app/native hosted checks and the configured inert panel render remain pending cumulative delivery gates.
+
+## Terminal Result Coverage
+
+Every valid terminal manual response accounts for each frozen selected strategy, including strategies not reached before cancellation, budget exhaustion, lock inspection failure or another early error.  Strategy inventory_complete is false until inventory returns completely; synthetic not-attempted rows have false with zero known candidates/actions, while completed inventories and real removal/attempt counters stay intact.  The sole empty manual exception is a skipped run with the fixed busy reason, unacquired lock without a release claim, no cancellation and zero work totals.  Automatic healthy skips keep their existing empty, no-inventory contract.
+
+The client requires the full selected-ID set for all other terminal statuses and rejects wrong-typed or inconsistent inventory flags.  Eligibility is not inferred from legacy partial, failed or cancelled rows without the flag; the card displays eligibility not determined and still shows known removed files or cleanup attempts.  Legacy successful/planned known rows retain compatibility.  Raw backend reasons remain private to validation and never appear in the panel.  An internal injected-controller initializer supports inert render verification without changing the default transport or XCTest refusal.
+
+This correction is source-only until independent review and separate backend release.  Deploy the corrected producer before relying on complete early-error coverage in the new client; an older incomplete response fails closed as unverified rather than hiding selected work.

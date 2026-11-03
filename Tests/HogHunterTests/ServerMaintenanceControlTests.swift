@@ -113,6 +113,94 @@ final class ServerMaintenanceControlTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testEveryTerminalErrorRequiresAllFrozenSelectedStrategies() throws {
+        for mode in [PendingMaintenanceRequest.Mode.scan, .run] {
+            let request = try PendingMaintenanceRequest(host: "server", mode: mode, strategies: ServerMaintenanceStrategy.defaults)
+            for status in ["partial", "failed", "cancelled"] {
+                var object = try object(mode: mode.rawValue, status: "partial")
+                object["status"] = status
+                object["cancellation"] = ["requested": status == "cancelled"]
+                XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 1, output: encoded(object)), for: request),
+                                     "Matching totals cannot excuse an omitted selected strategy: \(status)")
+                object["strategies"] = []
+                object["candidate_count"] = 0
+                XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 1, output: encoded(object)), for: request))
+                object["strategies"] = request.strategies.map {
+                    ["id": $0.rawValue, "status": "partial", "inventory_complete": false,
+                     "candidate_count": 0, "removed_count": 0, "attempted_count": 0] as [String: Any]
+                }
+                let result = try ServerMaintenanceResult.parse(.init(exitCode: 1, output: encoded(object)), for: request)
+                XCTAssertEqual(Set(result.strategies.map(\.id)), Set(request.strategies.map(\.rawValue)))
+                XCTAssertTrue(result.strategies.allSatisfy { !$0.eligibilityIsKnown(in: result.status) })
+            }
+        }
+    }
+
+    func testEmptyStrategyExceptionRequiresTheExactUnacquiredBusyContract() throws {
+        let request = try PendingMaintenanceRequest(host: "server", mode: .run, strategies: ServerMaintenanceStrategy.defaults)
+        var busy = try object(mode: "run", status: "skipped")
+        busy["reason"] = "shared remote cleanup lock busy; no work started"
+        busy["strategies"] = []
+        busy["candidate_count"] = 0
+        let result = try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(busy)), for: request)
+        XCTAssertTrue(result.strategies.isEmpty)
+        XCTAssertEqual(result.message, "Server cleanup is busy; no work started.")
+        for (field, value) in [("reason", "no eligible work" as Any), ("reason", NSNull()),
+                               ("lock", ["acquired": true]), ("lock", ["acquired": false, "released": true]),
+                               ("lock", ["acquired": false, "released": false]),
+                               ("cancellation", ["requested": true]), ("removed_file_bytes", 1), ("manual", false)] {
+            var malformed = busy
+            malformed[field] = value
+            XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(malformed)), for: request), field)
+        }
+        let scan = try PendingMaintenanceRequest(host: "server", mode: .scan, strategies: request.strategies)
+        busy["mode"] = "scan"
+        XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(busy)), for: scan))
+    }
+
+    func testInventoryCompletenessIsTypedAndCannotHideActionsOrClaimUnscannedZeroEligibility() throws {
+        let request = try PendingMaintenanceRequest(host: "server", mode: .scan, strategies: [.packageCache])
+        for invalid in ["true" as Any, 1, 0, [true]] {
+            var malformed = try object(mode: "scan", status: "planned")
+            var rows = try XCTUnwrap(malformed["strategies"] as? [[String: Any]])
+            rows[0]["inventory_complete"] = invalid
+            malformed["strategies"] = rows
+            XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(malformed)), for: request))
+        }
+        var inconsistent = try object(mode: "scan", status: "planned")
+        var rows = try XCTUnwrap(inconsistent["strategies"] as? [[String: Any]])
+        rows[0]["inventory_complete"] = false
+        inconsistent["strategies"] = rows
+        XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(inconsistent)), for: request))
+        let run = try PendingMaintenanceRequest(host: "server", mode: .run, strategies: [.packageCache])
+        inconsistent = try object(mode: "run", status: "ran")
+        rows = try XCTUnwrap(inconsistent["strategies"] as? [[String: Any]])
+        rows[0]["inventory_complete"] = false
+        inconsistent["strategies"] = rows
+        XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(inconsistent)), for: run))
+    }
+
+    func testLegacyErrorEligibilityStaysUnknownWhileKnownActionsRemainVisible() throws {
+        let request = try PendingMaintenanceRequest(host: "server", mode: .run, strategies: [.packageCache])
+        for status in ["partial", "failed", "cancelled"] {
+            var legacy = try object(mode: "run", status: "ran")
+            legacy["status"] = status
+            legacy["cancellation"] = ["requested": status == "cancelled"]
+            let unknown = try ServerMaintenanceResult.parse(.init(exitCode: 1, output: encoded(legacy)), for: request)
+            XCTAssertFalse(unknown.strategies[0].eligibilityIsKnown(in: status))
+            XCTAssertEqual(unknown.strategies[0].removedCount, 1)
+            XCTAssertEqual(unknown.removedFileBytes, 8192)
+            var rows = try XCTUnwrap(legacy["strategies"] as? [[String: Any]])
+            rows[0]["inventory_complete"] = true
+            legacy["strategies"] = rows
+            let known = try ServerMaintenanceResult.parse(.init(exitCode: 1, output: encoded(legacy)), for: request)
+            XCTAssertTrue(known.strategies[0].eligibilityIsKnown(in: status))
+            XCTAssertEqual(known.strategies[0].removedCount, 1)
+        }
+        let legacySuccess = try ServerMaintenanceResult.parse(.init(exitCode: 0, output: fixture(mode: "run", status: "ran")), for: request)
+        XCTAssertTrue(legacySuccess.strategies[0].eligibilityIsKnown(in: "ran"))
+    }
+
     func testRawTransportAndBackendDiagnosticsNeverReachUI() async throws {
         let request = try PendingMaintenanceRequest(host: "server", mode: .scan, strategies: [.packageCache])
         let control = ServerMaintenanceControl(runner: { _, _ in
@@ -205,6 +293,14 @@ final class ServerMaintenanceControlTests: XCTestCase {
                             "attempted_count": ran && strategy == "docker-images" ? 1 : 0]]
         ]
         return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+
+    private func object(mode: String, status: String) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fixture(mode: mode, status: status).utf8)) as? [String: Any])
+    }
+
+    private func encoded(_ object: [String: Any]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }
 }
 
