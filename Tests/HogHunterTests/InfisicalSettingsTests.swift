@@ -582,6 +582,39 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainJanitorRetireMinDays))
     }
 
+    func testServiceTokenMetadataAndExplicitFolderTransport() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.handler = { request in
+            if request.url?.path == "/api/v2/service-token" {
+                return (200, self.json([
+                    "projectId": "00000000-1111-2222-3333-444444444444",
+                    "workspace": "00000000-1111-2222-3333-444444444444",
+                    "scopes": [["environment": "prod", "secretPath": "/settings"]],
+                    "permissions": ["read", "write"],
+                ]))
+            }
+            if request.httpMethod == "GET" { return (200, self.json(["secrets": []])) }
+            if request.httpMethod == "PATCH" { return (404, self.json([:])) }
+            return (200, self.json([:]))
+        }
+        let client = InfisicalClient(session: makeSession())
+        let metadata = try await client.tokenMetadata(token: "synthetic-service-token")
+        XCTAssertEqual(metadata.scopes.first?.secretPath, "/settings")
+        XCTAssertEqual(metadata.permissions, ["read", "write"])
+        _ = try await client.fetchSecrets(accessToken: "synthetic-service-token", environment: "prod",
+            projectId: metadata.projectId, secretPath: "/settings")
+        try await client.upsertSecret(accessToken: "synthetic-service-token", environment: "prod",
+            key: "synthetic-key", value: "synthetic-value", projectId: metadata.projectId, secretPath: "/settings")
+        let requests = StubURLProtocol.takeRecorded()
+        XCTAssertEqual(requests.map(\.method), ["GET", "GET", "PATCH", "POST"])
+        XCTAssertEqual(requests[1].query["secretPath"], "/settings")
+        XCTAssertEqual(requests[1].query["recursive"], "false")
+        XCTAssertEqual(requests[1].query["include_imports"], "false")
+        XCTAssertEqual(requests[2].body?["secretPath"] as? String, "/settings")
+        XCTAssertEqual(requests[3].body?["secretPath"] as? String, "/settings")
+    }
+
     // The Maintain store's Infisical override and write-through tests live in
     // MaintainInfisicalTests.swift, where the settings owner is configured
     // with a stub instead of the app's shared instance.

@@ -1156,6 +1156,10 @@ private struct AdvancedSettingsTab: View {
     @EnvironmentObject private var store: HogStore
     @ObservedObject private var infisical = InfisicalSettings.shared
 
+    @State private var authMode: InfisicalAuthMode = .machineIdentity
+    @State private var secretPath = "/"
+    @State private var serviceTokens: [InfisicalServiceToken] = []
+    @State private var loadedEditor = false
     @State private var clientId = ""
     @State private var clientSecret = ""
     @State private var projectId = InfisicalSettings.shared.projectId
@@ -1165,7 +1169,7 @@ private struct AdvancedSettingsTab: View {
     var body: some View {
         Form {
             Section("Infisical Settings Sync") {
-                Text("App-level settings sync from Infisical, the fleet's source of truth.\u{00A0} The credential below is stored in the secure App Group container (mode 0600), never logged or shared across apps.")
+                Text("Infisical sync is optional.\u{00A0} Without a connection, local settings and built-in defaults apply.\u{00A0} Credentials stay in this Mac's Keychain and are never shared with the iPhone.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1173,7 +1177,7 @@ private struct AdvancedSettingsTab: View {
                 HStack {
                     Text("Status")
                     Spacer()
-                    Text(infisical.isConfigured ? "Configured" : "Not Configured")
+                    Text(infisical.isConfigured ? "Configured" : "Not configured")
                         .foregroundStyle(infisical.isConfigured ? .green : .secondary)
                 }
                 if let last = infisical.lastRefresh {
@@ -1199,18 +1203,43 @@ private struct AdvancedSettingsTab: View {
             }
 
             Section("Credential") {
-                TextField("Client ID", text: $clientId)
+                Picker("Authentication", selection: $authMode) {
+                    ForEach(InfisicalAuthMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                .disabled(isWorking || infisical.isSaving)
+                TextField("Active Project ID", text: $projectId)
                     .disabled(isWorking || infisical.isSaving)
-                SecureField("Client Secret", text: $clientSecret)
+                TextField(authMode == .machineIdentity ? "Settings Folder" : "New Settings Write Folder", text: $secretPath)
                     .disabled(isWorking || infisical.isSaving)
-                TextField("Project ID", text: $projectId)
-                    .disabled(isWorking || infisical.isSaving)
+                if authMode == .machineIdentity {
+                    TextField("Client ID", text: $clientId)
+                    SecureField("Client Secret", text: $clientSecret)
+                } else {
+                    Text("Add a token for each exact prod folder and permission.\u{00A0} Only tokens for the active project are read.\u{00A0} Each token must have one exact folder scope; overlapping settings keys are refused.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    ForEach($serviceTokens) { $entry in
+                        VStack(alignment: .leading) {
+                            TextField("Label", text: $entry.label)
+                            TextField("Token Project ID", text: $entry.projectId)
+                            TextField("Token Folder", text: $entry.secretPath)
+                            SecureField("Service Token", text: $entry.token)
+                            HStack {
+                                Toggle("Read Settings", isOn: $entry.reads)
+                                Toggle("Write Settings", isOn: $entry.writes)
+                                Button("Remove") { serviceTokens.removeAll { $0.id == entry.id } }
+                            }
+                        }
+                    }
+                    Button("Add Service Token") {
+                        serviceTokens.append(InfisicalServiceToken(projectId: projectId))
+                    }
+                }
                 Text(InfisicalSettings.credentialNotice)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
                     Button("Save Credential") { saveCredential() }
-                        .disabled(clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || UUID(uuidString: projectId.trimmingCharacters(in: .whitespacesAndNewlines)) == nil || isWorking || infisical.isSaving)
+                        .disabled(!candidate.isComplete || isWorking || infisical.isSaving)
                     Button("Clear") { clearCredential() }
                         .disabled(!infisical.isConfigured || isWorking)
                     Spacer()
@@ -1230,11 +1259,30 @@ private struct AdvancedSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(width: SettingsView.windowWidth - 80)
+        .onAppear {
+            guard !loadedEditor, ApplicationRunMode.current.allowsLiveProbes else { return }
+            loadedEditor = true
+            if let saved = infisical.editingCredential {
+                authMode = saved.effectiveMode
+                clientId = saved.clientId
+                clientSecret = saved.clientSecret
+                projectId = saved.effectiveProjectId
+                secretPath = saved.effectivePath
+                serviceTokens = saved.serviceTokens ?? []
+            }
+        }
         .onChange(of: infisical.projectId) { previous, current in
             // Bootstrap may finish after this tab first appears.  Update only
             // an untouched field; never replace a project the admin is typing.
             if projectId == previous { projectId = current }
         }
+    }
+
+    private var candidate: InfisicalCredential {
+        InfisicalCredential(clientId: authMode == .machineIdentity ? clientId : "",
+            clientSecret: authMode == .machineIdentity ? clientSecret : "",
+            projectId: projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            mode: authMode, secretPath: secretPath, serviceTokens: authMode == .serviceTokens ? serviceTokens : nil)
     }
 
     private func saveCredential() {
@@ -1243,9 +1291,8 @@ private struct AdvancedSettingsTab: View {
         Task { @MainActor in
             defer { isWorking = false }
             do {
-                try await infisical.saveCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
-                clientSecret = ""
-                notice = "Connection verified and saved to App Group storage."
+                try await infisical.saveConfiguration(candidate)
+                notice = "Connection verified and saved to Keychain."
             } catch {
                 notice = "Save failed: \(InfisicalSettings.safeMessage(for: error))"
             }
@@ -1262,6 +1309,8 @@ private struct AdvancedSettingsTab: View {
         projectId = infisical.projectId
         clientId = ""
         clientSecret = ""
+        serviceTokens = []
+        secretPath = "/"
         notice = "Credential removed.\u{00A0} Local defaults stand until a credential is saved again."
     }
 

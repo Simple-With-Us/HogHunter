@@ -57,10 +57,6 @@ jobs:
     if: github.event.repository.fork == false
     runs-on: macos-26
     timeout-minutes: 60
-    env:
-      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -75,11 +71,20 @@ jobs:
           names: MAC_CERT_P12_BASE64 MAC_CERT_PASSWORD
           project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
           secret-path: /mac-certs
-          client-id: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID || secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET || secrets.INFISICAL_CLIENT_SECRET }}
+          service-token: ${{ secrets.INFISICAL_MAC_CERTS_READ_TOKEN }}
         env:
           GH_FALLBACK_MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           GH_FALLBACK_MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+
+      - name: Load ASC credentials (Fleet-OPS prod /asc)
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/infisical-secrets
+        with:
+          names: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          required: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
+          secret-path: /asc
+          service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}
 
       - name: Load signing secrets (Infisical, then repository secrets)
         if: github.event_name != 'pull_request'
@@ -87,8 +92,7 @@ jobs:
         with:
           names: SPARKLE_ED_PRIVATE_KEY SENTRY_DSN SENTRY_AUTH_TOKEN
           project-id: ${{ secrets.INFISICAL_PROJECT_ID }}
-          client-id: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID || secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET || secrets.INFISICAL_CLIENT_SECRET }}
+          service-token: ${{ secrets.INFISICAL_HOGHUNTER_READ_TOKEN }}
         env:
           GH_FALLBACK_SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           GH_FALLBACK_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -182,8 +186,8 @@ jobs:
         if: steps.gate.outputs.publish == 'true'
         env:
           NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
-          NOTARY_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          NOTARY_KEY_ID: ${{ env.ASC_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ env.ASC_ISSUER_ID }}
         run: scripts/mac-release-build.sh --release
 
       - name: Upload Sentry debug files
