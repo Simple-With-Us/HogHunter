@@ -42,6 +42,7 @@ class Maintenance:
         self.uncertain_child = False
         self.lock = self.path("/run/fleet-housekeeper.lock")
         self.owner = None
+        self.lock_state = "unknown"
         self.removed_file_bytes = 0
 
     def path(self, absolute):
@@ -203,18 +204,7 @@ class Maintenance:
             result = []
             for image in ids:
                 self.check()
-                if not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
-                    raise ValueError("malformed image identity")
-                code, data = self.runner(DOCKER + ["image", "inspect", "--format",
-                    '{{json .Created}}|{{json .RepoTags}}|{{json .Config.Labels}}', image])
-                if code:
-                    raise ValueError("image changed during inventory")
-                created, tags, labels = map(json.loads, data.strip().split("|"))
-                if labels is not None and not isinstance(labels, dict):
-                    raise ValueError("malformed image labels")
-                if tags not in (None, []) or any(str(k).casefold() in ("janitor-keep", "hoghunter.keep") for k in (labels or {})):
-                    continue
-                if self.clock() - self.timestamp(created) >= AGE:
+                if self.image_eligible(image):
                     result.append(image)
             return result
         self.verify_local_builder()
@@ -237,6 +227,26 @@ class Maintenance:
                     and self.clock() - self.timestamp(record.get("LastUsedAt")) >= AGE):
                 result.append(identity)
         return result[:20]
+
+    def image_eligible(self, identity):
+        """Inspect only one exact image using one selected-field JSON object."""
+        self.check()
+        if not isinstance(identity, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", identity):
+            raise ValueError("malformed image identity")
+        code, data = self.runner(DOCKER + ["image", "inspect", "--format",
+            '{"created":{{json .Created}},"tags":{{json .RepoTags}},"labels":{{json .Config.Labels}}}', identity])
+        if code:
+            raise ValueError("image changed during inventory")
+        record = json.loads(data)
+        if not isinstance(record, dict) or set(record) != {"created", "tags", "labels"}:
+            raise ValueError("malformed image metadata")
+        tags, labels = record["tags"], record["labels"]
+        if ((labels is not None and not isinstance(labels, dict))
+                or (tags is not None and (not isinstance(tags, list) or any(not isinstance(t, str) for t in tags)))):
+            raise ValueError("malformed image tags or labels")
+        return (tags in (None, [])
+                and not any(str(k).casefold() in ("janitor-keep", "hoghunter.keep") for k in (labels or {}))
+                and self.clock() - self.timestamp(record["created"]) >= AGE)
 
     def remove_files(self, strategy, candidates, progress=None):
         directory = self.path("/var/cache/apt/archives" if strategy == "package-cache" else "/var/log/fleet-backup")
@@ -289,7 +299,14 @@ class Maintenance:
     def process_start(self, pid):
         # /proc stat comm may contain spaces and parentheses; fields follow its final close.
         text = (self.path("/proc") / str(pid) / "stat").read_text()
-        return int(text[text.rfind(")") + 2:].split()[19])
+        close = text.rfind(")")
+        fields = text[close + 2:].split() if close >= 0 else []
+        if len(fields) <= 19:
+            raise ValueError("malformed process stat")
+        start = int(fields[19])
+        if start <= 0:
+            raise ValueError("malformed process start ticks")
+        return start
 
     def sync_lock_directory(self):
         fd = os.open(self.lock, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -332,9 +349,14 @@ class Maintenance:
 
     def acquire_lock(self):
         # All new-tool callers share this guard; legacy/unknown locks are left alone.
+        self.lock_state = "unknown"
         guard = os.open(self.lock.with_suffix(".guard"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.lock_state = "busy"
+                return False
             if self.lock.exists() or self.lock.is_symlink():
                 try:
                     ds = self.lock.lstat()
@@ -350,14 +372,16 @@ class Maintenance:
                             or not isinstance(owner["nonce"], str) or not re.fullmatch(r"[a-f0-9]{32}", owner["nonce"])
                             or owner["inode"] != ds.st_ino):
                         return False
+                    if set(x.name for x in self.lock.iterdir()) != {"owner.json"}:
+                        return False
                     try:
                         os.kill(owner["pid"], 0)
                     except ProcessLookupError:
                         pass  # Proven dead; never recover on age or an unreadable process.
                     else:
-                        return False
-                    if set(x.name for x in self.lock.iterdir()) != {"owner.json"}:
-                        return False
+                        if self.process_start(owner["pid"]) == owner["start_ticks"]:
+                            self.lock_state = "busy"
+                            return False
                     if self.lock.lstat().st_ino != ds.st_ino or op.lstat().st_ino != owner_stat.st_ino:
                         return False
                     op.unlink()
@@ -424,7 +448,10 @@ class Maintenance:
                 if self.protected(self.lock.parent):
                     raise ValueError("lock parent protected")
                 if not self.acquire_lock():
-                    result["reason"] = "shared remote cleanup lock held; no work started"
+                    if self.lock_state == "busy":
+                        result["reason"] = "shared remote cleanup lock busy; no work started"
+                    else:
+                        result.update(status="partial", reason="shared remote cleanup lock requires inspection; no work started")
                     return result
                 held = True
                 lock_inode = self.lock.stat().st_ino
@@ -453,7 +480,7 @@ class Maintenance:
                             # Exact reviewed identities only; never force image removal, containers or volumes.
                             if self.protected(self.path("/var/lib/docker")):
                                 raise ValueError("Docker storage became protected")
-                            if strategy == "docker-images" and identity not in self.docker_candidates(strategy):
+                            if strategy == "docker-images" and not self.image_eligible(identity):
                                 continue
                             if strategy == "docker-build-cache":
                                 self.verify_local_builder()

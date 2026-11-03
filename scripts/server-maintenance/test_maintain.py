@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic: every root/command/active-file probe is replaced; no SSH or Docker."""
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -111,13 +112,99 @@ class MaintenanceTests(unittest.TestCase):
 
     def test_unknown_legacy_or_live_lock_is_preserved(self):
         self.tool.lock.mkdir()
-        self.assertEqual(self.tool.execute()["status"], "skipped")
+        self.assertEqual(self.tool.execute()["status"], "partial")
         self.assertTrue(self.tool.lock.exists())
         self.tool.lock.rmdir()
         self.assertTrue(self.tool.acquire_lock())
         self.assertEqual(self.tool.execute()["status"], "skipped")
         self.assertTrue(self.tool.lock.exists())
 
+    def test_guard_contention_is_known_busy_and_skips_without_work(self):
+        guard = os.open(self.tool.lock.with_suffix('.guard'), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.tool.execute()
+        finally:
+            os.close(guard)
+        self.assertEqual(result['status'], 'skipped')
+        self.assertIn('busy', result['reason'])
+        self.assertFalse(self.tool.lock.exists())
+
+    def test_reused_pid_recovery_requires_known_owner_and_no_dispatch(self):
+        self.assertTrue(self.tool.acquire_lock())
+        prior = self.tool.owner.copy()
+        self.tool.process_start = lambda _: prior['start_ticks'] + 1
+        self.assertTrue(self.tool.acquire_lock())
+        self.assertNotEqual(self.tool.owner['nonce'], prior['nonce'])
+        (self.tool.lock / 'dispatch.json').write_text('{}')
+        self.tool.process_start = lambda _: prior['start_ticks'] + 2
+        self.assertFalse(self.tool.acquire_lock())
+        self.assertEqual(self.tool.lock_state, 'unknown')
+        result = self.tool.execute()
+        self.assertEqual(result['status'], 'partial')
+        self.assertIn('requires inspection', result['reason'])
+
+    def test_unreadable_live_start_is_not_recovery_evidence_or_benign_busy(self):
+        self.assertTrue(self.tool.acquire_lock())
+        owner = (self.tool.lock / 'owner.json').read_bytes()
+        self.tool.process_start = lambda _: (_ for _ in ()).throw(PermissionError())
+        result = self.tool.execute()
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual((self.tool.lock / 'owner.json').read_bytes(), owner)
+        self.assertIn('requires inspection', result['reason'])
+
+    def test_malformed_process_stat_raises_value_error_and_execute_returns_json(self):
+        directory = self.root / 'proc' / str(os.getpid())
+        directory.mkdir(parents=True)
+        for text in ('truncated', f'{os.getpid()} (with ) parentheses) S 1',
+                     f'{os.getpid()} (worker) ' + ' '.join(['S'] + ['0'] * 19)):
+            (directory / 'stat').write_text(text)
+            with self.assertRaises(ValueError):
+                m.Maintenance.process_start(self.tool, os.getpid())
+        self.tool.process_start = lambda pid: m.Maintenance.process_start(self.tool, pid)
+        result = self.tool.execute('run', ['package-cache'], True)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(json.loads(json.dumps(result))['schema_version'], 1)
+
+    def test_image_json_preserves_pipe_labels_and_revalidates_only_each_identity(self):
+        identities = ['sha256:' + letter * 64 for letter in ('a', 'b', 'c')]
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            if 'ls' in argv:
+                return 0, '\n'.join(identities)
+            if 'inspect' in argv:
+                template = argv[argv.index('--format') + 1]
+                self.assertIn('"created":', template)
+                self.assertNotIn('Config.Env', template)
+                return 0, json.dumps(dict(created='2020-01-01T00:00:00Z', tags=[], labels={'description': 'valid|label'}))
+            self.assertIn('rm', argv)
+            self.assertTrue((self.tool.lock / 'dispatch.json').exists())
+            return 0, ''
+        self.tool.runner = runner
+        result = self.tool.execute('run', ['docker-images'], True)
+        self.assertEqual(result['status'], 'ran')
+        self.assertEqual(result['strategies'][0]['attempted_count'], 3)
+        self.assertEqual(sum('ls' in a for a in calls), 1)
+        self.assertEqual(sum('inspect' in a for a in calls), 2 * len(identities))
+        self.assertEqual(sum('rm' in a for a in calls), len(identities))
+
+    def test_image_tag_or_keep_change_during_single_identity_recheck_prevents_removal(self):
+        identity = 'sha256:' + 'a' * 64
+        for tags, labels in [(['current:tag'], {}), ([], {'JANITOR-KEEP': 'yes'})]:
+            with self.subTest(tags=tags, labels=labels):
+                inspects = []
+                def runner(argv):
+                    if 'ls' in argv:
+                        return 0, identity
+                    self.assertIn('inspect', argv, 'changed image was removed')
+                    inspects.append(argv[-1])
+                    return 0, json.dumps(dict(created='2020-01-01T00:00:00Z',
+                        tags=[] if len(inspects) == 1 else tags, labels={} if len(inspects) == 1 else labels))
+                self.tool.runner = runner
+                result = self.tool.execute('run', ['docker-images'], True)
+                self.assertEqual(result['status'], 'skipped')
+                self.assertEqual(inspects, [identity, identity])
     def test_known_dead_lock_recovery_and_owner_mismatch(self):
         self.assertTrue(self.tool.acquire_lock())
         with patch.object(m.os, "kill", side_effect=ProcessLookupError):
@@ -402,6 +489,18 @@ class CallerTests(unittest.TestCase):
                 self.assertEqual(obj._coolify_remote()[2], expected)
         with patch("vacuum.engine.work.run_process", side_effect=subprocess.TimeoutExpired("ssh", 110)):
             self.assertEqual(obj._coolify_remote()[2], StepStatus.FAILED)
+
+    def test_empty_ssh_and_remote_command_failures_have_distinct_safe_reasons(self):
+        obj = self.engine()
+        for code, stdout, expected in [(255, b'', 'SSH connection or authentication failed'),
+                                       (1, ' \n', 'verify installation and sudo access'),
+                                       (0, '', 'invalid result')]:
+            with self.subTest(code=code), patch('vacuum.engine.work.run_process',
+                    return_value=subprocess.CompletedProcess([], code, stdout, 'private diagnostic')):
+                _, reason, status = obj._coolify_remote()
+                self.assertEqual(status, StepStatus.FAILED)
+                self.assertIn(expected, reason)
+                self.assertNotIn('private diagnostic', reason)
 
 
 if __name__ == "__main__":

@@ -1257,6 +1257,11 @@ class VacuumEngine:
             return 0, "remote maintenance timed out; outcome unconfirmed", StepStatus.FAILED
         try:
             raw = response.stdout.decode("utf-8") if isinstance(response.stdout, bytes) else response.stdout
+            if not raw or (isinstance(raw, str) and not raw.strip()):
+                if response.returncode == 255:
+                    return 0, "remote SSH connection or authentication failed; maintenance outcome unconfirmed", StepStatus.FAILED
+                if response.returncode != 0:
+                    return 0, "remote maintenance returned no result; verify installation and sudo access", StepStatus.FAILED
             result = parse_server_maintenance_result(raw)
         except (ValueError, TypeError, UnicodeError):
             return 0, "remote maintenance returned an invalid result", StepStatus.FAILED
