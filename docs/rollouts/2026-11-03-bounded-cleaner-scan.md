@@ -29,13 +29,13 @@ The existing `bytesReclaimed` field remains compatible with consumers and cleanu
 
 `CleanResult.observedFreeBytesChange` records an optional signed startup-volume available-space difference, using the same important-usage capacity metric as the Storage card.  A negative change remains negative, and an unavailable reading stays unknown.  Concurrent writes and changes in purgeable capacity affect the observation, so it is not attributed entirely to this cleanup.
 
-The Mac completion panel labels moved/removed estimates and observed available-space changes separately.  It explains that Trash and APFS snapshots can retain blocks, and the volume gauge no longer adds selected item bytes to free space as a promised result.  No new automatic Trash emptying or undo-snapshot deletion is introduced.  Companion JSON keys and cleanup permissions are unchanged; these native report/result types are Sendable, not Codable wire payloads.
+The Mac completion panel labels moved/removed estimates and observed available-space changes separately.  It explains that Trash and APFS snapshots can retain blocks, and the volume gauge no longer adds selected item bytes to free space as a promised result.  No new automatic Trash emptying or undo-snapshot deletion is introduced.  Cleanup permissions are unchanged; companion wire additions are optional and are documented below.
 
 ## Verification
 
-Focused XCTest fixtures cover provisional report cancellation, partial simulator cleaning, nested-link accounting, partial-regimen retry, child-command deadlines, synthetic snapshots, depth and directory-entry caps, package contents, target and global deadlines, incremental reports, external mount aliases, internal aliases, cancellation, partial-age eligibility, primary simulator identity, per-scan cache lifetime, and signed free-space observations.  The isolated fixture compiles the real cleaner, directory walker, keep sentinel, and temp safety policy with inert app-inventory/capacity stubs; it never scans the real home or invokes cleanup commands.
+Focused XCTest fixtures cover provisional report cancellation, partial simulator cleaning, nested-link accounting, partial-regimen retry, child-command deadlines, synthetic snapshots, depth and directory-entry caps, package contents, target and global deadlines, incremental reports, external mount aliases, internal aliases, cancellation, partial-age eligibility, primary simulator identity, per-scan cache lifetime, signed free-space observations, and per-folder orphan identity completeness.  The isolated fixture compiles the real cleaner, directory walker, keep sentinel, and temp safety policy with inert app-inventory/capacity stubs; it never scans the real home or invokes cleanup commands.
 
-The exact-source isolated fixture passed all 23 XCTest cases with zero failures; store/view Swift parsing and the diff check also passed.  Native UI integration and the complete app test suite remain CI checks.  No app was installed or quit, and no system cleanup ran during this work.
+The exact-source isolated fixture passed all 25 XCTest cases with zero failures; store/view Swift parsing and the diff check also passed.  Native UI integration and the complete app test suite remain CI checks.  No app was installed or quit, and no system cleanup ran during this work.
 
 
 ## Companion Parity
