@@ -1167,6 +1167,54 @@ class TestMaintenanceTimingAndIncomplete(_EngineHome):
         self.assertTrue(run_skipped_for_lock(record))
         self.assertEqual((hits, cleaned, state), ([], False, {"last_clean_at": 100}))
 
+    def test_nested_watch_observations_merge_once_and_preserve_each_phase(self):
+        for step_id in self.cfg["steps"]:
+            self.cfg["steps"][step_id] = {"enabled": step_id == "hoghunter_reclaim"}
+        for initial_complete in (False, True):
+            for after_disk_ok, after_complete in ((False, False), (True, False), (True, True)):
+                with self.subTest(initial_complete=initial_complete, after_disk_ok=after_disk_ok,
+                                  after_complete=after_complete):
+                    before = {**self.SAMPLE, "sample_complete": initial_complete}
+                    nested = {**self.SAMPLE, "sample_complete": False}
+                    after = {**self.SAMPLE, "sample_complete": after_complete,
+                             "disk_sample_ok": after_disk_ok, "disk_free_gb": 9 if after_disk_ok else 0}
+                    state = {}
+                    with patch("vacuum.engine.sample_mac", side_effect=[before, nested, after]), \
+                         patch.object(self.engine, "_dispatch", return_value=(512, "synthetic applied work", StepStatus.RAN)):
+                        record, hits, cleaned = self.engine.run_watch_tick(state, None)
+                    probes = [s for s in record.steps if s.step_id == "resource_sample"]
+                    self.assertEqual(len(probes), 1)
+                    self.assertEqual(len(record.steps), 2)
+                    self.assertTrue(probes[0].incomplete)
+                    for phase in ("watch check", "cleanup preflight", "after cleanup"):
+                        self.assertEqual(probes[0].reason.count(phase + ":"), 1)
+                    self.assertIn("threshold hit", probes[0].reason)
+                    self.assertIn("after cleanup: host observation " + ("complete" if after_complete else "incomplete")
+                                  + "; disk reading " + ("available" if after_disk_ok else "unknown"), probes[0].reason)
+                    self.assertEqual(state["prev_disk_free_gb"], 9 if after_disk_ok else before["disk_free_gb"])
+                    self.assertTrue(hits)
+                    self.assertTrue(cleaned)
+                    self.assertEqual((record.outcome, record.exit_code, record.bytes_freed), ("partial", 0, 512))
+                    self.assertIn("1 step(s) incomplete (resource_sample)", record.summary)
+
+    def test_complete_scan_with_failed_deletes_preserves_partial_and_failed_rules(self):
+        self.fake_cleaner()
+        for applied, expected_status, expected_outcome, expected_exit in (
+                (2, StepStatus.RAN, "partial", 0), (0, StepStatus.FAILED, "failed", 1)):
+            with self.subTest(applied=applied):
+                report = _report(applied_count=applied, actionable_count=applied + 3, failed_count=3,
+                                 applied_bytes=1024 if applied else 0, scan_truncated=False, budget_exhausted=False)
+                with patch.object(sys, "platform", "darwin"), \
+                     patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+                     patch("vacuum.engine._run_in_own_group", return_value=(0, report, "", False)):
+                    record = self.engine.run_single_step("hoghunter_reclaim")
+                self.assertEqual((record.outcome, record.exit_code), (expected_outcome, expected_exit))
+                self.assertEqual(record.bytes_freed, 1024 if applied else 0)
+                self.assertEqual(record.steps[0].status, expected_status)
+                self.assertTrue(record.steps[0].incomplete, "cleanup incomplete is broader than scan incomplete")
+                self.assertIn("3 could not be removed", record.steps[0].reason)
+                self.assertNotIn("scan incomplete", record.steps[0].reason)
+
 
 class TestPressureProbeBudget(unittest.TestCase):
     def test_probe_clamps_to_remaining_shared_deadline_and_uses_owned_runner(self):
