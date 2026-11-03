@@ -41,7 +41,9 @@ from ios_screenshot_checks import (  # noqa: E402
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
 
-BOOT_TIMEOUT_S = 180
+# First boots on hosted runners take minutes (dyld caches on a cold disk);
+# 180s starved the 13-inch iPad even though its device type was valid.
+BOOT_TIMEOUT_S = 420
 
 
 def boot_simulator(udid):

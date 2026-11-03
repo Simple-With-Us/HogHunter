@@ -52,7 +52,7 @@ jobs:
 
   test:
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
       TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
@@ -132,14 +132,14 @@ jobs:
 
       - name: Capture app screenshots
         if: ${{ !cancelled() }}
-        timeout-minutes: 27
+        timeout-minutes: 35
         # The supervisor finishes when capture exits and kills its whole process
         # group, including orphan helpers that could retain runner output handles.
         # Budget: the first iOS format alone takes ~6 min on these runners
         # (simulator boot dominates), and five formats plus the macOS phase
-        # need ~20 min.  The old 480s cap always fired mid-way through the
+        # need ~25 min.  The old 480s cap always fired mid-way through the
         # second format, after the required screens were already saved.
-        run: python3 scripts/bounded-process.py --timeout 1500 --grace 2 -- bash scripts/capture-app-screenshots.sh
+        run: python3 scripts/bounded-process.py --timeout 1980 --grace 2 -- bash scripts/capture-app-screenshots.sh
 
       - name: Upload screenshots artifact
         timeout-minutes: 3
