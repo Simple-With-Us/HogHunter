@@ -17,6 +17,15 @@ from ios_screenshot_checks import (
 def capture_scenes(udid, bundle_id, app_path, output, run=subprocess.run, settle=time.sleep, recognize=recognize_text):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    # A retry must never expose a previous attempt's scene or route evidence.
+    for name in ("widget-small.png", "clean-cold-start.png", "cleaner-quick.png",
+                 "cleaner-partial.png", "clean-deep-link.png", "unverified/clean-deep-link.png"):
+        (output / name).unlink(missing_ok=True)
+    (output / "scene-verification.json").write_text("[]\n")
+    (output / "deep-link-verification.json").write_text(json.dumps({
+        "url": CLEAN_URL, "verified": False, "frame": None,
+        "problem": "not attempted: required scene capture has not completed",
+    }, indent=2) + "\n")
     if not widget_appex_present(app_path):
         raise RuntimeError("embedded widget extension missing")
 
@@ -41,16 +50,19 @@ def capture_scenes(udid, bundle_id, app_path, output, run=subprocess.run, settle
         ("cleaner-quick", CLEANER_LAUNCH_ARGS, "cleaner-quick"),
         ("cleaner-partial", PARTIAL_CLEANER_LAUNCH_ARGS, "cleaner-partial"),
     ):
-        launch(args)
         path = output / (name + ".png")
-        capture(path)
         text = ""
+        stage = "launch"
         try:
+            launch(args)
+            stage = "capture"
+            capture(path)
+            stage = "OCR"
             text = recognize(path)
             problem = scene_problem(scene, text)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-            problem = "OCR unavailable: " + str(error)
-        results.append({"frame": path.name, "scene": scene, "verified": problem is None, "problem": problem, "recognizedText": text})
+            problem = ("OCR unavailable: " if stage == "OCR" else stage + " failed: ") + str(error)
+        results.append({"frame": path.name, "scene": scene, "verified": problem is None, "stage": stage, "problem": problem, "recognizedText": text})
         (output / "scene-verification.json").write_text(json.dumps(results, indent=2) + "\n")
         if problem:
             raise RuntimeError(path.name + ": " + problem)

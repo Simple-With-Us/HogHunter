@@ -114,6 +114,9 @@ jobs:
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           fi
 
+      - name: Require server maintenance render
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png"
+
       - name: Build iOS companion
         run: |
           xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \

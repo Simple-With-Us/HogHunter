@@ -107,14 +107,17 @@ class SceneChecks(unittest.TestCase):
         clipped = full.replace("Sampling & Display", "g & Display").replace("Active Refresh", "efresh")
         self.assertIn("missing intended text", checks.scene_problem("mac-settings", clipped))
 
-    def run_capture(self, root, route_text, failure=None):
+    def run_capture(self, root, route_text, failure=None, command_failure=None, blank_frame=False):
         app = root / "App.app"
-        (app / "PlugIns" / checks.WIDGET_APPEX_NAME).mkdir(parents=True)
+        (app / "PlugIns" / checks.WIDGET_APPEX_NAME).mkdir(parents=True, exist_ok=True)
         commands = []
         def run(command, **kwargs):
             commands.append(command)
+            if command_failure and command_failure in command:
+                raise subprocess.CalledProcessError(1, command)
             if "screenshot" in command:
-                Path(command[-1]).write_bytes(png(400, 800, os.urandom(8000)))
+                payload = b"\x00" * 20 if blank_frame else os.urandom(8000)
+                Path(command[-1]).write_bytes(png(400, 800, payload))
             return subprocess.CompletedProcess(command, 0, "", "")
         def recognize(path):
             if failure:
@@ -149,6 +152,59 @@ class SceneChecks(unittest.TestCase):
             scenes = json.loads((root / "screens/scene-verification.json").read_text())
             self.assertFalse(scenes[-1]["verified"])
             self.assertIn("access denied", scenes[-1]["problem"])
+
+    def test_launch_capture_and_blank_frame_failures_are_recorded(self):
+        for failure, blank, stage in [("launch", False, "launch"), ("screenshot", False, "capture"), (None, True, "capture")]:
+            with self.subTest(failure=failure, blank=blank), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with self.assertRaisesRegex(RuntimeError, stage + " failed"):
+                    self.run_capture(root, CONFIRMATION, command_failure=failure, blank_frame=blank)
+                scenes = json.loads((root / "screens/scene-verification.json").read_text())
+                self.assertEqual(len(scenes), 1)
+                self.assertFalse(scenes[0]["verified"])
+                self.assertEqual(scenes[0]["stage"], stage)
+                self.assertEqual(scenes[0]["frame"], "widget-small.png")
+
+    def test_successful_retry_removes_stale_unverified_route_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_capture(root, "Open in Hog Hunter? " + CONFIRMATION)
+            stale = root / "screens/unverified/clean-deep-link.png"
+            self.assertTrue(stale.exists())
+            (_, route), _ = self.run_capture(root, CONFIRMATION)
+            self.assertTrue(route["verified"])
+            self.assertFalse(stale.exists())
+            self.assertTrue((root / "screens/clean-deep-link.png").exists())
+
+    def test_failed_retry_cannot_retain_previous_success_or_route_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_capture(root, CONFIRMATION)
+            with self.assertRaises(RuntimeError):
+                self.run_capture(root, CONFIRMATION, command_failure="launch")
+            output = root / "screens"
+            self.assertFalse(list(output.glob("*.png")))
+            route = json.loads((output / "deep-link-verification.json").read_text())
+            self.assertFalse(route["verified"])
+            self.assertIsNone(route["frame"])
+            self.assertIn("not attempted", route["problem"])
+
+    def test_hosted_gate_requires_named_nonempty_server_render(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        command = ci.split("- name: Require server maintenance render\n        run: ")[1].splitlines()[0]
+        self.assertIn("hh207-server-maintenance-schedule-off.png", command)
+        self.assertIn("HOGHUNTER_RENDER_DIR:", ci)
+        self.assertIn("TEST_RUNNER_HOGHUNTER_RENDER_DIR:", ci)
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, HOGHUNTER_RENDER_DIR=tmp)
+            def gate():
+                return subprocess.run(["bash", "-c", command], env=env).returncode
+            self.assertNotEqual(gate(), 0)
+            image = Path(tmp) / "hh207-server-maintenance-schedule-off.png"
+            image.touch()
+            self.assertNotEqual(gate(), 0)
+            image.write_bytes(png(400, 800, os.urandom(8000)))
+            self.assertEqual(gate(), 0)
 
     def test_sample_safety_and_shared_mac_size_contract(self):
         model = (ROOT / "ios/Sources/CompanionModel.swift").read_text()
