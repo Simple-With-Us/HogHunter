@@ -1400,7 +1400,7 @@ class TestStepReasonsArePlural(_EngineHome):
                 # A clean ran a moment ago, so a hit is counted and nothing is cleaned.
                 record, _hits, cleaned = self.engine.run_watch_tick({"last_clean_at": time.time()}, None)
             self.assertFalse(cleaned)
-            self.assertEqual(record.steps[0].reason, expected)
+            self.assertTrue(record.steps[0].reason.endswith("; " + expected), record.steps[0].reason)
 
     def test_the_cleaner_reports_its_item_count_in_the_right_form(self):
         self.fake_cleaner()
