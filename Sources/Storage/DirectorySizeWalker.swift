@@ -13,6 +13,7 @@ final class DirectorySizeWalker {
         var finishedAt: Date?
         var failure: String?
         var hasResolvedRoot = false
+        var retryAutomatically = true
         var isComplete: Bool { finishedAt != nil && failure == nil }
     }
 
@@ -54,11 +55,30 @@ final class DirectorySizeWalker {
     private let includesLaneLinks: Bool
     /// Retained because `observation.path` becomes the physical root after the first slice.
     private let logicalPath: String
+    private let allowsPath: (String) -> Bool
+    private let willReadMetadata: (String) -> Void
+    static let automaticAccessReason = "External or network directory not measured automatically"
 
-    init(path: String, startedAt: Date) {
+    /// Check the kernel's mount names before any directory metadata or symlink target is read.
+    /// In particular, realpath() follows a local alias onto a protected volume before returning.
+    static func automaticAccessPolicy(mountPaths: [String]) -> (String) -> Bool {
+        let protected = ["/Volumes"] + mountPaths.filter {
+            $0 != "/" && $0 != "/dev" && !$0.hasPrefix("/System/Volumes/")
+        }
+        return { path in
+            !protected.contains { path == $0 || path.hasPrefix($0 + "/") }
+        }
+    }
+
+    init(path: String, startedAt: Date,
+         allowsPath: ((String) -> Bool)? = nil,
+         willReadMetadata: @escaping (String) -> Void = { _ in }) {
         observation = Observation(path: path, bytes: 0, entries: 0, startedAt: startedAt)
         includesLaneLinks = URL(fileURLWithPath: path).lastPathComponent == "lanes"
         logicalPath = path
+        self.allowsPath = allowsPath ?? Self.automaticAccessPolicy(
+            mountPaths: MountedDriveStore.cachedMountRecords().map(\.path))
+        self.willReadMetadata = willReadMetadata
     }
 
     func advance(maxEntries: Int = 256, maxDuration: TimeInterval = 0.04) -> Observation {
@@ -67,8 +87,8 @@ final class DirectorySizeWalker {
         if !initialized {
             initialized = true
             // Resolution can touch a slow volume, so it belongs here, never in a view initializer.
-            guard let physicalPath = Self.canonicalPath(observation.path) else {
-                fail("Directory cannot be resolved (\(errno))")
+            guard let physicalPath = canonicalPath(observation.path) else {
+                if observation.failure == nil { fail("Directory cannot be resolved (\(errno))") }
                 return observation
             }
             observation.path = physicalPath
@@ -85,7 +105,11 @@ final class DirectorySizeWalker {
                 let error = errno
                 guard validate(frame) else { continue }
                 frames.removeLast()
-                if error != 0 { fail("Could not read every directory entry (\(error))") }
+                if error != 0 {
+                    errno = error
+                    failIfPermissionDenied()
+                    fail("Could not read every directory entry (\(error))")
+                }
                 continue
             }
             let name = withUnsafePointer(to: &entry.pointee.d_name) {
@@ -96,7 +120,7 @@ final class DirectorySizeWalker {
             processed += 1
             let path = frame.path + "/" + name
             var info = stat()
-            guard lstat(path, &info) == 0 else {
+            guard readMetadata(path, into: &info) == 0 else {
                 // A disappearing entry is a normal concurrent mutation, never a permission bypass.
                 if errno != ENOENT { fail("Could not read metadata (\(errno))") }
                 else { _ = validate(frame) }
@@ -108,12 +132,12 @@ final class DirectorySizeWalker {
             } else {
                 add(info)
                 if kind == S_IFLNK, let depth = frame.layoutDepth, depth < 2 {
-                    guard let target = Self.canonicalPath(path) else {
-                        fail("Linked directory cannot be resolved (\(errno))")
+                    guard let target = canonicalPath(path) else {
+                        if observation.failure == nil { fail("Linked directory cannot be resolved (\(errno))") }
                         continue
                     }
                     var targetInfo = stat()
-                    guard lstat(target, &targetInfo) == 0 else {
+                    guard readMetadata(target, into: &targetInfo) == 0 else {
                         fail("Linked directory is unavailable (\(errno))")
                         continue
                     }
@@ -143,7 +167,7 @@ final class DirectorySizeWalker {
                 let (link, expected) = checks[nextLinkCheck]
                 processed += 1
                 var info = stat()
-                guard Self.canonicalPath(link) == expected.path, lstat(expected.path, &info) == 0,
+                guard canonicalPath(link) == expected.path, readMetadata(expected.path, into: &info) == 0,
                       info.st_mode & S_IFMT == expected.kind,
                       info.st_dev == expected.inode.device, info.st_ino == expected.inode.number else {
                     fail("Linked lane target changed or became unavailable while measuring")
@@ -157,8 +181,8 @@ final class DirectorySizeWalker {
             // validate, but the total belongs to the old target, so it must not be published under
             // the alias the row is displayed by.  Re-resolving here keeps the syscall off the caller.
             var rootInfo = stat()
-            guard Self.canonicalPath(logicalPath) == observation.path,
-                  lstat(observation.path, &rootInfo) == 0,
+            guard canonicalPath(logicalPath) == observation.path,
+                  readMetadata(observation.path, into: &rootInfo) == 0,
                   baseIdentity == Inode(device: rootInfo.st_dev, number: rootInfo.st_ino) else {
                 fail("Symlink target changed while measuring")
                 return observation
@@ -171,12 +195,70 @@ final class DirectorySizeWalker {
     /// Foundation may shorten /private/tmp back to the /tmp symlink after resolution.
     /// Keep the POSIX physical path so the root passes lstat and O_NOFOLLOW checks.
     static func canonicalPath(_ path: String) -> String? {
-        path.withCString { source in
-            guard let resolved = Darwin.realpath(source, nil) else { return nil }
-            defer { free(resolved) }
-            guard let result = String(validatingUTF8: resolved) else { errno = EILSEQ; return nil }
-            return result
+        resolvePath(path, allowsPath: { _ in true }, willReadMetadata: { _ in })
+    }
+
+    private func canonicalPath(_ path: String) -> String? {
+        let result = Self.resolvePath(path, allowsPath: { [self] candidate in
+            guard allowsPath(candidate) else {
+                fail(Self.automaticAccessReason, retryAutomatically: false)
+                return false
+            }
+            return true
+        }, willReadMetadata: willReadMetadata)
+        if result == nil { failIfPermissionDenied() }
+        return result
+    }
+
+    private func failIfPermissionDenied() {
+        if errno == EACCES || errno == EPERM {
+            fail("Directory access denied; automatic measurement paused", retryAutomatically: false)
         }
+    }
+
+    /// Resolve local link text first, then gate the destination before lstat can follow it.
+    /// Do not standardize away `..` before resolving a symlink: POSIX applies it to the target.
+    private static func resolvePath(_ path: String, allowsPath: (String) -> Bool,
+                                    willReadMetadata: (String) -> Void) -> String? {
+        guard path.hasPrefix("/") else { errno = EINVAL; return nil }
+        var remaining = path.split(separator: "/").map(String.init)
+        var resolved: [String] = []
+        var links = 0
+        while !remaining.isEmpty {
+            let component = remaining.removeFirst()
+            if component == "." { continue }
+            if component == ".." { if !resolved.isEmpty { resolved.removeLast() }; continue }
+            let candidate = "/" + (resolved + [component]).joined(separator: "/")
+            guard allowsPath(candidate) else { errno = EACCES; return nil }
+            willReadMetadata(candidate)
+            var info = stat()
+            guard lstat(candidate, &info) == 0 else { return nil }
+            if info.st_mode & S_IFMT == S_IFLNK {
+                links += 1
+                guard links <= 40 else { errno = ELOOP; return nil }
+                // destinationOfSymbolicLink reads the link itself, never its destination.
+                guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: candidate) else { return nil }
+                if target.hasPrefix("/") { resolved.removeAll() }
+                remaining = target.split(separator: "/").map(String.init) + remaining
+            } else {
+                resolved.append(component)
+            }
+        }
+        let result = "/" + resolved.joined(separator: "/")
+        guard allowsPath(result) else { errno = EACCES; return nil }
+        return result
+    }
+
+    private func readMetadata(_ path: String, into info: inout stat) -> Int32 {
+        guard allowsPath(path) else {
+            fail(Self.automaticAccessReason, retryAutomatically: false)
+            errno = EACCES
+            return -1
+        }
+        willReadMetadata(path)
+        let result = lstat(path, &info)
+        if result != 0 { failIfPermissionDenied() }
+        return result
     }
 
     /// A same-device parent covers descendants; a nested mounted volume is excluded
@@ -191,7 +273,7 @@ final class DirectorySizeWalker {
     /// Never publish those skipped children as a complete, smaller observation.
     private func validate(_ frame: Frame) -> Bool {
         var info = stat()
-        guard lstat(frame.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+        guard readMetadata(frame.path, into: &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
               info.st_dev == frame.inode.device, info.st_ino == frame.inode.number else {
             fail("Directory moved or changed while measuring; last complete size retained")
             return false
@@ -203,7 +285,7 @@ final class DirectorySizeWalker {
                        isRoot: Bool = false) {
         guard isRoot || countedRoots[path] == nil else { return }
         var info = supplied ?? stat()
-        if supplied == nil, lstat(path, &info) != 0 { fail("Directory is unavailable (\(errno))"); return }
+        if supplied == nil, readMetadata(path, into: &info) != 0 { fail("Directory is unavailable (\(errno))"); return }
         guard info.st_mode & S_IFMT == S_IFDIR else { fail("Path is not a directory"); return }
         guard expectedDevice == nil || expectedDevice == info.st_dev else { return }
         if isRoot { countedRoots[path] = info.st_dev }
@@ -211,7 +293,11 @@ final class DirectorySizeWalker {
         guard !frames.contains(where: { $0.inode == inode }) else { fail("Directory cycle detected"); return }
         guard frames.count < 64 else { fail("Directory depth safety limit reached; last complete size retained"); return }
         let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { fail("Directory cannot be opened (\(errno))"); return }
+        guard descriptor >= 0 else {
+            failIfPermissionDenied()
+            fail("Directory cannot be opened (\(errno))")
+            return
+        }
         var opened = stat()
         guard fstat(descriptor, &opened) == 0, opened.st_dev == info.st_dev, opened.st_ino == info.st_ino else {
             close(descriptor)
@@ -242,8 +328,11 @@ final class DirectorySizeWalker {
         observation.entries += 1
     }
 
-    private func fail(_ reason: String) {
+    private func fail(_ reason: String, retryAutomatically: Bool = true) {
+        // Retain the first failure and its retry policy when a failed safety check unwinds.
+        guard observation.failure == nil else { return }
         observation.failure = reason
+        observation.retryAutomatically = retryAutomatically
         frames.removeAll()
     }
 }
@@ -253,6 +342,15 @@ final class DirectorySizeWalker {
 final class DirectorySizeExecutor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "HogHunter.directory-size", qos: .background)
     private var cursors: [String: DirectorySizeWalker] = [:]
+    typealias WalkerFactory = @Sendable (String, Date, Bool) -> DirectorySizeWalker
+    private let makeWalker: WalkerFactory
+
+    init(makeWalker: @escaping WalkerFactory = { path, startedAt, allowExternal in
+        DirectorySizeWalker(path: path, startedAt: startedAt,
+                            allowsPath: allowExternal ? { _ in true } : nil)
+    }) {
+        self.makeWalker = makeWalker
+    }
 
     func discard(paths: [String]) {
         queue.async { [self] in
@@ -260,10 +358,10 @@ final class DirectorySizeExecutor: @unchecked Sendable {
         }
     }
 
-    func advance(path: String, startedAt: Date, pressured: Bool,
+    func advance(path: String, startedAt: Date, pressured: Bool, allowExternal: Bool = false,
                  completion: @escaping @Sendable (DirectorySizeWalker.Observation) -> Void) {
         queue.async { [self] in
-            let walker = cursors[path] ?? DirectorySizeWalker(path: path, startedAt: startedAt)
+            let walker = cursors[path] ?? makeWalker(path, startedAt, allowExternal)
             cursors[path] = walker
             let observation = walker.advance(maxEntries: pressured ? 32 : 256, maxDuration: pressured ? 0.01 : 0.04)
             if observation.finishedAt != nil || observation.failure != nil { cursors[path] = nil }

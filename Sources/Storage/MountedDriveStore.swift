@@ -151,7 +151,7 @@ final class MountedDriveStore: ObservableObject {
         }
     }
 
-    nonisolated private static func cachedMountRecords() -> [MountedDriveMountRecord] {
+    nonisolated static func cachedMountRecords() -> [MountedDriveMountRecord] {
         // MNT_NOWAIT uses cached filesystem statistics rather than refreshing each mounted path.
         // Cap memory and retries if mounts change between sizing and copying the table.
         let maximumMounts = 4096
