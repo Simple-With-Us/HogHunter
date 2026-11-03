@@ -66,6 +66,16 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(states['fleet-listener']['count'], 1)
         self.assertIn('container', states['fleet-listener']['reason'])
 
+    def test_an_unrelated_operator_container_does_not_answer_for_the_listener(self):
+        """A container that merely starts with the word operator is not the
+        listener: the match is on the workload name operator-listener, so an
+        unrelated operator-* workload cannot mask a real outage."""
+        rows = module.tool_statuses([{'python3'}], True, lambda _: '/fixture/bin', installed=lambda _: True,
+                                    containers={'operator-backup'})
+        states = {row['id']: row for row in rows}
+        self.assertEqual(states['fleet-listener']['state'], 'unknown')
+        self.assertEqual(states['fleet-listener']['count'], 0)
+
     def test_every_tool_row_carries_a_reason(self):
         """A dot with no explanation is a dot the owner cannot act on."""
         rows = module.tool_statuses([{'codex'}], True, lambda _: '/fixture/bin', installed=lambda _: True)

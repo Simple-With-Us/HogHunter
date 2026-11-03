@@ -43,7 +43,7 @@ CONTAINER_TOOLS = {
     # The listener runs as a Coolify workload here, not as a systemd unit, so
     # the workload is the only identity that can answer for it.  Its container
     # is named after the deployment, so the workload's own name is matched too.
-    'operator': 'fleet-listener',
+    'operator-listener': 'fleet-listener',
 }
 
 # Tools that run under an interpreter.  For these, "not seen in the process
