@@ -220,6 +220,34 @@ final class HousekeeperLockTests: XCTestCase {
             .appendingPathComponent(lockPath.lastPathComponent + ".owner")
     }
 
+    func testExactUTCTokenStillChecksAcquisitionTime() throws {
+        let pid = liveProcessPid()
+        let token = HousekeeperLock.processStartToken(pid, utc: true)
+        let started = try XCTUnwrap(HousekeeperLock.startTokenEpoch(token))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        let oldToken = formatter.string(from: Date(timeIntervalSince1970: started - 172800))
+        for (recorded, acquired, sane, expected) in [
+            (token, started - 10, true, true),
+            (token, started + 10, true, false),
+            (token, started - 10, false, false),
+            (oldToken, started - 10, false, true),
+        ] {
+            let owner = HousekeeperLock.OwnerRecord(
+                pid: pid, host: HousekeeperLock.currentHostName(),
+                acquiredAt: acquired, lock: lockPath.path, start: recorded
+            )
+            let modified = sane ? acquired : acquired + 100
+            XCTAssertEqual(HousekeeperLock.ownerIsGone(
+                owner,
+                lockModified: Date(timeIntervalSince1970: modified),
+                ownerModified: Date(timeIntervalSince1970: modified + 1)
+            ), expected, "exact token must obey sane acquisition evidence")
+        }
+    }
+
     func testAcquireWritesAnOwnerFileBesideTheLock() {
         let lock = HousekeeperLock(path: lockPath)
         XCTAssertEqual(lock.acquire(), .acquired)

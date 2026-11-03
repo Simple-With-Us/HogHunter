@@ -14,6 +14,8 @@ struct MaintainStatus: Codable, Equatable {
     /// The disk reading the engine last sampled.  Nil before the first watch
     /// tick, and nil for a status written before the engine reported it.
     var disk: MaintainDisk? = nil
+    /// Last persisted unfinished run; this alone does not prove it is still running.
+    var partialRun: MaintainRun? = nil
 
     enum CodingKeys: String, CodingKey {
         case health
@@ -26,6 +28,7 @@ struct MaintainStatus: Codable, Equatable {
         case historyCount = "history_count"
         case updatedAt = "updated_at"
         case disk
+        case partialRun = "partial_run"
     }
 
     var displayHealth: String {
@@ -74,9 +77,11 @@ struct MaintainRun: Codable, Equatable {
     var exitCode: Int
     var steps: [MaintainStepResult]
     /// How the run ended, as the engine recorded it: "ok", "partial" (a step
-    /// failed and another did its work, so the run exits 0) or "failed".
+    /// failed and another did its work, so the run exits 0), "skipped" or "failed".
     /// Nil for a record written before the engine kept the field.
     var outcome: String? = nil
+    var currentStep: String? = nil
+    var currentTarget: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case runId = "run_id"
@@ -87,6 +92,8 @@ struct MaintainRun: Codable, Equatable {
         case exitCode = "exit_code"
         case steps
         case outcome
+        case currentStep = "current_step"
+        case currentTarget = "current_target"
     }
 }
 
@@ -98,12 +105,17 @@ extension MaintainRun {
     /// check, or the lock being held by another run.
     private static let lookOnlyStepIds: Set<String> = ["resource_sample", "housekeeper_lock"]
 
-    /// "ok", "partial" or "failed".  The run's recorded outcome, so a partial
+    /// "ok", "partial", "skipped" or "failed".  The run's recorded outcome, so a partial
     /// run (exit 0) is told from a clean one; a record from before the field
     /// existed, or one holding a word this build does not know, is judged by
     /// its exit code.  A non-zero exit is always failed, as in the engine.
     var resolvedOutcome: String {
-        CompanionMaintainRunResult.resolve(exitCode: exitCode, outcome: outcome).rawValue
+        // Older engines wrote lock contention as a successful run.
+        if exitCode == 0 && outcome == nil && !steps.isEmpty
+            && steps.allSatisfy({ $0.stepId == "housekeeper_lock" && $0.status == "skipped" }) {
+            return "skipped"
+        }
+        return CompanionMaintainRunResult.resolve(exitCode: exitCode, outcome: outcome).rawValue
     }
 
     /// A watch tick the engine took no further action on.  Most ticks are.

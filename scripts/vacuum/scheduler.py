@@ -12,9 +12,7 @@ from .store import VacuumStore
 
 
 def run_skipped_for_lock(record: RunRecord) -> bool:
-    if record.summary and "lock" in record.summary.lower():
-        return True
-    return any(s.step_id == "housekeeper_lock" for s in record.steps)
+    return VacuumStore.is_lock_skip(record.as_dict())
 
 
 def should_run(store: VacuumStore, cfg: dict[str, Any], kind: str, now: float | None = None) -> bool:
@@ -287,7 +285,7 @@ def run_scheduler_tick(
     if "watch" in selected:
         record, hits, cleaned = engine.run_watch_tick(watch_scratch, prev_free_f)
         store.append_run(record)
-        store.clear_partial_run()
+        store.clear_partial_run(record.run_id)
         if not run_skipped_for_lock(record):
             store.touch_scheduler("last_watch", now)
         results.append({"trigger": "watch", "run_id": record.run_id, "hits": len(hits), "cleaned": cleaned})
@@ -295,7 +293,7 @@ def run_scheduler_tick(
     if "janitor" in selected:
         record = engine.run(TriggerKind.JANITOR)
         store.append_run(record)
-        store.clear_partial_run()
+        store.clear_partial_run(record.run_id)
         if not run_skipped_for_lock(record):
             store.touch_scheduler("last_janitor", now)
         results.append({"trigger": "janitor", "run_id": record.run_id})
@@ -303,7 +301,7 @@ def run_scheduler_tick(
     if "full" in selected:
         record = engine.run(TriggerKind.FULL, band="cheap")
         store.append_run(record)
-        store.clear_partial_run()
+        store.clear_partial_run(record.run_id)
         if not run_skipped_for_lock(record):
             store.touch_scheduler("last_full", now)
         results.append({"trigger": "full", "run_id": record.run_id})
@@ -443,7 +441,7 @@ def build_status(
     # a run that finished after it.
     partial = store.load_partial_run()
     if partial:
-        newest_started = max((float(r.get("started_at") or 0.0) for r in history), default=0.0)
+        newest_started = max((float(r.get("started_at") or 0.0) for r in history if not store.is_lock_skip(r)), default=0.0)
         if float(partial.get("started_at") or 0.0) <= newest_started:
             partial = {}
     if partial:

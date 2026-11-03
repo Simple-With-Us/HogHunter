@@ -1772,7 +1772,7 @@ class TestEngineProcessChecks(unittest.TestCase):
     def test_install_steps_skip_when_pgrep_errors(self) -> None:
         engine = self.engine(Runner(pgrep_rc=2))
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch(
-            "vacuum.engine.subprocess.run"
+            "vacuum.engine.work.run_process"
         ) as ran:
             for step in (engine._npm_cache, engine._pnpm_store, engine._brew_cleanup):
                 freed, reason, status = step()
@@ -1784,7 +1784,7 @@ class TestEngineProcessChecks(unittest.TestCase):
     def test_install_steps_run_when_pgrep_is_clear(self) -> None:
         engine = self.engine(Runner(pgrep_rc=1))
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch(
-            "vacuum.engine.subprocess.run"
+            "vacuum.engine.work.run_process"
         ) as ran, patch("vacuum.engine.shutil.rmtree"):
             _freed, _reason, status = engine._pnpm_store()
         self.assertEqual(status, StepStatus.RAN)
@@ -1937,7 +1937,7 @@ class TestLegacyFullSteps(unittest.TestCase):
     def test_xcode_reported_location_must_be_a_derived_data_folder(self) -> None:
         idle_in_home = self.folder(self.home, "Projects-idle", 3 * 3600)
         reported = subprocess.CompletedProcess([], 0, stdout=str(self.home) + "\n", stderr="")
-        with patch("vacuum.engine.subprocess.run", return_value=reported):
+        with patch("vacuum.engine.work.run_process", return_value=reported):
             freed, reason, status = self.engine()._xcode_derived_data()
         self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
         self.assertIn("DerivedData path missing", reason)
@@ -1954,7 +1954,7 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertFalse(old.exists())
 
     def test_simctl_delete_unavailable_never_deletes(self) -> None:
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"), patch("vacuum.engine.work.run_process") as ran:
             freed, reason, status = self.engine()._simctl_delete_unavailable()
         self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
         self.assertIn("CoreSimulator/Devices", reason)
@@ -2030,18 +2030,18 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: Simulator.app is open"))
 
     def test_brew_cleanup_uses_prune_all_and_waits_for_node_gyp(self) -> None:
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             _freed, _reason, status = self.engine(Runner(pgrep_rc=1))._brew_cleanup()
         self.assertEqual(status, StepStatus.RAN)
         self.assertEqual(ran.call_args[0][0], ["brew", "cleanup", "--prune=all"])
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             _freed, reason, status = self.engine(OnlyMatching("node-gyp"))._brew_cleanup()
         self.assertEqual((status, reason), (StepStatus.SKIPPED, "node-gyp build in progress"))
         ran.assert_not_called()
 
     def test_package_caches_wait_for_a_build(self) -> None:
         engine = self.engine(OnlyMatching("xcodebuild"))
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             for step in (engine._npm_cache, engine._pnpm_store, engine._yarn_cache):
                 _freed, reason, status = step()
                 self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: xcodebuild is running"))
@@ -2051,7 +2051,7 @@ class TestLegacyFullSteps(unittest.TestCase):
         npx = self.home / ".npm" / "_npx" / "abc"
         npx.mkdir(parents=True)
         (npx / "server.js").write_text("x\n", encoding="utf-8")
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run"):
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process"):
             _freed, reason, status = self.engine(OnlyMatching("_npx"))._npm_cache()
         self.assertEqual((status, reason), (StepStatus.RAN, "npm cache cleaned; npx folder kept"))
         self.assertTrue((npx / "server.js").exists())
@@ -2104,7 +2104,7 @@ class TestEngineDependencies(unittest.TestCase):
         removed = [a for a in engine.plan if a["action"] == "removed-folder"]
         self.assertEqual(len(removed), 3)
         for item in removed:
-            self.assertTrue(item["command"].startswith("shutil.rmtree "))
+            self.assertTrue(item["command"].startswith("bounded dependency cleanup "))
             self.assertGreater(item["size_bytes"], 0)
         log = (Path(self.cfg["data_dir"]) / lanes.ACTION_LOG_NAME).read_text(encoding="utf-8")
         self.assertEqual(len(log.splitlines()), 3)
@@ -2630,6 +2630,166 @@ class TestKeepRegex(unittest.TestCase):
         elsewhere.write_text(json.dumps({"seats": [{"worktreeSuffix": "mm", "retired": True}]}), encoding="utf-8")
         pattern = default_keep_worktree_regex(home, env={"FLEET_APPS_JSON": str(elsewhere)})
         self.assertNotIn("|mm)", pattern)
+
+
+
+class TestBoundedWork(unittest.TestCase):
+    """Deadline tests use temporary trees and injected time, never live cleaners."""
+
+    def test_single_wide_directory_stops_enumerating_at_deadline(self):
+        from vacuum import budget
+        ticks = [0.0]
+        visited = [0]
+        class Entry:
+            name = "file"
+            path = "file"
+            def is_dir(self, **kwargs):
+                return False
+        class Listing:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def __iter__(self):
+                for _ in range(1000000):
+                    ticks[0] += 1
+                    visited[0] += 1
+                    yield Entry()
+        with budget.scope(budget.WorkBudget(20, lambda: ticks[0])):
+            with patch("vacuum.lanes.os.scandir", return_value=Listing()):
+                with self.assertRaises(budget.BudgetExceeded):
+                    list(lanes._walk_dirs("fake", 1000000))
+        self.assertLessEqual(visited[0], 20)
+
+    def test_du_timeout_is_clamped_and_cannot_fall_back_to_unbounded_walk(self):
+        from vacuum import budget
+        ticks = [0.0]
+        def runner(argv, **kwargs):
+            self.assertEqual(kwargs["timeout"], 3)
+            ticks[0] = 3
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        with budget.scope(budget.WorkBudget(3, lambda: ticks[0])):
+            with self.assertRaises(budget.BudgetExceeded):
+                lanes.dir_size_bytes("fake", runner)
+
+    def test_delete_stops_between_entries_and_counts_completed_unlinks(self):
+        from vacuum import budget
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "node_modules"
+            target.mkdir()
+            for i in range(10):
+                (target / str(i)).write_bytes(b"abc")
+            ticks = [0.0]
+            counts = []
+            unlink = os.unlink
+            def slow_unlink(*args, **kwargs):
+                unlink(*args, **kwargs)
+                ticks[0] += 1
+            with budget.scope(budget.WorkBudget(2, lambda: ticks[0])):
+                with patch("vacuum.lanes.os.unlink", side_effect=slow_unlink):
+                    with self.assertRaises(budget.BudgetExceeded):
+                        lanes.remove_dependency_tree(str(target), counts.append)
+            self.assertEqual(counts, [3, 6])
+            self.assertEqual(len(list(target.iterdir())), 8)
+
+    def test_delete_never_follows_a_child_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            outside = Path(td) / "outside"
+            outside.mkdir()
+            (outside / "history").write_text("keep")
+            target = Path(td) / "node_modules"
+            target.mkdir()
+            (target / "link").symlink_to(outside)
+            lanes.remove_dependency_tree(str(target))
+            self.assertEqual((outside / "history").read_text(), "keep")
+
+    def test_nested_calls_share_deadline_and_later_runs_get_fresh_budget(self):
+        from vacuum import budget
+        ticks = [0.0]
+        class Host:
+            _work_budget_seconds = 10
+            _monotonic = staticmethod(lambda: ticks[0])
+            @budget.bounded_run
+            def outer(self):
+                first = budget.current().deadline
+                ticks[0] += 4
+                return first, self.inner()
+            @budget.bounded_run
+            def inner(self):
+                return budget.current().deadline
+        host = Host()
+        self.assertEqual(host.outer(), (10, 10))
+        self.assertEqual(host.outer(), (14, 14))
+        self.assertIsNone(budget.current())
+
+    def test_completed_target_checkpoint_survives_next_target_budget_stop(self):
+        from types import SimpleNamespace
+        from vacuum import budget
+        from vacuum.models import RunRecord
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            one = home / "node_modules"
+            two = home / ".next"
+            one.mkdir()
+            two.mkdir()
+            (one / "blob").write_bytes(b"abc")
+            (two / "blob").write_bytes(b"untouched")
+            ticks = [0.0]
+            snapshots = []
+            engine = VacuumEngine({"housekeeper_lock": str(home / "lock"), "data_dir": str(home / "data")},
+                                  home, on_step=lambda record: snapshots.append(record.as_dict()))
+            engine._active_record = RunRecord("test", TriggerKind.MANUAL, 0)
+            choice = SimpleNamespace(targets=[{"path": "node_modules"}, {"path": ".next"}])
+            real_remove = lanes.remove_dependency_tree
+            def remove(path, on_bytes):
+                value = real_remove(path, on_bytes)
+                ticks[0] = 2
+                return value
+            with budget.scope(budget.WorkBudget(1, lambda: ticks[0])):
+                with patch("vacuum.engine.sys.platform", "darwin"), \
+                     patch.object(engine, "_lane_report", return_value=SimpleNamespace(ok=True)), \
+                     patch("vacuum.lanes.dependency_candidates", return_value=([(td, {})], [])), \
+                     patch("vacuum.lanes.evaluate_dependency_lane", return_value=(choice, "")), \
+                     patch("vacuum.lanes.deletable_target", side_effect=lambda lane, rel: (str(home / rel), "")), \
+                     patch("vacuum.lanes.dir_size_bytes", return_value=1024), \
+                     patch("vacuum.lanes.remove_dependency_tree", side_effect=remove):
+                    result = engine._run_step("pressure_apps_deps", True, "cheap", {}, "normal", False)
+            self.assertEqual(result.status, StepStatus.FAILED)
+            self.assertIn("budget exhausted", result.reason)
+            self.assertEqual(result.bytes_freed, 3)
+            self.assertTrue(any(s["bytes_freed"] == 3 for s in snapshots))
+            self.assertFalse(one.exists())
+            self.assertTrue((two / "blob").exists())
+
+    def test_watchdog_shutdown_refuses_new_children(self):
+        from vacuum import budget
+        with patch.object(budget, "_shutdown", False), patch.object(budget, "_children", {}):
+            self.assertTrue(budget.terminate_all())
+            with patch("vacuum.budget.subprocess.Popen") as popen:
+                with self.assertRaises(budget.BudgetExceeded):
+                    budget.spawn(["never-start"])
+                popen.assert_not_called()
+
+    def test_leader_exit_cleans_child_and_grandchild_group(self):
+        from vacuum import budget
+        # Both descendants close inherited pipes; leader exit alone therefore
+        # returns communicate() immediately while the descendants still run.
+        with tempfile.TemporaryDirectory() as td:
+            marker = str(Path(td) / "unexpected")
+            grandchild = "import time,pathlib; time.sleep(.4); pathlib.Path(%r).write_text('leaked')" % marker
+            child = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',%r],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(5)" % grandchild
+            leader = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)" % child
+            try:
+                budget.run_process([sys.executable, "-c", leader], capture_output=True, text=True, timeout=3)
+            except ChildProcessError:
+                # A zombie group still visible to kill(0) is fail-closed; it
+                # cannot be mistaken for proven shutdown and release a lock.
+                pass
+            time.sleep(.6)
+            self.assertFalse(Path(marker).exists())
+            budget.terminate_all()
+            # This test's watchdog simulation must not poison other tests.
+            budget._shutdown = False
 
 
 if __name__ == "__main__":

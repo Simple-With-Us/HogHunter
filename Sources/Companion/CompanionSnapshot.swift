@@ -536,6 +536,8 @@ enum CompanionMaintainRunResult: String, Equatable, Sendable {
     /// A step failed and another one did its work.  The run exits 0, which is
     /// why the exit code alone cannot show it.
     case partial
+    /// The run stepped aside without doing work (for example, lock contention).
+    case skipped
     case failed
 
     /// The one rule for both screens.  A non-zero exit is always failed, as in
@@ -546,6 +548,7 @@ enum CompanionMaintainRunResult: String, Equatable, Sendable {
         if exitCode != 0 { return .failed }
         switch outcome {
         case "partial": return .partial
+        case "skipped": return .skipped
         case "failed": return .failed
         default: return .ok
         }
@@ -556,6 +559,7 @@ enum CompanionMaintainRunResult: String, Equatable, Sendable {
         switch self {
         case .ok: return nil
         case .partial: return "Partial"
+        case .skipped: return "Skipped"
         case .failed: return "Failed"
         }
     }
@@ -572,7 +576,7 @@ struct CompanionMaintainRun: Codable, Equatable, Identifiable, Sendable {
     /// Zero when the run finished cleanly.  A partial run is zero too.
     var exitCode: Int
     var durationSeconds: Int
-    /// "ok", "partial" or "failed", as the Mac resolved it from the run's
+    /// "ok", "partial", "skipped" or "failed", as the Mac resolved it from the run's
     /// recorded outcome.  Nil from a Mac that predates the field: the exit code
     /// then decides, and a partial run cannot be told from a clean one.
     var outcome: String? = nil

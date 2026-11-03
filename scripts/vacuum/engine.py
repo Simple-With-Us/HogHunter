@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import budget as work
 from . import lanes
 from .config import STEP_CATALOG, TICK_WATCHDOG_SEC, expand_path, step_enabled, steps_for_trigger
 from .janitor import RetirePlan, data_dir_for, keep_regex, plan_retire_worktrees, retire_worktrees
@@ -101,7 +102,7 @@ _DRY_RUN_AWARE_STEPS = frozenset(
 
 
 def _subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, **kwargs)
+    return work.run_process(cmd, **kwargs)
 
 
 def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bool]:
@@ -109,8 +110,9 @@ def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bo
     group is killed, so the find, lsof or du the child started cannot outlive it and keep the disk busy.  Any other
     error while waiting (a broken pipe, an interrupt) kills the group too and is raised, so nothing is leaked and
     the step reports the real error instead of a budget overrun."""
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+    timeout = work.timeout(timeout)
+    proc = work.spawn(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
 
     def kill_group() -> None:
@@ -124,6 +126,8 @@ def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bo
 
     try:
         out, err = proc.communicate(timeout=timeout)
+        work.unregister(proc)
+        work.check()
         return proc.returncode, out or "", err or "", False
     except subprocess.TimeoutExpired:
         kill_group()
@@ -131,6 +135,9 @@ def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bo
             out, err = proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             out, err = "", ""
+        if proc.poll() is not None:
+            work.unregister(proc)
+        work.check()
         return -1, out or "", err or "", True
     except BaseException:
         kill_group()
@@ -138,6 +145,10 @@ def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bo
             proc.communicate(timeout=15)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
+        try:
+            work.unregister(proc)
+        except Exception:
+            pass  # the barrier retains ownership if shutdown is unproven
         raise
 
 
@@ -150,6 +161,8 @@ class VacuumEngine:
         doctor_runner: Optional[lanes.DoctorRunner] = None,
         clock: Callable[[], float] = time.time,
         on_step: Optional[Callable[[RunRecord], None]] = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        work_budget_seconds: Optional[float] = None,
     ) -> None:
         self.home = home or Path.home()
         self.cfg = cfg
@@ -158,6 +171,11 @@ class VacuumEngine:
         self._runner: Callable[..., Any] = runner or _subprocess_run
         self._doctor_runner = doctor_runner
         self._clock = clock
+        self._monotonic = monotonic
+        self._work_budget_seconds = (TICK_WATCHDOG_SEC - _RECLAIM_RESERVE_SECONDS
+                                     if work_budget_seconds is None else work_budget_seconds)
+        self._active_record = None
+        self._step_freed = 0
         # Called after every step with the run so far, so a tick the watchdog
         # kills still leaves a record of what it reclaimed.
         self._on_step = on_step
@@ -185,6 +203,7 @@ class VacuumEngine:
         except Exception:  # noqa: BLE001 — bookkeeping must never kill a cleaning run
             pass
 
+    @work.bounded_run
     def run(
         self,
         trigger: TriggerKind,
@@ -199,11 +218,12 @@ class VacuumEngine:
             band=band,
             pressure=pressure,
         )
+        self._active_record = record
         step_ids = steps_for_trigger(self.cfg, trigger.value, pressure=pressure)
         self._planned_retire_plan = None
         self._lane_report_cache = None
         try:
-            with HousekeeperLock(self.lock_path):
+            with HousekeeperLock(self.lock_path), work.child_barrier():
                 sample = sample_mac()
                 mode = janitor_pressure_mode(sample, self.cfg.get("janitor", {}))
                 for step_id in step_ids:
@@ -211,12 +231,20 @@ class VacuumEngine:
                         continue
                     meta = STEP_CATALOG.get(step_id, {})
                     title = str(meta.get("title", step_id))
+                    if work.current().remaining() <= 0:
+                        record.steps.append(StepResult(step_id, title, StepStatus.FAILED,
+                                                       reason="maintenance work budget exhausted; step not started"))
+                        self._emit_partial(record, dry_run=dry_run)
+                        break
                     if mode == "hard" and step_id in _HEAVY_LANE_STEPS:
                         record.steps.append(
                             StepResult(step_id, title, StepStatus.SKIPPED, reason="host under extreme load; cheap steps only")
                         )
                         self._emit_partial(record, dry_run=dry_run)
                         continue
+                    record.current_step = step_id
+                    record.current_target = ""
+                    self._emit_partial(record, dry_run=dry_run)
                     failure = self._plan_step(step_id, dry_run)
                     if failure is not None:
                         record.steps.append(failure)
@@ -236,6 +264,7 @@ class VacuumEngine:
             self._lane_report_cache = None
         return record
 
+    @work.bounded_run
     def run_single_step(
         self,
         step_id: str,
@@ -261,12 +290,13 @@ class VacuumEngine:
             band=band,
             pressure=pressure,
         )
+        self._active_record = record
         meta = STEP_CATALOG.get(step_id, {})
         title = str(meta.get("title", step_id))
         self._planned_retire_plan = None
         self._lane_report_cache = None
         try:
-            with HousekeeperLock(self.lock_path):
+            with HousekeeperLock(self.lock_path), work.child_barrier():
                 if not step_enabled(self.cfg, step_id):
                     record.steps.append(
                         StepResult(step_id, title, StepStatus.SKIPPED, reason="step is off")
@@ -284,6 +314,9 @@ class VacuumEngine:
                     # "step is off" refusal above reports itself.
                     record.finish(2, summary="skipped; host under extreme load")
                     return record
+                record.current_step = step_id
+                record.current_target = ""
+                self._emit_partial(record, dry_run=dry_run)
                 failure = self._plan_step(step_id, dry_run)
                 if failure is not None:
                     record.steps.append(failure)
@@ -326,6 +359,7 @@ class VacuumEngine:
             return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200])
         return None
 
+    @work.bounded_run
     def run_watch_tick(
         self, rw_state: dict[str, Any], prev_free: Optional[float], dry_run: bool = False
     ) -> tuple[RunRecord, list[dict[str, Any]], bool]:
@@ -341,9 +375,10 @@ class VacuumEngine:
             trigger=TriggerKind.WATCH,
             started_at=time.time(),
         )
+        self._active_record = record
         should_clean = False
         try:
-            with HousekeeperLock(self.lock_path):
+            with HousekeeperLock(self.lock_path), work.child_barrier():
                 record.steps.append(
                     StepResult(
                         "resource_sample",
@@ -396,13 +431,24 @@ class VacuumEngine:
         meta = STEP_CATALOG.get(step_id, {})
         title = str(meta.get("title", step_id))
         started = time.time()
+        self._step_freed = 0
+        if self._active_record is not None:
+            self._active_record.current_step = step_id
+            self._active_record.current_target = ""
+            self._emit_partial(self._active_record, dry_run=dry_run)
         try:
+            work.check()
             freed, reason, status = self._dispatch(step_id, pressure, band, sample, mode, dry_run)
             dur = int((time.time() - started) * 1000)
             return StepResult(step_id, title, status, reason=reason, bytes_freed=freed, duration_ms=dur)
+        except work.BudgetExceeded as exc:
+            dur = int((time.time() - started) * 1000)
+            return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc),
+                              bytes_freed=self._step_freed, duration_ms=dur)
         except Exception as exc:  # noqa: BLE001 — step boundary; record failure
             dur = int((time.time() - started) * 1000)
-            return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200], duration_ms=dur)
+            return StepResult(step_id, title, StepStatus.FAILED, reason=str(exc)[:200],
+                              bytes_freed=self._step_freed, duration_ms=dur)
 
     def _dispatch(
         self,
@@ -565,7 +611,7 @@ class VacuumEngine:
         if default_home.is_dir():
             return default_home, ""
         try:
-            res = subprocess.run(
+            res = work.run_process(
                 ["defaults", "read", "com.apple.dt.Xcode", "IDECustomDerivedDataLocation"],
                 capture_output=True,
                 text=True,
@@ -712,7 +758,7 @@ class VacuumEngine:
         busy = self._build_running()
         if busy:
             return 0, f"skipped: {busy}", StepStatus.SKIPPED
-        subprocess.run([npm, "cache", "clean", "--force"], capture_output=True, timeout=300)
+        work.run_process([npm, "cache", "clean", "--force"], capture_output=True, timeout=300)
         npx = self.home / ".npm/_npx"
         if npx.is_symlink() or not npx.is_dir():
             return 0, "npm cache cleaned", StepStatus.RAN
@@ -731,7 +777,7 @@ class VacuumEngine:
         busy = self._build_running()
         if busy:
             return 0, f"skipped: {busy}", StepStatus.SKIPPED
-        subprocess.run(["pnpm", "store", "prune"], capture_output=True, timeout=300)
+        work.run_process(["pnpm", "store", "prune"], capture_output=True, timeout=300)
         return 0, "pnpm store pruned", StepStatus.RAN
 
     def _yarn_cache(self) -> tuple[int, str, StepStatus]:
@@ -742,7 +788,7 @@ class VacuumEngine:
         busy = self._build_running()
         if busy:
             return 0, f"skipped: {busy}", StepStatus.SKIPPED
-        subprocess.run(["yarn", "cache", "clean"], capture_output=True, timeout=300)
+        work.run_process(["yarn", "cache", "clean"], capture_output=True, timeout=300)
         return 0, "yarn cache cleaned", StepStatus.RAN
 
     def _brew_cleanup(self) -> tuple[int, str, StepStatus]:
@@ -755,7 +801,7 @@ class VacuumEngine:
             return 0, self._skip_busy("brew install in progress"), StepStatus.SKIPPED
         if self._install_running("node-gyp"):
             return 0, self._skip_busy("node-gyp build in progress"), StepStatus.SKIPPED
-        subprocess.run([brew, "cleanup", "--prune=all"], capture_output=True, timeout=600)
+        work.run_process([brew, "cleanup", "--prune=all"], capture_output=True, timeout=600)
         return 0, "brew cleanup --prune=all finished", StepStatus.RAN
 
     def _hoghunter_reclaim(self, band: str) -> tuple[int, str, StepStatus]:
@@ -766,6 +812,11 @@ class VacuumEngine:
         if not path.is_file():
             return 0, "hoghunter-clean not found", StepStatus.SKIPPED
         budget = self._reclaim_budget()
+        if work.current() is not None:
+            remaining = work.current().remaining()
+            if remaining <= _RECLAIM_GRACE_SECONDS:
+                raise work.BudgetExceeded("maintenance work budget exhausted; insufficient reclaim shutdown reserve")
+            budget = min(budget, max(1, int(remaining - _RECLAIM_GRACE_SECONDS)))
         cmd = [str(path), "--clean", f"--band={band}", "--json", f"--budget-sec={budget}"]
         code, out, err, timed_out = _run_in_own_group(cmd, budget + _RECLAIM_GRACE_SECONDS)
         if timed_out:
@@ -927,7 +978,7 @@ class VacuumEngine:
                 return 0, _SPOTLIGHT_NEEDS_FDA, StepStatus.SKIPPED
             raise
         try:
-            subprocess.run(["killall", "knowledgeconstructiond", "corespotlightd", "mds_stores"], capture_output=True)
+            work.run_process(["killall", "knowledgeconstructiond", "corespotlightd", "mds_stores"], capture_output=True)
             freed = 0
             for kind in ("Journals", "HistoricalReports"):
                 for found in pipe.rglob(kind):
@@ -1003,6 +1054,9 @@ class VacuumEngine:
         instead of retiring nothing; removal still re-checks every lane live.  Dry runs pass write=False:
         planning may read the cache but never persists state."""
         if self._lane_report_cache is None:
+            if self._active_record is not None:
+                self._active_record.current_target = "lane doctor"
+                self._emit_partial(self._active_record, dry_run=not write)
             settings = lanes.lane_settings(self.cfg, self.home)
             cache_file = lanes.doctor_cache_file(data_dir_for(self.cfg, self.home))
             self._lane_report_cache = lanes.load_report(
@@ -1020,6 +1074,19 @@ class VacuumEngine:
     def _log(data_dir: Optional[Path], entry: dict[str, Any]) -> None:
         if data_dir is not None:
             lanes.append_action_log(data_dir, entry)
+
+    def _checkpoint_dependency(self, freed: int, dry_run: bool) -> None:
+        record = self._active_record
+        if record is None or dry_run:
+            return
+        progress = StepResult("pressure_apps_deps", "Clear Idle Lane Build Folders", StepStatus.RAN,
+                              reason="in progress", bytes_freed=freed)
+        record.steps.append(progress)
+        record.bytes_freed = sum(s.bytes_freed for s in record.steps)
+        try:
+            self._emit_partial(record)
+        finally:
+            record.steps.pop()
 
     def _pressure_apps_deps(self, dry_run: bool = False) -> tuple[int, str, StepStatus]:
         """Clear regenerable build folders (node_modules and friends) in idle lanes.  The lane list comes from the
@@ -1039,7 +1106,12 @@ class VacuumEngine:
         planned_bytes = 0
         folders = 0
         touched = 0
+        failures = 0
         for path, co in passing:
+            work.check()
+            if self._active_record is not None:
+                self._active_record.current_target = path
+                self._checkpoint_dependency(freed, dry_run)
             choice, why = lanes.evaluate_dependency_lane(path, co, ctx)
             if choice is None:
                 if why:  # an empty reason means the lane has nothing to clean, which is not a refusal
@@ -1047,6 +1119,10 @@ class VacuumEngine:
                 continue
             did_any = False
             for target in choice.targets:
+                work.check()
+                if self._active_record is not None:
+                    self._active_record.current_target = os.path.join(path, target["path"])
+                    self._checkpoint_dependency(freed, dry_run)
                 # Re-checked right before the delete: still a plain folder in the lane, no nested git repository.
                 full, why = lanes.deletable_target(path, target["path"])
                 if not full:
@@ -1054,8 +1130,9 @@ class VacuumEngine:
                     continue
                 size = lanes.dir_size_bytes(full, self._runner)
                 if size is None:
-                    size = self._dir_size_before_clear(Path(full))
-                command = f"shutil.rmtree {full}"
+                    refused.append({"path": full, "reason": "size could not be measured within the probe budget"})
+                    continue
+                command = f"bounded dependency cleanup {full}"
                 if dry_run:
                     planned_bytes += size
                     folders += 1
@@ -1063,25 +1140,35 @@ class VacuumEngine:
                     self._note(step, "would-remove-folder", path=full, lane=path, size_bytes=size, command=command)
                     continue
                 try:
-                    shutil.rmtree(full)
+                    base_freed = freed
+                    self._step_freed = freed
+                    def removed_bytes(count):
+                        self._step_freed = base_freed + count
+                    lanes.remove_dependency_tree(full, on_bytes=removed_bytes)
                 except OSError as exc:
+                    failures += 1
                     self._log(
                         data_dir,
                         self._note(
                             step, "failed", path=full, lane=path, size_bytes=size, command=command, error=type(exc).__name__
                         ),
                     )
+                    freed = self._step_freed
+                    self._checkpoint_dependency(freed, dry_run)
                     continue
-                freed += size
+                freed = self._step_freed
                 folders += 1
                 did_any = True
                 self._log(
-                    data_dir, self._note(step, "removed-folder", path=full, lane=path, size_bytes=size, command=command)
+                    data_dir, self._note(step, "removed-folder", path=full, lane=path, size_bytes=freed-base_freed, command=command)
                 )
+                self._checkpoint_dependency(freed, dry_run)
             touched += 1 if did_any else 0
         if dry_run:
             for item in refused:
                 self._note(step, "refused", **item)
+        if failures:
+            return freed, f"cleared {_plural(folders, 'folder')}; {_plural(failures, 'folder')} could not be fully removed", StepStatus.FAILED
         if not folders:
             return 0, f"no idle lanes with regenerable folders ({_plural(len(refused), 'lane')} refused)", StepStatus.SKIPPED
         if dry_run:
@@ -1093,14 +1180,14 @@ class VacuumEngine:
         if not isinstance(host_value, str) or not host_value.strip():
             return 0, "No remote servers are set up", StepStatus.SKIPPED
         host = host_value.strip()
-        check = subprocess.run(
+        check = work.run_process(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", host, "exit 0"],
             capture_output=True,
             timeout=10,
         )
         if check.returncode != 0:
             return 0, "ssh unavailable", StepStatus.SKIPPED
-        subprocess.run(
+        work.run_process(
             ["ssh", "-o", "ConnectTimeout=5", host, "/etc/cron.daily/coolify-auto-maintenance"],
             capture_output=True,
             timeout=120,

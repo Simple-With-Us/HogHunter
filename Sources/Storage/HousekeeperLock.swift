@@ -642,9 +642,11 @@ final class HousekeeperLock {
         if !isProcessAlive(owner.pid) { return true }
         let current = processStartToken(owner.pid, utc: true)
         if current.isEmpty { return false }
-        if current == owner.start { return false }
         guard let currentEpoch = startTokenEpoch(current),
               let recordedCivilEpoch = startTokenEpoch(owner.start) else { return false }
+        // No timezone change can explain this gap, even if acquisition
+        // metadata is unusable.  Match AFC's two readers.
+        if abs(recordedCivilEpoch - currentEpoch) > 24 * 60 * 60 { return true }
         guard ownerAcquiredAtIsSane(
             owner.acquiredAt,
             lockModified: lockModified,
@@ -653,9 +655,9 @@ final class HousekeeperLock {
         ) else { return false }
         // A legacy local token may differ only by its zone's UTC offset.
         // The acquisition bound prevents a newly reused pid from being
-        // accepted as the prior holder merely because it started within a day.
+        // accepted as the prior holder merely because it started within a day,
+        // including an exact legacy-local/new-UTC token collision.
         return currentEpoch > owner.acquiredAt
-            || abs(recordedCivilEpoch - currentEpoch) > 24 * 60 * 60
     }
 
     private static func ownerAcquiredAtIsSane(

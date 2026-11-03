@@ -1,0 +1,187 @@
+"""Cooperative monotonic run deadlines and owned child process groups.
+
+Checks bound work between filesystem calls; they cannot interrupt a stuck kernel syscall.
+The outer watchdog remains responsible for that final containment boundary.
+"""
+from __future__ import annotations
+
+import contextvars
+import functools
+import os
+import signal
+import subprocess
+import time
+import threading
+from contextlib import contextmanager
+from typing import Callable
+
+
+class BudgetExceeded(Exception):
+    pass
+
+
+class WorkBudget:
+    def __init__(self, seconds: float, monotonic: Callable[[], float] = time.monotonic):
+        self.monotonic = monotonic
+        self.deadline = monotonic() + max(0.0, seconds)
+
+    def remaining(self) -> float:
+        return max(0.0, self.deadline - self.monotonic())
+
+    def check(self) -> None:
+        if self.remaining() <= 0:
+            raise BudgetExceeded("maintenance work budget exhausted")
+
+    def timeout(self, seconds: float) -> float:
+        self.check()
+        return min(seconds, self.remaining())
+
+
+_current = contextvars.ContextVar("vacuum_work_budget", default=None)
+_children: dict[int, subprocess.Popen] = {}
+_children_lock = threading.RLock()
+_shutdown = False
+
+
+def current():
+    return _current.get()
+
+
+def check() -> None:
+    if current() is not None:
+        current().check()
+
+
+def timeout(seconds: float) -> float:
+    return current().timeout(seconds) if current() is not None else seconds
+
+
+@contextmanager
+def scope(work_budget):
+    token = _current.set(work_budget)
+    try:
+        yield work_budget
+    finally:
+        _current.reset(token)
+
+
+def bounded_run(method):
+    """Nested watch/pressure runs share one deadline; independent calls start afresh."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        previous = getattr(self, "_active_record", None)
+        work_budget = current() or WorkBudget(self._work_budget_seconds, self._monotonic)
+        try:
+            with scope(work_budget):
+                return method(self, *args, **kwargs)
+        finally:
+            self._active_record = previous
+    return wrapped
+
+
+def spawn(argv, **kwargs):
+    # Spawning and registering are atomic against watchdog shutdown.
+    with _children_lock:
+        if _shutdown:
+            raise BudgetExceeded("maintenance watchdog is shutting down child work")
+        proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        _children[proc.pid] = proc
+        return proc
+
+
+def kill_group(proc) -> bool:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return False
+    if group_stopped(proc.pid):
+        with _children_lock:
+            _children.pop(proc.pid, None)
+        return True
+    return False
+
+
+def group_stopped(pgid) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    # Reparented zombies cannot execute or touch the filesystem, but kill(0)
+    # continues to see them until init reaps them.  Inspect states, never argv.
+    try:
+        states = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                                text=True, timeout=2, start_new_session=True)
+        if states.returncode != 0:
+            return False
+        matches = [row.split()[1] for row in states.stdout.splitlines()
+                   if len(row.split()) == 2 and row.split()[0] == str(pgid)]
+        if matches:
+            return all(state.startswith("Z") for state in matches)
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+@contextmanager
+def child_barrier():
+    """Enter inside the housekeeper lock so live/unknown children retain it."""
+    try:
+        yield
+    finally:
+        while True:
+            with _children_lock:
+                children = list(_children.values())
+            if all([kill_group(proc) for proc in children]):
+                break
+            time.sleep(.1)
+
+
+def unregister(proc):
+    # Closing its pipes and exiting does not prove a leader's children stopped.
+    if group_stopped(proc.pid):
+        with _children_lock:
+            _children.pop(proc.pid, None)
+        return
+    if not kill_group(proc):
+        raise ChildProcessError("owned child process group could not be proven stopped")
+
+
+def terminate_all() -> bool:
+    """Kill/reap every owned group; False means lock release is not proven safe."""
+    global _shutdown
+    with _children_lock:
+        _shutdown = True
+        children = list(_children.values())
+    return all([kill_group(proc) for proc in children])
+
+
+def run_process(argv, **kwargs):
+    """subprocess.run subset used by lane probes, with descendant containment."""
+    seconds = timeout(float(kwargs.pop("timeout", 60)))
+    capture = kwargs.pop("capture_output", False)
+    if capture:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    proc = spawn(argv, **kwargs)
+    try:
+        out, err = proc.communicate(timeout=seconds)
+    except BaseException:
+        kill_group(proc)
+        raise
+    unregister(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)

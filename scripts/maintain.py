@@ -64,6 +64,7 @@ from vacuum.config import TICK_WATCHDOG_SEC  # noqa: E402
 # killed tick used to leave the housekeeper lock behind and every tick after
 # it did nothing for two hours.
 from vacuum import lock as housekeeper_lock  # noqa: E402
+from vacuum import budget as work_budget  # noqa: E402
 
 _watchdog_armed = False
 
@@ -76,13 +77,23 @@ def _watchdog_exit(seconds: float) -> None:
         "exiting so the next tick can run\n"
     )
     sys.stderr.flush()
-    # Give the lock back before the hard exit.  Without this the lock
-    # directory survives the kill and every later tick reports "peer holds
-    # lock" until the stale window expires.
-    try:
-        housekeeper_lock.force_release()
-    except Exception:  # pragma: no cover - the exit must not be blocked
-        pass
+    # Stop/reap owned process groups before handing serialization back.
+    # A dead parent is not proof its deleting child is gone.  If a kernel
+    # operation cannot yet be killed, keep the owner alive and hold the lock
+    # rather than let the next cleaner overlap it.
+    while True:
+        try:
+            stopped = work_budget.terminate_all()
+        except Exception:
+            stopped = False
+        if stopped:
+            break
+        sys.stderr.write("[hoghunter] waiting for owned cleanup processes to stop; lock retained\n")
+        sys.stderr.flush()
+        time.sleep(1)
+    # Keep the owner record until this PID actually dies.  Releasing here
+    # would let a peer enter while the main thread can still unlink files.
+    # The next reader recovers a well-formed dead-PID owner immediately.
     os._exit(3)
 
 
@@ -293,13 +304,14 @@ def _run_single_step(store: VacuumStore, args: argparse.Namespace) -> int:
     state.  A real run appends the record to history and publishes the status, and it never touches the
     scheduler clock: a manual step is not a cadence, so it must not make one look like it has already run.
     """
-    engine = VacuumEngine(store.cfg, store.home)
+    engine = VacuumEngine(store.cfg, store.home, on_step=store.write_partial_run)
     record = engine.run_single_step(str(args.run_step), dry_run=args.dry_run)
     if args.dry_run:
         os.environ[NO_NOTIFY_ENV] = "1"
         print(json.dumps({"dry_run": True, "plan": engine.plan, "records": [record.as_dict()]}, indent=2))
         return 0
     store.append_run(record)
+    store.clear_partial_run(record.run_id)
     status = build_status(store, store.cfg)
     store.publish_status(status)
     if args.as_json:
@@ -384,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.run_now:
-        engine = VacuumEngine(store.cfg, store.home)
+        engine = VacuumEngine(store.cfg, store.home, on_step=store.write_partial_run)
         if args.run_now == "watch":
             state = store.scheduler_state()
             watch_scratch: dict[str, object] = {}
@@ -406,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
             store.append_run(record)
             if not run_skipped_for_lock(record):
                 store.touch_scheduler(f"last_{args.run_now if args.run_now != 'pressure' else 'full'}")
+        store.clear_partial_run(record.run_id)
         status = build_status(store, store.cfg)
         store.publish_status(status)
         if args.as_json:

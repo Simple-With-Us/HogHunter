@@ -67,7 +67,7 @@ class VacuumStore:
         the in-progress copy: one file, overwritten as the run advances, and
         removed once a run finishes.
         """
-        self._atomic_write(self.partial_run_path, record.as_dict())
+        self._locked_json_update(self.partial_run_path, {}, lambda _: record.as_dict())
 
     def load_partial_run(self) -> dict[str, Any]:
         if not self.partial_run_path.is_file():
@@ -77,17 +77,27 @@ class VacuumStore:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def clear_partial_run(self) -> None:
-        try:
-            self.partial_run_path.unlink()
-        except OSError:
-            pass
+    def clear_partial_run(self, run_id: str | None = None) -> None:
+        # A peer that merely skipped the housekeeper lock must not erase the
+        # holder's live checkpoint.  Compare and clear under the store lock.
+        self._locked_json_update(
+            self.partial_run_path, {},
+            lambda current: {} if run_id is None or current.get("run_id") == run_id else current,
+        )
 
     def last_run_for(self, trigger: str) -> Optional[dict[str, Any]]:
         for raw in reversed(self.load_history()):
-            if raw.get("trigger") == trigger:
+            if raw.get("trigger") == trigger and not self.is_lock_skip(raw):
                 return raw
         return None
+
+    @staticmethod
+    def is_lock_skip(raw: dict[str, Any]) -> bool:
+        steps = raw.get("steps") or []
+        return raw.get("outcome") == "skipped" or (
+            any(s.get("step_id") == "housekeeper_lock" and s.get("status") == "skipped" for s in steps)
+            and not any(s.get("status") == "ran" for s in steps)
+        )
 
     def scheduler_state(self) -> dict[str, Any]:
         if not self.state_path.is_file():
