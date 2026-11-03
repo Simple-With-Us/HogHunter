@@ -136,5 +136,40 @@ final class VPSActivityTests: XCTestCase {
         XCTAssertNil(snapshot.coolify)
         XCTAssertNil(snapshot.toolStatuses)
         XCTAssertNil(snapshot.memoryPressure)
+        XCTAssertNil(snapshot.storageDiagnostics)
+    }
+
+    func testContainerStorageDiagnosticsDecodeWithoutAddingOverlappingCategories() throws {
+        let json = """
+        {"generated_at":"2026-11-03T15:00:00Z","host":"fixture","devices":{},
+         "storage_diagnostics":{"sampled_at":"2026-11-03T15:00:00Z","duration_seconds":7,"status":"complete",
+          "daemon":{"status":"complete","uses_containerd":true},
+          "categories":{"status":"complete","items":[
+           {"id":"images","total_count":23,"active_count":16,"size_bytes":36820000000,"engine_reclaimable_bytes":17870000000},
+           {"id":"build_cache","total_count":62,"active_count":5,"size_bytes":21400000000,"engine_reclaimable_bytes":9779000000}]},
+          "blobs":{"status":"complete","allocated_bytes":9338941440,"baseline_status":"complete","change_bytes":-4096}}}
+        """.data(using: .utf8)!
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: json)
+        let storage = try XCTUnwrap(snapshot.storageDiagnostics)
+        XCTAssertTrue(storage.daemon.usesContainerd == true)
+        XCTAssertEqual(storage.categories.items.map(\.sizeBytes), [36_820_000_000, 21_400_000_000])
+        XCTAssertEqual(storage.blobs.changeBytes, -4096)
+        let source = ISO8601DateFormatter().date(from: "2026-11-03T15:00:00Z")!
+        XCTAssertTrue(storage.isFresh(relativeTo: source.addingTimeInterval(30)))
+        XCTAssertFalse(storage.isFresh(relativeTo: source.addingTimeInterval(1800)))
+    }
+
+    func testUnavailableContainerStorageKeepsMissingMeasurementsUnavailable() throws {
+        let json = """
+        {"generated_at":"2026-11-03T15:00:00Z","host":"fixture","devices":{},
+         "storage_diagnostics":{"sampled_at":"2026-11-03T15:00:00Z","duration_seconds":10,"status":"unavailable",
+          "daemon":{"status":"unavailable"},"categories":{"status":"unavailable","items":[]},
+          "blobs":{"status":"unavailable","baseline_status":"unavailable"}}}
+        """.data(using: .utf8)!
+        let storage = try XCTUnwrap(JSONDecoder().decode(VPSStatusSnapshot.self, from: json).storageDiagnostics)
+        XCTAssertEqual(storage.status, "unavailable")
+        XCTAssertTrue(storage.categories.items.isEmpty)
+        XCTAssertNil(storage.blobs.allocatedBytes)
+        XCTAssertNil(storage.blobs.changeBytes)
     }
 }

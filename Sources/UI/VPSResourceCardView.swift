@@ -174,6 +174,9 @@ struct VPSResourceCardView: View {
             if section.showsHeadline, let pressure = snapshot.memoryPressure {
                 pagingReadings(pressure)
             }
+            if section.showsHeadline, let diagnostics = snapshot.storageDiagnostics {
+                storageReadings(diagnostics)
+            }
 
             // A section only carries the readings it owns, so two sections
             // never show the same rows.
@@ -218,6 +221,31 @@ struct VPSResourceCardView: View {
                     .font(.system(size: 9)).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func storageReadings(_ diagnostics: VPSStorageDiagnostics) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(diagnostics.isFresh() ? "Container Storage" : "Container Storage · Earlier Reading")
+                .font(.system(size: 11, weight: .semibold))
+            if diagnostics.categories.status == "complete" {
+                ForEach(diagnostics.categories.items) { row in
+                    Text("\(row.title): \(HogFormat.memory(UInt64(max(0, row.sizeBytes)))); engine reclaimable \(HogFormat.memory(UInt64(max(0, row.engineReclaimableBytes))))")
+                }
+            } else {
+                Text("Docker storage totals unavailable")
+            }
+            if diagnostics.daemon.usesContainerd == true {
+                if diagnostics.blobs.status == "complete", let bytes = diagnostics.blobs.allocatedBytes {
+                    Text("Containerd blobs: " + HogFormat.memory(UInt64(max(0, bytes))))
+                } else {
+                    Text(diagnostics.blobs.status == "incomplete" ? "Containerd blob reading incomplete" : "Containerd blob reading unavailable")
+                }
+                Text("Containerd includes a separate image store; unpacked snapshots are not measured here.")
+            }
+            Text("Readings overlap; do not add them.\u{00A0} Engine reclaimable is not a cleanup recommendation.")
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(.secondary)
     }
 
     private func pagingRate(_ bytes: Double?) -> String {
