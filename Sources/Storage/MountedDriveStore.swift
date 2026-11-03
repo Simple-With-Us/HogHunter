@@ -36,6 +36,19 @@ struct MountedDriveUsage: Identifiable, Equatable, Sendable {
     }
 }
 
+/// The storage browser includes the boot disk even when no external drive is mounted.
+/// Uses existing capacity samples; building the list never opens a mounted path.
+enum StorageDriveList {
+    static func rows(boot: DiskSpace?, external: [MountedDriveUsage]) -> [MountedDriveUsage] {
+        let internalDrive = MountedDriveUsage(
+            name: "Internal", path: "/",
+            totalBytes: boot.map { Int64(clamping: $0.totalBytes) },
+            availableBytes: boot.map { Int64(clamping: $0.freeBytes) })
+        var seen: Set<String> = ["/", "/System/Volumes/Data"]
+        return [internalDrive] + external.filter { seen.insert($0.path).inserted }
+    }
+}
+
 struct MountedDriveCandidate: Sendable {
     let name: String
     let path: String

@@ -1149,7 +1149,7 @@ struct HogHunterPanel: View {
     /// drive that was nearly full looked the same as one with room to spare,
     /// and the path a drive was mounted at was hidden in a tooltip.
     private var mountedDriveList: some View {
-        let drives = mountedDrives.rows
+        let drives = StorageDriveList.rows(boot: store.diskSpace, external: mountedDrives.rows)
         return Group {
             if !drives.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1165,7 +1165,7 @@ struct HogHunterPanel: View {
     private func mountedDriveRow(_ drive: MountedDriveUsage) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Label(drive.name, systemImage: "externaldrive")
+                Label(drive.name, systemImage: drive.path == "/" ? "internaldrive" : "externaldrive")
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
                 Spacer(minLength: 8)
