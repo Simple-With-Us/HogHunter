@@ -231,8 +231,8 @@ final class HogStore: ObservableObject {
     var remoteScanWatchdog: TimeInterval = 15 * 60
     /// What a phone-started scan runs.  Tests replace it so no real folder is
     /// walked; the app scans exactly as the Mac's own cleaner does.
-    var remoteScanner: (CleanTier, CleanerExclusions, @escaping (String) -> Void) async -> CleanScanReport = { tier, exclusions, progress in
-        await DiskCleaner().scan(tier: tier, exclusions: exclusions, progress: progress)
+    var remoteScanner: (CleanTier, CleanerExclusions, DiskCleaner.ScanDepth, @escaping (String) -> Void) async -> CleanScanReport = { tier, exclusions, depth, progress in
+        await DiskCleaner().scan(tier: tier, exclusions: exclusions, depth: depth, progress: progress)
     }
     /// The cleaner a phone-started clean uses.  Tests replace it with one that
     /// touches no files.
@@ -2093,7 +2093,7 @@ final class HogStore: ObservableObject {
                 error: nil
             )
             publishCompanion()
-            let scanReport = await remoteScanner(tier, exclusions) { _ in }
+            let scanReport = await remoteScanner(tier, exclusions, .quick) { _ in }
             itemsToClean = CompanionCleanerReport.defaultSelection(of: scanReport)
         }
         let totalItems = max(1, itemsToClean.count)
@@ -2141,7 +2141,8 @@ final class HogStore: ObservableObject {
             itemsRemoved: cleanResult.itemsRemoved,
             snapshotCreated: cleanResult.snapshotName != nil,
             snapshotName: cleanResult.snapshotName,
-            tier: cleanResult.tier.title
+            tier: cleanResult.tier.title,
+            observedFreeBytesChange: cleanResult.observedFreeBytesChange
         )
         let resultData = (try? JSONEncoder().encode(responseObj)) ?? Data("{}".utf8)
 
@@ -2150,7 +2151,7 @@ final class HogStore: ObservableObject {
             isCleaning: false,
             phase: "completed",
             progress: 1.0,
-            statusText: "Clean complete: Reclaimed \(cleanResult.formattedBytesReclaimed)",
+            statusText: "Estimated moved/removed: \(cleanResult.formattedBytesReclaimed)",
             currentItem: nil,
             itemsCleaned: cleanResult.itemsRemoved,
             totalItems: totalItems,
@@ -2159,7 +2160,8 @@ final class HogStore: ObservableObject {
             snapshotName: cleanResult.snapshotName,
             // The phone gets a count, never the raw paths: a safety check can
             // name the absolute path it refused to delete.
-            error: cleanResult.errors.isEmpty ? nil : "Clean finished with \(cleanResult.errors.count) item\(cleanResult.errors.count == 1 ? "" : "s") that could not be removed.\u{00A0} Details are on the Mac."
+            error: cleanResult.errors.isEmpty ? nil : "Clean finished with \(cleanResult.errors.count) item\(cleanResult.errors.count == 1 ? "" : "s") that could not be removed.\u{00A0} Details are on the Mac.",
+            observedFreeBytesChange: cleanResult.observedFreeBytesChange
         )
         publishCompanion()
 
@@ -2213,11 +2215,11 @@ final class HogStore: ObservableObject {
         let exclusions = remoteExclusions()
         remoteScanStartedAt = Date()
         remoteScanTask = Task.detached(priority: .utility) { [weak self] in
-            let report = await scanner(tier, exclusions) { category in
+            let report = await scanner(tier, exclusions, request.depth == "deeper" ? .deeper : .quick) { category in
                 Task { @MainActor [weak self] in self?.noteRemoteScanProgress(id: id, category: category) }
             }
             guard !Task.isCancelled else { return }
-            let scan = CompanionCleanerReport.build(from: report, id: id)
+            let scan = CompanionCleanerReport.build(from: report, id: id, depth: request.depth)
             await MainActor.run { [weak self] in self?.finishRemoteScan(scan) }
         }
         let response = CompanionCleanScanResponse(status: "scanning", scanId: id, tier: tier.rawValue, message: "Scanning \(tier.title).")
@@ -2283,7 +2285,10 @@ final class HogStore: ObservableObject {
             report.tier = scan.tier.rawValue
             report.scannedAt = scan.scannedAt
             report.totalBytes = scan.totalBytes
-            report.totalText = HogFormat.memory(scan.totalBytes)
+            report.totalText = (scan.isPartial ? "at least " : "") + HogFormat.memory(scan.totalBytes)
+            report.isPartial = scan.isPartial
+            report.incompleteCategories = scan.incompleteCategories
+            report.scanDepth = scan.scanDepth
             report.totalItems = scan.totalItems
             report.categories = scan.categories
         }

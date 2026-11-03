@@ -235,10 +235,10 @@ enum CompanionConnection {
     /// Starts a scan on the Mac for the chosen tier.  The Mac answers at once
     /// (`scanning`, or `busy` while another scan or a clean is running) and
     /// the phone reads progress from the report.
-    static func startCleanScan(endpoint: NWEndpoint, token: String, tier: String, acknowledgedExtreme: Bool, useTLS: Bool? = nil) async throws -> CompanionCleanScanResponse {
+    static func startCleanScan(endpoint: NWEndpoint, token: String, tier: String, acknowledgedExtreme: Bool, useTLS: Bool? = nil, depth: String = "quick") async throws -> CompanionCleanScanResponse {
         let reply = try await exchange(
             endpoint: endpoint,
-            request: CompanionHTTP.cleanScanRequest(token: token, tier: tier, acknowledgedExtreme: acknowledgedExtreme, host: hostHeader(for: endpoint)),
+            request: CompanionHTTP.cleanScanRequest(token: token, tier: tier, acknowledgedExtreme: acknowledgedExtreme, host: hostHeader(for: endpoint), depth: depth),
             timeout: defaultTimeout,
             useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )

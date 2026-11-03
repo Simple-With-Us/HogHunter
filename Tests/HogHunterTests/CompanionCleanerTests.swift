@@ -116,6 +116,43 @@ final class CompanionCleanerReportTests: XCTestCase {
         XCTAssertTrue(built.categories[0].totalText.hasPrefix("at least "), built.categories[0].totalText)
     }
 
+    func testPartialDiscoveryPreservesCompletenessAndDepthForThePhone() {
+        var report = CleanerFixtures.sampleReport()
+        report.isPartial = true
+        report.incompleteCategories = [.developer]
+        let scan = CompanionCleanerReport.build(from: report, id: "partial", depth: "deeper")
+        XCTAssertTrue(scan.isPartial)
+        XCTAssertEqual(scan.incompleteCategories, [CleanCategory.developer.title])
+        XCTAssertEqual(scan.scanDepth, "deeper")
+    }
+
+    func testScanDepthValidationRejectsUnknownValuesBeforeScanning() throws {
+        XCTAssertEqual(try CompanionCleanerReport.validate(CompanionCleanScanRequest(tier: "standard", depth: "deeper")).get(), .standard)
+        guard case .failure(let refusal) = CompanionCleanerReport.validate(CompanionCleanScanRequest(tier: "standard", depth: "unbounded")) else {
+            return XCTFail("unknown depth accepted")
+        }
+        XCTAssertEqual(refusal.status, 400)
+    }
+
+    func testLegacyCleanerWireOmitsNewEvidenceWithoutInventingIt() throws {
+        let old = Data(#"{"state":"ready","totalBytes":0,"totalText":"0 B","totalItems":0,"categories":[],"history":[]}"#.utf8)
+        let report = try JSONDecoder().decode(CompanionCleanReport.self, from: old)
+        XCTAssertNil(report.isPartial)
+        XCTAssertNil(report.scanDepth)
+        let response = Data(#"{"status":"completed","bytesReclaimed":10,"formattedBytesReclaimed":"10 B","itemsRemoved":1,"snapshotCreated":true,"tier":"Standard Clean"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(CompanionCleanResponse.self, from: response).observedFreeBytesChange)
+    }
+
+    func testSignedFreeObservationNeverBecomesAttributedReclaim() throws {
+        let response = CompanionCleanResponse(status: "completed", bytesReclaimed: 100, formattedBytesReclaimed: "100 B", itemsRemoved: 1,
+                                              snapshotCreated: true, tier: "Standard Clean", observedFreeBytesChange: -2048)
+        let decoded = try JSONDecoder().decode(CompanionCleanResponse.self, from: JSONEncoder().encode(response))
+        XCTAssertEqual(decoded.observedFreeBytesChange, -2048)
+        XCTAssertTrue(CleanerSpaceObservation.text(decoded.observedFreeBytesChange).contains("decreased"))
+        XCTAssertTrue(CleanerSpaceObservation.text(Int64.min).contains("decreased"))
+        XCTAssertEqual(CleanerSpaceObservation.text(nil), "Available-space change unavailable")
+    }
+
     func testAnExactCategoryTotalCarriesNoPrefix() {
         let built = CompanionCleanerReport.build(from: CleanerFixtures.report([(.userCaches, [CleanerFixtures.item(.userCaches, "TestCacheExact", bytes: 5_000)])]), id: "exact")
         XCTAssertFalse(built.categories[0].totalText.hasPrefix("at least "), built.categories[0].totalText)
@@ -468,6 +505,20 @@ final class CompanionCleanerRouteTests: XCTestCase {
         XCTAssertEqual(calls.value, 0, "routing must not run any of them on the server queue")
     }
 
+    func testDeeperScanRouteKeepsAuthorizationAndRejectsAmbiguousDepth() {
+        let server = server(clean: true)
+        server.onRemoteCleanScan = { _, _ in }
+        let valid = CompanionHTTP.cleanScanRequest(token: deviceToken, tier: "standard", acknowledgedExtreme: false, depth: "deeper")
+        XCTAssertEqual(disposition(server, valid), .startCleanScan(CompanionCleanScanRequest(tier: "standard", depth: "deeper")))
+        let validText = String(data: valid, encoding: .utf8)!
+        for value in ["unbounded", "", "quick&depth=deeper"] {
+            let raw = Data(validText.replacingOccurrences(of: "depth=deeper", with: "depth=" + value).utf8)
+            XCTAssertEqual(status(of: disposition(server, raw)), 400)
+        }
+        let shared = CompanionHTTP.cleanScanRequest(token: code, tier: "standard", acknowledgedExtreme: false, depth: "deeper")
+        XCTAssertEqual(status(of: disposition(server, shared)), 403)
+    }
+
     func testABareCleanFromAnOlderPhoneIsTheStandardCleanRequestWithNoBody() {
         let server = server(clean: true)
         server.onRemoteClean = { _, _ in }
@@ -567,7 +618,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
     }
 
     private func scanReady(tier: String = "standard", acknowledged: Bool = false) async throws -> CompanionCleanReport {
-        store.remoteScanner = { tier, _, progress in
+        store.remoteScanner = { tier, _, _, progress in
             progress("User Caches")
             return CleanerFixtures.sampleReport(tier: tier)
         }
@@ -588,8 +639,26 @@ final class CompanionCleanerStoreTests: XCTestCase {
         XCTAssertNotNil(ready.scanId)
     }
 
+    func testPhoneDeeperScanKeepsPartialStatusAndLowerBound() async throws {
+        store.remoteScanner = { tier, _, depth, _ in
+            guard case .deeper = depth else { XCTFail("deeper request became quick"); return CleanerFixtures.sampleReport() }
+            var report = CleanerFixtures.sampleReport(tier: tier)
+            report.isPartial = true
+            report.incompleteCategories = [.developer]
+            return report
+        }
+        let started = store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard", depth: "deeper"))
+        XCTAssertEqual(started.status, 202)
+        try await waitForScan()
+        let ready = try report(of: store.remoteCleanReportReply())
+        XCTAssertEqual(ready.isPartial, true)
+        XCTAssertTrue(ready.totalText.hasPrefix("at least "))
+        XCTAssertEqual(ready.scanDepth, "deeper")
+        XCTAssertEqual(ready.incompleteCategories, [CleanCategory.developer.title])
+    }
+
     func testASecondScanIsRefusedWhileOneRuns() async throws {
-        store.remoteScanner = { tier, _, _ in
+        store.remoteScanner = { tier, _, _, _ in
             try? await Task.sleep(nanoseconds: 400_000_000)
             return CleanerFixtures.sampleReport(tier: tier)
         }
@@ -602,7 +671,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
     }
 
     func testExtremeIsNotScannedWithoutTheAcknowledgement() throws {
-        store.remoteScanner = { _, _, _ in XCTFail("must not scan"); return CleanerFixtures.sampleReport() }
+        store.remoteScanner = { _, _, _, _ in XCTFail("must not scan"); return CleanerFixtures.sampleReport() }
         let refused = store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "extreme", acknowledgedExtreme: false))
         XCTAssertEqual(refused.status, 400)
         XCTAssertEqual(try report(of: store.remoteCleanReportReply()).state, "idle")
@@ -697,7 +766,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
 
     func testAnOlderPhonesBareCleanIsStillTheStandardCleanAndIsRecordedToo() async throws {
         let files = RecordingFileManager()
-        store.remoteScanner = { tier, _, _ in
+        store.remoteScanner = { tier, _, _, _ in
             XCTAssertEqual(tier, .standard)
             return CleanerFixtures.sampleReport(tier: tier)
         }
@@ -738,13 +807,13 @@ final class CompanionCleanerStoreTests: XCTestCase {
         // neither slow the suite nor outlive the test into the next one.
         let stuck = CompanionLocked(false)
         defer { stuck.value = true }
-        store.remoteScanner = { tier, _, _ in
+        store.remoteScanner = { tier, _, _, _ in
             while !stuck.value { try? await Task.sleep(for: .milliseconds(10)) }
             return CleanerFixtures.sampleReport(tier: tier)
         }
         XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 202)
         XCTAssertEqual(store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status, 409, "a young scan is still running")
-        store.remoteScanner = { tier, _, _ in CleanerFixtures.sampleReport(tier: tier) }
+        store.remoteScanner = { tier, _, _, _ in CleanerFixtures.sampleReport(tier: tier) }
         var replaced = false
         for _ in 0..<100 where !replaced {
             replaced = store.beginRemoteCleanScan(CompanionCleanScanRequest(tier: "standard")).status == 202
@@ -799,7 +868,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
         let release = CompanionLocked(false)
         let files = RecordingFileManager()
         store.remoteCleanerFactory = { DiskCleaner(fileManager: files, makeSnapshot: { (true, "snapshot-fixture") }) }
-        store.remoteScanner = { tier, _, _ in
+        store.remoteScanner = { tier, _, _, _ in
             began.fulfill()
             while !release.value { try? await Task.sleep(for: .milliseconds(10)) }
             return CleanerFixtures.sampleReport(tier: tier)
@@ -820,7 +889,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
     func testTempPolicyChangeRejectsInFlightCompletionAndQueuedProgress() async throws {
         let began = expectation(description: "scanner began")
         let release = CompanionLocked(false)
-        store.remoteScanner = { tier, _, progress in
+        store.remoteScanner = { tier, _, _, progress in
             began.fulfill()
             while !release.value { try? await Task.sleep(for: .milliseconds(10)) }
             progress("Late progress")
@@ -840,7 +909,7 @@ final class CompanionCleanerStoreTests: XCTestCase {
         var exclusions = CleanerExclusions()
         exclusions.excludedPaths = ["/Users/someone/Keep"]
         store.remoteExclusions = { exclusions }
-        store.remoteScanner = { tier, given, _ in
+        store.remoteScanner = { tier, given, _, _ in
             seen.value = given
             return CleanerFixtures.sampleReport(tier: tier)
         }

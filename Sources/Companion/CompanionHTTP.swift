@@ -117,10 +117,18 @@ enum CompanionHTTP {
             var scanRequest = CompanionCleanScanRequest(tier: "standard")
             if fullPath.contains("?") {
                 let query = queryString(of: fullPath)
+                var sawDepth = false
                 for param in query.split(separator: "&") {
-                    let kv = param.split(separator: "=", maxSplits: 1)
+                    let kv = param.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
                     guard kv.count == 2 else { continue }
                     let value = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                    if kv[0] == "depth" {
+                        guard !sawDepth, ["quick", "deeper"].contains(value) else {
+                            return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"Unknown or repeated scan depth."}"#.utf8), type: "application/json; charset=utf-8")
+                        }
+                        sawDepth = true
+                        scanRequest.depth = value
+                    }
                     if kv[0] == "tier" { scanRequest.tier = value.lowercased() }
                     if kv[0] == "ack" { scanRequest.acknowledgedExtreme = (value == "1" || value.lowercased() == "true") }
                 }
@@ -656,10 +664,11 @@ enum CompanionHTTP {
         return jsonPostRequest(path: CompanionService.cleanRunPath, token: token, body: body, host: host)
     }
 
-    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool, host: String? = nil) -> Data {
+    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool, host: String? = nil, depth: String? = nil) -> Data {
         let ack = acknowledgedExtreme ? "&ack=1" : ""
+        let depthQuery = depth.map { "&depth=" + queryAllowedValue($0) } ?? ""
         let lines = [
-            "POST \(CompanionService.cleanScanPath)?tier=\(queryAllowedValue(tier))\(ack) HTTP/1.1",
+            "POST \(CompanionService.cleanScanPath)?tier=\(queryAllowedValue(tier))\(ack)\(depthQuery) HTTP/1.1",
             hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",

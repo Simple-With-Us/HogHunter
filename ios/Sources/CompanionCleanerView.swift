@@ -57,7 +57,7 @@ struct CleanerView: View {
             isPresented: $showConfirm,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(iPhoneStorage.format(bytes: model.selectedCleanBytes)) (\(tierTitle))", role: .destructive) {
+            Button("Clean Selected — \(iPhoneStorage.format(bytes: model.selectedCleanBytes)) Estimated", role: .destructive) {
                 Task { await model.cleanSelection() }
             }
             Button("Cancel", role: .cancel) {}
@@ -137,13 +137,20 @@ struct CleanerView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(iPhoneStorage.format(bytes: model.selectedCleanBytes))
                             .font(.title2.weight(.bold).monospacedDigit())
-                        Text("ready to reclaim")
+                        Text("estimated to move or remove")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     Text("\(report.totalText) total discovered across \(report.totalItems) items")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if report.isPartial == true {
+                        Label("Partial scan; listed sizes are lower bounds", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                        if let categories = report.incompleteCategories, !categories.isEmpty {
+                            Text("Incomplete: " + categories.joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
                     if let scanned = report.scannedAt {
                         Text("Scanned \(CompanionRelative.text(for: scanned)) on \(hostName).")
                             .font(.caption2)
@@ -167,10 +174,19 @@ struct CleanerView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                    Text("Reclaimed \(last.formattedBytesReclaimed) (\(last.itemsRemoved) items).")
+                    Text("Estimated moved/removed: \(last.formattedBytesReclaimed) (\(last.itemsRemoved) items).")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.green)
                 }
+            }
+
+            if report?.isPartial == true {
+                Button("Scan Deeper") { model.beginCleanScan(depth: "deeper") }
+                    .disabled(!canClean || isBusy || !tierReady)
+            }
+            if let last = model.lastCleanResult, !isCleaningNow {
+                Text(CleanerSpaceObservation.text(last.observedFreeBytesChange)).font(.caption).foregroundStyle(.secondary)
+                Text("Trash, snapshots and concurrent writes affect available space.").font(.caption2).foregroundStyle(.secondary)
             }
 
             Button {
@@ -340,7 +356,7 @@ struct CleanerView: View {
             } label: {
                 HStack {
                     Spacer()
-                    Text(isCleaningNow ? "Cleaning Mac…" : "Reclaim \(iPhoneStorage.format(bytes: model.selectedCleanBytes))")
+                    Text(isCleaningNow ? "Cleaning Mac…" : "Clean Selected — \(iPhoneStorage.format(bytes: model.selectedCleanBytes)) Estimated")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
                 }
@@ -367,7 +383,7 @@ struct CleanerView: View {
                 ForEach(history) { record in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack {
-                            Text("Freed \(record.sizeText)")
+                            Text("Estimated moved/removed: \(record.sizeText)")
                                 .font(.subheadline.weight(.semibold))
                             if record.source == "iPhone" {
                                 Text("FROM IPHONE")

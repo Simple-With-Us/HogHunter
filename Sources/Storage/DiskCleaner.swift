@@ -260,6 +260,47 @@ struct CleanerExclusions: Codable, Equatable, Sendable {
     }
 }
 
+/// Small read-only scan commands use a deadline and file output so neither a
+/// full pipe nor a child ignoring TERM can indefinitely hold discovery open.
+enum CleanerScanCommand {
+    static func run(executable: String, arguments: [String], timeout: TimeInterval = 1) -> Data? {
+        guard !Task.isCancelled, timeout > 0 else { return nil }
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("hh-scan-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil,
+            attributes: [.posixPermissions: 0o600]) else { return nil }
+        guard let output = try? FileHandle(forWritingTo: outputURL) else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return nil
+        }
+        defer { try? output.close(); try? FileManager.default.removeItem(at: outputURL) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return nil }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline {
+            if exited.wait(timeout: .now() + 0.02) == .success {
+                guard process.terminationStatus == 0,
+                      let input = try? FileHandle(forReadingFrom: outputURL) else { return nil }
+                defer { try? input.close() }
+                // Refuse truncated inventory rather than treating its prefix as complete.
+                guard let data = try? input.read(upToCount: 1_048_577), data.count <= 1_048_576 else { return nil }
+                return data
+            }
+        }
+        if process.isRunning { process.terminate() }
+        if exited.wait(timeout: .now() + 0.1) != .success, process.isRunning {
+            _ = kill(process.processIdentifier, SIGKILL)
+            _ = exited.wait(timeout: .now() + 0.1)
+        }
+        return nil
+    }
+}
+
 /// Helper that manages Apple APFS local snapshots for safe rollback before disk cleaning operations.
 enum SnapshotSafety {
     /// Attempts to create an APFS local snapshot via `tmutil localsnapshot`.
@@ -290,28 +331,11 @@ enum SnapshotSafety {
     }
 
     /// Lists active APFS local Time Machine snapshots on the system.
-    static func listLocalSnapshots() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
-        process.arguments = ["listlocalsnapshots", "/"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            // Drain before waiting and close the read end: a full ~64 KB pipe
-            // buffer blocks the child on write(2), and an unclosed handle leaks.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            try? pipe.fileHandleForReading.close()
-            process.waitUntilExit()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.hasPrefix("com.apple.TimeMachine.") }
-        } catch {
-            try? pipe.fileHandleForReading.close()
-            return []
-        }
+    static func listLocalSnapshots() -> [String]? {
+        guard let data = CleanerScanCommand.run(executable: "/usr/bin/tmutil", arguments: ["listlocalsnapshots", "/"]) else { return nil }
+        return String(decoding: data, as: UTF8.self).components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasPrefix("com.apple.TimeMachine.") }
     }
 
     /// Holds the in-flight `tmutil thinlocalsnapshots` child so a cancelled clean can terminate it.
@@ -413,8 +437,8 @@ struct CleanItem: Identifiable, Hashable, Sendable {
     var url: URL
     var bytes: UInt64
     var fileCount: Int
-    /// True when the size walk hit its file cap, so `bytes` is a lower
-    /// bound ("at least N"), not an exact size.
+    /// True when a bounded size walk is incomplete; `bytes` is a measured
+    /// lower bound ("at least N"), not an exact size.
     var isApproximate: Bool = false
     var lastModified: Date?
     var isSelected: Bool
@@ -512,8 +536,12 @@ struct CleanScanReport: Sendable {
     var totalSelectedBytes: UInt64
     var scannedAt: Date
     var tier: CleanTier
+    var isPartial: Bool = false
+    var incompleteCategories: [CleanCategory] = []
 
-    init(categories: [CleanCategoryReport], totalBytes: UInt64, totalSelectedBytes: UInt64, scannedAt: Date, tier: CleanTier = .standard) {
+    init(categories: [CleanCategoryReport], totalBytes: UInt64, totalSelectedBytes: UInt64, scannedAt: Date, tier: CleanTier = .standard, isPartial: Bool = false, incompleteCategories: [CleanCategory] = []) {
+        self.isPartial = isPartial
+        self.incompleteCategories = incompleteCategories
         self.categories = categories
         self.totalBytes = totalBytes
         self.totalSelectedBytes = totalSelectedBytes
@@ -536,7 +564,7 @@ struct CleanScanReport: Sendable {
     /// True when any item's size walk hit its file cap, so totals built from
     /// this report are lower bounds, not exact sizes.
     var anyApproximate: Bool {
-        categories.contains { $0.anyApproximate }
+        isPartial || categories.contains { $0.anyApproximate }
     }
 
     var formattedSelectedSize: String {
@@ -554,7 +582,10 @@ struct CleanScanReport: Sendable {
 
 /// Result returned after performing a clean operation.
 struct CleanResult: Sendable {
+    /// Estimated allocated bytes of successfully moved/removed items, not a free-space gain.
     var bytesReclaimed: UInt64
+    /// Signed startup-volume available-space change observed during this run; concurrent writes affect it.
+    var observedFreeBytesChange: Int64?
     var itemsRemoved: Int
     var errors: [String]
     var cleanedAt: Date
@@ -574,7 +605,9 @@ struct CleanResult: Sendable {
          snapshotName: String? = nil,
          tier: CleanTier = .standard,
          removedItemTitles: [String] = [],
-         removedCategoryIds: [String] = []) {
+         removedCategoryIds: [String] = [],
+         observedFreeBytesChange: Int64? = nil) {
+        self.observedFreeBytesChange = observedFreeBytesChange
         self.bytesReclaimed = bytesReclaimed
         self.itemsRemoved = itemsRemoved
         self.errors = errors
@@ -622,7 +655,121 @@ final class DiskCleaner: @unchecked Sendable {
         ("Puppeteer Cache", "Library/Caches/puppeteer", "Puppeteer browser downloads"),
     ]
 
+    enum ScanDepth: Sendable {
+        case quick, deeper
+        var duration: TimeInterval { self == .quick ? 8 : 45 }
+        var targetDuration: TimeInterval { self == .quick ? 0.15 : 0.8 }
+        var entries: Int { self == .quick ? 30_000 : 150_000 }
+        var maxDepth: Int { self == .quick ? 10 : 32 }
+    }
+
+    /// One task owns this context, including its per-run memoization.  No filesystem
+    /// timestamps are used to reuse observations across scans.
+    private final class ScanContext: @unchecked Sendable {
+        let depth: ScanDepth
+        let deadline: TimeInterval
+        let mountPaths: [String]
+        var remaining: Int
+        var incomplete = false
+        var memo: [String: DirectoryStats] = [:]
+        init(depth: ScanDepth, now: TimeInterval, mountPaths: [String]) {
+            self.depth = depth
+            deadline = now + depth.duration
+            remaining = depth.entries
+            self.mountPaths = mountPaths
+        }
+    }
+    @TaskLocal private static var scanContext: ScanContext?
+
+    private func withScanBudget<T>(_ operation: () -> T) -> T {
+        let context = ScanContext(depth: .quick, now: scanUptime(), mountPaths: mountPathsProvider())
+        return Self.$scanContext.withValue(context, operation: operation)
+    }
+
+    private func scanShouldStop() -> Bool {
+        if Task.isCancelled { Self.scanContext?.incomplete = true; return true }
+        guard let context = Self.scanContext else { return false }
+        if context.remaining <= 0 || scanUptime() >= context.deadline {
+            context.incomplete = true
+            return true
+        }
+        return false
+    }
+
+    private func markScanIncomplete() { Self.scanContext?.incomplete = true }
+
+    /// Gate symlink destinations before Foundation can read their metadata.
+    private func scanAllows(_ url: URL) -> Bool { scanURL(url) != nil }
+
+    private func scanURL(_ url: URL) -> URL? {
+        guard !scanShouldStop() else { return nil }
+        let mounts = Self.scanContext?.mountPaths ?? mountPathsProvider()
+        guard let path = DirectorySizeWalker.automaticCanonicalPath(url.path, mountPaths: mounts) else {
+            // Missing roots are normal; unknown/access-denied roots cannot prove completeness.
+            if errno != ENOENT { markScanIncomplete() }
+            return nil
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private func scanSubpaths(at root: URL) throws -> [String] {
+        guard scanAllows(root), let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { [self] _, _ in markScanIncomplete(); return false }) else { return [] }
+        let deadline = scanUptime() + (Self.scanContext?.depth.targetDuration ?? 0.15)
+        var paths: [String] = []
+        while !scanShouldStop() {
+            guard paths.count < 25_000, scanUptime() < deadline else { markScanIncomplete(); break }
+            guard let entry = enumerator.nextObject() as? URL else { break }
+            Self.scanContext?.remaining -= 1
+            guard scanAllows(entry) else { enumerator.skipDescendants(); continue }
+            if enumerator.level >= (Self.scanContext?.depth.maxDepth ?? 10) { markScanIncomplete(); enumerator.skipDescendants() }
+            paths.append(String(entry.path.dropFirst(root.path.count + 1)))
+        }
+        return paths
+    }
+
+    private func scanFileExists(atPath path: String, isDirectory: UnsafeMutablePointer<ObjCBool>? = nil) -> Bool {
+        guard scanAllows(URL(fileURLWithPath: path)) else { return false }
+        return fileManager.fileExists(atPath: path, isDirectory: isDirectory)
+    }
+
+    /// Enumerate without eager resource prefetch: the entry must pass the mount/link
+    /// preflight before any resourceValues call.  Listings count directories as work.
+    private func scanContentsOfDirectory(at url: URL, includingPropertiesForKeys: [URLResourceKey]?,
+                                         options: FileManager.DirectoryEnumerationOptions = [],
+                                         requireComplete: Bool = false) throws -> [URL] {
+        guard scanAllows(url) else {
+            if requireComplete { throw CocoaError(.fileReadUnknown) }
+            return []
+        }
+        var incomplete = false
+        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: nil,
+            options: options.union(.skipsSubdirectoryDescendants), errorHandler: { [self] _, _ in
+                incomplete = true; markScanIncomplete(); return false
+            }) else {
+                markScanIncomplete()
+                if requireComplete { throw CocoaError(.fileReadUnknown) }
+                return []
+            }
+        let deadline = scanUptime() + (Self.scanContext?.depth.targetDuration ?? 0.15)
+        var urls: [URL] = []
+        while true {
+            guard !scanShouldStop(), urls.count < 25_000, scanUptime() < deadline else {
+                incomplete = true; markScanIncomplete(); break
+            }
+            guard let entry = enumerator.nextObject() as? URL else { break }
+            Self.scanContext?.remaining -= 1
+            if scanAllows(entry) { urls.append(entry) } else { incomplete = true }
+        }
+        if incomplete && requireComplete { throw CocoaError(.fileReadUnknown) }
+        return urls
+    }
+
     private let fileManager: FileManager
+    private let freeBytesProvider: () -> UInt64?
+    private let moveToTrash: (URL) throws -> Void
+    private let scanUptime: () -> TimeInterval
+    private let mountPathsProvider: () -> [String]
     /// Tests substitute a closure that does not call `tmutil`.
     private let makeSnapshot: () -> (success: Bool, snapshotName: String?)
     /// Tests substitute a closure that does not call `tmutil`.
@@ -648,6 +795,10 @@ final class DiskCleaner: @unchecked Sendable {
     private let tempEnumerationProvider: TempEnumerationProvider
 
     init(fileManager: FileManager = .default,
+         freeBytesProvider: @escaping () -> UInt64? = { DiskSpace.current()?.freeBytes },
+         moveToTrash: ((URL) throws -> Void)? = nil,
+         scanUptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         mountPathsProvider: @escaping () -> [String] = { MountedDriveStore.cachedMountRecords().map(\.path) },
          makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
          listSnapshots: @escaping (String) -> [String]? = { _ in SnapshotSafety.listLocalSnapshots() },
          purgeableProvider: @escaping (String) -> UInt64 = { SnapshotSafety.purgeableBytes(at: $0) },
@@ -661,6 +812,13 @@ final class DiskCleaner: @unchecked Sendable {
          tempUptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          tempWalkTimeLimit: TimeInterval = 2,
          tempEnumerationProvider: TempEnumerationProvider? = nil) {
+        self.mountPathsProvider = mountPathsProvider
+        self.scanUptime = scanUptime
+        self.freeBytesProvider = freeBytesProvider
+        self.moveToTrash = moveToTrash ?? { url in
+            var trashedURL: NSURL?
+            try fileManager.trashItem(at: url, resultingItemURL: &trashedURL)
+        }
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
         self.listSnapshots = listSnapshots
@@ -681,51 +839,52 @@ final class DiskCleaner: @unchecked Sendable {
 
     // MARK: - Full Scan
 
-    /// Performs a full scan across all categories matching the given tier.
+    /// Cooperative bounded scan; one kernel metadata call can still block beyond a budget.
     func scan(installedApps: [StorageScanner.InstalledApp] = [],
               tier: CleanTier = .standard,
               exclusions: CleanerExclusions = CleanerExclusions.load(),
+              depth: ScanDepth = .quick,
+              categories selectedCategories: Set<CleanCategory>? = nil,
+              partialReport: ((CleanScanReport) -> Void)? = nil,
               progress: ((String) -> Void)? = nil) async -> CleanScanReport {
-        var reports: [CleanCategoryReport] = []
-        var overallTotal: UInt64 = 0
-        var overallSelected: UInt64 = 0
-
-        let categoriesToScan = CleanCategory.allCases
-            .filter { tier.isCategoryIncluded($0) && !exclusions.isCategoryExcluded($0) }
-            .sorted(by: { $0.sortOrder < $1.sortOrder })
-
-        for category in categoriesToScan {
-            if Task.isCancelled { break }
-            await Task.yield()
-            progress?(category.title)
-            let items = scanCategory(category, installedApps: installedApps)
-                .filter { !exclusions.isPathExcluded($0.path) && !isHandsOff($0.url) }
-            if Task.isCancelled { break }
-            let total = items.reduce(0 as UInt64) { $0 &+ $1.bytes }
-            let selected = items.filter(\.isSelected).reduce(0 as UInt64) { $0 &+ $1.bytes }
-            overallTotal &+= total
-            overallSelected &+= selected
-
-            reports.append(CleanCategoryReport(
-                category: category,
-                items: items,
-                totalBytes: total,
-                selectedBytes: selected,
-                itemCount: items.count
-            ))
+        let context = ScanContext(depth: depth, now: scanUptime(), mountPaths: mountPathsProvider())
+        return await Self.$scanContext.withValue(context) {
+            var reports: [CleanCategoryReport] = []
+            var incomplete: [CleanCategory] = []
+            let categories = CleanCategory.allCases
+                .filter { (selectedCategories?.contains($0) ?? true) && tier.isCategoryIncluded($0) && !exclusions.isCategoryExcluded($0) }
+                .sorted { $0.sortOrder < $1.sortOrder }
+            func report(inFlight: Bool = false) -> CleanScanReport {
+                CleanScanReport(categories: reports,
+                    totalBytes: reports.reduce(0) { $0 &+ $1.totalBytes },
+                    totalSelectedBytes: reports.reduce(0) { $0 &+ $1.selectedBytes },
+                    scannedAt: Date(), tier: tier,
+                    isPartial: inFlight || !incomplete.isEmpty || reports.count < categories.count,
+                    incompleteCategories: incomplete)
+            }
+            for category in categories {
+                guard !scanShouldStop() else {
+                    incomplete.append(contentsOf: categories.filter { candidate in !reports.contains { $0.category == candidate } })
+                    break
+                }
+                await Task.yield()
+                context.incomplete = false
+                progress?(category.title)
+                let items = scanCategory(category, installedApps: installedApps)
+                    .filter { !scanShouldStop() && !exclusions.isPathExcluded($0.path) && ($0.category == .apfsSnapshots || scanAllows($0.url)) && !isHandsOff($0.url) }
+                if context.incomplete || items.contains(where: \.isApproximate) { incomplete.append(category) }
+                reports.append(CleanCategoryReport(category: category, items: items,
+                    totalBytes: items.reduce(0) { $0 &+ $1.bytes },
+                    selectedBytes: items.filter(\.isSelected).reduce(0) { $0 &+ $1.bytes }, itemCount: items.count))
+                partialReport?(report(inFlight: true))
+            }
+            return report()
         }
-
-        return CleanScanReport(
-            categories: reports,
-            totalBytes: overallTotal,
-            totalSelectedBytes: overallSelected,
-            scannedAt: Date(),
-            tier: tier
-        )
     }
 
     /// Scans a single category.
     func scanCategory(_ category: CleanCategory, installedApps: [StorageScanner.InstalledApp] = []) -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanCategory(category, installedApps: installedApps) } }
         switch category {
         case .userCaches:
             return scanUserCaches()
@@ -759,7 +918,10 @@ final class DiskCleaner: @unchecked Sendable {
     /// emitted carrying the full purgeable figure so the panel still has
     /// something to show and the clean can still thin.
     func scanAPFSSnapshots() -> [CleanItem] {
-        let snapshotNames = listSnapshots("/") ?? []
+        if Self.scanContext == nil { return withScanBudget { scanAPFSSnapshots() } }
+        let listed = listSnapshots("/")
+        if listed == nil { markScanIncomplete() }
+        let snapshotNames = listed ?? []
         let purgeable = purgeableProvider("/")
 
         if snapshotNames.isEmpty {
@@ -814,19 +976,23 @@ final class DiskCleaner: @unchecked Sendable {
     /// walks produce no suggestion, including unchecked rows.  Temp items still
     /// require explicit review: idle plain files have no inferred backup status.
     func scanTempFiles() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanTempFiles() } }
         var enumerationFailed = false
+        guard scanAllows(tempRootURL) else { return [] }
         guard let entries = tempEnumerationProvider(tempRootURL,
             [.skipsSubdirectoryDescendants], { _, _ in enumerationFailed = true; return false }) else { return [] }
         let policy = tempPolicyProvider()
         let cutoff = tempNow().addingTimeInterval(-policy.minimumUntouchedInterval)
         let worktrees = Set(worktreePathsProvider().map(Self.resolvedPath))
-        let deadline = tempUptime() + 10
+        let deadline = tempUptime() + min(10, Self.scanContext?.depth.targetDuration ?? 10)
         var visited = 0
         var items: [CleanItem] = []
         while let entry = entries.nextObject() {
-            guard !Task.isCancelled, !enumerationFailed, visited < tempEntryCap,
-                  tempUptime() < deadline, let url = entry as? URL else { return [] }
+            guard !scanShouldStop(), !enumerationFailed, visited < tempEntryCap,
+                  tempUptime() < deadline, let url = entry as? URL else { markScanIncomplete(); return [] }
             visited += 1
+            Self.scanContext?.remaining -= 1
+            guard scanAllows(url) else { continue }
             guard let stats = eligibleTempEntry(url, cutoff: cutoff, worktrees: worktrees),
                   stats.bytes > 0 else { continue }
             let itemURL = URL(fileURLWithPath: Self.resolvedPath(url.path))
@@ -837,7 +1003,7 @@ final class DiskCleaner: @unchecked Sendable {
                 detail: "Temporary file — untouched for at least \(policy.hoursLabel) hours; review before cleaning"
             ))
         }
-        guard !enumerationFailed, !Task.isCancelled, policy == tempPolicyProvider() else { return [] }
+        guard !enumerationFailed, !scanShouldStop(), policy == tempPolicyProvider() else { return [] }
         return items.sorted { $0.bytes > $1.bytes }
     }
 
@@ -881,18 +1047,19 @@ final class DiskCleaner: @unchecked Sendable {
               path.hasPrefix(root + "/"), path != root,
               !worktrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }),
               !hasAdjacentTempLock(url) else { return nil }
-        let deadline = tempUptime() + tempWalkTimeLimit
+        let deadline = tempUptime() + min(tempWalkTimeLimit, Self.scanContext?.depth.targetDuration ?? tempWalkTimeLimit)
         var observations: [(URL, TempEntryMetadata)] = []
         var bytes: UInt64 = 0
         var count = 0
         var latestModified: Date?
         func inspect(_ entry: URL) -> TempEntryMetadata? {
-            guard !Task.isCancelled, observations.count < tempEntryCap,
+            guard scanAllows(entry), !scanShouldStop(), observations.count < tempEntryCap,
                   tempUptime() < deadline, !protectedTempName(entry),
                   let info = try? tempMetadataProvider(entry), !info.isSymbolicLink,
                   info.isDirectory || info.isRegularFile,
                   info.latestActivity.timeIntervalSince1970.isFinite,
                   info.latestActivity <= cutoff else { return nil }
+            Self.scanContext?.remaining -= 1
             observations.append((entry, info))
             latestModified = max(latestModified ?? info.modified, info.modified)
             if info.isRegularFile { bytes &+= info.bytes; count += 1 }
@@ -915,7 +1082,7 @@ final class DiskCleaner: @unchecked Sendable {
         // Enumeration records each parent before its descendants.  Reversing
         // that order verifies every containing directory after its children.
         for (entry, observed) in observations.reversed() {
-            guard !Task.isCancelled, tempUptime() < deadline,
+            guard !scanShouldStop(), tempUptime() < deadline,
                   let current = try? tempMetadataProvider(entry), current == observed else { return nil }
         }
         guard !hasAdjacentTempLock(url) else { return nil }
@@ -976,25 +1143,9 @@ final class DiskCleaner: @unchecked Sendable {
     }
 
     private static func worktreePaths(in root: String) -> Set<String> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", root, "worktree", "list", "--porcelain"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        // Drain before waiting and close the read end: a full ~64 KB pipe
-        // buffer blocks the child on write(2), and an unclosed handle leaks.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        try? pipe.fileHandleForReading.close()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return [] }
-        let output = String(data: data, encoding: .utf8) ?? ""
-        return output
+        guard let data = CleanerScanCommand.run(executable: "/usr/bin/git",
+            arguments: ["-c", "core.fsmonitor=false", "-C", root, "worktree", "list", "--porcelain"]) else { return [] }
+        return String(decoding: data, as: UTF8.self)
             .split(separator: "\n")
             .compactMap { line -> String? in
                 guard line.hasPrefix("worktree ") else { return nil }
@@ -1022,8 +1173,9 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans `~/Library/Caches/` for user caches (skips Hog Hunter and developer package caches handled elsewhere).
     func scanUserCaches() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanUserCaches() } }
         let cachesURL = userHomeURL.appendingPathComponent("Library/Caches", isDirectory: true)
-        guard let contents = try? fileManager.contentsOfDirectory(at: cachesURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+        guard let contents = try? scanContentsOfDirectory(at: cachesURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
             return []
         }
 
@@ -1039,7 +1191,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         var items: [CleanItem] = []
         for url in contents {
-            if Task.isCancelled { break }
+            if scanShouldStop() { break }
             let name = url.lastPathComponent
             if developerCacheNames.contains(name) { continue }
             if isHogHunterIdentifier(name) { continue }
@@ -1071,12 +1223,13 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans `~/Library/Logs/` and crash reports for logs and diagnostics.
     func scanLogsAndDiagnostics() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanLogsAndDiagnostics() } }
         var items: [CleanItem] = []
         let logsURL = userHomeURL.appendingPathComponent("Library/Logs", isDirectory: true)
 
-        if let contents = try? fileManager.contentsOfDirectory(at: logsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+        if let contents = try? scanContentsOfDirectory(at: logsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
             for url in contents {
-                if Task.isCancelled { break }
+                if scanShouldStop() { break }
                 let name = url.lastPathComponent
                 if isHogHunterIdentifier(name) { continue }
 
@@ -1098,11 +1251,11 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        if Task.isCancelled { return items.sorted { $0.bytes > $1.bytes } }
+        if scanShouldStop() { return items.sorted { $0.bytes > $1.bytes } }
 
         // DiagnosticReports folder
         let diagReportsURL = logsURL.appendingPathComponent("DiagnosticReports", isDirectory: true)
-        if fileManager.fileExists(atPath: diagReportsURL.path) && !items.contains(where: { $0.url == diagReportsURL }) {
+        if scanFileExists(atPath: diagReportsURL.path) && !items.contains(where: { $0.url == diagReportsURL }) {
             let stats = directoryStats(at: diagReportsURL)
             if stats.bytes > 0 {
                 items.append(CleanItem(
@@ -1120,11 +1273,11 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        if Task.isCancelled { return items.sorted { $0.bytes > $1.bytes } }
+        if scanShouldStop() { return items.sorted { $0.bytes > $1.bytes } }
 
         // CrashReporter
         let crashReportsURL = userHomeURL.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
-        if fileManager.fileExists(atPath: crashReportsURL.path) {
+        if scanFileExists(atPath: crashReportsURL.path) {
             let stats = directoryStats(at: crashReportsURL)
             if stats.bytes > 0 {
                 items.append(CleanItem(
@@ -1147,14 +1300,15 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans items in `~/.Trash/`.
     func scanTrash() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanTrash() } }
         let trashURL = userHomeURL.appendingPathComponent(".Trash", isDirectory: true)
-        guard let contents = try? fileManager.contentsOfDirectory(at: trashURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) else {
+        guard let contents = try? scanContentsOfDirectory(at: trashURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) else {
             return []
         }
 
         var items: [CleanItem] = []
         for url in contents {
-            if Task.isCancelled { break }
+            if scanShouldStop() { break }
             let name = url.lastPathComponent
             if name.hasPrefix(".") && name == ".DS_Store" { continue }
 
@@ -1180,6 +1334,7 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans developer build artifacts and package manager caches.
     func scanDeveloper() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanDeveloper() } }
         var items: [CleanItem] = []
 
         let targets: [(name: String, path: String, detail: String)] = [
@@ -1202,10 +1357,10 @@ final class DiskCleaner: @unchecked Sendable {
         ] + Self.codingPlatformCacheTargets
 
         for target in targets {
-            if Task.isCancelled { break }
+            if scanShouldStop() { break }
             let url = userHomeURL.appendingPathComponent(target.path, isDirectory: true)
             var isDir: ObjCBool = false
-            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            guard scanFileExists(atPath: url.path, isDirectory: &isDir) else { continue }
 
             let stats = directoryStats(at: url)
             guard stats.bytes > 0 else { continue }
@@ -1227,7 +1382,7 @@ final class DiskCleaner: @unchecked Sendable {
             ))
         }
 
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             // iOS Simulator Devices — installed simulators + runtimes.  Opt-in only:
             // other users may actively develop for iOS, and an auto-clean would force
             // a full re-download of every runtime on next boot.
@@ -1236,7 +1391,7 @@ final class DiskCleaner: @unchecked Sendable {
             // to clean that primary iOS 27 simulator as well.
             let simDevicesURL = userHomeURL.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
             var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: simDevicesURL.path, isDirectory: &isDir), isDir.boolValue {
+            if scanFileExists(atPath: simDevicesURL.path, isDirectory: &isDir), isDir.boolValue {
                 let deviceMetas = scanSimulatorDevices(at: simDevicesURL)
                 let primary = primaryIOS27Simulator(in: deviceMetas)
 
@@ -1253,8 +1408,8 @@ final class DiskCleaner: @unchecked Sendable {
                             url: simDevicesURL,
                             bytes: otherBytes,
                             fileCount: otherCount,
-                            isApproximate: false,
-                            lastModified: otherDevices.compactMap(\.lastUsedAt).max(),
+                            isApproximate: otherDevices.contains { $0.isApproximate },
+                            lastModified: otherDevices.contains { $0.isApproximate } ? nil : otherDevices.compactMap(\.lastUsedAt).max(),
                             isSelected: false,
                             detail: "Installed iOS simulator devices except the primary iOS 27 simulator (\(primary.name)), which is preserved by default for BitRig and testing.\u{00a0} Xcode re-downloads runtimes on demand."
                         ))
@@ -1268,8 +1423,8 @@ final class DiskCleaner: @unchecked Sendable {
                             url: primary.url,
                             bytes: primary.bytes,
                             fileCount: primary.fileCount,
-                            isApproximate: false,
-                            lastModified: primary.lastUsedAt,
+                            isApproximate: primary.isApproximate,
+                            lastModified: primary.isApproximate ? nil : primary.lastUsedAt,
                             isSelected: false,
                             detail: "The primary iOS 27 simulator (\(primary.name)), preserved by default so BitRig and local test lanes can run without re-downloading.\u{00a0} Select this option to clean it also."
                         ))
@@ -1294,14 +1449,14 @@ final class DiskCleaner: @unchecked Sendable {
             }
         }
 
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             // Xcode Connected-Device Support — symbols pulled down when an iOS
             // device is plugged in.  Opt-in: re-downloads when a device is next
             // connected, which is a no-op for anyone who isn't actively
             // developing on physical hardware.
             let coreDeviceURL = userHomeURL.appendingPathComponent("Library/Developer/CoreDevice", isDirectory: true)
             var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: coreDeviceURL.path, isDirectory: &isDir) {
+            if scanFileExists(atPath: coreDeviceURL.path, isDirectory: &isDir) {
                 let stats = directoryStats(at: coreDeviceURL)
                 if stats.bytes > 0 {
                     items.append(CleanItem(
@@ -1325,16 +1480,31 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans for residual support and cache folders belonging to apps no longer installed.
     func scanOrphanedData(installedApps: [StorageScanner.InstalledApp] = []) -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanOrphanedData(installedApps: installedApps) } }
         // Collect known installed bundle IDs and app names (lowercase for comparison)
         var knownBundleIds: Set<String> = []
         var knownNames: Set<String> = []
 
         let appRoots = StorageScanner.installedAppRoots()
         let scanner = StorageScanner(fileManager: fileManager)
-        let appsToInspect = installedApps.isEmpty ? appRoots.flatMap { scanner.appURLs(under: $0) }.map { url in
-            let info = scanner.readInfo(at: url)
-            return StorageScanner.InstalledApp(bundleId: info.bundleId, name: info.name, url: url, groupContainers: info.applicationGroups)
-        } : installedApps
+        var appsToInspect = installedApps
+        if installedApps.isEmpty {
+            for root in appRoots {
+                if scanShouldStop() { return [] }
+                let subpaths = (try? scanSubpaths(at: root)) ?? []
+                for subpath in subpaths where subpath.hasSuffix(".app") {
+                    if scanShouldStop() { return [] }
+                    let url = root.appendingPathComponent(subpath)
+                    guard scanAllows(url.appendingPathComponent("Contents/Info.plist")) else { markScanIncomplete(); continue }
+                    let info = scanner.readInfo(at: url)
+                    guard info.bundleId != nil else { markScanIncomplete(); continue }
+                    appsToInspect.append(StorageScanner.InstalledApp(bundleId: info.bundleId, name: info.name,
+                        url: url, groupContainers: info.applicationGroups))
+                }
+            }
+            // An incomplete app inventory cannot establish that an app was uninstalled.
+            guard Self.scanContext?.incomplete != true else { return [] }
+        }
 
         for app in appsToInspect {
             if let bid = app.bundleId {
@@ -1349,11 +1519,11 @@ final class DiskCleaner: @unchecked Sendable {
         var items: [CleanItem] = []
 
         // Inspect Containers
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let containersURL = userHomeURL.appendingPathComponent("Library/Containers", isDirectory: true)
-            if let contents = try? fileManager.contentsOfDirectory(at: containersURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            if let contents = try? scanContentsOfDirectory(at: containersURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
                 for url in contents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = url.lastPathComponent
                     // Skip Apple system containers
                     if name.hasPrefix("com.apple.") || isHogHunterIdentifier(name) { continue }
@@ -1379,16 +1549,20 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // Inspect Application Support
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let appSupportURL = userHomeURL.appendingPathComponent("Library/Application Support", isDirectory: true)
-            if let contents = try? fileManager.contentsOfDirectory(at: appSupportURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            if let contents = try? scanContentsOfDirectory(at: appSupportURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
                 for url in contents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = url.lastPathComponent
                     if isAppleOrSystemFolder(name) || isHogHunterIdentifier(name) { continue }
                     if Self.isSharedVendorContainer(name) { continue }
                     if knownBundleIds.contains(name.lowercased()) || knownNames.contains(name.lowercased()) { continue }
-                    let childNames = (try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.map(\.lastPathComponent) ?? []
+                    // An unread installed-product child must never become an orphan suggestion.
+                    // Completeness belongs to this folder, not an earlier category target.
+                    guard let children = try? scanContentsOfDirectory(at: url, includingPropertiesForKeys: nil,
+                        options: [.skipsHiddenFiles], requireComplete: true) else { continue }
+                    let childNames = children.map(\.lastPathComponent)
                     if Self.holdsInstalledProduct(childNames: childNames, knownBundleIds: knownBundleIds, knownNames: knownNames) { continue }
 
                     let stats = directoryStats(at: url)
@@ -1411,11 +1585,11 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // Inspect Saved Application State
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let savedStateURL = userHomeURL.appendingPathComponent("Library/Saved Application State", isDirectory: true)
-            if let contents = try? fileManager.contentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            if let contents = try? scanContentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
                 for url in contents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = url.lastPathComponent
                     let bundleId = name.replacingOccurrences(of: ".savedState", with: "")
                     if bundleId.hasPrefix("com.apple.") || isHogHunterIdentifier(bundleId) { continue }
@@ -1446,14 +1620,15 @@ final class DiskCleaner: @unchecked Sendable {
     /// Scans for stale AI agent transcripts (>7 days) across Gemini/Antigravity, Grok, Codex,
     /// stale BotFleet update installers, and old AI model temporary caches.
     func scanAIArtifacts() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanAIArtifacts() } }
         var items: [CleanItem] = []
         let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
 
         // 1. Antigravity brain sessions (~/.gemini/antigravity/brain)
         let brainURL = userHomeURL.appendingPathComponent(".gemini/antigravity/brain", isDirectory: true)
-        if let brainContents = try? fileManager.contentsOfDirectory(at: brainURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+        if let brainContents = try? scanContentsOfDirectory(at: brainURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
             for folderURL in brainContents {
-                if Task.isCancelled { break }
+                if scanShouldStop() { break }
                 let name = folderURL.lastPathComponent
                 if name == "tempmediaStorage" { continue }
                 guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
@@ -1462,7 +1637,7 @@ final class DiskCleaner: @unchecked Sendable {
                       modDate < sevenDaysAgo else { continue }
 
                 let stats = directoryStats(at: folderURL)
-                guard stats.bytes > 0 else { continue }
+                guard !stats.isApproximate, stats.bytes > 0 else { continue }
                 items.append(CleanItem(
                     category: .aiArtifacts,
                     title: "Antigravity Session (\(name.prefix(8)))",
@@ -1479,16 +1654,16 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 2. Grok sessions (~/.grok/sessions)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let grokURL = userHomeURL.appendingPathComponent(".grok/sessions", isDirectory: true)
-            if let grokContents = try? fileManager.contentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+            if let grokContents = try? scanContentsOfDirectory(at: grokURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
                 for folderURL in grokContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     guard let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey]),
                           let modDate = values.contentModificationDate,
                           modDate < sevenDaysAgo else { continue }
                     let stats = directoryStats(at: folderURL)
-                    guard stats.bytes > 0 else { continue }
+                    guard !stats.isApproximate, stats.bytes > 0 else { continue }
                     items.append(CleanItem(
                         category: .aiArtifacts,
                         title: "Grok Session (\(folderURL.lastPathComponent.prefix(8)))",
@@ -1506,13 +1681,13 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 3. Codex archived sessions (~/.codex/archived_sessions)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let codexURL = userHomeURL.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
-            if let codexContents = try? fileManager.contentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+            if let codexContents = try? scanContentsOfDirectory(at: codexURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
                 for fileURL in codexContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let stats = directoryStats(at: fileURL)
-                    guard stats.bytes > 0 else { continue }
+                    guard !stats.isApproximate, stats.bytes > 0 else { continue }
                     items.append(CleanItem(
                         category: .aiArtifacts,
                         title: "Codex Archived Session (\(fileURL.lastPathComponent.prefix(16)))",
@@ -1530,14 +1705,14 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 4. Stale BotFleet update installers & temporary downloads (~/.BotFleet.update-*)
-        if !Task.isCancelled {
-            if let homeContents = try? fileManager.contentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+        if !scanShouldStop() {
+            if let homeContents = try? scanContentsOfDirectory(at: userHomeURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
                 for url in homeContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = url.lastPathComponent
                     if name.hasPrefix(".BotFleet.update-") {
                         let stats = directoryStats(at: url)
-                        guard stats.bytes > 0 else { continue }
+                        guard !stats.isApproximate, stats.bytes > 0 else { continue }
                         items.append(CleanItem(
                             category: .aiArtifacts,
                             title: name,
@@ -1556,15 +1731,15 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 5. Abandoned BotFleet update/rollback node_modules (~/apps/.botfleet-server.node_modules.*)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let appsURL = userHomeURL.appendingPathComponent("apps", isDirectory: true)
-            if let appsContents = try? fileManager.contentsOfDirectory(at: appsURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+            if let appsContents = try? scanContentsOfDirectory(at: appsURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
                 for url in appsContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = url.lastPathComponent
                     if name.hasPrefix(".botfleet-server.node_modules.") {
                         let stats = directoryStats(at: url)
-                        guard stats.bytes > 0 else { continue }
+                        guard !stats.isApproximate, stats.bytes > 0 else { continue }
                         // A fresh rollback may still be needed: the new copy
                         // gets a day to prove itself before the old one is listed.
                         if let modified = stats.lastModified,
@@ -1596,15 +1771,15 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 6. Rotated BotFleet agent transcript logs (~/.botfleet/native/*.ndjson.1)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let bfNativeURL = userHomeURL.appendingPathComponent(".botfleet/native", isDirectory: true)
-            if let nativeContents = try? fileManager.contentsOfDirectory(at: bfNativeURL, includingPropertiesForKeys: [.fileSizeKey], options: []) {
+            if let nativeContents = try? scanContentsOfDirectory(at: bfNativeURL, includingPropertiesForKeys: [.fileSizeKey], options: []) {
                 for url in nativeContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = url.lastPathComponent
                     if name.hasSuffix(".ndjson.1") {
                         let stats = directoryStats(at: url)
-                        guard stats.bytes > 0 else { continue }
+                        guard !stats.isApproximate, stats.bytes > 0 else { continue }
                         items.append(CleanItem(
                             category: .aiArtifacts,
                             title: name,
@@ -1626,18 +1801,19 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans local AI model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper.
     func scanLocalAIModels() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanLocalAIModels() } }
         var items: [CleanItem] = []
         let home = userHomeURL
 
         // 1. Ollama Models (~/.ollama/models)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let manifestsURL = home.appendingPathComponent(".ollama/models/manifests", isDirectory: true)
-            if let manifestContents = try? fileManager.subpathsOfDirectory(atPath: manifestsURL.path) {
+            if let manifestContents = try? scanSubpaths(at: manifestsURL) {
                 for subpath in manifestContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let fileURL = manifestsURL.appendingPathComponent(subpath)
                     var isDir: ObjCBool = false
-                    if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
+                    if scanFileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
                         let name = subpath.replacingOccurrences(of: "registry.ollama.ai/", with: "")
                         let stats = directoryStats(at: fileURL)
                         items.append(CleanItem(
@@ -1646,7 +1822,8 @@ final class DiskCleaner: @unchecked Sendable {
                             subtitle: "~/.ollama/models/manifests/\(subpath)",
                             url: fileURL,
                             bytes: stats.bytes,
-                            fileCount: 1,
+                            fileCount: stats.fileCount,
+                            isApproximate: stats.isApproximate,
                             lastModified: stats.lastModified,
                             isSelected: false,
                             detail: "Ollama Model Manifest"
@@ -1656,9 +1833,9 @@ final class DiskCleaner: @unchecked Sendable {
             }
 
             let blobsURL = home.appendingPathComponent(".ollama/models/blobs", isDirectory: true)
-            if let blobContents = try? fileManager.contentsOfDirectory(at: blobsURL, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) {
+            if let blobContents = try? scanContentsOfDirectory(at: blobsURL, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) {
                 for blobURL in blobContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let stats = directoryStats(at: blobURL)
                     guard stats.bytes >= 10_000_000 else { continue }
                     items.append(CleanItem(
@@ -1667,7 +1844,8 @@ final class DiskCleaner: @unchecked Sendable {
                         subtitle: "~/.ollama/models/blobs/\(blobURL.lastPathComponent)",
                         url: blobURL,
                         bytes: stats.bytes,
-                        fileCount: 1,
+                        fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
                         lastModified: stats.lastModified,
                         isSelected: false,
                         detail: "Ollama Model Weights (\(stats.isApproximate ? "at least " : "")\(HogFormat.memory(stats.bytes)))"
@@ -1677,11 +1855,11 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 2. Hugging Face Hub Models (~/.cache/huggingface/hub)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let hfURL = home.appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
-            if let hfContents = try? fileManager.contentsOfDirectory(at: hfURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+            if let hfContents = try? scanContentsOfDirectory(at: hfURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
                 for repoURL in hfContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let name = repoURL.lastPathComponent
                     guard name.hasPrefix("models--") else { continue }
                     let readableName = name.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/")
@@ -1706,11 +1884,11 @@ final class DiskCleaner: @unchecked Sendable {
         // 3. LM Studio Models (~/.cache/lm-studio/models and ~/.lmstudio/models)
         let lmStudioPaths = [".cache/lm-studio/models", ".lmstudio/models"]
         for lmPath in lmStudioPaths {
-            if Task.isCancelled { break }
+            if scanShouldStop() { break }
             let lmURL = home.appendingPathComponent(lmPath, isDirectory: true)
-            if let lmContents = try? fileManager.contentsOfDirectory(at: lmURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
+            if let lmContents = try? scanContentsOfDirectory(at: lmURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
                 for modelURL in lmContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let stats = directoryStats(at: modelURL)
                     guard stats.bytes > 0 else { continue }
                     items.append(CleanItem(
@@ -1730,11 +1908,11 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         // 4. Whisper Models (~/.cache/whisper)
-        if !Task.isCancelled {
+        if !scanShouldStop() {
             let whisperURL = home.appendingPathComponent(".cache/whisper", isDirectory: true)
-            if let whisperContents = try? fileManager.contentsOfDirectory(at: whisperURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
+            if let whisperContents = try? scanContentsOfDirectory(at: whisperURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
                 for modelURL in whisperContents {
-                    if Task.isCancelled { break }
+                    if scanShouldStop() { break }
                     let stats = directoryStats(at: modelURL)
                     guard stats.bytes > 0 else { continue }
                     items.append(CleanItem(
@@ -1764,6 +1942,7 @@ final class DiskCleaner: @unchecked Sendable {
 
     /// Scans user folders (Downloads, Documents, Desktop) for files >100 MB or untouched >6 months (>=20 MB).
     func scanLargeAndOldFiles() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanLargeAndOldFiles() } }
         var items: [CleanItem] = []
         let searchDirectories = ["Downloads", "Documents", "Desktop"]
         let sixMonthsAgo = Calendar.current.date(byAdding: .month, value: -6, to: Date()) ?? Date()
@@ -1781,19 +1960,23 @@ final class DiskCleaner: @unchecked Sendable {
         ]
 
         for folder in searchDirectories {
-            if Task.isCancelled { break }
+            if scanShouldStop() { break }
             let dirURL = userHomeURL.appendingPathComponent(folder, isDirectory: true)
-            guard let enumerator = fileManager.enumerator(
+            guard scanAllows(dirURL), let enumerator = fileManager.enumerator(
                 at: dirURL,
-                includingPropertiesForKeys: Array(keys),
+                includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
             ) else { continue }
 
             var count = 0
+            let deadline = scanUptime() + (Self.scanContext?.depth.targetDuration ?? 0.15)
             for case let fileURL as URL in enumerator {
-                if Task.isCancelled { break }
+                if scanShouldStop() { break }
                 count += 1
-                if count > 20_000 { break } // Protect against runaway directories
+                if count > 20_000 || scanUptime() >= deadline { markScanIncomplete(); break }
+                Self.scanContext?.remaining -= 1
+                guard scanAllows(fileURL) else { enumerator.skipDescendants(); continue }
+                if enumerator.level >= (Self.scanContext?.depth.maxDepth ?? 10) { markScanIncomplete(); enumerator.skipDescendants() }
 
                 // Never scan into code repositories or package/build trees
                 if [".git", "node_modules", ".build", "Pods", ".venv", "venv", ".next", ".cache", "DerivedData"].contains(fileURL.lastPathComponent) {
@@ -1843,9 +2026,10 @@ final class DiskCleaner: @unchecked Sendable {
     /// backups (`state.vscdb.bak-*`) older than 7 days.  The live `state.vscdb`
     /// is never listed and never touched.
     func scanStaleBackups() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanStaleBackups() } }
         let backupDir = userHomeURL
             .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
-        guard let contents = try? fileManager.contentsOfDirectory(
+        guard let contents = try? scanContentsOfDirectory(
             at: backupDir,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
@@ -1856,7 +2040,7 @@ final class DiskCleaner: @unchecked Sendable {
         let staleCutoff = Date().addingTimeInterval(-7 * 24 * 3600)
         var items: [CleanItem] = []
         for url in contents {
-            if Task.isCancelled { break }
+            if scanShouldStop() { break }
             let name = url.lastPathComponent
             // The live database has no .bak- suffix; only versioned backups match.
             guard name.hasPrefix("state.vscdb.bak-") else { continue }
@@ -1908,6 +2092,11 @@ final class DiskCleaner: @unchecked Sendable {
     /// before it.
     static let cancelledMessage = "Cleanup cancelled"
 
+    static func freeSpaceChange(before: UInt64?, after: UInt64?) -> Int64? {
+        guard let before, let after, before <= UInt64(Int64.max), after <= UInt64(Int64.max) else { return nil }
+        return Int64(after) - Int64(before)
+    }
+
     /// Deletes the selected items safely.  Non-trash items are sent to the macOS Trash (`trashItem`).
     /// Trash items are removed permanently from `~/.Trash/`.
     /// When `createSnapshot` is true, takes an APFS local snapshot first.
@@ -1918,6 +2107,7 @@ final class DiskCleaner: @unchecked Sendable {
                createSnapshot: Bool = true,
                exclusions: CleanerExclusions = CleanerExclusions.load(),
                progress: ((Double, String) -> Void)? = nil) async -> CleanResult {
+        let freeBefore = freeBytesProvider()
         var reclaimed: UInt64 = 0
         var removedCount = 0
         var errors: [String] = []
@@ -1943,7 +2133,8 @@ final class DiskCleaner: @unchecked Sendable {
                 snapshotName: snapshot,
                 tier: tier,
                 removedItemTitles: removedTitles,
-                removedCategoryIds: removedCategoryIds
+                removedCategoryIds: removedCategoryIds,
+                observedFreeBytesChange: Self.freeSpaceChange(before: freeBefore, after: freeBytesProvider())
             )
         }
 
@@ -2077,21 +2268,23 @@ final class DiskCleaner: @unchecked Sendable {
                     // again here would let a swapped link redirect the clean to
                     // a target the gate above never approved.
                     var trashedChild = false
+                    var childBytes: UInt64 = 0
                     if linkTarget.path != item.url.path, fileManager.fileExists(atPath: linkTarget.path) {
                         if let contents = try? fileManager.contentsOfDirectory(at: linkTarget, includingPropertiesForKeys: nil, options: []) {
                             for child in contents {
                                 let checkURL = URL(fileURLWithPath: denormalizedCleanPath(child.path))
                                 guard !exclusions.isPathExcluded(checkURL.path),
                                       isSafeToDelete(url: checkURL, category: item.category) else { continue }
-                                var trashedURL: NSURL?
-                                if (try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)) != nil {
+                                let estimatedBytes = estimatedBytesForMovingEntry(at: child)
+                                if (try? moveToTrash(child)) != nil {
                                     trashedChild = true
+                                    childBytes &+= estimatedBytes
                                 }
                             }
                         }
                     }
                     if trashedChild {
-                        reclaimed &+= item.bytes
+                        reclaimed &+= childBytes
                         removedCount += 1
                         noteSuccess(item)
                     } else {
@@ -2101,11 +2294,19 @@ final class DiskCleaner: @unchecked Sendable {
                     // Aggregate simulator devices item: trash child devices individually so the primary iOS 27
                     // simulator is preserved unless explicitly selected as its own item in activeItems.
                     let simDevicesURL = item.url
-                    let deviceMetas = scanSimulatorDevices(at: simDevicesURL)
+                    // Preservation depends on a complete identity inventory, not complete sizes.
+                    // A large primary's partial size must not block cleaning other devices.
+                    let deviceMetas = scanSimulatorDevices(at: simDevicesURL, measureSizes: false)
+                    guard !deviceMetas.isEmpty else {
+                        errors.append("Simulator device inventory is incomplete; no devices were removed")
+                        continue
+                    }
                     let primary = primaryIOS27Simulator(in: deviceMetas)
                     let primaryPath = primary?.url.standardizedFileURL.path
                     let primaryAlsoSelected = primaryPath != nil && activeItems.contains { $0.url.standardizedFileURL.path == primaryPath }
 
+                    var simulatorChildrenMoved = 0
+                    var simulatorBytesMoved: UInt64 = 0
                     if let children = try? fileManager.contentsOfDirectory(at: simDevicesURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                         for child in children {
                             let childPath = child.standardizedFileURL.path
@@ -2116,18 +2317,23 @@ final class DiskCleaner: @unchecked Sendable {
                                 continue
                             }
                             if isSafeToDelete(url: child, category: item.category) {
-                                var trashedURL: NSURL?
-                                try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)
+                                let estimatedBytes = estimatedBytesForMovingEntry(at: child)
+                                do {
+                                    try moveToTrash(child)
+                                    simulatorChildrenMoved += 1
+                                    simulatorBytesMoved &+= estimatedBytes
+                                } catch { errors.append("A simulator device could not be moved to Trash") }
                             }
                         }
                     }
-                    reclaimed &+= item.bytes
-                    removedCount += 1
-                    noteSuccess(item)
+                    if simulatorChildrenMoved > 0 {
+                        reclaimed &+= simulatorBytesMoved
+                        removedCount += 1
+                        noteSuccess(item)
+                    }
                 } else {
                     // Safe removal: move to macOS Trash
-                    var trashedURL: NSURL?
-                    try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
+                    try moveToTrash(item.url)
                     reclaimed &+= item.bytes
                     removedCount += 1
                     noteSuccess(item)
@@ -2309,11 +2515,19 @@ final class DiskCleaner: @unchecked Sendable {
         }
     }
 
+    /// Moving a child link moves the link itself, leaving its target untouched.
+    /// Zero is a conservative estimate for that entry; never credit the target tree.
+    private func estimatedBytesForMovingEntry(at url: URL) -> UInt64 {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT != S_IFLNK else { return 0 }
+        return directoryStats(at: url).bytes
+    }
+
     // MARK: - Directory Stats Helper
 
     /// Allocated bytes, file count, and last modification date of a directory
-    /// or file.  `isApproximate` is true when the walk hit `fileCap`, so
-    /// `bytes` is a lower bound ("at least N"), never an exact size.
+    /// or file.  Any depth, entry, time, cancellation, or access limit marks
+    /// `bytes` as a lower bound and leaves age unknown.
     struct DirectoryStats: Sendable {
         var bytes: UInt64
         var fileCount: Int
@@ -2321,62 +2535,67 @@ final class DiskCleaner: @unchecked Sendable {
         var isApproximate: Bool = false
     }
 
-    /// Computes allocated bytes, file count, and last modification date of a directory or file.
-    func directoryStats(at url: URL, maxDepth: Int = 10, fileCap: Int = 25_000) -> DirectoryStats {
-        var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else {
-            return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
+    /// Counts files and directories against the entry cap, including empty directories.
+    /// Budgets are checked between filesystem calls, not kernel deadlines.
+    func directoryStats(at url: URL, maxDepth: Int = 32, fileCap: Int = 25_000) -> DirectoryStats {
+        let context = Self.scanContext
+        let depth = min(maxDepth, context?.depth.maxDepth ?? maxDepth)
+        let memoKey = "\(url.path)|\(depth)|\(fileCap)"
+        if let cached = context?.memo[memoKey] { return cached }
+        var stats = DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
+        func partial() -> DirectoryStats {
+            markScanIncomplete()
+            stats.isApproximate = true
+            // A visited prefix cannot prove that the entire target is old.
+            stats.lastModified = nil
+            return stats
         }
-
-        let keys: Set<URLResourceKey> = [
-            .fileAllocatedSizeKey,
-            .fileSizeKey,
-            .isRegularFileKey,
-            .isDirectoryKey,
-            .contentModificationDateKey
-        ]
-
-        if !isDir.boolValue {
-            guard let values = try? url.resourceValues(forKeys: keys) else { return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil) }
-            let allocated = values.fileAllocatedSize ?? 0
-            let logical = values.fileSize ?? 0
-            let bytes = allocated > 0 ? UInt64(allocated) : UInt64(logical)
-            return DirectoryStats(bytes: bytes, fileCount: 1, lastModified: values.contentModificationDate)
-        }
-
-        guard let enumerator = fileManager.enumerator(
-            at: url,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsPackageDescendants]
-        ) else {
-            return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
-        }
-
-        var totalBytes: UInt64 = 0
-        var totalCount = 0
-        var latestDate: Date?
-        var hitCap = false
-
-        for case let fileURL as URL in enumerator {
-            if Task.isCancelled { return DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil) }
-            guard let values = try? fileURL.resourceValues(forKeys: keys) else { continue }
-            if values.isDirectory == true { continue }
-
-            totalCount += 1
-            if totalCount > fileCap { hitCap = true; break }
-
-            let allocated = values.fileAllocatedSize ?? 0
-            let logical = values.fileSize ?? 0
-            totalBytes &+= allocated > 0 ? UInt64(allocated) : UInt64(logical)
-
-            if let date = values.contentModificationDate {
-                if latestDate == nil || date > latestDate! {
-                    latestDate = date
-                }
+        guard let measuredURL = scanURL(url) else { return partial() }
+        let deadline = scanUptime() + (context?.depth.targetDuration ?? 0.15)
+        let keys: Set<URLResourceKey> = [.fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey,
+            .isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]
+        guard let root = try? measuredURL.resourceValues(forKeys: keys) else { return partial() }
+        func add(_ values: URLResourceValues) {
+            let allocated = max(0, values.fileAllocatedSize ?? 0)
+            let logical = max(0, values.fileSize ?? 0)
+            stats.bytes &+= UInt64(allocated > 0 ? allocated : logical)
+            stats.fileCount += 1
+            if let date = values.contentModificationDate, stats.lastModified == nil || date > stats.lastModified! {
+                stats.lastModified = date
             }
         }
-
-        return DirectoryStats(bytes: totalBytes, fileCount: totalCount, lastModified: latestDate, isApproximate: hitCap)
+        if root.isDirectory != true {
+            add(root)
+            context?.memo[memoKey] = stats
+            return stats
+        }
+        stats.lastModified = root.contentModificationDate
+        var failed = false
+        guard let enumerator = fileManager.enumerator(at: measuredURL, includingPropertiesForKeys: nil,
+            options: [], errorHandler: { _, _ in failed = true; return true }) else { return partial() }
+        var visited = 0
+        while !scanShouldStop() {
+            guard visited < fileCap, scanUptime() < deadline else { return partial() }
+            guard let child = enumerator.nextObject() as? URL else {
+                if failed || stats.isApproximate { return partial() }
+                context?.memo[memoKey] = stats
+                return stats
+            }
+            visited += 1
+            context?.remaining -= 1
+            guard scanAllows(child) else { failed = true; enumerator.skipDescendants(); continue }
+            guard let values = try? child.resourceValues(forKeys: keys) else { failed = true; continue }
+            if values.isDirectory == true {
+                if enumerator.level >= depth { stats.isApproximate = true; enumerator.skipDescendants() }
+                if let date = values.contentModificationDate, stats.lastModified == nil || date > stats.lastModified! {
+                    stats.lastModified = date
+                }
+                continue
+            }
+            if values.isSymbolicLink == true { failed = true; continue }
+            add(values)
+        }
+        return partial()
     }
 
     // MARK: - Simulator Device Inspection
@@ -2390,37 +2609,42 @@ final class DiskCleaner: @unchecked Sendable {
         let isIOS27: Bool
         let bytes: UInt64
         let fileCount: Int
+        var isApproximate: Bool = false
     }
 
     /// Scans individual simulator devices inside `CoreSimulator/Devices`.
-    func scanSimulatorDevices(at devicesURL: URL) -> [SimulatorDeviceInfo] {
-        guard let contents = try? fileManager.contentsOfDirectory(
+    func scanSimulatorDevices(at devicesURL: URL, measureSizes: Bool = true) -> [SimulatorDeviceInfo] {
+        guard let contents = try? scanContentsOfDirectory(
             at: devicesURL,
             includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
+            options: [.skipsHiddenFiles], requireComplete: true
         ) else {
             return []
         }
         var devices: [SimulatorDeviceInfo] = []
         for item in contents {
+            if scanShouldStop() { markScanIncomplete(); return [] }
             var isDir: ObjCBool = false
-            guard fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard scanFileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue else { continue }
             let plistURL = item.appendingPathComponent("device.plist")
-            guard fileManager.fileExists(atPath: plistURL.path) else { continue }
+            guard scanFileExists(atPath: plistURL.path) else { markScanIncomplete(); return [] }
 
             var name = item.lastPathComponent
             var runtime = ""
             var lastUsedAt: Date?
             var udid = item.lastPathComponent
 
-            if let data = try? Data(contentsOf: plistURL),
-               let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any] {
+            guard let data = try? Data(contentsOf: plistURL),
+                  let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
+                  let parsedRuntime = plist["runtime"] as? String, !parsedRuntime.isEmpty else {
+                markScanIncomplete()
+                return []
+            }
+            do {
                 if let parsedName = plist["name"] as? String, !parsedName.isEmpty {
                     name = parsedName
                 }
-                if let parsedRuntime = plist["runtime"] as? String {
-                    runtime = parsedRuntime
-                }
+                runtime = parsedRuntime
                 if let parsedUDID = plist["UDID"] as? String, !parsedUDID.isEmpty {
                     udid = parsedUDID
                 }
@@ -2439,7 +2663,8 @@ final class DiskCleaner: @unchecked Sendable {
             let isIOS27 = runtime.localizedCaseInsensitiveContains("iOS-27") ||
                           runtime.localizedCaseInsensitiveContains("iOS 27") ||
                           runtime.localizedCaseInsensitiveContains("iOS.27")
-            let stats = directoryStats(at: item)
+            let stats = measureSizes ? directoryStats(at: item)
+                : DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
             devices.append(SimulatorDeviceInfo(
                 url: item,
                 udid: udid,
@@ -2448,7 +2673,8 @@ final class DiskCleaner: @unchecked Sendable {
                 lastUsedAt: lastUsedAt,
                 isIOS27: isIOS27,
                 bytes: stats.bytes,
-                fileCount: stats.fileCount
+                fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate
             ))
         }
         return devices
