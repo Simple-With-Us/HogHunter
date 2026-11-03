@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ios-testflight.yml"
@@ -455,6 +456,49 @@ class ReleaseNotesTests(unittest.TestCase):
     def test_empty_range_still_names_a_reason_for_the_build(self):
         body = self.render(["Merge branch main", "wip"])["body"]
         self.assertIn("- Maintenance and reliability updates", body)
+
+
+@unittest.skipUnless(shutil.which("ditto"), "macOS archive extractor is unavailable")
+class XcodeGenInstallTests(unittest.TestCase):
+    def test_install_uses_fresh_roots_and_preserves_presets_on_rerun(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        start = workflow.index("      - name: Install xcodegen\n")
+        end = workflow.index("\n      #", start)
+        step = workflow[start:end]
+        script = "\n".join(line[10:] for line in step.splitlines() if line.startswith("          "))
+        with tempfile.TemporaryDirectory(prefix="hh-xcodegen-fixture-") as tmp:
+            root = Path(tmp)
+            archive = root / "fixture.zip"
+            with zipfile.ZipFile(archive, "w") as stream:
+                binary = zipfile.ZipInfo("xcodegen/bin/xcodegen")
+                binary.external_attr = 0o100755 << 16
+                stream.writestr(binary, "#!/bin/sh\nprintf 'Version: 2.46.0\\n'\n")
+                stream.writestr("xcodegen/share/xcodegen/SettingPresets/fixture.yml", "fixture: true\n")
+            stale = root / "xcodegen-2.46.0"
+            stale.mkdir()
+            (stale / "must-not-be-used").write_text("preserve")
+            stubs = root / "stubs"
+            stubs.mkdir()
+            curl = stubs / "curl"
+            curl.write_text('#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n'
+                            '  if [ "$1" = "--output" ]; then /bin/cp "$FIXTURE_ZIP" "$2"; exit; fi\n'
+                            '  shift\ndone\nexit 2\n')
+            curl.chmod(0o755)
+            path_file = root / "github-path"
+            env = dict(os.environ, RUNNER_TEMP=str(root), GITHUB_PATH=str(path_file),
+                       FIXTURE_ZIP=str(archive), PATH=str(stubs) + os.pathsep + os.environ["PATH"])
+            for _ in range(2):
+                result = subprocess.run(["/bin/bash", "-euo", "pipefail", "-c", script],
+                                        capture_output=True, text=True, env=env, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            paths = path_file.read_text().splitlines()
+            self.assertEqual(len(set(paths)), 2)
+            for value in paths:
+                installed = Path(value)
+                self.assertTrue((installed / "xcodegen").is_file())
+                self.assertTrue((installed.parent / "share/xcodegen/SettingPresets/fixture.yml").is_file())
+                self.assertNotEqual(installed.parent.parent, stale)
+            self.assertEqual((stale / "must-not-be-used").read_text(), "preserve")
 
 
 if __name__ == "__main__":
