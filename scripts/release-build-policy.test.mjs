@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync, mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {feedFloor, makePlan, selectPlan, validatePlan, isReleasePath, ReleasePending} from './release-build-policy.mjs';
 import {nextIncrementalBuild as next} from './ios-fleet/shared-build.mjs';
 const empty = {iosBuilds: [], macBuilds: [], complete: true};
@@ -73,4 +76,45 @@ test('published Sparkle floors fail closed without a numeric CFBundleVersion', (
   assert.equal(feedFloor('<sparkle:version>1004</sparkle:version><sparkle:version>1000</sparkle:version>'), '1004');
   assert.throws(() => feedFloor('<rss/>'), /missing/);
   assert.throws(() => feedFloor('<sparkle:version>1.0.214</sparkle:version>'), /malformed/);
+});
+
+test('the Mac scoped action exports planner aliases and reuses its staged notarization key', () => {
+  const mac = readFileSync(new URL('../.github/workflows/mac-release.yml', import.meta.url), 'utf8');
+  const credentials = mac.split('      - name: Load ASC credentials (Fleet-OPS prod /asc)')[1].split('      - name:')[0];
+  assert.ok(credentials.includes('asc-mode: "true"'));
+  assert.ok(credentials.includes('service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}'));
+  assert.ok(mac.includes('NOTARY_KEY_PATH: ${{ env.ASC_KEY_PATH }}'));
+  const gate = mac.split('      - name: Decide whether this run can publish')[1].split('      - name:')[0];
+  for (const name of ['APPLE_API_KEY_ID', 'APPLE_API_ISSUER_ID', 'APPLE_API_KEY_P8_BASE64', 'ASC_KEY_PATH']) assert.ok(gate.includes(name));
+  assert.doesNotMatch(gate, /\bASC_KEY_P8\b/);
+});
+
+test('an existing published release fails without upload, replacement or latest mutation', () => {
+  const mac = readFileSync(new URL('../.github/workflows/mac-release.yml', import.meta.url), 'utf8');
+  const body = mac.split('      - name: Publish the GitHub release')[1].split('        run: |\n')[1].split('\n      - name:')[0]
+    .split('\n').map(line => line.replace(/^          /, '')).join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'hh-release-publish-fixture-'));
+  try {
+    const calls = join(dir, 'calls');
+    writeFileSync(join(dir, 'gh'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n[ "$1" = release ] && [ "$2" = view ] && exit 0\nexit 97\n', {mode: 0o700});
+    const result = spawnSync('bash', ['-eu', '-c', body], {encoding: 'utf8', env: {PATH: `${dir}:${process.env.PATH}`, CALLS: calls, TAG: 'v0.1.0-build.202610301657'}});
+    assert.equal(result.status, 1);
+    assert.equal(readFileSync(calls, 'utf8').trim(), 'release view v0.1.0-build.202610301657');
+    assert.ok(result.stdout.includes('immutable'));
+    assert.ok(!mac.includes('--clobber'));
+    assert.ok(!mac.includes('gh release edit'));
+  } finally {rmSync(dir, {recursive: true, force: true});}
+});
+
+test('explicit paired uploads must match the published counter and marketing version while exports remain isolated', () => {
+  const script = readFileSync(new URL('./ios-fleet/ship-testflight.sh', import.meta.url), 'utf8');
+  const declaration = script.match(/assert_paired_release_identity\(\) \{[\s\S]*?\n\}/)[0];
+  const run = extra => spawnSync('bash', ['-eu', '-c', `${declaration}\nasc_next_shared_build() { printf '%s' "$EXPECTED"; }\nassert_paired_release_identity`], {
+    encoding: 'utf8', env: {PATH: process.env.PATH, BUILD_NUMBER_POLICY: 'paired-release', EXPORT_ONLY: '0', BUILD_NUM: '202610301657', EXPECTED: '202610301657', MARKETING: '0.1.0', FIXED_MARKETING: '0.1.0', ...extra}
+  });
+  assert.equal(run({}).status, 0);
+  assert.equal(run({BUILD_NUM: '202610301658'}).status, 1);
+  assert.equal(run({MARKETING: '1.0.214'}).status, 1);
+  assert.equal(run({EXPORT_ONLY: '1', BUILD_NUM: '202610301658', EXPECTED: ''}).status, 0);
+  assert.ok(script.indexOf('\nassert_paired_release_identity || die') < script.indexOf('xcrun altool --upload-package'));
 });

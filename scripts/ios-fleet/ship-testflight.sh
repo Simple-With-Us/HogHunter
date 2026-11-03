@@ -593,6 +593,13 @@ project_marketing_seq() {
 # shape is refused with a message naming it, never shipped or silently
 # dropped:  an App Store Connect build or feed floor above 999999999999
 # leaves no shippable build for this release.
+assert_paired_release_identity() {
+  [[ "${BUILD_NUMBER_POLICY:-}" == "paired-release" && "${EXPORT_ONLY:-0}" -ne 1 ]] || return 0
+  local published
+  published="$(asc_next_shared_build)" || return 1
+  [[ "$MARKETING" == "$FIXED_MARKETING" && "$BUILD_NUM" == "$published" ]]
+}
+
 asc_next_shared_build() {
   local out rc mac_id feed feed_xml max floor curl_err curl_stderr rev _plat _is_mac stamp
   command -v "$ASC_NODE" >/dev/null 2>&1 || return 1
@@ -1402,6 +1409,8 @@ sys.exit(0 if a>b else 1)' "$FIXED_MARKETING" "$_rel"; then
     fi
   fi
 fi
+
+assert_paired_release_identity || die "requested version/build does not match the published release source plan; nothing uploaded"
 
 # The project file and the shipped version must never disagree silently. The
 # version above is passed on the xcodebuild command line and overrides whatever
