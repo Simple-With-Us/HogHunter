@@ -3,6 +3,30 @@ import Darwin
 @testable import HogHunter
 
 final class MountedDriveTests: XCTestCase {
+    func testStorageBrowserIncludesInternalDiskWithoutExternalDrives() {
+        let rows = StorageDriveList.rows(boot: DiskSpace(freeBytes: 20, totalBytes: 100), external: [])
+        XCTAssertEqual(rows.map(\.path), ["/"])
+        XCTAssertEqual(rows.first?.name, "Internal")
+        XCTAssertEqual(rows.first?.usedPercent, 80)
+    }
+
+    func testStorageBrowserKeepsUnavailableInternalDiskVisible() {
+        let rows = StorageDriveList.rows(boot: nil, external: [])
+        XCTAssertEqual(rows.map(\.path), ["/"])
+        XCTAssertEqual(rows.first?.severity, .unavailable)
+        XCTAssertNil(rows.first?.availableBytes)
+    }
+
+    func testStorageBrowserDoesNotCountAPFSBootAliasesOrDuplicateMountsTwice() {
+        let backup = MountedDriveUsage(name: "Backup", path: "/Volumes/Backup", totalBytes: 100, availableBytes: 20)
+        let root = MountedDriveUsage(name: "Root", path: "/", totalBytes: 100, availableBytes: 20)
+        let data = MountedDriveUsage(name: "Data", path: "/System/Volumes/Data", totalBytes: 100, availableBytes: 20)
+        let rows = StorageDriveList.rows(boot: DiskSpace(freeBytes: 10, totalBytes: 100),
+                                         external: [root, backup, data, backup])
+        XCTAssertEqual(rows.map(\.path), ["/", "/Volumes/Backup"])
+        XCTAssertEqual(rows.first?.availableBytes, 10)
+    }
+
     func testCapacityNormalizationDoesNotInventMissingSpace() {
         let missing = MountedDriveUsage(name: "Backup", path: "/Volumes/Backup", totalBytes: 100, availableBytes: nil)
         XCTAssertNil(missing.usedPercent)
