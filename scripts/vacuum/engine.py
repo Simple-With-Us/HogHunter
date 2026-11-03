@@ -283,12 +283,32 @@ class VacuumEngine:
         record.overhead_duration_ms = max(0, elapsed_ms - sum(s.duration_ms for s in record.steps))
         record.finish(*args, **kwargs)
 
-    def _sample(self, record: RunRecord, dry_run: bool) -> dict[str, Any]:
+    @staticmethod
+    def _merge_resource_sample(record: RunRecord, incoming: StepResult) -> None:
+        existing = next((s for s in record.steps if s.step_id == "resource_sample"), None)
+        if existing is None:
+            record.steps.append(incoming)
+            return
+        existing.incomplete = existing.incomplete or incoming.incomplete
+        if incoming.status == StepStatus.FAILED:
+            existing.status = StepStatus.FAILED
+        existing.duration_ms += incoming.duration_ms
+        if incoming.reason and incoming.reason not in existing.reason.split(" | "):
+            existing.reason = " | ".join(filter(None, (existing.reason, incoming.reason)))
+
+    @staticmethod
+    def _sample_reason(sample: dict[str, Any], phase: str) -> str:
+        completeness = "complete" if sample.get("sample_complete", True) else "incomplete"
+        disk = "available" if sample.get("disk_sample_ok", True) else "unknown"
+        return f"{phase}: host observation {completeness}; disk reading {disk}"
+
+    def _sample(self, record: RunRecord, dry_run: bool, phase: str = "cleanup preflight") -> dict[str, Any]:
         sample = sample_mac()
-        if sample.get("sample_complete", True) is False:
-            record.steps.append(StepResult("resource_sample", "Check disk and memory", StepStatus.RAN,
-                                           reason="host observation incomplete; unavailable readings are unknown",
-                                           incomplete=True))
+        incomplete = sample.get("sample_complete", True) is False
+        if incomplete or any(s.step_id == "resource_sample" for s in record.steps):
+            self._merge_resource_sample(record, StepResult(
+                "resource_sample", "Check disk and memory", StepStatus.RAN,
+                reason=self._sample_reason(sample, phase), incomplete=incomplete))
             self._emit_partial(record, dry_run=dry_run)
         return sample
 
@@ -452,14 +472,15 @@ class VacuumEngine:
                 # critical shortage the disk does not have until the next tick lands.
                 if sample.get("disk_sample_ok", True):
                     rw_state["prev_disk_free_gb"] = sample.get("disk_free_gb")
-                record.steps.append(
+                self._merge_resource_sample(record,
                     StepResult(
                         "resource_sample",
                         "Check disk and memory",
                         StepStatus.RAN,
-                        reason=((_plural(len(hits), "threshold hit") if hits else "within limits")
-                                if sample.get("sample_complete", True) else
-                                "host observation incomplete; unavailable readings are unknown"),
+                        reason=self._sample_reason(sample, "watch check") + "; " +
+                               (_plural(len(hits), "threshold hit") if hits else
+                                "within limits" if sample.get("sample_complete", True) else
+                                "unavailable readings are unknown"),
                         incomplete=sample.get("sample_complete", True) is False,
                     )
                 )
@@ -476,7 +497,11 @@ class VacuumEngine:
                     if now - last_clean >= cooldown:
                         should_clean = True
                         pressure_record = self.run(TriggerKind.PRESSURE, pressure=True, band="full", dry_run=dry_run)
-                        record.steps.extend(pressure_record.steps)
+                        for step in pressure_record.steps:
+                            if step.step_id == "resource_sample":
+                                self._merge_resource_sample(record, step)
+                            else:
+                                record.steps.append(step)
                         self._emit_partial(record, dry_run=dry_run)
                         rw_state["last_clean_at"] = now
                         if not dry_run:
@@ -484,7 +509,7 @@ class VacuumEngine:
                             # cleanup.  Keeping it makes the status this same
                             # tick publishes report the shortage the run just
                             # resolved, so measure the disk again afterwards.
-                            after = self._sample(record, dry_run)
+                            after = self._sample(record, dry_run, phase="after cleanup")
                             if after.get("disk_sample_ok", True):
                                 rw_state["prev_disk_free_gb"] = after.get("disk_free_gb")
             self._finish_record(record, started, summary="watch tick")
