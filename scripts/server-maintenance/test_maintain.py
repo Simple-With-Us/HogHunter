@@ -4,6 +4,7 @@ import importlib.util
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -268,6 +269,24 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result['status'], 'ran')
         self.assertEqual(result['strategies'][0]['attempted_count'], 2)
         self.assertTrue(result['lock']['released'])
+
+    def test_buildx_identity_regex_is_anchored_against_overlapping_record_ids(self):
+        identity = 'abcdefghijklm'
+        self.tool.docker_candidates = lambda _: [identity]
+        self.tool.verify_local_builder = lambda: None
+        commands = []
+        self.tool.runner = lambda argv: (commands.append(argv) or 0, '')
+        result = self.tool.execute('run', ['docker-build-cache'], True)
+        self.assertEqual(result['status'], 'ran')
+        command = commands[0]
+        selectors = [command[i+1] for i, arg in enumerate(command[:-1]) if arg == '--filter']
+        self.assertIn('id=^' + identity + '$', selectors)
+        pattern = next(value[3:] for value in selectors if value.startswith('id='))
+        self.assertIsNotNone(re.search(pattern, identity))
+        for other in ('x'+identity, identity+'x', 'x'+identity+'x'):
+            self.assertIsNone(re.search(pattern, other))
+        for selector in ('until=168h', 'inuse=false', 'mutable=false', 'shared=false', 'type=regular'):
+            self.assertIn(selector, selectors)
 
     def test_uncertain_dispatch_stops_before_later_cleanup_and_retains_lock(self):
         cache = self.cache()

@@ -485,7 +485,7 @@ class Maintenance:
                             if strategy == "docker-build-cache":
                                 self.verify_local_builder()
                             argv = (DOCKER + ["image", "rm", identity] if strategy == "docker-images" else
-                                    BUILD + ["prune", "--force", "--filter", "id=" + identity,
+                                    BUILD + ["prune", "--force", "--filter", "id=^" + identity + "$",
                                              "--filter", "until=168h", "--filter", "inuse=false",
                                              "--filter", "mutable=false", "--filter", "shared=false",
                                              "--filter", "type=regular"])
