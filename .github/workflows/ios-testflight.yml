@@ -299,12 +299,11 @@ jobs:
       - name: Install xcodegen
         if: steps.gate.outputs.should_ship == '1'
         run: |
-          xcodegen_root="${RUNNER_TEMP}/xcodegen-2.46.0"
+          xcodegen_root="$(mktemp -d "${RUNNER_TEMP}/xcodegen-2.46.0.XXXXXX")"
           curl --fail --silent --show-error --location \
             https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
-            --output "${RUNNER_TEMP}/xcodegen-2.46.0.zip"
-          mkdir -p "$xcodegen_root"
-          ditto -xk "${RUNNER_TEMP}/xcodegen-2.46.0.zip" "$xcodegen_root"
+            --output "$xcodegen_root/xcodegen.zip"
+          ditto -xk "$xcodegen_root/xcodegen.zip" "$xcodegen_root"
           xcodegen_bin="$xcodegen_root/xcodegen/bin"
           test -x "$xcodegen_bin/xcodegen"
           test -d "$xcodegen_root/xcodegen/share/xcodegen/SettingPresets"
