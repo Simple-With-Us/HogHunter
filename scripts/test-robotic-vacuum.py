@@ -1053,7 +1053,8 @@ class TestMaintenanceTimingAndIncomplete(_EngineHome):
             with self.subTest(count=count):
                 report = _report(applied_count=count, actionable_count=count, applied_bytes=freed,
                                  scan_truncated=True, budget_exhausted=True, remaining_count=0)
-                with patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+                with patch.object(sys, "platform", "darwin"), \
+                     patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
                      patch("vacuum.engine._run_in_own_group", return_value=(0, report, "", False)):
                     record = self.engine.run_single_step("hoghunter_reclaim")
                 step = record.steps[0]
@@ -1067,6 +1068,48 @@ class TestMaintenanceTimingAndIncomplete(_EngineHome):
                 again = RunRecord.from_dict(json.loads(json.dumps(record.as_dict())))
                 self.assertTrue(again.steps[0].incomplete)
                 self.assertEqual(again.overhead_duration_ms, record.overhead_duration_ms)
+
+    def test_actual_cleaner_json_flags_and_observed_delta_feed_partial_outcome(self):
+        # Exercise the actual producer/consumer contract from merged main;
+        # all discovery, observations and apply are synthetic, with no scan.
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("hh208_cleaner_contract", str(REPO / "scripts/hoghunter-clean"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cleaner = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: cleaner}):
+            loader.exec_module(cleaner)
+        candidate = cleaner.Candidate("synthetic", str(self.home / "synthetic"), 9_000_000_000, "synthetic")
+        def scan(*args):
+            cleaner._SCAN_BUDGET_EXHAUSTED = True
+            return [candidate]
+        def apply(item):
+            item.applied = True
+        before = cleaner.Band(8, 99, 0, 0, False, cpu_idle_pct=100)
+        after = cleaner.Band(8.25, 99, 0, 0, False, cpu_idle_pct=100)
+        output = io.StringIO()
+        with patch.object(cleaner, "scan", side_effect=scan), \
+             patch.object(cleaner, "apply_candidate", side_effect=apply), \
+             patch.object(cleaner, "read_band", side_effect=[before, after]), \
+             patch.object(cleaner, "budget_left", return_value=600), \
+             patch.object(cleaner.shutil, "which", return_value=None), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cleaner.main(["--clean", "--json", "--budget-sec=600"]), 0)
+        produced = json.loads(output.getvalue())
+        self.assertEqual((produced["scan_truncated"], produced["budget_exhausted"], produced["budget_spent"]),
+                         (True, True, False))
+        self.assertEqual(produced["remaining_count"], 0)
+        self.assertEqual(produced["applied_bytes"], 9_000_000_000)
+        self.assertEqual(produced["disk_free_delta_gb"], 0.25)
+        self.fake_cleaner()
+        with patch.object(sys, "platform", "darwin"), \
+             patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+             patch("vacuum.engine._run_in_own_group", return_value=(0, output.getvalue(), "", False)):
+            record = self.engine.run_single_step("hoghunter_reclaim")
+        self.assertEqual(record.outcome, "partial")
+        self.assertEqual(record.bytes_freed, 268_435_456)
+        self.assertTrue(record.steps[0].incomplete)
+        self.assertIn("1 step(s) incomplete", record.summary)
 
     def test_mixed_failure_and_incomplete_keep_failure_and_byte_evidence(self):
         record = RunRecord("r", TriggerKind.FULL, started_at=1, steps=[
