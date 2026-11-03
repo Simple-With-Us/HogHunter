@@ -201,6 +201,35 @@ final class ServerMaintenanceControlTests: XCTestCase {
         XCTAssertTrue(legacySuccess.strategies[0].eligibilityIsKnown(in: "ran"))
     }
 
+    func testSuccessfulOverallStatusCannotContainUnknownOrFailedStrategyRows() throws {
+        for status in ["skipped", "planned", "ran"] {
+            let mode = status == "planned" ? "scan" : "run"
+            let selected: [ServerMaintenanceStrategy] = [.packageCache, .rotatedLogs]
+            let request = try PendingMaintenanceRequest(host: "server", mode: mode == "scan" ? .scan : .run, strategies: selected)
+            for rowStatus in ["partial", "failed"] {
+                for inventory in [false, true] {
+                    var malformed = try object(mode: mode, status: status)
+                    var rows = try XCTUnwrap(malformed["strategies"] as? [[String: Any]])
+                    rows.append(["id": "rotated-logs", "status": rowStatus, "inventory_complete": inventory,
+                                 "candidate_count": 0, "removed_count": 0, "attempted_count": 0])
+                    malformed["strategies"] = rows
+                    // The original successful/action row stays intact, so a
+                    // ran response fails specifically on the inconsistent row.
+                    XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(malformed)), for: request),
+                                         "\(status) must reject \(rowStatus), inventory_complete=\(inventory)")
+                }
+            }
+        }
+        // The reported skipped/no-eligible counterexample has complete ID
+        // coverage and matching zero totals, but no eligibility proof.
+        let request = try PendingMaintenanceRequest(host: "server", mode: .run, strategies: [.packageCache])
+        var unknown = try object(mode: "run", status: "skipped")
+        unknown["candidate_count"] = 0
+        unknown["strategies"] = [["id": "package-cache", "status": "partial", "inventory_complete": false,
+                                  "candidate_count": 0, "removed_count": 0, "attempted_count": 0]]
+        XCTAssertThrowsError(try ServerMaintenanceResult.parse(.init(exitCode: 0, output: encoded(unknown)), for: request))
+    }
+
     func testRawTransportAndBackendDiagnosticsNeverReachUI() async throws {
         let request = try PendingMaintenanceRequest(host: "server", mode: .scan, strategies: [.packageCache])
         let control = ServerMaintenanceControl(runner: { _, _ in
