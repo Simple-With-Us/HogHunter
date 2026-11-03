@@ -94,6 +94,8 @@ class VacuumStore:
     @staticmethod
     def is_lock_skip(raw: dict[str, Any]) -> bool:
         steps = raw.get("steps") or []
+        if any(s.get("status") == "failed" for s in steps) or int(raw.get("exit_code") or 0) != 0:
+            return False
         return raw.get("outcome") == "skipped" or (
             any(s.get("step_id") == "housekeeper_lock" and s.get("status") == "skipped" for s in steps)
             and not any(s.get("status") == "ran" for s in steps)

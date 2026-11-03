@@ -37,10 +37,10 @@ _PROBE_ONLY_STEPS = frozenset({"resource_sample"})
 def run_outcome(steps: list["StepResult"]) -> RunOutcome:
     """ok: no step failed.  partial: a step failed, and another step ran.  failed: a step failed and nothing
     else did any work (skips and the sampler do not count)."""
-    if any(s.step_id == "housekeeper_lock" and s.status == StepStatus.SKIPPED for s in steps):
-        if not any(s.status == StepStatus.RAN for s in steps):
-            return RunOutcome.SKIPPED
     if not any(s.status == StepStatus.FAILED for s in steps):
+        if any(s.step_id == "housekeeper_lock" and s.status == StepStatus.SKIPPED for s in steps):
+            if not any(s.status == StepStatus.RAN for s in steps):
+                return RunOutcome.SKIPPED
         return RunOutcome.OK
     worked = any(s.bytes_freed > 0 or (s.status == StepStatus.RAN and s.step_id not in _PROBE_ONLY_STEPS) for s in steps)
     return RunOutcome.PARTIAL if worked else RunOutcome.FAILED

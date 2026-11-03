@@ -115,40 +115,26 @@ def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bo
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
 
-    def kill_group() -> None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            try:
-                proc.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
+    def partial_text(value) -> str:
+        # TimeoutExpired carries bytes even when Popen(text=True).
+        if isinstance(value, bytes):
+            return value.decode(errors="replace")
+        return value or ""
 
     try:
         out, err = proc.communicate(timeout=timeout)
         work.unregister(proc)
         work.check()
         return proc.returncode, out or "", err or "", False
-    except subprocess.TimeoutExpired:
-        kill_group()
-        try:
-            out, err = proc.communicate(timeout=15)
-        except subprocess.TimeoutExpired:
-            out, err = "", ""
-        if proc.poll() is not None:
-            work.unregister(proc)
+    except subprocess.TimeoutExpired as exc:
+        # A second communicate() waits for pipe EOF, which an escaped session
+        # can hold indefinitely.  Keep the bytes already read and reap only
+        # the owned leader/group through the common cleanup path.
+        work.kill_group(proc)
         work.check()
-        return -1, out or "", err or "", True
+        return -1, partial_text(exc.output), partial_text(exc.stderr), True
     except BaseException:
-        kill_group()
-        try:
-            proc.communicate(timeout=15)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            pass
-        try:
-            work.unregister(proc)
-        except Exception:
-            pass  # the barrier retains ownership if shutdown is unproven
+        work.kill_group(proc)
         raise
 
 

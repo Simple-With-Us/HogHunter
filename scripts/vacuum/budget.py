@@ -89,7 +89,22 @@ def spawn(argv, **kwargs):
         return proc
 
 
+def close_output_pipes(proc) -> None:
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+
 def kill_group(proc) -> bool:
+    """Stop/reap the owned group without waiting for inherited pipe EOF.
+
+    A descendant that starts another session is outside this group's scope.
+    It may keep stdout open after the owned group stopped; that is not evidence
+    that this group is still alive, and must not wedge the lock barrier.
+    """
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -100,10 +115,11 @@ def kill_group(proc) -> bool:
         except OSError:
             pass
     try:
-        proc.communicate(timeout=5)
+        proc.wait(timeout=5)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return False
     if group_stopped(proc.pid):
+        close_output_pipes(proc)
         with _children_lock:
             _children.pop(proc.pid, None)
         return True

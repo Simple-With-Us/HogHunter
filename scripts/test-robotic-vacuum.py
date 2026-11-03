@@ -599,6 +599,14 @@ class TestRunOutcome(unittest.TestCase):
         self.assertEqual(run_outcome([_step("a", ran), _step("b", failed)]), RunOutcome.PARTIAL)
         self.assertEqual(run_outcome([_step("a", skipped), _step("b", failed)]), RunOutcome.FAILED)
         self.assertEqual(run_outcome([_step("b", failed)]), RunOutcome.FAILED)
+        lock_skip = _step("housekeeper_lock", skipped)
+        self.assertEqual(run_outcome([_step("b", failed), lock_skip]), RunOutcome.FAILED)
+        self.assertEqual(run_outcome([_step("a", ran), _step("b", failed), lock_skip]), RunOutcome.PARTIAL)
+        from vacuum.scheduler import run_skipped_for_lock
+        broken = RunRecord("broken", TriggerKind.FULL, started_at=1,
+                           steps=[_step("b", failed), lock_skip])
+        broken.finish()
+        self.assertFalse(run_skipped_for_lock(broken))
         # The sampler only reads the host.  It never counts as the work that rescued a run.
         self.assertEqual(run_outcome([_step("resource_sample", ran), _step("b", failed)]), RunOutcome.FAILED)
         self.assertEqual(
@@ -1212,18 +1220,35 @@ class TestRunInOwnGroupErrors(unittest.TestCase):
                 _run_in_own_group(["/bin/true"], 5)
         self.assertIn(unittest.mock.call(4242, signal.SIGKILL), killpg.call_args_list)
 
-    def test_a_missing_group_falls_back_to_killing_the_child(self):
+    def test_a_missing_group_is_reaped_without_a_second_pipe_read(self):
         from vacuum.engine import _run_in_own_group
 
         proc = Mock()
         proc.pid = 4242
-        proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("partial", "")]
+        proc.communicate.side_effect = subprocess.TimeoutExpired("x", 1, output=b"partial")
         with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch(
             "vacuum.engine.os.killpg", side_effect=ProcessLookupError
         ):
             code, out, _err, timed_out = _run_in_own_group(["/bin/true"], 1)
-        proc.kill.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=5)
         self.assertEqual((code, out, timed_out), (-1, "partial", True))
+
+    def test_timeout_does_not_retry_a_broken_pipe_read_or_leave_registry(self):
+        from vacuum import budget
+        from vacuum.engine import _run_in_own_group
+        for read_error in (OSError(errno.EIO, "read failed"), ValueError("closed pipe")):
+            proc = Mock()
+            proc.pid = 4242
+            proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1, output=b"partial"), read_error]
+            with patch("vacuum.engine.subprocess.Popen", return_value=proc), \
+                 patch("vacuum.engine.os.killpg"), \
+                 patch("vacuum.budget.group_stopped", return_value=True):
+                code, out, _err, timed_out = _run_in_own_group(["unused"], 1)
+            self.assertEqual((code, out, timed_out), (-1, "partial", True))
+            proc.communicate.assert_called_once_with(timeout=1)
+            proc.wait.assert_called_once_with(timeout=5)
+            self.assertNotIn(proc.pid, budget._children)
+
 
 
 class TestSpotlightStep(_EngineHome):

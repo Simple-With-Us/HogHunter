@@ -2770,6 +2770,67 @@ class TestBoundedWork(unittest.TestCase):
                     budget.spawn(["never-start"])
                 popen.assert_not_called()
 
+    def test_unproven_group_or_unreaped_leader_retains_ownership(self):
+        from vacuum import budget
+        for wait_error in (None, subprocess.TimeoutExpired("owned leader", 5)):
+            proc = unittest.mock.Mock()
+            proc.pid = 4242
+            if wait_error is not None:
+                proc.wait.side_effect = wait_error
+            with patch.object(budget, "_children", {proc.pid: proc}), \
+                 patch("vacuum.budget.os.killpg"), \
+                 patch("vacuum.budget.group_stopped", return_value=False):
+                self.assertFalse(budget.kill_group(proc))
+                self.assertIn(proc.pid, budget._children)
+                proc.stdout.close.assert_not_called()
+                proc.stderr.close.assert_not_called()
+
+    def test_detached_grandchild_holding_pipes_cannot_wedge_group_cleanup(self):
+        from vacuum import budget
+        import signal
+        # This fixture deliberately escapes containment.  The test owns and
+        # kills that session explicitly; production group cleanup cannot claim
+        # ownership of a descendant that has moved to a different session.
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "detached.pid"
+            escaped = ("import os,pathlib,time; os.setsid(); "
+                       "pathlib.Path(%r).write_text(str(os.getpid())); time.sleep(60)" % str(pid_file))
+            child = ("import subprocess,sys,time; "
+                     "subprocess.Popen([sys.executable,'-c',%r]); time.sleep(60)" % escaped)
+            leader = ("import subprocess,sys,time; "
+                      "subprocess.Popen([sys.executable,'-c',%r]); time.sleep(60)" % child)
+            proc = budget.spawn([sys.executable, "-c", leader], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+            detached_pid = None
+            try:
+                deadline = time.monotonic() + 5
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(pid_file.exists(), "detached fixture never became ready")
+                detached_pid = int(pid_file.read_text())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=.05)
+                started = time.monotonic()
+                self.assertTrue(budget.kill_group(proc))
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertNotIn(proc.pid, budget._children)
+                self.assertTrue(proc.stdout.closed)
+                self.assertTrue(proc.stderr.closed)
+                # The escaped session remains alive: pipe ownership is not a
+                # claim that it belonged to the group we just stopped.
+                os.kill(detached_pid, 0)
+                with budget.child_barrier():
+                    pass
+            finally:
+                budget.kill_group(proc)
+                if detached_pid is None and pid_file.exists():
+                    detached_pid = int(pid_file.read_text())
+                if detached_pid is not None:
+                    try:
+                        os.killpg(detached_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def test_leader_exit_cleans_child_and_grandchild_group(self):
         from vacuum import budget
         # Both descendants close inherited pipes; leader exit alone therefore
