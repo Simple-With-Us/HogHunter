@@ -7,8 +7,12 @@ the Clean widget lane must run.
 """
 
 import os
+import json
+import re
+import subprocess
 import struct
 import zlib
+from pathlib import Path
 
 # A solid-colour frame compresses to ~0.1% of its raw size; a rendered screen
 # is an order of magnitude above this.
@@ -19,12 +23,45 @@ WIDGET_APPEX_NAME = "HogHunterWidgets.appex"
 WIDGET_PREVIEW_LAUNCH_ARGS = ["-HogHunterSample", "-HogHunterWidgetPreview"]
 COLD_CLEAN_LAUNCH_ARGS = ["-HogHunterSample", "-HogHunterCleanConfirm"]
 WARM_CLEAN_LAUNCH_ARGS = ["-HogHunterSample"]
+CLEANER_LAUNCH_ARGS = ["-HogHunterSample", "-HogHunterCleaner"]
+PARTIAL_CLEANER_LAUNCH_ARGS = CLEANER_LAUNCH_ARGS + ["-HogHunterCleanerPartial"]
 
 REQUIRED_FRAMES = (
     "screenshots/ios/widget-small.png",
     "screenshots/ios/clean-cold-start.png",
-    "screenshots/ios/clean-deep-link.png",
+    "screenshots/ios/cleaner-quick.png",
+    "screenshots/ios/cleaner-partial.png",
 )
+
+
+def recognize_text(path):
+    """OCR the saved pixels, not application state or a launch flag."""
+    helper = Path(__file__).with_name("screenshot-text.swift")
+    result = subprocess.run(["swift", str(helper), str(path)], capture_output=True, text=True, timeout=90, check=True)
+    lines = json.loads(result.stdout)
+    if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+        raise ValueError("invalid screenshot OCR response")
+    return "\n".join(lines)
+
+
+def scene_problem(scene, text):
+    """Require the intended view and reject known OS/network alert overlays."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    for alert in ("open in", "the mac did not accept that", "looking for your mac", "not connected to your mac", "could not connect", "would like to", "don t allow", "local network access", "access your local network"):
+        if alert in normalized:
+            return "unexpected alert: " + alert
+    required = {
+        "widget-preview": ("hog hunter widget", "cpu", "ram", "clean mac"),
+        "clean-confirmation": ("clean this mac", "run safe clean", "cancel"),
+        "cleaner-quick": ("disk cleaner", "estimated to move or remove", "rescan", "clean selected"),
+        "cleaner-partial": ("disk cleaner", "partial scan", "lower bounds", "scan deeper", "clean selected"),
+        "cleaner-extreme": ("disk cleaner", "extreme clean", "estimated to move or remove", "rescan"),
+        "mac-settings": ("sampling display", "active refresh when open", "background refresh when closed", "menu bar shows", "show percentage in menu bar", "cpu rows show"),
+    }
+    if scene not in required:
+        raise ValueError("unknown screenshot scene: " + scene)
+    missing = [phrase for phrase in required[scene] if phrase not in normalized]
+    return "missing intended text: " + ", ".join(missing) if missing else None
 
 
 def clean_openurl_command(udid):

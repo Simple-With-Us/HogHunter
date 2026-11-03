@@ -44,7 +44,7 @@ jobs:
             find build-ios -name "*.app" -type d | head -20 || true
             exit 1
           fi
-          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
           echo "Found app: $APP_PATH"
 
       - name: Capture screenshots
@@ -214,39 +214,18 @@ jobs:
               return 1
             fi
             echo "Captured screenshots/${SAFE_NAME}.png"
-            # Once per run: the embedded widget, the cold-start confirm, and
-            # hoghunter://clean via simctl openurl.  Same checks as
-            # scripts/capture-app-screenshots.sh.
-            if [[ ! -f screenshots/clean-deep-link.png ]]; then
-              if ! find "$APP_PATH" -name 'HogHunterWidgets.appex' -type d | grep -q .; then
-                echo "ERROR: HogHunterWidgets.appex is missing from $APP_PATH"
-                return 1
-              fi
-              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterWidgetPreview || return 1
-              sleep 5
-              xcrun simctl io "$UDID" screenshot "screenshots/widget-small.png" || return 1
-              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterCleanConfirm || return 1
-              sleep 5
-              xcrun simctl io "$UDID" screenshot "screenshots/clean-cold-start.png" || return 1
-              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample || return 1
-              sleep 4
-              xcrun simctl openurl "$UDID" "hoghunter://clean" || return 1
-              sleep 3
-              xcrun simctl io "$UDID" screenshot "screenshots/clean-deep-link.png" || return 1
-              if ! python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_problem; paths = ["screenshots/widget-small.png", "screenshots/clean-cold-start.png", "screenshots/clean-deep-link.png"]; bad = [(p, screenshot_problem(p)) for p in paths]; bad = [(p, problem) for p, problem in bad if problem]; [print("ERROR: %s: %s" % item) for item in bad]; [print("OK %s" % p) for p in paths if p not in [item[0] for item in bad]]; sys.exit(1 if bad else 0)'; then
-                echo "ERROR: extra screenshot validation failed on $DEVICE_PATTERN"
-                return 1
-              fi
+            # Shared scene checks reject alert overlays; URL routing is reported
+            # separately and runs last on this simulator.
+            if [[ ! -f screenshots/deep-link-verification.json ]]; then
+              python3 scripts/ios_capture_scenes.py --udid "$UDID" --bundle-id "$BUNDLE_ID" \
+                --app-path "$APP_PATH" --output screenshots || return 1
             fi
             return 0
             }
             SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
             if ! capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
               echo "First capture attempt failed on $DEVICE_PATTERN; erasing simulator and retrying once"
-              rm -f screenshots/widget-small.png screenshots/clean-cold-start.png screenshots/clean-deep-link.png
+              rm -f screenshots/widget-small.png screenshots/clean-cold-start.png screenshots/clean-deep-link.png screenshots/cleaner-quick.png screenshots/cleaner-partial.png screenshots/scene-verification.json screenshots/deep-link-verification.json
               xcrun simctl shutdown "$UDID" || true
               xcrun simctl erase "$UDID"
               if ! capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
@@ -261,7 +240,7 @@ jobs:
           ls -lh screenshots/
           # Fail loudly when the set is incomplete: a green run must mean
           # three real device shots, never a partial set.
-          DEVICE_SHOTS=$(ls screenshots/iPhone_*.png 2>/dev/null | wc -l | tr -d ' ')
+          DEVICE_SHOTS=$(find screenshots -maxdepth 1 -type f -name 'iPhone_*.png' | wc -l | tr -d ' ')
           if [ "$DEVICE_SHOTS" -lt 3 ]; then
             echo "ERROR: only $DEVICE_SHOTS device screenshot(s) captured, need at least 3"
             exit 1

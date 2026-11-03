@@ -274,7 +274,13 @@ extension CompanionModel {
         isScreenshotMode = true
         cleanTier = extreme ? "extreme" : "standard"
         extremeAcknowledged = extreme
-        applyCleanReport(Self.sampleCleanReport(state: "ready", tier: cleanTier))
+        var report = Self.sampleCleanReport(state: "ready", tier: cleanTier)
+        report.scanDepth = "quick"
+        if arguments.contains("-HogHunterCleanerPartial") {
+            report.isPartial = true
+            report.incompleteCategories = ["Developer Junk"]
+        }
+        applyCleanReport(report)
     }
 
     // MARK: - Demo mode
