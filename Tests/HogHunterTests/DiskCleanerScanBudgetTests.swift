@@ -116,6 +116,36 @@ final class DiskCleanerScanBudgetTests: XCTestCase {
         XCTAssertTrue(cleaner.scanSimulatorDevices(at: base).isEmpty)
     }
 
+    func testSyntheticSnapshotRowsSurviveFilesystemPreflight() async {
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] },
+            listSnapshots: { _ in ["com.apple.TimeMachine.fixture"] }, purgeableProvider: { _ in 4096 })
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.apfsSnapshots]))
+        XCTAssertFalse(report.isPartial)
+        XCTAssertEqual(report.totalBytes, 4096)
+        XCTAssertEqual(report.categories.first?.items.count, 1)
+    }
+
+    func testUnavailableSnapshotListingIsMarkedPartial() async {
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] },
+            listSnapshots: { _ in nil }, purgeableProvider: { _ in 4096 })
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.apfsSnapshots]))
+        XCTAssertTrue(report.isPartial)
+        XCTAssertEqual(report.incompleteCategories, [.apfsSnapshots])
+        XCTAssertEqual(report.categories.first?.items.count, 1)
+    }
+
+    func testSelectedCategoriesCannotSpendBudgetOnDisabledDiscovery() async {
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let report = await cleaner.scan(exclusions: CleanerExclusions(), categories: [.logsAndDiagnostics])
+        XCTAssertEqual(report.categories.map(\.category), [.logsAndDiagnostics])
+    }
+
+    func testScanCommandDeadlineStopsAnUnresponsiveChild() {
+        let started = ProcessInfo.processInfo.systemUptime
+        XCTAssertNil(CleanerScanCommand.run(executable: "/bin/sleep", arguments: ["10"], timeout: 0.05))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+    }
+
     func testGlobalDeadlineReportsUnvisitedCategories() async {
         var reads = 0
         let cleaner = DiskCleaner(scanUptime: { reads += 1; return reads == 1 ? 0 : 100 },
@@ -176,6 +206,59 @@ final class DiskCleanerScanBudgetTests: XCTestCase {
         let result = await task.value
         XCTAssertTrue(result.isApproximate)
         XCTAssertNil(result.lastModified)
+    }
+
+    func testPartialPrimarySizeDoesNotBlockCleaningAnotherSimulator() async throws {
+        let base = sandbox.appendingPathComponent("Library/Developer/CoreSimulator/Devices")
+        let primary = base.appendingPathComponent("Primary")
+        let secondary = base.appendingPathComponent("Secondary")
+        _ = try write("Library/Developer/CoreSimulator/Devices/Primary/" + Array(repeating: "deep", count: 34).joined(separator: "/") + "/payload.bin")
+        _ = try write("Library/Developer/CoreSimulator/Devices/Secondary/payload.bin")
+        for (url, used) in [(primary, 200.0), (secondary, 100.0)] {
+            let plist: [String: Any] = ["name": url.lastPathComponent, "UDID": url.lastPathComponent,
+                "runtime": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "lastUsedAt": Date(timeIntervalSince1970: used)]
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                .write(to: url.appendingPathComponent("device.plist"))
+        }
+        let moved = sandbox.appendingPathComponent("Moved")
+        try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+        let cleaner = DiskCleaner(freeBytesProvider: { nil }, moveToTrash: { url in
+            try FileManager.default.moveItem(at: url, to: moved.appendingPathComponent(url.lastPathComponent))
+        }, scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        XCTAssertTrue(cleaner.directoryStats(at: primary).isApproximate)
+        let item = CleanItem(category: .developer, title: "Other simulators", subtitle: "Fixture",
+            url: base, bytes: 999999, fileCount: 2, isApproximate: true, lastModified: nil, isSelected: true)
+        let result = await cleaner.clean(items: [item], createSnapshot: false, exclusions: CleanerExclusions())
+        XCTAssertTrue(result.errors.isEmpty)
+        XCTAssertEqual(result.itemsRemoved, 1)
+        XCTAssertGreaterThan(result.bytesReclaimed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: primary.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secondary.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: moved.appendingPathComponent("Secondary").path))
+    }
+
+    func testMovingNestedLinkDoesNotCreditItsUntouchedTarget() async throws {
+        let target = try write("Library/Caches/C/payload.bin").deletingLastPathComponent()
+        let intermediate = sandbox.appendingPathComponent("Library/Caches/B")
+        try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+        let childLink = intermediate.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: childLink, withDestinationURL: target)
+        let alias = sandbox.appendingPathComponent("Library/Caches/A")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: intermediate)
+        let moved = sandbox.appendingPathComponent("Moved")
+        try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+        let cleaner = DiskCleaner(freeBytesProvider: { nil }, moveToTrash: { url in
+            try FileManager.default.moveItem(at: url, to: moved.appendingPathComponent(url.lastPathComponent))
+        }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let item = CleanItem(category: .userCaches, title: "Alias", subtitle: "Fixture",
+            url: alias, bytes: 999999, fileCount: 1, lastModified: nil, isSelected: true, isSymlink: true)
+        let result = await cleaner.clean(items: [item], createSnapshot: false, exclusions: CleanerExclusions())
+        XCTAssertTrue(result.errors.isEmpty)
+        XCTAssertEqual(result.itemsRemoved, 1)
+        XCTAssertEqual(result.bytesReclaimed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("payload.bin").path))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: moved.appendingPathComponent("link").path), target.path)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: alias.path), intermediate.path)
     }
 
     func testSignedFreeSpaceObservationIsSeparateFromMovedBytes() async {

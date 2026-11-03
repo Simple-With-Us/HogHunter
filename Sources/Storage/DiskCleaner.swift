@@ -260,6 +260,47 @@ struct CleanerExclusions: Codable, Equatable, Sendable {
     }
 }
 
+/// Small read-only scan commands use a deadline and file output so neither a
+/// full pipe nor a child ignoring TERM can indefinitely hold discovery open.
+enum CleanerScanCommand {
+    static func run(executable: String, arguments: [String], timeout: TimeInterval = 1) -> Data? {
+        guard !Task.isCancelled, timeout > 0 else { return nil }
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("hh-scan-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil,
+            attributes: [.posixPermissions: 0o600]) else { return nil }
+        guard let output = try? FileHandle(forWritingTo: outputURL) else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return nil
+        }
+        defer { try? output.close(); try? FileManager.default.removeItem(at: outputURL) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return nil }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline {
+            if exited.wait(timeout: .now() + 0.02) == .success {
+                guard process.terminationStatus == 0,
+                      let input = try? FileHandle(forReadingFrom: outputURL) else { return nil }
+                defer { try? input.close() }
+                // Refuse truncated inventory rather than treating its prefix as complete.
+                guard let data = try? input.read(upToCount: 1_048_577), data.count <= 1_048_576 else { return nil }
+                return data
+            }
+        }
+        if process.isRunning { process.terminate() }
+        if exited.wait(timeout: .now() + 0.1) != .success, process.isRunning {
+            _ = kill(process.processIdentifier, SIGKILL)
+            _ = exited.wait(timeout: .now() + 0.1)
+        }
+        return nil
+    }
+}
+
 /// Helper that manages Apple APFS local snapshots for safe rollback before disk cleaning operations.
 enum SnapshotSafety {
     /// Attempts to create an APFS local snapshot via `tmutil localsnapshot`.
@@ -290,28 +331,11 @@ enum SnapshotSafety {
     }
 
     /// Lists active APFS local Time Machine snapshots on the system.
-    static func listLocalSnapshots() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
-        process.arguments = ["listlocalsnapshots", "/"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            // Drain before waiting and close the read end: a full ~64 KB pipe
-            // buffer blocks the child on write(2), and an unclosed handle leaks.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            try? pipe.fileHandleForReading.close()
-            process.waitUntilExit()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.hasPrefix("com.apple.TimeMachine.") }
-        } catch {
-            try? pipe.fileHandleForReading.close()
-            return []
-        }
+    static func listLocalSnapshots() -> [String]? {
+        guard let data = CleanerScanCommand.run(executable: "/usr/bin/tmutil", arguments: ["listlocalsnapshots", "/"]) else { return nil }
+        return String(decoding: data, as: UTF8.self).components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasPrefix("com.apple.TimeMachine.") }
     }
 
     /// Holds the in-flight `tmutil thinlocalsnapshots` child so a cancelled clean can terminate it.
@@ -736,6 +760,7 @@ final class DiskCleaner: @unchecked Sendable {
 
     private let fileManager: FileManager
     private let freeBytesProvider: () -> UInt64?
+    private let moveToTrash: (URL) throws -> Void
     private let scanUptime: () -> TimeInterval
     private let mountPathsProvider: () -> [String]
     /// Tests substitute a closure that does not call `tmutil`.
@@ -764,6 +789,7 @@ final class DiskCleaner: @unchecked Sendable {
 
     init(fileManager: FileManager = .default,
          freeBytesProvider: @escaping () -> UInt64? = { DiskSpace.current()?.freeBytes },
+         moveToTrash: ((URL) throws -> Void)? = nil,
          scanUptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          mountPathsProvider: @escaping () -> [String] = { MountedDriveStore.cachedMountRecords().map(\.path) },
          makeSnapshot: @escaping () -> (success: Bool, snapshotName: String?) = { SnapshotSafety.createLocalSnapshot() },
@@ -782,6 +808,10 @@ final class DiskCleaner: @unchecked Sendable {
         self.mountPathsProvider = mountPathsProvider
         self.scanUptime = scanUptime
         self.freeBytesProvider = freeBytesProvider
+        self.moveToTrash = moveToTrash ?? { url in
+            var trashedURL: NSURL?
+            try fileManager.trashItem(at: url, resultingItemURL: &trashedURL)
+        }
         self.fileManager = fileManager
         self.makeSnapshot = makeSnapshot
         self.listSnapshots = listSnapshots
@@ -807,6 +837,7 @@ final class DiskCleaner: @unchecked Sendable {
               tier: CleanTier = .standard,
               exclusions: CleanerExclusions = CleanerExclusions.load(),
               depth: ScanDepth = .quick,
+              categories selectedCategories: Set<CleanCategory>? = nil,
               partialReport: ((CleanScanReport) -> Void)? = nil,
               progress: ((String) -> Void)? = nil) async -> CleanScanReport {
         let context = ScanContext(depth: depth, now: scanUptime(), mountPaths: mountPathsProvider())
@@ -814,7 +845,7 @@ final class DiskCleaner: @unchecked Sendable {
             var reports: [CleanCategoryReport] = []
             var incomplete: [CleanCategory] = []
             let categories = CleanCategory.allCases
-                .filter { tier.isCategoryIncluded($0) && !exclusions.isCategoryExcluded($0) }
+                .filter { (selectedCategories?.contains($0) ?? true) && tier.isCategoryIncluded($0) && !exclusions.isCategoryExcluded($0) }
                 .sorted { $0.sortOrder < $1.sortOrder }
             func report(inFlight: Bool = false) -> CleanScanReport {
                 CleanScanReport(categories: reports,
@@ -833,7 +864,7 @@ final class DiskCleaner: @unchecked Sendable {
                 context.incomplete = false
                 progress?(category.title)
                 let items = scanCategory(category, installedApps: installedApps)
-                    .filter { !scanShouldStop() && !exclusions.isPathExcluded($0.path) && scanAllows($0.url) && !isHandsOff($0.url) }
+                    .filter { !scanShouldStop() && !exclusions.isPathExcluded($0.path) && ($0.category == .apfsSnapshots || scanAllows($0.url)) && !isHandsOff($0.url) }
                 if context.incomplete || items.contains(where: \.isApproximate) { incomplete.append(category) }
                 reports.append(CleanCategoryReport(category: category, items: items,
                     totalBytes: items.reduce(0) { $0 &+ $1.bytes },
@@ -881,7 +912,9 @@ final class DiskCleaner: @unchecked Sendable {
     /// something to show and the clean can still thin.
     func scanAPFSSnapshots() -> [CleanItem] {
         if Self.scanContext == nil { return withScanBudget { scanAPFSSnapshots() } }
-        let snapshotNames = listSnapshots("/") ?? []
+        let listed = listSnapshots("/")
+        if listed == nil { markScanIncomplete() }
+        let snapshotNames = listed ?? []
         let purgeable = purgeableProvider("/")
 
         if snapshotNames.isEmpty {
@@ -1103,25 +1136,9 @@ final class DiskCleaner: @unchecked Sendable {
     }
 
     private static func worktreePaths(in root: String) -> Set<String> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", root, "worktree", "list", "--porcelain"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        // Drain before waiting and close the read end: a full ~64 KB pipe
-        // buffer blocks the child on write(2), and an unclosed handle leaks.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        try? pipe.fileHandleForReading.close()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return [] }
-        let output = String(data: data, encoding: .utf8) ?? ""
-        return output
+        guard let data = CleanerScanCommand.run(executable: "/usr/bin/git",
+            arguments: ["-c", "core.fsmonitor=false", "-C", root, "worktree", "list", "--porcelain"]) else { return [] }
+        return String(decoding: data, as: UTF8.self)
             .split(separator: "\n")
             .compactMap { line -> String? in
                 guard line.hasPrefix("worktree ") else { return nil }
@@ -2249,11 +2266,10 @@ final class DiskCleaner: @unchecked Sendable {
                                 let checkURL = URL(fileURLWithPath: denormalizedCleanPath(child.path))
                                 guard !exclusions.isPathExcluded(checkURL.path),
                                       isSafeToDelete(url: checkURL, category: item.category) else { continue }
-                                let stats = directoryStats(at: child)
-                                var trashedURL: NSURL?
-                                if (try? fileManager.trashItem(at: child, resultingItemURL: &trashedURL)) != nil {
+                                let estimatedBytes = estimatedBytesForMovingEntry(at: child)
+                                if (try? moveToTrash(child)) != nil {
                                     trashedChild = true
-                                    childBytes &+= stats.bytes
+                                    childBytes &+= estimatedBytes
                                 }
                             }
                         }
@@ -2269,8 +2285,10 @@ final class DiskCleaner: @unchecked Sendable {
                     // Aggregate simulator devices item: trash child devices individually so the primary iOS 27
                     // simulator is preserved unless explicitly selected as its own item in activeItems.
                     let simDevicesURL = item.url
-                    let deviceMetas = scanSimulatorDevices(at: simDevicesURL)
-                    guard !deviceMetas.isEmpty, !deviceMetas.contains(where: { $0.isApproximate }) else {
+                    // Preservation depends on a complete identity inventory, not complete sizes.
+                    // A large primary's partial size must not block cleaning other devices.
+                    let deviceMetas = scanSimulatorDevices(at: simDevicesURL, measureSizes: false)
+                    guard !deviceMetas.isEmpty else {
                         errors.append("Simulator device inventory is incomplete; no devices were removed")
                         continue
                     }
@@ -2290,11 +2308,11 @@ final class DiskCleaner: @unchecked Sendable {
                                 continue
                             }
                             if isSafeToDelete(url: child, category: item.category) {
-                                var trashedURL: NSURL?
+                                let estimatedBytes = estimatedBytesForMovingEntry(at: child)
                                 do {
-                                    try fileManager.trashItem(at: child, resultingItemURL: &trashedURL)
+                                    try moveToTrash(child)
                                     simulatorChildrenMoved += 1
-                                    simulatorBytesMoved &+= deviceMetas.first(where: { $0.url.standardizedFileURL.path == childPath })?.bytes ?? 0
+                                    simulatorBytesMoved &+= estimatedBytes
                                 } catch { errors.append("A simulator device could not be moved to Trash") }
                             }
                         }
@@ -2306,8 +2324,7 @@ final class DiskCleaner: @unchecked Sendable {
                     }
                 } else {
                     // Safe removal: move to macOS Trash
-                    var trashedURL: NSURL?
-                    try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
+                    try moveToTrash(item.url)
                     reclaimed &+= item.bytes
                     removedCount += 1
                     noteSuccess(item)
@@ -2489,6 +2506,14 @@ final class DiskCleaner: @unchecked Sendable {
         }
     }
 
+    /// Moving a child link moves the link itself, leaving its target untouched.
+    /// Zero is a conservative estimate for that entry; never credit the target tree.
+    private func estimatedBytesForMovingEntry(at url: URL) -> UInt64 {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT != S_IFLNK else { return 0 }
+        return directoryStats(at: url).bytes
+    }
+
     // MARK: - Directory Stats Helper
 
     /// Allocated bytes, file count, and last modification date of a directory
@@ -2579,7 +2604,7 @@ final class DiskCleaner: @unchecked Sendable {
     }
 
     /// Scans individual simulator devices inside `CoreSimulator/Devices`.
-    func scanSimulatorDevices(at devicesURL: URL) -> [SimulatorDeviceInfo] {
+    func scanSimulatorDevices(at devicesURL: URL, measureSizes: Bool = true) -> [SimulatorDeviceInfo] {
         guard let contents = try? scanContentsOfDirectory(
             at: devicesURL,
             includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
@@ -2629,7 +2654,8 @@ final class DiskCleaner: @unchecked Sendable {
             let isIOS27 = runtime.localizedCaseInsensitiveContains("iOS-27") ||
                           runtime.localizedCaseInsensitiveContains("iOS 27") ||
                           runtime.localizedCaseInsensitiveContains("iOS.27")
-            let stats = directoryStats(at: item)
+            let stats = measureSizes ? directoryStats(at: item)
+                : DirectoryStats(bytes: 0, fileCount: 0, lastModified: nil)
             devices.append(SimulatorDeviceInfo(
                 url: item,
                 udid: udid,

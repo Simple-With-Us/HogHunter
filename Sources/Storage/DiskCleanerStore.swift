@@ -151,6 +151,10 @@ final class DiskCleanerStore: ObservableObject {
         if !isCleaning { state = .idle }
     }
 
+    /// Tests publish provisional reports without scanning a real filesystem.
+    typealias ScanOperation = (CleanTier, CleanerExclusions, DiskCleaner.ScanDepth,
+                              @escaping (CleanScanReport) -> Void, @escaping (String) -> Void) async -> CleanScanReport
+    private let scanOperation: ScanOperation
     let cleaner: DiskCleaner
     /// Append-only cleanup history under the stable app-support namespace.
     /// Refreshed on clean and on view appear so the hero header's "last cleanup" line is always fresh.
@@ -166,8 +170,13 @@ final class DiskCleanerStore: ObservableObject {
          historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
          exclusionsDefaults: UserDefaults = CleanerExclusions.sharedDefaults,
          rescanAfterExclusionChange: Bool = true,
-         manualScanOnly: Bool = false) {
+         manualScanOnly: Bool = false,
+         scanOperation: ScanOperation? = nil) {
         self.cleaner = cleaner
+        self.scanOperation = scanOperation ?? { tier, exclusions, depth, partial, progress in
+            await cleaner.scan(tier: tier, exclusions: exclusions, depth: depth,
+                               partialReport: partial, progress: progress)
+        }
         self.historyStore = historyStore
         self.exclusionsDefaults = exclusionsDefaults
         self.rescanAfterExclusionChange = rescanAfterExclusionChange
@@ -198,6 +207,13 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Cancels any in-flight clutter scan.
     func cancelScan() {
+        // Provisional results never become cleanable by cancelling or leaving the view.
+        if isScanInFlight {
+            report = nil
+            selectedItemIds.removeAll()
+            expandedCategoryIds.removeAll()
+            showConfirmation = false
+        }
         currentScanId = nil
         scanTask?.cancel()
         scanTask = nil
@@ -232,11 +248,10 @@ final class DiskCleanerStore: ObservableObject {
         let currentTier = selectedTier
         state = .scanning(category: "Starting \(currentTier.title) scan…")
 
-        let cleaner = self.cleaner
         let activeExclusions = exclusions
-        scanTask = Task.detached(priority: .utility) { [weak self, cleaner] in
-            let scanReport = await cleaner.scan(tier: currentTier, exclusions: activeExclusions,
-                depth: depth, partialReport: { partial in
+        let scanOperation = self.scanOperation
+        scanTask = Task.detached(priority: .utility) { [weak self] in
+            let scanReport = await scanOperation(currentTier, activeExclusions, depth, { partial in
                     Task { @MainActor [weak self] in
                         guard let self, self.currentScanId == scanId, self.isScanInFlight,
                               (self.report?.categories.count ?? 0) <= partial.categories.count else { return }
@@ -244,12 +259,12 @@ final class DiskCleanerStore: ObservableObject {
                         // Suggestions are visible during scanning, but only a finalized report
                         // supplies default selections or cleaning authority.
                     }
-                }) { categoryTitle in
+                }, { categoryTitle in
                 Task { @MainActor [weak self] in
                     guard let self, self.currentScanId == scanId else { return }
                     self.state = .scanning(category: categoryTitle)
                 }
-            }
+            })
 
             guard !Task.isCancelled else { return }
 
