@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -266,6 +267,48 @@ tool.mutation(['harmless-injected-command'], 'docker-build-cache', 'cache-record
         tool = m.Maintenance(root=self.root)
         with self.assertRaises(m.StopWork):
             tool.command([sys.executable, "-c", "import sys; sys.stdout.write('x'*2000000)"])
+
+    def test_readonly_inventory_timeout_reaps_child_and_releases_lock(self):
+        self.tool.deadline = time.monotonic() + 0.3
+        self.tool.docker_candidates = lambda _: self.tool.command(
+            [sys.executable, '-c', 'import time; time.sleep(20)'])
+        children, popen = [], subprocess.Popen
+        def launch(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            children.append(child)
+            return child
+        with patch.object(m.subprocess, 'Popen', side_effect=launch):
+            result = self.tool.execute('run', ['docker-build-cache'], True)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0].returncode, -signal.SIGKILL)
+        self.assertTrue(children[0].stdout.closed)
+        self.assertEqual(result['status'], 'partial')
+        self.assertTrue(result['lock']['released'])
+        self.assertFalse(self.tool.uncertain_child)
+        self.assertFalse(self.tool.lock.exists())
+
+    def test_mutating_timeout_reaps_cli_but_keeps_daemon_dispatch_lock(self):
+        self.tool.deadline = time.monotonic() + 0.3
+        self.tool.docker_candidates = lambda _: ['cache-record']
+        self.tool.verify_local_builder = lambda: None
+        self.tool.runner = lambda _: self.tool.command(
+            [sys.executable, '-c', 'import time; time.sleep(20)'])
+        children, popen = [], subprocess.Popen
+        def launch(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            children.append(child)
+            return child
+        with patch.object(m.subprocess, 'Popen', side_effect=launch):
+            result = self.tool.execute('run', ['docker-build-cache'], True)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0].returncode, -signal.SIGKILL)
+        self.assertTrue(children[0].stdout.closed)
+        self.assertEqual(result['status'], 'partial')
+        self.assertFalse(result['lock']['released'])
+        self.assertFalse(self.tool.uncertain_child)
+        self.assertTrue((self.tool.lock / 'dispatch.json').exists())
+        with patch.object(m.os, 'kill', side_effect=ProcessLookupError):
+            self.assertFalse(self.tool.acquire_lock())
 
     def test_audit_failure_prevents_deletion_and_uncertain_child_retains_lock(self):
         path = self.cache()

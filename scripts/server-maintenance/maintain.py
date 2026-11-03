@@ -90,18 +90,21 @@ class Maintenance:
             return proc.returncode, out.decode("utf-8", errors="strict")
         finally:
             if proc.poll() is None:
-                # A timed-out Docker request may outlive its CLI inside dockerd.
-                # Retain an unrecoverable lock until an operator proves it stopped.
-                self.uncertain_child = True
+                # Read-only inventory is safe after owned-group termination and
+                # reap.  Mutation uncertainty is separately persisted *before*
+                # dispatch, since daemon work can outlive even a reaped CLI.
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except OSError:
+                    self.uncertain_child = True
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.uncertain_child = True
-            proc.stdout.close()
+            finally:
+                proc.stdout.close()
 
     def protected(self, path):
         """No symlink component; case-insensitive keep marker on any parent."""
