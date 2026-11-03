@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {allRows, inventory, scopedToken} from './release-inventory.mjs';
+import {allRows, inventory, scopedToken, readOnlyAPI} from './release-inventory.mjs';
+
+test('credentialed requests use GET and refuse redirects', async () => {
+  let called = 0;
+  const api = readOnlyAPI('offline-fixture', async (url, options) => {
+    called++;
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.body, undefined);
+    assert.equal(options.headers.Authorization, 'Bearer offline-fixture');
+    throw new TypeError('redirect refused');
+  });
+  await assert.rejects(api('https://api.appstoreconnect.apple.com/v1/apps/6816633156'), /redirect refused/);
+  assert.equal(called, 1);
+});
 
 test('inventory requires the workflow environment without a credential bootstrap', () => {
   assert.throws(() => scopedToken({}), /Scoped workflow ASC environment is required/);

@@ -78,14 +78,16 @@ export async function inventory(api) {
   return {appId: APP_ID, bundleId: BUNDLE_ID, sourceHead: process.env.GITHUB_SHA || null, checkedAt: new Date().toISOString(), complete: true, platforms};
 }
 
-async function main() {
-  const token = scopedToken(process.env);
-  const api = async url => {
-    const response = await fetch(url, {method: 'GET', headers: {Authorization: `Bearer ${token}`}, signal: AbortSignal.timeout(30000)});
+export function readOnlyAPI(token, fetchImpl = fetch) {
+  return async url => {
+    const response = await fetchImpl(url, {method: 'GET', redirect: 'error', headers: {Authorization: `Bearer ${token}`}, signal: AbortSignal.timeout(30000)});
     if (!response.ok) throw new Error(`ASC inventory GET failed (HTTP ${response.status})`);
     return response.json();
   };
-  console.log(JSON.stringify(await inventory(api), null, 2));
+}
+
+async function main() {
+  console.log(JSON.stringify(await inventory(readOnlyAPI(scopedToken(process.env))), null, 2));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
