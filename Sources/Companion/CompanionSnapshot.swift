@@ -25,6 +25,12 @@ enum CompanionService {
     /// Starts a Maintain run.  Behind its own opt-in: a run can retire
     /// old git worktrees and run maintenance on remote servers.
     static let maintainRunPath = "/v1/maintain/run"
+    /// Turns built-in Maintain steps on or off and sets the three tuning
+    /// thresholds.  Behind the same opt-in as the run.
+    static let maintainSettingsPath = "/v1/maintain/settings"
+    /// The cleaner's temp file minimum untouched hours.  Behind the cleaner
+    /// opt-in, and takes nothing else.
+    static let cleanSettingsPath = "/v1/clean/settings"
     /// Acts on one server process.  These three are stricter than every other
     /// route: Tailscale only, behind their own opt-in.
     static let serverProcessPath = "/v1/server/process"
@@ -361,6 +367,29 @@ enum CompanionSettingsLimits {
     static let webhookMaxLength = 2_048
 }
 
+/// The bounds on the Maintain tuning knobs.  The Mac's Maintenance settings
+/// sliders and steppers and the phone's route both read these, so the phone can
+/// never set a value the Mac's own controls would not offer.
+enum CompanionMaintainLimits {
+    /// Cache reclaim runs when free disk falls below this.  Gigabytes.
+    static let lowFreeGiBRange: ClosedRange<Double> = 30...200
+    static let lowFreeGiBStep: Double = 5
+    /// PM2 log files over this size are truncated.  Megabytes.
+    static let pm2LogsCapMBRange: ClosedRange<Int> = 10...200
+    static let pm2LogsCapMBStep: Int = 10
+    /// Merged git worktrees are retired after this many idle days.
+    static let worktreeRetireDaysRange: ClosedRange<Int> = 1...90
+    /// The one built-in step that runs maintenance on a remote server.
+    static let remoteServerStepId = "coolify_remote"
+}
+
+/// The bounds on the cleaner settings a phone may change.
+enum CompanionCleanLimits {
+    /// Whole hours a temp file must sit untouched before the cleaner lists it.
+    /// The Mac's Settings > Cleaner stepper and its safety policy read this.
+    static let tempFileHoursRange: ClosedRange<Double> = 1...8_760
+}
+
 /// Download and upload speed on the Mac, formatted the way the Network tab on
 /// the Mac prints it.  The Mac does the formatting so both screens agree.
 struct CompanionBandwidth: Codable, Equatable, Sendable {
@@ -415,6 +444,9 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     /// "System".  The phone's System choice follows the Mac, and the Mac's
     /// own preference says nothing about what the Mac is showing.
     var resolvedAppearance: String = "Light"
+    /// True when the Mac opens Hog Hunter at login.  Nil from a Mac that
+    /// predates the field.
+    var launchesAtLogin: Bool? = nil
 }
 
 extension CompanionSettingsSummary {
@@ -439,6 +471,7 @@ extension CompanionSettingsSummary {
         sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
         sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? false
         resolvedAppearance = try container.decodeIfPresent(String.self, forKey: .resolvedAppearance) ?? "Light"
+        launchesAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchesAtLogin)
     }
 }
 
@@ -460,12 +493,41 @@ struct CompanionSettingsUpdateRequest: Codable, Equatable, Sendable {
     /// What the Mac's menu bar shows: "Machine CPU", "Top Hog" or
     /// "Live Sparkline".
     var menuBarLabelMode: String? = nil
+    /// Opens Hog Hunter at login on the Mac.
+    var launchesAtLogin: Bool? = nil
 
     var isEmpty: Bool {
         refreshInterval == nil && alertsEnabled == nil && alertThresholdPercent == nil
             && alertSustainedMinutes == nil && webhookURL == nil && testWebhook != true
             && appearance == nil && backgroundRefreshInterval == nil && menuBarLabelMode == nil
+            && launchesAtLogin == nil
     }
+}
+
+/// A change to the Maintain's built-in steps and thresholds.  Every field is
+/// optional and the change is applied whole or not at all.  Custom scripts
+/// cannot be named: enabling one runs code the phone has never seen, so that
+/// stays a Mac choice.
+struct CompanionMaintainSettingsRequest: Codable, Equatable, Sendable {
+    /// Step id to on or off.  Built-in step ids only.
+    var stepEnabled: [String: Bool]? = nil
+    var lowFreeGiB: Double? = nil
+    var worktreeRetireMinDays: Int? = nil
+    var pm2LogsCapMB: Int? = nil
+    /// Must be true to turn on the step that runs maintenance on the remote
+    /// server.  The phone sets it only after it has said what the step does.
+    var acknowledgeRemoteServer: Bool? = nil
+
+    var isEmpty: Bool {
+        (stepEnabled ?? [:]).isEmpty && lowFreeGiB == nil && worktreeRetireMinDays == nil && pm2LogsCapMB == nil
+    }
+}
+
+/// A change to the cleaner's temp file safety minimum.  Nothing else.
+struct CompanionCleanSettingsRequest: Codable, Equatable, Sendable {
+    var tempFileMinimumHours: Double? = nil
+
+    var isEmpty: Bool { tempFileMinimumHours == nil }
 }
 
 struct CompanionSettingsUpdateResponse: Codable, Equatable, Sendable {
@@ -545,6 +607,15 @@ struct CompanionMaintainStatus: Codable, Equatable, Sendable {
     /// ran and how many ran today.  Nil from a Mac that predates the field,
     /// and from a Mac that has recorded no check.  Carries no step text.
     var watch: CompanionMaintainWatch? = nil
+    /// Every built-in step with its on or off state, in the Mac's order.  Nil
+    /// unless the owner allowed the phone to run the maintain.
+    var stepSettings: [CompanionMaintainStepSetting]? = nil
+    /// The three tuning thresholds.  Nil unless the owner allowed the phone to
+    /// run the maintain.
+    var tuning: CompanionMaintainTuning? = nil
+    /// The custom scripts the Mac knows, by name and on or off state, never by
+    /// path.  Read only.  Nil unless the owner allowed the phone to run the maintain.
+    var customScripts: [CompanionMaintainScript]? = nil
 
     /// `recentRuns` without any watch tick, so an older Mac that still lists
     /// them reads the same as a newer one.  Nil when the Mac sent no list.
@@ -556,6 +627,36 @@ struct CompanionMaintainStatus: Codable, Equatable, Sendable {
     var cleaningRuns: [CompanionMaintainRun]? {
         recentRuns?.filter { $0.trigger != CompanionMaintainRun.watchTrigger }
     }
+}
+
+/// One built-in step and whether the Mac runs it.
+struct CompanionMaintainStepSetting: Codable, Equatable, Identifiable, Sendable {
+    var stepId: String
+    var title: String
+    var isEnabled: Bool
+    /// True for the step that runs maintenance on the remote server, which the
+    /// phone confirms in words of its own before it turns it on.
+    var isRemoteServer: Bool = false
+    var id: String { stepId }
+}
+
+/// The Maintain thresholds as the Mac holds them.
+struct CompanionMaintainTuning: Codable, Equatable, Sendable {
+    var lowFreeGiB: Double
+    var worktreeRetireMinDays: Int
+    var pm2LogsCapMB: Int
+}
+
+/// A custom maintenance script, by the name the Mac lists it under.  The path
+/// and the owner stay on the Mac.
+struct CompanionMaintainScript: Codable, Equatable, Identifiable, Sendable {
+    var name: String
+    var isEnabled: Bool
+    /// "owned" or "observed".
+    var mode: String
+    /// "local" or "remote".
+    var scope: String
+    var id: String { "\(mode)/\(scope)/\(name)" }
 }
 
 /// How a Maintain run ended, for the mark on its row.
@@ -882,6 +983,22 @@ struct CompanionStorageSummary: Codable, Equatable {
     /// The host's largest directories, with the same short status line the
     /// Mac's rows show.  Optional for the same reason.
     var topDirectories: [CompanionDirectoryRow]? = nil
+    /// What the scanned apps add up to by kind of data (caches, containers,
+    /// logs and so on), the way the Mac's Storage tab sums them for its
+    /// subtitle.  Largest first.  Optional because the scan may not have run.
+    var categoryTotals: [CompanionStorageCategoryTotal]? = nil
+    /// Whole hours a temp file must sit untouched before the cleaner lists it,
+    /// as the Mac's Settings > Cleaner holds it.  Nil from a Mac that predates the field.
+    var tempFileMinimumHours: Double? = nil
+}
+
+/// One kind of app data, summed across the scanned apps.
+struct CompanionStorageCategoryTotal: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var bytes: UInt64
+    /// The size, already formatted for display ("2.1 GB").
+    var text: String
 }
 
 /// One mounted drive, as the host sees it.

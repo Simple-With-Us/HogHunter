@@ -318,7 +318,7 @@ private struct CleanerSettingsTab: View {
         Form {
             Section("Temp File Safety") {
                 HStack {
-                    Stepper(value: $tempHoursDraft, in: 1...8_760) {
+                    Stepper(value: $tempHoursDraft, in: Int(TempFileSafetyPolicy.allowedHours.lowerBound)...Int(TempFileSafetyPolicy.allowedHours.upperBound)) {
                         HStack {
                             Text("Minimum Untouched Time")
                             TextField("Hours", value: $tempHoursDraft, format: .number.grouping(.never))
@@ -559,7 +559,7 @@ private struct MaintenanceSettingsContent: View {
                         Text("\(Int(maintain.lowFreeGiB)) GB")
                             .font(.system(size: 12, weight: .bold))
                     }
-                    Slider(value: $maintain.lowFreeGiB, in: 30...200, step: 5)
+                    Slider(value: $maintain.lowFreeGiB, in: CompanionMaintainLimits.lowFreeGiBRange, step: CompanionMaintainLimits.lowFreeGiBStep)
                         .onChange(of: maintain.lowFreeGiB) { _ in maintain.saveMaintainConfig() }
                     Text("Trigger cache reclaim when available disk space falls below this limit (default 80 GB).")
                         .font(.system(size: 10))
@@ -578,7 +578,7 @@ private struct MaintenanceSettingsContent: View {
                     Slider(value: Binding(
                         get: { Double(maintain.pm2LogsCapMB) },
                         set: { maintain.pm2LogsCapMB = Int($0) }
-                    ), in: 10...200, step: 10)
+                    ), in: Double(CompanionMaintainLimits.pm2LogsCapMBRange.lowerBound)...Double(CompanionMaintainLimits.pm2LogsCapMBRange.upperBound), step: Double(CompanionMaintainLimits.pm2LogsCapMBStep))
                         .onChange(of: maintain.pm2LogsCapMB) { _ in maintain.saveMaintainConfig() }
                     Text("Truncate Node.js PM2 process manager logs in ~/.pm2/logs that exceed this file size.")
                         .font(.system(size: 10))
@@ -599,7 +599,7 @@ private struct MaintenanceSettingsContent: View {
                                 maintain.worktreeRetireMinDays = $0
                                 maintain.saveWorktreeRetireMinDays()
                             }
-                        ), in: 1...90)
+                        ), in: CompanionMaintainLimits.worktreeRetireDaysRange)
                         .labelsHidden()
                         .help("Choose 1 to 90 whole days")
                     }

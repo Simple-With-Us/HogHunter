@@ -233,6 +233,13 @@ final class CompanionServer: @unchecked Sendable {
     /// waiting for the run: the run takes minutes, the server queue also
     /// serves snapshot polls, and the phone watches the snapshot instead.
     var onRemoteMaintainRun: ((_ kind: String) -> Reply)? = nil
+    /// Built-in step toggles and the three thresholds.  Called on the server
+    /// queue, only when the Maintain opt-in is on, with values the router has
+    /// not checked: the handler validates them.
+    var onRemoteMaintainSettings: ((CompanionMaintainSettingsRequest) -> Reply)? = nil
+    /// The cleaner's temp file minimum.  Called on the server queue, only when
+    /// the cleaner opt-in is on, with a value the router has not checked.
+    var onRemoteCleanSettings: ((CompanionCleanSettingsRequest) -> Reply)? = nil
     /// Called on the server queue each time a phone fetches the snapshot, so
     /// the host can refresh slow-to-gather data only while someone is looking.
     var onSnapshotServed: (() -> Void)? = nil
@@ -532,6 +539,22 @@ final class CompanionServer: @unchecked Sendable {
                 let reply = handler(kind)
                 if !(200..<300).contains(reply.status) { self.maintainRunningFlag.value = false }
                 return reply
+            },
+            maintainSettingsHandler: { [weak self] req in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteMaintain else { return Self.maintainRefusal }
+                guard let handler = self.onRemoteMaintainSettings else {
+                    return (501, Data("{\"error\": \"Maintain settings handler not configured\"}".utf8))
+                }
+                return handler(req)
+            },
+            cleanSettingsHandler: { [weak self] req in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.allowRemoteClean else { return Self.cleanOptInRefusal }
+                guard let handler = self.onRemoteCleanSettings else {
+                    return (501, Data("{\"error\": \"Clean settings handler not configured\"}".utf8))
+                }
+                return handler(req)
             },
             serverControlGate: { [weak self] in
                 guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }

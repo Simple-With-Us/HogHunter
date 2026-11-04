@@ -310,6 +310,39 @@ enum CompanionConnection {
         return try decode(CompanionMaintainRunResponse.self, from: reply)
     }
 
+    /// Turns built-in Maintain steps on or off and sets the thresholds.  The
+    /// Mac checks every value and answers 400 with the reason when one is refused.
+    static func triggerMaintainSettingsUpdate(
+        endpoint: NWEndpoint,
+        token: String,
+        update: CompanionMaintainSettingsRequest,
+        useTLS: Bool? = nil
+    ) async throws -> CompanionSettingsUpdateResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.maintainSettingsRequest(token: token, update: update, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
+        )
+        return try decode(CompanionSettingsUpdateResponse.self, from: reply)
+    }
+
+    /// Sets the cleaner's temp file minimum untouched hours.
+    static func triggerCleanSettingsUpdate(
+        endpoint: NWEndpoint,
+        token: String,
+        update: CompanionCleanSettingsRequest,
+        useTLS: Bool? = nil
+    ) async throws -> CompanionSettingsUpdateResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.cleanSettingsRequest(token: token, update: update, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
+        )
+        return try decode(CompanionSettingsUpdateResponse.self, from: reply)
+    }
+
     // MARK: - Reply handling
 
     /// Turns one reply into a value or a readable error.  A typed body wins

@@ -135,10 +135,18 @@ struct MacSettingsView: View {
                 }
             }
             .disabled(!canEdit || model.isApplyingSettings)
+
+            if let launchesAtLogin = settings.launchesAtLogin {
+                Toggle("Open Hog Hunter at Login", isOn: Binding(
+                    get: { launchesAtLogin },
+                    set: { next in Task { await model.updateSettings(CompanionSettingsUpdateRequest(launchesAtLogin: next)) } }
+                ))
+                .disabled(!canEdit || model.isApplyingSettings)
+            }
         } header: {
             Text("Mac Display")
         } footer: {
-            Text("The background refresh is how often \(snapshot.hostName) samples while its panel is closed.\u{00A0} The menu bar setting is what the Mac shows in the menu bar.")
+            Text("The background refresh is how often \(snapshot.hostName) samples while its panel is closed.\u{00A0} The menu bar setting is what the Mac shows in the menu bar.\u{00A0} Open at Login starts Hog Hunter when you sign in to \(snapshot.hostName).\u{00A0} If macOS asks for approval, give it on the Mac.")
         }
     }
 

@@ -246,7 +246,7 @@ final class MaintainStore: ObservableObject {
     /// Writes the retention knob to Infisical first when configured, then
     /// mirrors it to config.json for launchd's standalone Python scheduler.
     func saveWorktreeRetireMinDays() {
-        guard (1...90).contains(worktreeRetireMinDays) else {
+        guard CompanionMaintainLimits.worktreeRetireDaysRange.contains(worktreeRetireMinDays) else {
             worktreeRetireMinDays = 7
             return
         }
@@ -301,7 +301,7 @@ final class MaintainStore: ObservableObject {
         } else {
             parsed = nil
         }
-        guard let parsed, (1...90).contains(parsed) else { return nil }
+        guard let parsed, CompanionMaintainLimits.worktreeRetireDaysRange.contains(parsed) else { return nil }
         return parsed
     }
 
