@@ -104,7 +104,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Xcode DerivedData and device support",
-      "$rationale": "Per-project DerivedData with no build running, and each idle Hog Hunter checkout under ~/Library/Caches/HogHunterDerivedData. iOS DeviceSupport for OS versions older than 7 days is semi-safe: it re-downloads when an old device is attached. A lone xcodebuild with zero compiler children hours old is STALLED, not a real build -- check for clang/swiftc children before assuming work is in flight.",
+      "$rationale": "Per-project DerivedData with no build running. iOS DeviceSupport for OS versions older than 7 days is semi-safe: it re-downloads when an old device is attached. A lone xcodebuild with zero compiler children hours old is STALLED, not a real build -- check for clang/swiftc children before assuming work is in flight.",
       "skipWhenAny": ["xcodebuild alive", "clang alive", "swift-frontend alive"]
     },
     {
