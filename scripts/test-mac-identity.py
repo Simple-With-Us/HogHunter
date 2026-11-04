@@ -197,6 +197,15 @@ class InstallerGateTests(unittest.TestCase):
         (self.home / "Applications" / "Hog Hunter.app").mkdir(parents=True)
         self.assert_refused(self.install("--dest", str(self.dir / "elsewhere")), 4, "second copy")
 
+    def test_updating_in_place_is_not_a_second_copy_however_the_folder_is_spelled(self) -> None:
+        applications = self.home / "Applications"
+        (applications / "Hog Hunter.app").mkdir(parents=True)
+        link = self.dir / "link-to-applications"
+        link.symlink_to(applications)
+        for destination in (f"{applications}", f"{applications}/", f"{applications}//", str(link)):
+            result = self.install("--dest", destination)
+            self.assertEqual(result.returncode, 42, destination + result.stdout + result.stderr)
+
     def test_the_production_identity_passes_the_gates(self) -> None:
         result = self.install()
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)

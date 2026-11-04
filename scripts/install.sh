@@ -80,11 +80,14 @@ EXPECTED_TEAM_ID="CC8UTF7ATG"
 
 # Compares resolved paths, so a trailing slash or a symlink cannot walk an ad hoc
 # copy into a production location.
+resolved_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "${1%/}"
+}
+
 is_production_dir() {
   local resolved
-  resolved="$(cd "$1" 2>/dev/null && pwd -P || printf '%s' "${1%/}")"
-  [[ "$resolved" == "$SYSTEM_APPLICATIONS" || "$resolved" == "$USER_APPLICATIONS" ]] && return 0
-  [[ "$resolved" == "$(cd "$USER_APPLICATIONS" 2>/dev/null && pwd -P || echo "$USER_APPLICATIONS")" ]]
+  resolved="$(resolved_dir "$1")"
+  [[ "$resolved" == "$(resolved_dir "$SYSTEM_APPLICATIONS")" || "$resolved" == "$(resolved_dir "$USER_APPLICATIONS")" ]]
 }
 
 if [[ "$ADHOC" -eq 1 ]]; then
@@ -117,7 +120,8 @@ fi
 # LaunchServices may open the stale one.
 if [[ "$ADHOC" -ne 1 ]]; then
   for candidate_dir in "$SYSTEM_APPLICATIONS" "$USER_APPLICATIONS"; do
-    [[ "$candidate_dir" == "$DEST_DIR" ]] && continue
+    # Resolved, so `--dest ~/Applications/` is an update in place, not a second copy.
+    [[ "$(resolved_dir "$candidate_dir")" == "$(resolved_dir "$DEST_DIR")" ]] && continue
     for other in "$candidate_dir/Hog Hunter.app" "$candidate_dir/HogHunter.app"; do
       if [[ -d "$other" ]]; then
         if [[ "$DRY_RUN" -eq 1 ]]; then
