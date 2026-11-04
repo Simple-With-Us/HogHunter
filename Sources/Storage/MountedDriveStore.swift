@@ -49,11 +49,28 @@ enum StorageDriveList {
     }
 }
 
+/// What discovery needs from a mount's whole disk: whether the disk is
+/// internal to the machine, the bus it hangs off, and the volume name the
+/// system reports.  A nil identity means the disk could not be inspected and
+/// the mount is skipped rather than guessed about.
+struct WholeDiskIdentity: Sendable, Equatable {
+    let isInternal: Bool
+    let deviceProtocol: String?
+    let volumeName: String?
+}
+
+/// Bus protocols a physical disk can hang off.  Disk images and other virtual
+/// devices report no recognized protocol, which is what keeps them out.
+private let physicalDiskProtocols: Set<String> = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "SATA", "SAS", "ATA", "Secure Digital"]
+
 struct MountedDriveCandidate: Sendable {
     let name: String
     let path: String
     let isLocal: Bool
     let isHidden: Bool
+    /// Eligibility for display: a physical volume.  The name predates
+    /// additional-internal-volume support; discovery sets it for external
+    /// disks and for extra internal volumes alike, and only discovery sets it.
     let isExternalPhysical: Bool
     let totalBytes: Int64?
     let availableBytes: Int64?
@@ -144,19 +161,39 @@ final class MountedDriveStore: ObservableObject {
     nonisolated static func discover() -> [MountedDriveCandidate] {
         guard ApplicationRunMode.current.allowsLiveProbes,
               let session = DASessionCreate(kCFAllocatorDefault) else { return [] }
-        return cachedMountRecords().compactMap { mount -> MountedDriveCandidate? in
-            guard mount.isLocal, !mount.isHidden, let fallbackName = mount.volumeName,
-                  let bsdName = mount.bsdName,
-                  let disk = bsdName.withCString({ DADiskCreateFromBSDName(kCFAllocatorDefault, session, $0) }),
+        return discover(mounts: cachedMountRecords()) { bsdName in
+            guard let disk = bsdName.withCString({ DADiskCreateFromBSDName(kCFAllocatorDefault, session, $0) }),
                   let whole = DADiskCopyWholeDisk(disk),
-                  let description = DADiskCopyDescription(whole) as? [String: Any] else { return nil }
-            let internalDevice = description[kDADiskDescriptionDeviceInternalKey as String] as? Bool
-            let deviceProtocol = description[kDADiskDescriptionDeviceProtocolKey as String] as? String
-            let physicalProtocols: Set<String> = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "SATA", "SAS", "ATA", "Secure Digital"]
-            guard internalDevice == false, deviceProtocol.map(physicalProtocols.contains) == true else { return nil }
+                  let description = DADiskCopyDescription(whole) as? [String: Any],
+                  let internalDevice = description[kDADiskDescriptionDeviceInternalKey as String] as? Bool
+            else { return nil }
             let volumeDescription = DADiskCopyDescription(disk) as? [String: Any]
             let volumeName = volumeDescription?[kDADiskDescriptionVolumeNameKey as String] as? String
-            let name = volumeName.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackName
+            return WholeDiskIdentity(isInternal: internalDevice,
+                deviceProtocol: description[kDADiskDescriptionDeviceProtocolKey as String] as? String,
+                volumeName: volumeName)
+        }
+    }
+
+    /// The testable heart of discovery: which kernel mount records become
+    /// drive rows.  A mount qualifies when it is local, browsable, mounted at
+    /// a visible /Volumes/<name> path, parseable to a BSD disk, and attached
+    /// to a physical whole disk - external, or an additional INTERNAL volume
+    /// such as a second internal disk or an extra volume carved from the boot
+    /// device.  Monitoring covers every physical volume, not only removable
+    /// ones.  The boot volume never double counts: it mounts at / and
+    /// /System/Volumes/Data, which are not visible /Volumes/<name> paths.
+    /// One row per BSD disk even when the same volume is mounted twice.
+    nonisolated static func discover(mounts: [MountedDriveMountRecord],
+                                     wholeDisk: (String) -> WholeDiskIdentity?) -> [MountedDriveCandidate] {
+        var seenDisks = Set<String>()
+        return mounts.compactMap { mount -> MountedDriveCandidate? in
+            guard mount.isLocal, !mount.isHidden, let fallbackName = mount.volumeName,
+                  let bsdName = mount.bsdName, seenDisks.insert(bsdName).inserted,
+                  let identity = wholeDisk(bsdName),
+                  let deviceProtocol = identity.deviceProtocol,
+                  physicalDiskProtocols.contains(deviceProtocol) else { return nil }
+            let name = identity.volumeName.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackName
             let capacity = mount.capacity
             return MountedDriveCandidate(name: name, path: mount.path,
                 isLocal: mount.isLocal, isHidden: mount.isHidden, isExternalPhysical: true,

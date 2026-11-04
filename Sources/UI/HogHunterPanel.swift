@@ -871,8 +871,8 @@ struct HogHunterPanel: View {
                     )
                 }
 
-                // Mac External Drives
-                ForEach(externalDrives.prefix(2)) { drive in
+                // Every mounted Mac drive, whatever it is named
+                ForEach(mountedDrives.rows) { drive in
                     quickStorageRow(
                         name: "Mac (\(drive.name))",
                         icon: "externaldrive",
@@ -1075,78 +1075,24 @@ struct HogHunterPanel: View {
                                   freeBytes: diskSpace.freeBytes)
     }
 
+    /// Internal plus one card per mounted drive, each card under the drive's
+    /// own name.  No card is keyed to a fixed drive name, so a Mac with no
+    /// Time Machine destination - or a backup volume that is renamed or
+    /// repurposed - shows exactly the drives it actually has, and nothing
+    /// reads "Not identified" for a drive that is simply gone.
     private var capacityCards: some View {
-        HStack(alignment: .top, spacing: 8) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: 3)
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
             capacityCard("Internal", value: quickInternalText,
                          percent: store.diskSpace.map { $0.usedFraction * 100 })
-            capacityCard("External", value: externalCapacityText,
-                         percent: externalDrives.count == 1 ? externalDrives[0].usedPercent : nil)
-            capacityCard("Time Machine", value: timeMachineCapacityText,
-                         percent: timeMachineDrives.count == 1 ? timeMachineDrive?.usedPercent : nil)
+            ForEach(mountedDrives.rows) { drive in
+                capacityCard(drive.name, value: quickDriveText(drive),
+                             percent: drive.usedPercent)
+            }
+            if mountedDrives.rows.isEmpty, !driveReadAttempted || mountedDrives.isRefreshing {
+                capacityCard("External", value: "Reading…", percent: nil)
+            }
         }
-    }
-
-    private var timeMachineDrives: [MountedDriveUsage] {
-        mountedDrives.rows.filter { $0.name.localizedCaseInsensitiveContains("Time Machine") }
-    }
-
-    private var timeMachineDrive: MountedDriveUsage? {
-        timeMachineDrives.first
-    }
-
-    private var externalDrives: [MountedDriveUsage] {
-        // Every mounted Time Machine destination belongs in the Time Machine card, not
-        // the External one, so match on the name rather than the single selected id.
-        mountedDrives.rows.filter { !$0.name.localizedCaseInsensitiveContains("Time Machine") }
-    }
-
-    private var externalCapacityText: String {
-        if externalDrives.count > 1 {
-            return selectedTab == .storage ? "\(externalDrives.count) drives · details below"
-                : "\(externalDrives.count) drives · see Storage"
-        }
-        return externalDrives.first.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var timeMachineCapacityText: String {
-        if timeMachineDrives.count > 1 {
-            return selectedTab == .storage ? "\(timeMachineDrives.count) destinations · details below"
-                : "\(timeMachineDrives.count) destinations · see Storage"
-        }
-        return timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var unrecognizedDriveText: String {
-        (!driveReadAttempted || mountedDrives.isRefreshing) && mountedDrives.rows.isEmpty
-            ? "Reading…" : "Not identified"
-    }
-
-    private var quickExternalText: String {
-        if externalDrives.count > 1 {
-            let highest = externalDrives.compactMap(\.usedPercent).max()
-            return highest.map { "\(externalDrives.count) drives · up to \(Int($0.rounded()))% used" }
-                ?? "\(externalDrives.count) drives · see Storage"
-        }
-        return externalDrives.first.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var quickExternalColor: Color {
-        guard let highest = externalDrives.compactMap(\.usedPercent).max() else { return .secondary }
-        return Severity.forDisk(highest / 100).color
-    }
-
-    private var quickTimeMachineText: String {
-        if timeMachineDrives.count > 1 {
-            let highest = timeMachineDrives.compactMap(\.usedPercent).max()
-            return highest.map { "\(timeMachineDrives.count) backups · up to \(Int($0.rounded()))% used" }
-                ?? "\(timeMachineDrives.count) backups · see Storage"
-        }
-        return timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var quickTimeMachineColor: Color {
-        guard let highest = timeMachineDrives.compactMap(\.usedPercent).max() else { return .secondary }
-        return Severity.forDisk(highest / 100).color
     }
 
     /// The mounted volumes, each with the path it is mounted at.
@@ -1224,6 +1170,7 @@ struct HogHunterPanel: View {
     private func capacityCard(_ title: String, value: String, percent: Double?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
             Text(value).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
             if let percent { ProgressView(value: percent, total: 100) }
         }
