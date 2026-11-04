@@ -2853,7 +2853,8 @@ def test_stale_build_never_takes_node_modules_or_dist(hh):
         assert hh.rule_stale_build_output() == []
         assert hh.stale_build_refusal(repo, "node_modules") is not None
         assert hh.stale_build_refusal(repo, "dist") is not None
-        report = {c.path: c for c in hh.rule_ask_first_inventory()}
+        with mock.patch.object(hh, "open_handles", return_value=0):
+            report = {c.path: c for c in hh.rule_ask_first_inventory()}
         for name in ("node_modules", "dist"):
             assert report[str(repo / name)].op == "report", name
 

@@ -875,13 +875,17 @@ def process_names_path(path: str) -> bool:
     return proc_count(re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", path)) > 0
 
 
-def path_identity(path: str) -> tuple[int, int] | None:
-    """The object at this path, without following a symlink, or None."""
+def path_identity(path: str) -> tuple[int, int, int] | None:
+    """The object at this path, without following a symlink, or None.
+
+    The mtime is here because a filesystem can hand a freed inode straight to a
+    new file at the same path, and that is a different object.
+    """
     try:
         st = os.lstat(path)
     except OSError:
         return None
-    return (st.st_dev, st.st_ino)
+    return (st.st_dev, st.st_ino, st.st_mtime_ns)
 
 
 def changed_age_min(path: str) -> float:
