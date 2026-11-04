@@ -202,6 +202,16 @@ final class HogStore: ObservableObject {
             if !loadingSettings { publishCompanion() }
         }
     }
+    /// Off until the owner turns it on in Mac Settings.  Deliberately not in
+    /// the pairing alert: process names, directories and tool reasons name
+    /// server internals, so the owner grants it on purpose.  Gates the server
+    /// block and the server's Flagged Issues in the snapshot.
+    @Published var allowRemoteServerStatus = false {
+        didSet {
+            persist()
+            if !loadingSettings { publishCompanion() }
+        }
+    }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
@@ -298,6 +308,7 @@ final class HogStore: ObservableObject {
         static let allowRemoteClean = "allowRemoteClean"
         static let allowRemoteEdit = "allowRemoteEdit"
         static let allowRemoteMaintain = "allowRemoteMaintain"
+        static let allowRemoteServerStatus = "allowRemoteServerStatus"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
         static let settingsTab = "settingsTab"
@@ -1287,6 +1298,7 @@ final class HogStore: ObservableObject {
         allowRemoteClean = defaults.object(forKey: Key.allowRemoteClean) as? Bool ?? false
         allowRemoteEdit = defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
         allowRemoteMaintain = defaults.object(forKey: Key.allowRemoteMaintain) as? Bool ?? false
+        allowRemoteServerStatus = defaults.object(forKey: Key.allowRemoteServerStatus) as? Bool ?? false
         let bgInterval = defaults.double(forKey: Key.backgroundRefreshInterval)
         if bgInterval >= 1 { backgroundRefreshInterval = bgInterval }
         migrateRenamedKeys()
@@ -1401,6 +1413,7 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteClean, forKey: Key.allowRemoteClean)
         defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
         defaults.set(allowRemoteMaintain, forKey: Key.allowRemoteMaintain)
+        defaults.set(allowRemoteServerStatus, forKey: Key.allowRemoteServerStatus)
         defaults.set(backgroundRefreshInterval, forKey: Key.backgroundRefreshInterval)
     }
 
@@ -1540,6 +1553,10 @@ final class HogStore: ObservableObject {
             let remoteMaintain = self.defaults.object(forKey: Key.allowRemoteMaintain) as? Bool ?? false
             if remoteMaintain != self.allowRemoteMaintain {
                 self.allowRemoteMaintain = remoteMaintain
+            }
+            let remoteServer = self.defaults.object(forKey: Key.allowRemoteServerStatus) as? Bool ?? false
+            if remoteServer != self.allowRemoteServerStatus {
+                self.allowRemoteServerStatus = remoteServer
             }
         }
     }
@@ -2492,6 +2509,18 @@ final class HogStore: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishCompanion() } }
             .store(in: &maintainObservers)
+        // A new server reading reaches the phone when it arrives, not at the
+        // next sample, and only matters to a phone allowed to see it.
+        maintain.vpsStore.$snapshot
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishServerChange() } }
+            .store(in: &maintainObservers)
+        maintain.vpsStore.$lastReadError
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishServerChange() } }
+            .store(in: &maintainObservers)
     }
 
     /// Asks the network cache for a fresh scan when its copy is stale.  Called
@@ -2503,8 +2532,21 @@ final class HogStore: ObservableObject {
         })
     }
 
+    private func publishServerChange() {
+        if allowRemoteServerStatus { publishCompanion() }
+    }
+
     private func publishCompanion() {
         guard shareWithIPhone else { return }
+        let snapshots = companionSnapshots()
+        companionServer.update(snapshot: snapshots.plain, detailed: snapshots.detailed, targets: CompanionTargets.index(rows))
+    }
+
+    /// What the phone reads.  `plain` goes to the shared code and to anyone
+    /// arriving from outside the local network and Tailscale.  `detailed`, when
+    /// there is one, goes only to a phone's own token from the local network or
+    /// Tailscale.  Each opt-in adds only its own detail.
+    func companionSnapshots(now: Date = Date()) -> (plain: CompanionSnapshot, detailed: CompanionSnapshot?) {
         let sampledAt = pulse.sampledAt == .distantPast ? Date() : pulse.sampledAt
         let networkScan = CompanionNetworkCache.shared.current
         let snapshot = CompanionSnapshotBuilder.make(
@@ -2546,16 +2588,48 @@ final class HogStore: ObservableObject {
             remoteMaintainAllowed: allowRemoteMaintain,
             maintain: maintainStatusForPhone()
         )
-        // The plain snapshot is what the shared code reads.  A phone's own token
-        // on the local network or Tailscale also gets the maintain's step detail,
-        // and only while the owner has allowed the phone to run the maintain.
-        var detailed: CompanionSnapshot?
+        // The issues are worked out once, with the server's in them, and the
+        // plain snapshot keeps only the Mac's.  `lastReadError` rather than
+        // `errorMessage`, so a failing server does not read as calm while a
+        // retry is running.
+        let vps = maintain.vpsStore
+        let issues = CompanionServerStatusBuilder.issues(FlaggedIssueEvaluator.evaluate(
+            macStore: self,
+            vpsSnapshot: vps.snapshot,
+            vpsError: vps.lastReadError,
+            vpsConfigured: !vps.configuredHost.isEmpty,
+            externalDrives: MountedDriveStore.shared.rows
+        ))
+        var plain = snapshot
+        plain.remoteServerStatusAllowed = allowRemoteServerStatus
+        plain.flaggedIssues = issues.filter { !$0.isServer }
+        plain.flaggedIssuesCoverServer = false
+        guard allowRemoteMaintain || allowRemoteServerStatus else { return (plain, nil) }
+        var detailed = plain
         if allowRemoteMaintain {
-            var withSteps = snapshot
-            withSteps.maintain = maintainStatusForPhone(detailed: true)
-            detailed = withSteps
+            detailed.maintain = maintainStatusForPhone(detailed: true)
         }
-        companionServer.update(snapshot: snapshot, detailed: detailed, targets: CompanionTargets.index(rows))
+        if allowRemoteServerStatus {
+            detailed.server = serverStatusForPhone(now: now)
+            detailed.flaggedIssues = issues
+            detailed.flaggedIssuesCoverServer = true
+        }
+        return (plain, detailed)
+    }
+
+    /// The server block, built only for the detailed snapshot.
+    private func serverStatusForPhone(now: Date) -> CompanionServerStatus {
+        let vps = maintain.vpsStore
+        return CompanionServerStatusBuilder.make(
+            configuredHost: vps.configuredHost,
+            snapshot: vps.snapshot,
+            error: vps.lastReadError,
+            fetchedAt: vps.lastFetchDate,
+            cpuHistory: vps.cpuHistory.buckets.map(\.average),
+            databaseChange: { vps.databasePercentChange(key: $0) },
+            directoryChange: { vps.directoryPercentChange(path: $0) },
+            now: now
+        )
     }
 
     // MARK: - Staleness

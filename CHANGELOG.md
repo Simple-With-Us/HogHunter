@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+The iPhone can see the server (HH-215, stage 1, read-only):
+
+- A new Server tab shows the Mac and the server side by side, then the server's CPU, memory, swap, paging, disks, databases and directories with daily change, container storage, tools, top processes and Coolify workloads.  The phone tells no server set up, no reading yet, a stale reading and a failed read apart, and draws a missing number as a dash, never 0.
+- Flagged Issues and All Systems Calm are on the phone, on the Activity and Server tabs.  All Systems Calm appears only when the server was looked at and its reading is current, or when there is no server.
+- This is a new opt-in, Allow iPhone to See Server Status, off by default and set in Mac Settings > iPhone only.  The readings name server internals, so they go only to a phone's own token on the local network or Tailscale, and never to the shared pairing code.  Full context in `docs/rollouts/2026-11-04-iphone-server-status.md`.
+
 Codex markers wait for the idle gate (issue 111 follow-up):
 
 - The temp-scratch rule left the `.com.openai.codex.*` markers ungated while the scratch around them waited 3 hours, so it could delete a marker a running Codex still uses.  A marker is now a candidate only when nobody holds it and it was last touched over 3 hours ago, and the loop stops at the rule deadline like the loops above it.
