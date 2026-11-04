@@ -118,6 +118,21 @@ final class FlaggedIssuesTests: XCTestCase {
         )
         let freshExtra = fresh.first { $0.id == "server.disk.extra.critical" }
         XCTAssertFalse(freshExtra?.message.contains("last successful reading") == true)
+
+        // Age-based staleness with no error — polling stalled quietly —
+        // gets the note too, in its shorter form: the numbers are old, but
+        // nothing has said the server is not answering.
+        let aged = FlaggedIssueEvaluator.evaluate(
+            macStore: store,
+            vpsSnapshot: snap,
+            vpsError: nil,
+            vpsConfigured: true,
+            vpsStale: true
+        )
+        let agedExtra = aged.first { $0.id == "server.disk.extra.critical" }
+        XCTAssertTrue(agedExtra?.message.contains("last successful reading") == true,
+                      "got: \(agedExtra?.message ?? "no issue")")
+        XCTAssertFalse(agedExtra?.message.contains("not answering") == true)
     }
 
     func testEvaluatorPrioritizesIssues() {

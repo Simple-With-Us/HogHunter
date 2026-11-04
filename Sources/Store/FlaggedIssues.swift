@@ -146,6 +146,7 @@ enum FlaggedIssueEvaluator {
         vpsSnapshot: VPSStatusSnapshot?,
         vpsError: String?,
         vpsConfigured: Bool,
+        vpsStale: Bool = false,
         externalDrives: [MountedDriveUsage] = []
     ) -> [FlaggedIssue] {
         var issues: [FlaggedIssue] = []
@@ -283,15 +284,25 @@ enum FlaggedIssueEvaluator {
             }
 
             if let snap = vpsSnapshot {
-                // While the latest refresh is failing, every number below
-                // comes from the last good reading, so each server issue
-                // says so instead of letting an old reading pose as the
-                // server's state now — the failure mode of 2026-11-04, when
-                // a frozen snapshot kept reporting a full disk for hours
-                // after the space was freed.
-                let staleNote = (vpsError?.isEmpty == false)
-                    ? "\u{00A0} From the last successful reading; the server is not answering now."
-                    : ""
+                // While the readings are stale — the latest refresh is
+                // failing, or the last good one has aged past the store's
+                // staleness deadline — every number below comes from the
+                // last good reading, so each server issue says so instead
+                // of letting an old reading pose as the server's state
+                // now — the failure mode of 2026-11-04, when a frozen
+                // snapshot kept reporting a full disk for hours after the
+                // space was freed.  The two stale shapes say different
+                // things because they are different facts: a failing
+                // refresh means the server is not answering; an aged
+                // reading only means the numbers are old.
+                let staleNote: String
+                if vpsError?.isEmpty == false {
+                    staleNote = "\u{00A0} From the last successful reading; the server is not answering now."
+                } else if vpsStale {
+                    staleNote = "\u{00A0} From the last successful reading."
+                } else {
+                    staleNote = ""
+                }
 
                 // Server root disk
                 if let root = snap.rootDevice {

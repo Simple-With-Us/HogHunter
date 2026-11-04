@@ -19,9 +19,16 @@ final class VPSStatusStore: ObservableObject {
     /// no shape, and the two machines cannot be read side by side.
     @Published private(set) var cpuHistory = CpuMinuteHistory()
 
+    /// Bumped when a reading crosses the staleness deadline with no new
+    /// fetch landing, purely so observers re-render: `isStale` turns on
+    /// wall-clock time alone, and without a published change at that moment
+    /// SwiftUI keeps showing the reading as current until the next poll.
+    @Published private(set) var stalenessRevision = 0
+
     private let history: SizeGrowthHistory
     private let fetcher: Fetcher
     private var timer: Timer?
+    private var stalenessTimer: Timer?
     private var activeFetchTask: Task<Void, Never>?
 
     init(initialHost: String = "", fetcher: Fetcher? = nil, history: SizeGrowthHistory = .shared) {
@@ -45,6 +52,7 @@ final class VPSStatusStore: ObservableObject {
         snapshot = nil
         lastFetchDate = nil
         errorMessage = nil
+        cancelStalenessTimer()
         cpuHistory = CpuMinuteHistory()
         if !configuredHost.isEmpty {
             startPolling()
@@ -92,9 +100,34 @@ final class VPSStatusStore: ObservableObject {
     func stopPolling() {
         timer?.invalidate()
         timer = nil
+        cancelStalenessTimer()
         activeFetchTask?.cancel()
         activeFetchTask = nil
         isLoading = false
+    }
+
+    /// Arms the one-shot timer that publishes a change when the current
+    /// reading crosses the staleness deadline in `isStale`, so the stale
+    /// markers appear at the deadline instead of at the next poll tick.
+    /// Internal rather than private so a test can arm it with a short
+    /// interval; production arms it from each successful fetch with the
+    /// time left until that reading ages out.
+    func scheduleStalenessFlip(after interval: TimeInterval) {
+        cancelStalenessTimer()
+        let t = Timer(timeInterval: max(0.001, interval), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.stalenessTimer = nil
+                self.stalenessRevision &+= 1
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        stalenessTimer = t
+    }
+
+    private func cancelStalenessTimer() {
+        stalenessTimer?.invalidate()
+        stalenessTimer = nil
     }
 
     func fetch(force: Bool = false) {
@@ -140,8 +173,13 @@ final class VPSStatusStore: ObservableObject {
                     self.cpuHistory.record(percent: cpu.pct, at: Date())
                 }
                 self.errorMessage = nil
-                self.lastFetchDate = Date()
+                let fetchedAt = Date()
+                self.lastFetchDate = fetchedAt
+                self.scheduleStalenessFlip(after: fetchedAt.addingTimeInterval(150).timeIntervalSinceNow)
             case .failure(let err):
+                // The error itself is published, so observers re-render and
+                // read `isStale` as true without waiting for the timer.
+                self.cancelStalenessTimer()
                 self.errorMessage = err.localizedDescription
             }
             self.isLoading = false

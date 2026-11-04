@@ -98,14 +98,18 @@ struct VPSStatusStripView: View {
 
     /// What a screen reader says.  The numbers are in the label, not only in
     /// the drawing: the whole point of the strip is that the server's state is
-    /// readable without looking closely at a row of percentages.
+    /// readable without looking closely at a row of percentages.  The
+    /// reading's age and staleness are in it too: the strip's label replaces
+    /// the child views' own text, so anything the marker shows visually has
+    /// to be said here or a screen reader never hears it.
     private var accessibilityLabel: String {
-        Self.stripLabel(snapshot: store.snapshot)
+        Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale)
     }
 
-    /// The strip's spoken label, from the snapshot alone, so it can be pinned
-    /// by a test: the host, then each reading.
-    static func stripLabel(snapshot: VPSStatusSnapshot?) -> String {
+    /// The strip's spoken label, so it can be pinned by a test: the host,
+    /// then each reading, then how old the reading is and whether it is
+    /// stale.
+    static func stripLabel(snapshot: VPSStatusSnapshot?, isStale: Bool = false) -> String {
         guard let snapshot, let headline = snapshot.headline else {
             return "Remote server status"
         }
@@ -114,6 +118,8 @@ struct VPSStatusStripView: View {
         if let memory = headline.memoryText { parts.append("RAM \(memory)") }
         if let disk = headline.diskText { parts.append("disk \(disk)") }
         if let extra = headline.extraDiskText { parts.append("fleet-extra \(extra)") }
+        parts.append("read \(snapshot.relativeTimeString())")
+        if isStale { parts.append("stale") }
         return parts.joined(separator: ", ")
     }
 

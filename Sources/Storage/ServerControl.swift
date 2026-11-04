@@ -193,17 +193,27 @@ final class ServerControl: ObservableObject {
 /// connection (see `SSHConnection`), so both use the same host, the same key
 /// and the same timeout rules.
 enum SSHCommand {
-    /// Runs one command, recovering once from a dead socket: when the app's
-    /// connection master has died, it is discarded first and the command
-    /// runs once more over the fresh connection the retry creates.  A
-    /// control-script refusal is an answer, not an error, so it returns
-    /// from the first attempt untouched; any other failure, and any second
-    /// failure, propagates exactly as produced.
+    /// Runs one command exactly once.  This is the acting path — its
+    /// commands stop and restart workloads — so it never re-dispatches:
+    /// when the connection master has died, the remote helper may already
+    /// have applied the action before the channel broke, and running the
+    /// command again could apply it twice.  A dead-socket failure instead
+    /// discards the dead master and propagates, so the action's outcome is
+    /// reported as it stands and the next command the user asks for runs
+    /// over a fresh connection.  The reading path is the one that retries,
+    /// because a read changes nothing (see `VPSStatusStore.sshFetcher`).
+    /// A control-script refusal is an answer, not an error, so it returns
+    /// from the attempt untouched; any other failure propagates exactly as
+    /// produced.
     static func run(host: String, arguments: [String], timeout: TimeInterval) async throws -> String {
-        try await SSHConnection.retryingOnceOnDeadSocket(
-            attempt: { try await runOnce(host: host, arguments: arguments, timeout: timeout) },
-            discard: { await SSHConnection.invalidate(host: host) }
-        )
+        do {
+            return try await runOnce(host: host, arguments: arguments, timeout: timeout)
+        } catch {
+            if SSHConnection.isDeadSocketFailure(error) {
+                await SSHConnection.invalidate(host: host)
+            }
+            throw error
+        }
     }
 
     private static func runOnce(host: String, arguments: [String], timeout: TimeInterval) async throws -> String {

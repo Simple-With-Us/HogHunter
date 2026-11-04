@@ -105,12 +105,25 @@ enum SSHConnection {
     /// timeouts, authentication, name resolution — return false: the remedy
     /// for those is not discarding a socket, and callers must keep
     /// reporting them as the server being unreachable.
+    ///
+    /// Signatures match only at the start of a line, because the error text
+    /// callers hand in is the ssh process's stderr, which also carries the
+    /// remote command's own stderr.  A remote program failing with a broken
+    /// pipe writes exactly that phrase, and it must not be read as the
+    /// local socket dying — ssh's own control diagnostics are the ones that
+    /// open with the mux and control-socket prefixes below.
     static func isDeadSocketFailure(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        return lower.contains("mux_client")
-            || lower.contains("read from master failed")
-            || lower.contains("control socket")
-            || lower.contains("broken pipe")
+        let diagnosticPrefixes = [
+            "mux_client",
+            "read from master failed",
+            "control socket connect(",
+            "ssh: control socket",
+            "write to mux socket",
+        ]
+        return text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).contains { rawLine in
+            let line = String(rawLine).lowercased().trimmingCharacters(in: .whitespaces)
+            return diagnosticPrefixes.contains { line.hasPrefix($0) }
+        }
     }
 
     static func isDeadSocketFailure(_ error: Error) -> Bool {
@@ -119,20 +132,60 @@ enum SSHConnection {
 
     // MARK: - Invalidation
 
-    /// Discards the master connection for `host`: asks the master to exit
-    /// (`ssh -O exit` against the app's control path) and removes the socket
-    /// file if anything still has it there.  Both steps ignore failure — the
-    /// master may already be gone, which is the usual case — because the
-    /// point is the guarantee that follows: after this returns, no attempt
-    /// can be issued over the old socket or its path, so the next ssh call
-    /// creates a brand-new master first and runs over that fresh connection
-    /// only.
+    /// Discards the master connection for `host` when it is actually dead:
+    /// removes the socket file a dead master left behind, so the next ssh
+    /// call creates a brand-new master first and runs over that fresh
+    /// connection only.
+    ///
+    /// The socket is shared by every call site, so a live master is never
+    /// torn down from here: another call may already have replaced the dead
+    /// master with a fresh one, or be running over it right now, and
+    /// exiting that master would manufacture the very failure this recovery
+    /// exists to heal.  `invalidate` therefore checks first — a master that
+    /// answers `ssh -O check` is left exactly as it is.  Only when the
+    /// check cannot even run does it fall back to asking the master to exit
+    /// and removing the file, since a master whose state is unknowable
+    /// cannot be trusted either.
     static func invalidate(host: String) async {
         let socket = controlSocketURL(forHost: host)
         await Task.detached(priority: .utility) {
-            exitMaster(host: host, socket: socket)
+            guard let running = masterIsRunning(host: host, socket: socket) else {
+                exitMaster(host: host, socket: socket)
+                try? FileManager.default.removeItem(at: socket)
+                return
+            }
+            if running { return }
             try? FileManager.default.removeItem(at: socket)
         }.value
+    }
+
+    /// Whether a master currently answers over the control socket at
+    /// `socket`, or nil when the check itself could not run to an answer.
+    private static func masterIsRunning(host: String, socket: URL) -> Bool? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        proc.arguments = [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=3",
+            "-o", controlPathOption(socket),
+            "-O", "check",
+            host,
+        ]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in done.signal() }
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+        if done.wait(timeout: .now() + 5) == .timedOut {
+            if proc.isRunning { proc.terminate() }
+            return nil
+        }
+        return proc.terminationStatus == 0
     }
 
     private static func exitMaster(host: String, socket: URL) {

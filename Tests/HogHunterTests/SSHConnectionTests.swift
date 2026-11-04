@@ -25,6 +25,21 @@ final class SSHConnectionTests: XCTestCase {
             "ssh: control socket is not running"))
     }
 
+    /// The error text is the ssh process's stderr, which carries the remote
+    /// command's stderr too.  A remote program failing with a broken pipe
+    /// is not a dead local socket — classifying it as one would discard a
+    /// healthy master and, on the acting path, cast doubt on an action
+    /// that may already have been applied.
+    func testRemoteStderrIsNotADeadSocket() {
+        XCTAssertFalse(SSHConnection.isDeadSocketFailure("Broken pipe"))
+        XCTAssertFalse(SSHConnection.isDeadSocketFailure(
+            "cat: write error: Broken pipe"))
+        XCTAssertFalse(SSHConnection.isDeadSocketFailure(
+            "hoghunter-control: line 12: echo: write error: Broken pipe\n"))
+        XCTAssertFalse(SSHConnection.isDeadSocketFailure(
+            "some remote output\nthe pipe broke: broken pipe\n"))
+    }
+
     /// A dead socket is a local failure with a local remedy.  Server and
     /// network failures must not be classified as one: discarding a socket
     /// is not their fix, and callers report them as the server being
@@ -183,5 +198,25 @@ final class SSHConnectionTests: XCTestCase {
         XCTAssertNotNil(store.snapshot, "the last good reading is retained")
         XCTAssertNotNil(store.errorMessage)
         XCTAssertTrue(store.isStale)
+    }
+
+    /// `isStale` turns on wall-clock time alone, so the store publishes a
+    /// change at the deadline: without it, SwiftUI keeps showing the
+    /// reading as current until the next poll tick re-renders the views.
+    @MainActor
+    func testStalenessFlipPublishesAtTheDeadline() async throws {
+        let store = VPSStatusStore(initialHost: "fleet", fetcher: { _ in
+            VPSStatusSnapshot(
+                generatedAt: "2026-11-04T15:00:00Z",
+                host: "fleet-hetzner-nbg1",
+                devices: ["root": VPSDevice(mount: "/", freeBytes: 150 * 1024 * 1024 * 1024, note: "root")]
+            )
+        })
+        let before = store.stalenessRevision
+        store.scheduleStalenessFlip(after: 0.05)
+        for _ in 0..<100 where store.stalenessRevision == before {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertGreaterThan(store.stalenessRevision, before)
     }
 }
