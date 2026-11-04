@@ -1087,8 +1087,12 @@ struct HogHunterPanel: View {
         max(1, (mountedDrives.rows.count + 4) / 5)
     }
 
+    static func clampedMountedDrivePage(_ page: Int, count: Int) -> Int {
+        min(max(0, page), max(1, (count + 4) / 5) - 1)
+    }
+
     private var currentMountedDrivePage: Int {
-        min(max(0, mountedDrivePage), mountedDrivePageCount - 1)
+        Self.clampedMountedDrivePage(mountedDrivePage, count: mountedDrives.rows.count)
     }
 
     private var pagedMountedDrives: [MountedDriveUsage] {
@@ -1238,6 +1242,9 @@ struct HogHunterPanel: View {
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { break }
             }
+        }
+        .onChange(of: mountedDrives.rows.count) { _ in
+            mountedDrivePage = currentMountedDrivePage
         }
         .onChange(of: selectedTab) { tab in
             if tab == .storage { hasVisitedStorage = true }

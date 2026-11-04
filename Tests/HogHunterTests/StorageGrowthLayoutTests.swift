@@ -6,6 +6,18 @@ import XCTest
 
 @MainActor
 final class StorageGrowthLayoutTests: XCTestCase {
+    func testMountedDrivePageStaysClampedAfterRemovalAndReplug() {
+        var page = HogHunterPanel.clampedMountedDrivePage(2, count: 12)
+        XCTAssertEqual(page, 2)
+        page = HogHunterPanel.clampedMountedDrivePage(page, count: 3)
+        XCTAssertEqual(page, 0)
+        page = HogHunterPanel.clampedMountedDrivePage(page, count: 12)
+        XCTAssertEqual(page, 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(2, count: 0), 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(-1, count: 12), 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(2, count: 6), 1)
+    }
+
     private var dashboardStageWidth: CGFloat { HogHunterPanel.dashboardWidth - 154 - 24 - 36 }
 
     func testCompactRowsAndServerContentRenderWithinPanelWidth() async throws {
