@@ -292,7 +292,9 @@ enum CompanionConnection {
             timeout: action.isMaintenance ? serverMaintenanceTimeout : serverActionTimeout,
             useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
-        return try decode(CompanionServerActionResponse.self, from: reply)
+        // Not `decode`: it throws on a 403 before reading the body, and a refusal
+        // here has to stay a refusal, not become a failure to hear back.
+        return CompanionServerActionResponse.answer(status: reply.status, body: reply.body)
     }
 
     /// Starts a full Maintain run on the Mac.  The Mac answers at once,

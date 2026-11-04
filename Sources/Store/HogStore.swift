@@ -2647,7 +2647,6 @@ final class HogStore: ObservableObject {
         ))
         var plain = snapshot
         plain.remoteServerStatusAllowed = allowRemoteServerStatus
-        plain.remoteServerControlAllowed = serverControlEffective
         plain.flaggedIssues = issues.filter { !$0.isServer }
         plain.flaggedIssuesCoverServer = false
         guard allowRemoteMaintain || allowRemoteServerStatus else { return (plain, nil) }
@@ -2657,6 +2656,7 @@ final class HogStore: ObservableObject {
         }
         if allowRemoteServerStatus {
             detailed.server = serverStatusForPhone(now: now)
+            detailed.remoteServerControlAllowed = serverControlEffective
             detailed.flaggedIssues = issues
             detailed.flaggedIssuesCoverServer = true
         }

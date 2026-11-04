@@ -225,7 +225,7 @@ enum SSHCommand {
                 let timeoutTimer = DispatchSource.makeTimerSource()
                 timeoutTimer.schedule(deadline: .now() + timeout)
                 timeoutTimer.setEventHandler {
-                    if proc.isRunning { proc.terminate() }
+                    Self.stop(proc)
                 }
                 timeoutTimer.resume()
 
@@ -293,6 +293,22 @@ enum SSHCommand {
             }
         } onCancel: {
             if proc.isRunning { proc.terminate() }
+        }
+    }
+
+    /// How long a timed-out ssh gets to exit on SIGTERM.
+    static let killGrace: TimeInterval = 5
+
+    /// Asks the child to stop, then insists.  The caller's continuation resumes
+    /// only when the child exits, so a child that ignored SIGTERM would hold
+    /// its caller, and the phone's one server action slot, forever.
+    static func stop(_ process: Process, grace: TimeInterval = SSHCommand.killGrace) {
+        guard process.isRunning else { return }
+        process.terminate()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
+            // `isRunning` stays true only until this child is reaped, so the pid
+            // is still this child's own.
+            if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
         }
     }
 

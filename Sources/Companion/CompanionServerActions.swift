@@ -143,14 +143,15 @@ final class CompanionServerActions {
         if !sample { vps.fetch(force: true) }
         switch control.lastOutcome {
         case .acted(let text):
-            let response = CompanionServerActionResponse(status: "acted", message: text, name: name, sampleText: sample ? control.lastSampleText : nil)
+            let response = CompanionServerActionResponse(status: "acted", message: text, name: name, sampleText: sample ? control.lastSampleText.flatMap(Self.phoneSampleText) : nil)
             return Self.answer(200, response, row: name, outcome: "acted")
         case .refused(let text):
             return Self.answer(409, CompanionServerActionResponse(status: "refused", error: text, name: name), row: name, outcome: "refused")
         case .failed(let text):
-            return Self.answer(502, CompanionServerActionResponse(status: "failed", error: text, name: name), row: name, outcome: "failed")
+            // A transport failure says nothing about whether the server acted.
+            return Self.answer(502, CompanionServerActionResponse(status: "unknown", error: text, name: name), row: name, outcome: "unconfirmed")
         case nil:
-            return Self.answer(502, CompanionServerActionResponse(status: "failed", error: "The Mac has no outcome to report.", name: name), row: name, outcome: "failed")
+            return Self.answer(502, CompanionServerActionResponse(status: "unknown", error: "The Mac has no outcome to report.", name: name), row: name, outcome: "unconfirmed")
         }
     }
 
@@ -174,19 +175,51 @@ final class CompanionServerActions {
         guard !pending.includesImages || requestMode == .scan || acknowledged else {
             return Self.answer(400, CompanionServerActionResponse(status: "rejected", error: "Removing images needs its own confirmation, so nothing was done."), row: row, outcome: "rejected")
         }
+        // Past this line the request has gone to the server, so a missing result
+        // means unconfirmed.  This is the one refusal `perform` can give first.
+        guard !maintenance.isWorking else {
+            return Self.answer(409, CompanionServerActionResponse(status: "busy", error: "Another server maintenance request is already running."), row: row, outcome: "busy")
+        }
         await maintenance.perform(pending, confirmed: requestMode == .run, imageRemovalConfirmed: acknowledged)
         if requestMode == .run { vps.fetch(force: true) }
         guard let result = maintenance.result else {
             let text = maintenance.message ?? "Could not verify server maintenance."
-            return Self.answer(502, CompanionServerActionResponse(status: "failed", error: text), row: row, outcome: "unconfirmed")
+            return Self.answer(502, CompanionServerActionResponse(status: "unknown", error: text), row: row, outcome: "unconfirmed")
         }
-        let successful = ["ran", "skipped", "planned"].contains(result.status)
         let response = CompanionServerActionResponse(
-            status: successful ? "acted" : "partial",
+            status: Self.status(forMaintenance: result.status),
             message: result.message,
             maintenance: Self.summary(result)
         )
         return Self.answer(200, response, row: row, outcome: result.status)
+    }
+
+    /// A server's `skipped` means it looked and started nothing.  Its `partial`,
+    /// `cancelled` and `failed` runs may each have removed something already.
+    static func status(forMaintenance status: String) -> String {
+        switch status {
+        case "ran", "planned": return "acted"
+        case "skipped": return "noWork"
+        default: return "partial"
+        }
+    }
+
+    /// The fields of a process sample the phone may read.  A list of what is
+    /// allowed, so the pid, start time and boot id stay here, and so does
+    /// anything the server starts reporting later.
+    nonisolated private static let sampleFieldsForPhone: Set<String> = [
+        "name", "duration_seconds", "cpu_percent", "minor_faults", "major_faults",
+        "memory_before", "memory_after", "nice", "threads", "state", "source",
+    ]
+
+    /// A sample as the phone sees it.  Nil if it cannot be read back, because
+    /// passing unreadable text on could pass the identity on with it.
+    nonisolated static func phoneSampleText(_ text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let kept = object.filter { sampleFieldsForPhone.contains($0.key) }
+        guard let formatted = try? JSONSerialization.data(withJSONObject: kept, options: [.prettyPrinted, .sortedKeys]) else { return nil }
+        return String(data: formatted, encoding: .utf8)
     }
 
     /// The Mac card's rows, in the Mac card's words.

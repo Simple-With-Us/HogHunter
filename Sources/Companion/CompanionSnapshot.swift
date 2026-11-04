@@ -792,7 +792,8 @@ struct CompanionSnapshot: Codable, Equatable {
     /// the Mac's alone, so an empty list does not mean all is calm.
     var flaggedIssuesCoverServer: Bool? = nil
     /// Whether the owner allows the phone to act on the server.  Nil from an
-    /// older Mac.  True says the Mac will listen, not that this link will be
+    /// older Mac, and always in the plain snapshot: it travels with the server
+    /// block.  True says the Mac will listen, not that this link will be
     /// accepted: the routes also need a Tailscale connection.
     var remoteServerControlAllowed: Bool? = nil
 }
@@ -1012,8 +1013,8 @@ enum CompanionServerActionRequest: Equatable, Sendable {
 }
 
 /// The Mac's answer to a server action.  `status` is `acted`, `partial`,
-/// `refused`, `failed`, `busy`, `stale`, `changed`, `protected`, `rejected`,
-/// `forbidden` or `tailscaleRequired`.  A sample or a scan can name server
+/// `noWork`, `unknown`, `refused`, `busy`, `stale`, `changed`, `protected`,
+/// `rejected`, `forbidden` or `tailscaleRequired`.  A sample or a scan can name server
 /// internals, which is why these answers exist only behind the routes' gates.
 struct CompanionServerActionResponse: Codable, Equatable, Sendable {
     var status: String
@@ -1026,7 +1027,66 @@ struct CompanionServerActionResponse: Codable, Equatable, Sendable {
 
     /// Whatever the phone should show for this answer.
     var displayText: String { error ?? message ?? "The Mac did not say what happened." }
-    var succeeded: Bool { status == "acted" }
+
+    /// What the headline says.  These are kept apart because they call for
+    /// different next steps: retrying after a run that may still be going, or
+    /// that already deleted something, is a different act from retrying after
+    /// a refusal.  A status this phone does not know is not assumed to be safe.
+    var outcome: CompanionServerActionOutcome {
+        switch status {
+        case "acted": return .done
+        case "partial": return .partial
+        case "noWork": return .noWork
+        case "refused", "busy", "stale", "changed", "protected", "rejected", "forbidden", "tailscaleRequired": return .refused
+        default: return .unknown
+        }
+    }
+
+    /// What the phone makes of the Mac's reply, whatever its status.  A typed
+    /// body wins, because that is where a refusal says why.  Without one, a 4xx
+    /// is still a definite refusal: nothing ran.  Only a reply that says nothing
+    /// about the action leaves the outcome open.
+    static func answer(status: Int, body: Data) -> CompanionServerActionResponse {
+        if let typed = try? JSONDecoder().decode(CompanionServerActionResponse.self, from: body) {
+            return typed
+        }
+        switch status {
+        case 401:
+            return CompanionServerActionResponse(status: "forbidden", error: "This iPhone is no longer paired with the Mac, so nothing was done.\u{00A0} Pair it again.")
+        case 404:
+            return CompanionServerActionResponse(status: "refused", error: "This Mac's copy of Hog Hunter is older than this app and has no server controls, so nothing was done.\u{00A0} Update it on the Mac.")
+        case 429:
+            return CompanionServerActionResponse(status: "refused", error: "The Mac asked this iPhone to slow down, so nothing was done.\u{00A0} Wait a moment, then try again.")
+        case 400..<500:
+            return CompanionServerActionResponse(status: "refused", error: "The Mac refused that, so nothing was done.")
+        default:
+            return CompanionServerActionResponse(status: "unknown", error: "The Mac's answer could not be read, so the outcome is not known.\u{00A0} Check the server before trying again.")
+        }
+    }
+}
+
+/// How a server action came out, as far as the phone can honestly say.
+enum CompanionServerActionOutcome: Equatable, Sendable {
+    /// It happened.
+    case done
+    /// Some of it happened, and some work may have been done.
+    case partial
+    /// It may have happened, and may still be going.
+    case unknown
+    /// The server looked and started nothing.
+    case noWork
+    /// Nothing ran.
+    case refused
+
+    var headline: String {
+        switch self {
+        case .done: return "Done"
+        case .partial: return "Partly Done"
+        case .unknown: return "Outcome Unknown"
+        case .noWork: return "No Work Done"
+        case .refused: return "Not Done"
+        }
+    }
 }
 
 /// What a server maintenance scan or run found, in the Mac card's words.

@@ -525,6 +525,9 @@ final class CompanionServer: @unchecked Sendable {
                 // check and the set below cannot interleave with another phone
                 // request.
                 guard !self.maintainRunningFlag.value else { return Self.maintainBusyReply }
+                // A run can include the remote step, which would meet the server
+                // action already out, so it waits for that to finish.
+                guard !self.serverActionBusyFlag.value else { return Self.maintainWaitsForServerReply }
                 self.maintainRunningFlag.value = true
                 let reply = handler(kind)
                 if !(200..<300).contains(reply.status) { self.maintainRunningFlag.value = false }
@@ -691,11 +694,16 @@ final class CompanionServer: @unchecked Sendable {
     }
 
     private func startServerAction(_ request: CompanionServerActionRequest, device: String, on connection: NWConnection) {
-        let body = Self.encodeServerReply(CompanionServerActionResponse(status: "failed", error: "The server has not answered, so the outcome is not known.\u{00A0} Check the server before trying again."))
+        let body = Self.encodeServerReply(CompanionServerActionResponse(status: "unknown", error: "The server has not answered, so the outcome is not known.\u{00A0} Check the server before trying again."))
         let deadline = request.isMaintenance ? Self.serverMaintenanceReplyDeadline : Self.serverActionReplyDeadline
         hold(connection, deadline: deadline, timeout: (504, body)) { done in
             runServerAction(request, device: device, completion: done)
         }
+    }
+
+    static var maintainWaitsForServerReply: Reply {
+        let body = #"{"status":"busy","error":"A server action is running from iPhone.\u00a0 Wait for it to finish, then start the Maintain run."}"#
+        return (409, Data(body.utf8))
     }
 
     /// How long the connection of an unfinished sample is held.  The report

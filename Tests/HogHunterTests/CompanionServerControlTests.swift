@@ -43,6 +43,13 @@ private func planned(_ strategies: [String]) -> String {
     return #"{"schema_version":1,"tool":"hoghunter-server-maintenance","mode":"scan","manual":true,"dry_run":false,"pressure":false,"status":"planned","before":\#(disk),"after":\#(disk),"reclaimed_bytes":0,"observed_free_delta_bytes":0,"removed_file_bytes":0,"candidate_count":0,"strategies":[\#(rows)],"lock":{"acquired":false},"cancellation":{"requested":false},"duration_seconds":1}"#
 }
 
+/// A maintenance answer `ServerMaintenanceResult.parse` accepts.
+private func maintenanceAnswer(mode: String, status: String, rows: String, reason: String? = nil, candidates: Int = 0, removedBytes: Int = 0) -> String {
+    let disk = #"{"free_bytes":100,"total_bytes":200,"used_percent":50}"#
+    let because = reason.map { #""reason":"\#($0)","# } ?? ""
+    return #"{"schema_version":1,"tool":"hoghunter-server-maintenance","mode":"\#(mode)","manual":true,"dry_run":false,"pressure":false,"status":"\#(status)",\#(because)"before":\#(disk),"after":\#(disk),"reclaimed_bytes":0,"observed_free_delta_bytes":0,"removed_file_bytes":\#(removedBytes),"candidate_count":\#(candidates),"strategies":[\#(rows)],"lock":{"acquired":false},"cancellation":{"requested":false},"duration_seconds":1}"#
+}
+
 private final class Seam: @unchecked Sendable {
     private let calls = CompanionLocked<[[String]]>([])
     private let hosts = CompanionLocked<[String]>([])
@@ -126,6 +133,13 @@ final class CompanionTailscalePeerTests: XCTestCase {
         XCTAssertFalse(CompanionPeer.isTailscaleEndpoint(endpoint("studio.local")))
         XCTAssertTrue(CompanionPeer.isTailscaleEndpoint(endpoint("studio.tail1234.ts.net")))
         XCTAssertTrue(CompanionPeer.isTailscaleEndpoint(endpoint("100.100.1.1")))
+    }
+
+    func testThePhoneDoesNotOfferControlsOnATailscaleServeShapedLink() {
+        let serve = NWEndpoint.hostPort(host: "studio.tail1234.ts.net", port: 443)
+        XCTAssertFalse(CompanionPeer.isTailscaleEndpoint(serve), "Serve arrives over loopback, which the Mac refuses")
+        XCTAssertFalse(CompanionPeer.isTailscaleEndpoint(.hostPort(host: "100.100.1.1", port: 443)))
+        XCTAssertFalse(CompanionPeer.isTailscaleEndpoint(endpoint("studio.tail1234.ts.net"), usesTLS: true))
     }
 
     /// The proof depends on an accepted connection having a readable local
@@ -262,18 +276,18 @@ final class CompanionServerControlRouteTests: XCTestCase {
     private let loopback = CompanionPeer(key: "127.0.0.1", isTrusted: true)
     private let id = "0123456789abcdef"
 
-    private func server(on: Bool = true) -> (CompanionServer, String, CompanionLocked<Int>) {
+    /// Whether any request in this test got past the gates.  `disposition` only
+    /// decides: it never calls the handler, so a handler count would prove nothing.
+    private var started = false
+
+    private func server(on: Bool = true) -> (CompanionServer, String) {
         let server = CompanionServer()
         server.updateToken(code)
         let token = server.devices.issue(name: "Test iPhone").token
         server.allowRemoteServerControl = on
-        let calls = CompanionLocked(0)
-        server.onRemoteServerAction = { _, _, completion in
-            calls.withLock { $0 += 1 }
-            completion((200, Data("{}".utf8)))
-        }
+        server.onRemoteServerAction = { _, _, completion in completion((200, Data("{}".utf8))) }
         server.syncOnQueue {}
-        return (server, token, calls)
+        return (server, token)
     }
 
     private func request(_ action: CompanionServerActionRequest? = nil, token: String) -> Data {
@@ -286,13 +300,14 @@ final class CompanionServerControlRouteTests: XCTestCase {
     }
 
     private func reply(_ server: CompanionServer, _ data: Data, from peer: CompanionPeer) -> (status: Int, response: CompanionServerActionResponse?)? {
-        guard case .reply(let reply) = server.syncOnQueue({ server.disposition(for: data, peer: peer) }),
-              let parsed = CompanionHTTP.parseResponse(reply) else { return nil }
+        let disposition = server.syncOnQueue { server.disposition(for: data, peer: peer) }
+        if case .startServerAction = disposition { started = true }
+        guard case .reply(let reply) = disposition, let parsed = CompanionHTTP.parseResponse(reply) else { return nil }
         return (parsed.status, try? JSONDecoder().decode(CompanionServerActionResponse.self, from: parsed.body))
     }
 
     func testAPhonesOwnTokenOverTailscaleIsAccepted() {
-        let (server, token, _) = server()
+        let (server, token) = server()
         let disposition = server.syncOnQueue { server.disposition(for: request(token: token), peer: tailnet) }
         XCTAssertEqual(disposition, .startServerAction(.process(rowId: id, action: "quit"), device: "Test iPhone"))
     }
@@ -304,10 +319,10 @@ final class CompanionServerControlRouteTests: XCTestCase {
             .maintain(mode: "scan", strategies: ["package-cache"], imageRemovalAcknowledged: false),
         ]
         for action in actions {
-            let (off, token, offCalls) = server(on: false)
+            let (off, token) = server(on: false)
             XCTAssertEqual(reply(off, request(action, token: token), from: tailnet)?.status, 403)
-            XCTAssertEqual(offCalls.value, 0)
-            let (on, onToken, _) = server()
+            XCTAssertFalse(started, "the gate stops it before any action starts")
+            let (on, onToken) = server()
             let refused = reply(on, request(action, token: onToken), from: lan)
             XCTAssertEqual(refused?.status, 403)
             XCTAssertEqual(refused?.response?.status, "tailscaleRequired")
@@ -315,71 +330,71 @@ final class CompanionServerControlRouteTests: XCTestCase {
     }
 
     func testOffIsAReadable403() {
-        let (server, token, calls) = server(on: false)
+        let (server, token) = server(on: false)
         let refused = reply(server, request(token: token), from: tailnet)
         XCTAssertEqual(refused?.status, 403)
         XCTAssertEqual(refused?.response?.status, "forbidden")
         XCTAssertEqual(refused?.response?.error, CompanionServerControl.optInNote)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testALocalNetworkPeerIsToldToUseTailscale() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         let refused = reply(server, request(token: token), from: lan)
         XCTAssertEqual(refused?.status, 403)
         XCTAssertEqual(refused?.response?.error, CompanionServerControl.tailscaleOnlyNote)
         XCTAssertTrue(refused?.response?.error?.contains("Tailscale address") == true)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testAnUnprovenTailscaleAddressAndLoopbackAreRefused() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         XCTAssertEqual(reply(server, request(token: token), from: unprovenTailnet)?.response?.status, "tailscaleRequired")
         XCTAssertEqual(reply(server, request(token: token), from: loopback)?.response?.status, "tailscaleRequired")
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testAForwardedClientNamingATailscaleAddressIsRefused() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         let lines = ["POST \(CompanionService.serverProcessPath) HTTP/1.1", "Host: x", "Authorization: Bearer \(token)", "X-Forwarded-For: 100.100.1.2", "", ""]
         let data = Data(lines.joined(separator: "\r\n").utf8)
         let peer = loopback.resolvingForwardedClient(in: data)
         XCTAssertEqual(reply(server, data, from: peer)?.status, 403)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testAnOutsidePeerIsRefused() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         XCTAssertEqual(reply(server, request(token: token), from: wan)?.status, 403)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testTheSharedCodeIsRefusedEvenOverTailscale() {
-        let (server, _, calls) = server()
+        let (server, _) = server()
         XCTAssertEqual(reply(server, request(token: code), from: tailnet)?.status, 403)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testAWrongCredentialIs401AndCountsAgainstTheThrottle() {
-        let (server, _, calls) = server()
+        let (server, _) = server()
         var statuses: [Int] = []
         for _ in 0..<12 {
             if let status = reply(server, request(token: "hh1_wrong"), from: tailnet)?.status { statuses.append(status) }
         }
         XCTAssertEqual(statuses.first, 401)
         XCTAssertEqual(statuses.last, 429, "the existing throttle answers once it has seen enough")
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testAGetIsRefused() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         let lines = ["GET \(CompanionService.serverProcessPath) HTTP/1.1", "Host: x", "Authorization: Bearer \(token)", "", ""]
         XCTAssertEqual(reply(server, Data(lines.joined(separator: "\r\n").utf8), from: tailnet)?.status, 405)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testABadBodyIs400AndAQueryIsRefused() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         let path = CompanionService.serverProcessPath
         for body in [#"{"rowId":"\#(id)","action":"reboot"}"#, #"{"rowId":"\#(id)","action":"quit","host":"evil"}"#, #"{"rowId":"\#(id)","action":"quit","action":"sample"}"#, ""] {
             let refused = reply(server, raw(path: path, body: body, token: token), from: tailnet)
@@ -388,18 +403,18 @@ final class CompanionServerControlRouteTests: XCTestCase {
         }
         let query = raw(path: path + "?host=evil", body: #"{"rowId":"\#(id)","action":"quit"}"#, token: token)
         XCTAssertEqual(reply(server, query, from: tailnet)?.status, 400)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testAnImageRunWithoutTheAcknowledgementDoesNothing() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         let body = #"{"mode":"run","strategies":["docker-images"]}"#
         XCTAssertEqual(reply(server, raw(path: CompanionService.serverMaintainPath, body: body, token: token), from: tailnet)?.status, 400)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testOneActionAtATime() {
-        let (server, token, _) = server()
+        let (server, token) = server()
         let first = server.syncOnQueue { server.disposition(for: request(token: token), peer: tailnet) }
         guard case .startServerAction(let accepted, let device) = first else { return XCTFail("the first is accepted") }
         let second = reply(server, request(token: token), from: tailnet)
@@ -436,23 +451,92 @@ final class CompanionServerControlRouteTests: XCTestCase {
     }
 
     func testServerMaintenanceWaitsForAMaintainRun() {
-        let (server, token, calls) = server()
+        let (server, token) = server()
         server.maintainRunning = true
         let action = CompanionServerActionRequest.maintain(mode: "scan", strategies: ["package-cache"], imageRemovalAcknowledged: false)
         XCTAssertEqual(reply(server, request(action, token: token), from: tailnet)?.status, 409)
-        XCTAssertEqual(calls.value, 0)
+        XCTAssertFalse(started, "the gate stops it before any action starts")
     }
 
     func testARefusalAtTheGateIsLoggedWithoutTheToken() {
-        let (server, token, _) = server()
+        let (server, token) = server()
         let heard = CompanionLocked<[String]>([])
         server.onServerControlRefused = { device, path, outcome in heard.withLock { $0.append("\(device)|\(path)|\(outcome)") } }
         _ = reply(server, request(token: token), from: lan)
         XCTAssertEqual(heard.value, ["Test iPhone|\(CompanionService.serverProcessPath)|refused: not on Tailscale"])
     }
 
+    func testAMaintainRunWaitsForAServerAction() {
+        let (server, token) = server()
+        server.allowRemoteMaintain = true
+        let runs = CompanionLocked(0)
+        server.onRemoteMaintainRun = { _ in
+            runs.withLock { $0 += 1 }
+            return (202, Data("{}".utf8))
+        }
+        guard case .startServerAction = server.syncOnQueue({ server.disposition(for: request(token: token), peer: tailnet) }) else {
+            return XCTFail("the server action is accepted")
+        }
+        guard case .reply(let refused) = server.syncOnQueue({ server.disposition(for: CompanionHTTP.maintainRunRequest(token: token), peer: tailnet) }) else {
+            return XCTFail("a reply")
+        }
+        XCTAssertEqual(CompanionHTTP.parseResponse(refused)?.status, 409)
+        XCTAssertEqual(runs.value, 0)
+        XCTAssertFalse(server.maintainRunning, "a refused run leaves no run marked as going")
+    }
+
+    /// What the phone makes of the replies the router really sends.
+    func testThePhoneReadsEachRefusalAsARefusal() throws {
+        let (off, offToken) = server(on: false)
+        let (on, token) = server()
+        let cases: [(CompanionServer, Data, CompanionPeer, String)] = [
+            (off, request(token: offToken), tailnet, "forbidden"),
+            (on, request(token: token), lan, "tailscaleRequired"),
+            (on, request(token: token), wan, "forbidden"),
+            (on, request(token: code), tailnet, "forbidden"),
+            (on, raw(path: CompanionService.serverProcessPath, body: "{}", token: token), tailnet, "rejected"),
+        ]
+        for (server, data, peer, status) in cases {
+            guard case .reply(let reply) = server.syncOnQueue({ server.disposition(for: data, peer: peer) }),
+                  let parsed = CompanionHTTP.parseResponse(reply) else { return XCTFail("a reply for \(status)") }
+            let answer = CompanionServerActionResponse.answer(status: parsed.status, body: parsed.body)
+            XCTAssertEqual(answer.status, status)
+            XCTAssertEqual(answer.outcome, .refused, status)
+            XCTAssertFalse(answer.displayText.contains("not known"), status)
+        }
+        guard case .reply(let wrong) = on.syncOnQueue({ on.disposition(for: request(token: "hh1_wrong"), peer: tailnet) }),
+              let parsed = CompanionHTTP.parseResponse(wrong) else { return XCTFail("a reply") }
+        XCTAssertEqual(parsed.status, 401)
+        XCTAssertEqual(CompanionServerActionResponse.answer(status: parsed.status, body: parsed.body).outcome, .refused)
+    }
+
+    func testThePhoneReadsPlainRepliesByStatus() {
+        let plain = Data("Not Found".utf8)
+        for status in [400, 401, 403, 404, 405, 418, 429] {
+            XCTAssertEqual(CompanionServerActionResponse.answer(status: status, body: plain).outcome, .refused, "\(status)")
+        }
+        for status in [200, 500, 502, 504] {
+            XCTAssertEqual(CompanionServerActionResponse.answer(status: status, body: plain).outcome, .unknown, "\(status)")
+        }
+        XCTAssertEqual(CompanionServerActionResponse.answer(status: 200, body: Data("{}".utf8)).outcome, .unknown, "no status says nothing about the action")
+    }
+
+    func testEachStatusHasItsOwnOutcome() {
+        func outcome(_ status: String) -> CompanionServerActionOutcome { CompanionServerActionResponse(status: status).outcome }
+        XCTAssertEqual(outcome("acted"), .done)
+        XCTAssertEqual(outcome("partial"), .partial)
+        XCTAssertEqual(outcome("noWork"), .noWork)
+        XCTAssertEqual(outcome("unknown"), .unknown)
+        XCTAssertEqual(outcome("somethingNew"), .unknown, "a status this phone does not know is not assumed safe")
+        for status in ["refused", "busy", "stale", "changed", "protected", "rejected", "forbidden", "tailscaleRequired"] {
+            XCTAssertEqual(outcome(status), .refused, status)
+        }
+        let headlines = Set([CompanionServerActionOutcome.done, .partial, .unknown, .noWork, .refused].map(\.headline))
+        XCTAssertEqual(headlines.count, 5)
+    }
+
     func testTheOtherRoutesStillAcceptTheLocalNetwork() {
-        let (server, token, _) = server()
+        let (server, token) = server()
         server.update(snapshot: CompanionTestSnapshots.plain())
         server.syncOnQueue {}
         guard case .reply(let data) = server.syncOnQueue({ server.disposition(for: CompanionHTTP.request(token: token), peer: lan) }) else { return XCTFail("reply") }
@@ -469,6 +553,7 @@ final class CompanionServerActionsTests: XCTestCase {
         host: String = "server.tailnet",
         control seam: Seam = Seam(),
         maintenance maintenanceOutput: String? = nil,
+        maintenanceExit: Int32 = 0,
         maintainRunning: Bool = false
     ) async throws -> (actions: CompanionServerActions, control: Seam, maintenance: Seam, audit: AuditSink, vps: VPSStatusStore) {
         let vps = VPSStatusStore(fetcher: { _ in
@@ -489,7 +574,7 @@ final class CompanionServerActionsTests: XCTestCase {
         })
         let maintenance = ServerMaintenanceControl(runner: { host, arguments in
             maintenanceSeam.note(host, arguments)
-            return ServerMaintenanceResponse(exitCode: 0, output: maintenanceSeam.output)
+            return ServerMaintenanceResponse(exitCode: maintenanceExit, output: maintenanceSeam.output)
         })
         let sink = AuditSink()
         let actions = CompanionServerActions(vps: vps, control: control, maintenance: maintenance,
@@ -674,7 +759,8 @@ final class CompanionServerActionsTests: XCTestCase {
         let setup = try await make(reading: reading(), maintenance: "not json")
         let reply = await setup.actions.perform(.maintain(mode: "run", strategies: ["package-cache"], imageRemovalAcknowledged: false), device: "d")
         XCTAssertEqual(reply.status, 502)
-        XCTAssertEqual(try decode(reply).status, "failed")
+        XCTAssertEqual(try decode(reply).status, "unknown")
+        XCTAssertEqual(try decode(reply).outcome, .unknown, "it may still be going")
     }
 
     func testAMaintainRunOnTheMacBlocksServerMaintenance() async throws {
@@ -682,6 +768,41 @@ final class CompanionServerActionsTests: XCTestCase {
         let reply = await setup.actions.perform(.maintain(mode: "scan", strategies: ["package-cache"], imageRemovalAcknowledged: false), device: "d")
         XCTAssertEqual(reply.status, 409)
         XCTAssertFalse(setup.maintenance.called)
+    }
+
+    func testAMaintenanceAnswerKeepsItsMeaning() async throws {
+        let busy = maintenanceAnswer(mode: "run", status: "skipped", rows: "", reason: "shared remote cleanup lock busy; no work started")
+        let idle = try await make(reading: reading(), maintenance: busy)
+        let skipped = await idle.actions.perform(.maintain(mode: "run", strategies: ["package-cache"], imageRemovalAcknowledged: false), device: "d")
+        XCTAssertEqual(try decode(skipped).outcome, .noWork, "busy with no work started is not Done")
+
+        let row = #"{"id":"package-cache","status":"partial","candidate_count":3,"removed_count":2,"attempted_count":3,"inventory_complete":true}"#
+        let some = try await make(reading: reading(), maintenance: maintenanceAnswer(mode: "run", status: "partial", rows: row, candidates: 3, removedBytes: 900), maintenanceExit: 1)
+        let partial = await some.actions.perform(.maintain(mode: "run", strategies: ["package-cache"], imageRemovalAcknowledged: false), device: "d")
+        XCTAssertEqual(partial.status, 200)
+        XCTAssertEqual(try decode(partial).outcome, .partial, "it deleted files, so it is not Not Done")
+        XCTAssertEqual(try decode(partial).maintenance?.status, "partial")
+    }
+
+    func testAServerFailureOfAProcessActionIsUnknown() async throws {
+        let setup = try await make(reading: reading(), control: Seam(output: "garbage"))
+        let reply = await setup.actions.perform(.process(rowId: processID(), action: "quit"), device: "d")
+        XCTAssertEqual(reply.status, 502)
+        XCTAssertEqual(try decode(reply).outcome, .unknown)
+        XCTAssertEqual(setup.audit.entries.last?.outcome, "unconfirmed")
+    }
+
+    func testASampleCarriesNoIdentityToThePhone() async throws {
+        let output = #"{"ok":true,"action":"sample","sample":{"pid":4242,"start_time":987654,"boot_id":"boot-canary","name":"worker","duration_seconds":3,"cpu_percent":12.5,"something_new":"later","state":"S"}}"#
+        let setup = try await make(reading: reading(), control: Seam(output: output))
+        let reply = await setup.actions.perform(.process(rowId: processID(), action: "sample"), device: "d")
+        let text = try XCTUnwrap(try decode(reply).sampleText)
+        XCTAssertTrue(text.contains("cpu_percent"))
+        XCTAssertTrue(text.contains("worker"))
+        for identity in ["pid", "start_time", "boot_id", "boot-canary", "4242", "987654", "something_new"] {
+            XCTAssertFalse(text.contains(identity), identity)
+        }
+        XCTAssertNil(CompanionServerActions.phoneSampleText("not json"))
     }
 
     // The log.
@@ -738,31 +859,52 @@ final class CompanionServerControlOptInTests: XCTestCase {
         return try XCTUnwrap(UserDefaults(suiteName: suite))
     }
 
+    private func json(_ snapshot: CompanionSnapshot) throws -> String {
+        String(data: try CompanionJSON.encode(snapshot), encoding: .utf8) ?? ""
+    }
+
     func testItIsOffByDefault() throws {
         let store = try store(defaults: defaults())
         XCTAssertFalse(store.allowRemoteServerControl)
         XCTAssertFalse(store.serverControlAllowedOnRouter)
-        XCTAssertEqual(store.companionSnapshots().plain.remoteServerControlAllowed, false)
     }
 
     func testItNeedsServerStatusToo() throws {
         let store = try store(defaults: defaults())
         store.allowRemoteServerControl = true
         XCTAssertFalse(store.serverControlAllowedOnRouter, "a phone that cannot see a row cannot address it")
-        XCTAssertEqual(store.companionSnapshots().plain.remoteServerControlAllowed, false)
 
         store.allowRemoteServerStatus = true
         XCTAssertTrue(store.serverControlAllowedOnRouter)
-        XCTAssertEqual(store.companionSnapshots().plain.remoteServerControlAllowed, true)
+        XCTAssertEqual(store.companionSnapshots().detailed?.remoteServerControlAllowed, true)
 
         store.allowRemoteServerStatus = false
         XCTAssertFalse(store.serverControlAllowedOnRouter, "turning status off takes control with it")
     }
 
-    func testItIsOnWithStatusAloneNever() throws {
+    func testStatusAloneSaysControlIsOff() throws {
         let store = try store(defaults: defaults())
         store.allowRemoteServerStatus = true
         XCTAssertFalse(store.serverControlAllowedOnRouter)
+        XCTAssertEqual(store.companionSnapshots().detailed?.remoteServerControlAllowed, false, "so the phone can say how to turn it on")
+    }
+
+    func testThePlainSnapshotNeverCarriesTheFlag() throws {
+        let store = try store(defaults: defaults())
+        for (status, control) in [(false, false), (true, false), (false, true), (true, true)] {
+            store.allowRemoteServerStatus = status
+            store.allowRemoteServerControl = control
+            let plain = store.companionSnapshots().plain
+            XCTAssertNil(plain.remoteServerControlAllowed)
+            XCTAssertFalse(try json(plain).contains("remoteServerControlAllowed"))
+        }
+    }
+
+    func testTheMaintainOptInAloneCarriesNoControlFlag() throws {
+        let store = try store(defaults: defaults())
+        store.allowRemoteMaintain = true
+        store.allowRemoteServerControl = true
+        XCTAssertNil(store.companionSnapshots().detailed?.remoteServerControlAllowed)
     }
 
     func testItSurvivesARestart() throws {
@@ -772,5 +914,39 @@ final class CompanionServerControlOptInTests: XCTestCase {
         first.allowRemoteServerControl = true
         let second = try store(defaults: shared)
         XCTAssertTrue(second.serverControlAllowedOnRouter)
+    }
+}
+
+// MARK: - A child that will not stop
+
+final class SSHCommandStopTests: XCTestCase {
+    /// A local child that ignores SIGTERM, not ssh.  It stands for a wedged ssh,
+    /// which would otherwise hold the phone's one server action slot forever.
+    func testAChildThatIgnoresTermIsKilled() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' TERM; exec sleep 30"]
+        let gone = expectation(description: "the child exits")
+        process.terminationHandler = { _ in gone.fulfill() }
+        try process.run()
+        addTeardownBlock { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        // Time for the shell to set its trap before the signal arrives.
+        Thread.sleep(forTimeInterval: 0.3)
+        SSHCommand.stop(process, grace: 0.3)
+        wait(for: [gone], timeout: 5)
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(process.terminationStatus, SIGKILL)
+    }
+
+    func testAChildThatObeysTermIsNotKilled() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        let gone = expectation(description: "the child exits")
+        process.terminationHandler = { _ in gone.fulfill() }
+        try process.run()
+        SSHCommand.stop(process, grace: 5)
+        wait(for: [gone], timeout: 3)
+        XCTAssertEqual(process.terminationStatus, SIGTERM)
     }
 }

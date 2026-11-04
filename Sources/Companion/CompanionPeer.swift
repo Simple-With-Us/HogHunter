@@ -94,8 +94,10 @@ struct CompanionPeer: Equatable, Sendable {
     /// Whether the phone is about to reach the Mac over Tailscale, so it can
     /// offer the server controls.  Only a hint for the buttons: the Mac decides
     /// from the socket.  A Bonjour service is on the local link, never Tailscale.
-    static func isTailscaleEndpoint(_ endpoint: NWEndpoint) -> Bool {
-        guard case let .hostPort(host, _) = endpoint else { return false }
+    /// Port 443 and a TLS link are Tailscale Serve's shape, which reaches the Mac
+    /// over loopback and is always refused, so they are not offered either.
+    static func isTailscaleEndpoint(_ endpoint: NWEndpoint, usesTLS: Bool = false) -> Bool {
+        guard !usesTLS, case let .hostPort(host, port) = endpoint, port.rawValue != 443 else { return false }
         if case .name(let name, _) = host {
             var lowered = name.lowercased()
             if lowered.hasSuffix(".") { lowered.removeLast() }

@@ -888,16 +888,33 @@ struct ServerActionResultView: View {
     let outcome: ServerActionOutcome
     @Environment(\.dismiss) private var dismiss
 
+    private var result: CompanionServerActionOutcome { outcome.response.outcome }
+
+    private var icon: String {
+        switch result {
+        case .done: return "checkmark.circle.fill"
+        case .partial: return "circle.lefthalf.filled"
+        case .unknown: return "questionmark.circle.fill"
+        case .noWork: return "minus.circle.fill"
+        case .refused: return "xmark.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch result {
+        case .done: return .green
+        case .noWork: return .secondary
+        case .partial, .unknown, .refused: return .orange
+        }
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    Label(
-                        outcome.response.succeeded ? "Done" : "Not Done",
-                        systemImage: outcome.response.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-                    )
-                    .font(.headline)
-                    .foregroundStyle(outcome.response.succeeded ? Color.green : Color.orange)
+                    Label(result.headline, systemImage: icon)
+                        .font(.headline)
+                        .foregroundStyle(tint)
                     Text(outcome.response.displayText)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)

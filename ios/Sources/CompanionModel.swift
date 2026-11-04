@@ -632,9 +632,10 @@ final class CompanionModel {
     func serverControlEndpoint(for saved: SavedMac) -> NWEndpoint? {
         if let host = saved.remoteHost, let port = NWEndpoint.Port(rawValue: UInt16(saved.remotePort ?? 24240)) {
             let remote = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
-            if CompanionPeer.isTailscaleEndpoint(remote) { return remote }
+            if CompanionPeer.isTailscaleEndpoint(remote, usesTLS: isUsingTLS(for: saved)) { return remote }
         }
-        guard let active = activeEndpoint(for: saved), CompanionPeer.isTailscaleEndpoint(active) else { return nil }
+        guard let active = activeEndpoint(for: saved),
+              CompanionPeer.isTailscaleEndpoint(active, usesTLS: isUsingTLS(for: saved)) else { return nil }
         return active
     }
 
@@ -662,12 +663,12 @@ final class CompanionModel {
             return
         }
         do {
-            let response = try await CompanionConnection.triggerServerAction(endpoint: endpoint, token: saved.token, action: action, useTLS: saved.useTLS)
+            let response = try await CompanionConnection.triggerServerAction(endpoint: endpoint, token: saved.token, action: action, useTLS: false)
             serverActionOutcome = ServerActionOutcome(title: rowName, response: response)
         } catch {
             // Not knowing is not the same as nothing having happened.
             let text = "The Mac did not answer, so the outcome is not known.\u{00A0} Check the server before trying again.\u{00A0} \(Self.describe(error))"
-            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "failed", error: text))
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "unknown", error: text))
         }
         await refresh()
     }
