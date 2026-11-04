@@ -86,12 +86,7 @@ final class CleanRegimenTests: XCTestCase {
         }
         let trash = item(category: .trash, title: "trash")
         let temp = item(category: .tempFiles, title: "tmp")
-        XCTAssertEqual(CleanRegimenRunner.ruleName(for: trash), "temp-scratch")
         XCTAssertEqual(CleanRegimenRunner.ruleName(for: temp), "tmp-files")
-
-        let onlyTrash = CleanRegimenRunner.pendingItems(from: [trash, temp], rules: ["temp-scratch"])
-        XCTAssertEqual(onlyTrash.items.map(\.title), ["trash"])
-        XCTAssertNil(onlyTrash.skipReason)
 
         let onlyTemp = CleanRegimenRunner.pendingItems(from: [trash, temp], rules: ["tmp-files"])
         XCTAssertEqual(onlyTemp.items.map(\.title), ["tmp"])
@@ -119,6 +114,46 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertEqual(CleanRegimenRunner.ruleName(for: backup), "ask-first")
         let pending = CleanRegimenRunner.pendingItems(from: [backup], rules: Set(CleanRegimen.schedulableRules))
         XCTAssertTrue(pending.items.isEmpty, "no schedulable rule may take tool-made backups unattended")
+    }
+
+    func testNoRegimenRuleSelectsOrScansTheTrash() {
+        // config/reclaim-policy.json says neverEmptyTrash, and DiskCleaner.clean
+        // removes a Trash item permanently.  This used to map to temp-scratch,
+        // a default rule, so a turned-on regimen emptied ~/.Trash unattended.
+        let trash = CleanItem(
+            category: .trash,
+            title: "trash",
+            subtitle: "trash",
+            url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-trash"),
+            bytes: 10,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        XCTAssertTrue(CleanRegimenRunner.ruleNames(for: trash).isEmpty)
+        XCTAssertEqual(CleanRegimenRunner.ruleName(for: trash), "")
+
+        let everyRule = Set(CleanRegimen.schedulableRules).union(CleanRegimen.defaultRules)
+        XCTAssertFalse(CleanRegimenRunner.scanCategories(for: everyRule).contains(.trash))
+        for rule in everyRule {
+            let pending = CleanRegimenRunner.pendingItems(from: [trash], rules: [rule])
+            XCTAssertTrue(pending.items.isEmpty, "\(rule) must not select the Trash")
+        }
+        XCTAssertTrue(CleanRegimenRunner.pendingItems(from: [trash], rules: everyRule).items.isEmpty)
+    }
+
+    func testTheInternalDiskRulesAreSchedulableAndNotOnByDefault() {
+        // HH-164: a rule that is not in the policy and the schedulable list
+        // does not run.  They have no Swift cleaner category, so a regimen's
+        // default set has no reason to carry them.
+        for rule in ["duplicate-sim-runtimes", "tool-versions", "xcode-scratch", "stale-build-output"] {
+            XCTAssertTrue(CleanRegimen.schedulableRules.contains(rule), rule)
+            XCTAssertFalse(CleanRegimen.defaultRules.contains(rule), rule)
+            var regimen = CleanRegimen()
+            regimen.enabledRules = [rule]
+            XCTAssertEqual(regimen.sanitized().enabledRules, [rule], "sanitizing must keep \(rule)")
+        }
     }
 
     func testRegimenIsOffByDefault() {

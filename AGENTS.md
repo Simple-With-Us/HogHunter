@@ -91,6 +91,10 @@ The panel's summary never carries a raw error.  An error can name the path a saf
 
 The Python engine keeps its own budget.  `scripts/vacuum/config.py` owns `TICK_WATCHDOG_SEC = 900.0` and `scripts/vacuum/engine.py` derives `_RECLAIM_BUDGET_SECONDS` from it (600s), so the two numbers cannot drift apart again; `scripts/maintain.py` imports the constant rather than restating it.  A tick that runs long writes a partial run record (`scripts/vacuum/store.py` `partial-run.json`), which `build_status` folds into `step_states` and exposes as `partial_run`, so a long run is visible instead of silently truncated.  The engine must never write a partial record under `dry_run=True`.
 
+**The regimen never reaches the Trash.**  `CleanCategory.trash` answers to no rule, so no regimen scans or selects it, because `DiskCleaner.clean` removes a Trash item permanently and the policy says `neverEmptyTrash`.  A person can still select Trash in the Disk Cleaner, and that is unchanged.  Do not map the category to a rule.
+
+**`scripts/hoghunter-clean` and peer work (HH-213).**  `is_forbidden` refuses anything under a `.muse` folder and any `~/apps/botfleet-*` tree, because those hold other seats' live work; the ask-first rule surfaces them and nothing deletes them.  A new rule must be in `config/reclaim-policy.json` and `CleanRegimen.schedulableRules`.  A rule that deletes a whole tree from a place producers also write to passes a `recheck` on its candidate, which asks every gate again right before the delete and refuses if the path now holds another object.  That is not atomic: a writer that starts after the recheck is the limit HH-180 records.  See `docs/rollouts/2026-11-04-internal-disk-rules.md`.
+
 Tests: `Tests/HogHunterTests/{HousekeeperLockTests,KeepSentinelTests,CleanRegimenRunnerTests}.swift`, and `TestPartialRunRecord` / `TestTickBudget` in `scripts/test-robotic-vacuum.py`.
 
 ## Copy

@@ -161,6 +161,7 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         "snapshots", "temp-scratch", "tmp-files", "app-staging", "dev-caches",
         "app-caches", "agent-state",
         "xcode-artifacts", "simulator-runtimes", "logs", "sqlite-wal", "brew",
+        "duplicate-sim-runtimes", "tool-versions", "xcode-scratch", "stale-build-output",
     ]
 
     var isValid: Bool {
