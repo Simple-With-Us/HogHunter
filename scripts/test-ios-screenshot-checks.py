@@ -269,12 +269,50 @@ class SceneChecks(unittest.TestCase):
                 }, commands_sink=commands)
             scenes = json.loads((root / "screens/scene-verification.json").read_text())
             self.assertEqual([x["verified"] for x in scenes], [False, True, False, True])
-            self.assertEqual(len([x for x in commands if "screenshot" in x]), 4)
+            # A scene that does not reach its expected state is re-taken, so the
+            # two broken scenes cost three takes each and the two good ones cost
+            # one.  Every scene is still attempted, and a broken one never stops
+            # the next one.
+            shots = [x for x in commands if "screenshot" in x]
+            self.assertEqual(len(shots), 8)
             self.assertFalse(any("openurl" in x for x in commands))
             self.assertTrue(all((root / "screens" / x["frame"]).exists() for x in scenes))
             route = json.loads((root / "screens/deep-link-verification.json").read_text())
             self.assertFalse(route["verified"])
             self.assertIn("not attempted", route["problem"])
+
+    def test_a_scene_that_is_not_ready_yet_is_taken_again(self):
+        # The app can still be working when the first frame is taken:  a deeper
+        # cleaner scan has to finish before its partial result is on screen.
+        # One frame is not proof, so the scene is re-taken and the frame that
+        # does show the expected state is the one that counts.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attempts = {}
+
+            def recognize(path):
+                attempts[path.stem] = attempts.get(path.stem, 0) + 1
+                if path.stem == "cleaner-partial" and attempts[path.stem] < 3:
+                    return QUICK
+                return {"widget-small": "Hog Hunter Widget CPU RAM Clean Mac",
+                        "clean-cold-start": CONFIRMATION,
+                        "cleaner-quick": QUICK,
+                        "cleaner-partial": PARTIAL,
+                        "clean-deep-link": CONFIRMATION}[path.stem]
+
+            app = root / "App.app"
+            (app / "PlugIns" / checks.WIDGET_APPEX_NAME).mkdir(parents=True, exist_ok=True)
+
+            def run(command, **kwargs):
+                if "screenshot" in command:
+                    Path(command[-1]).write_bytes(png(400, 800, os.urandom(8000)))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            scenes, _ = capture_scenes("UDID", "test.fixture", app, root / "screens",
+                                       run=run, settle=lambda _: None, recognize=recognize)
+            self.assertTrue(all(item["verified"] for item in scenes))
+            self.assertEqual(attempts["cleaner-partial"], 3)
+            self.assertEqual(attempts["cleaner-quick"], 1)
 
     def test_successful_retry_removes_stale_unverified_route_frame(self):
         with tempfile.TemporaryDirectory() as tmp:

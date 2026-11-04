@@ -13,6 +13,13 @@ from ios_screenshot_checks import (
     recognize_text, scene_problem,
 )
 
+# How many times a required scene is taken before it is called a failure, and
+# how long the app is given to settle between those takes.  The first take is
+# the normal one;  the extra takes are for the frames that were taken while the
+# app was still working.
+SCENE_ATTEMPTS = 3
+SCENE_RETRY_SETTLE = 5
+
 
 def capture_scenes(udid, bundle_id, app_path, output, run=subprocess.run, settle=time.sleep, recognize=recognize_text):
     output = Path(output)
@@ -53,15 +60,28 @@ def capture_scenes(udid, bundle_id, app_path, output, run=subprocess.run, settle
         path = output / (name + ".png")
         text = ""
         stage = "launch"
-        try:
-            launch(args)
-            stage = "capture"
-            capture(path)
-            stage = "OCR"
-            text = recognize(path)
-            problem = scene_problem(scene, text)
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-            problem = ("OCR unavailable: " if stage == "OCR" else stage + " failed: ") + str(error)
+        problem = None
+        # One frame is not proof.  The app can still be working when the frame
+        # is taken:  a deeper cleaner scan has to finish before its partial
+        # result is on screen, and a loaded runner makes that slower still.
+        # So the scene is re-taken a few times before it is called a failure,
+        # and the last reason is the one that is reported.
+        for attempt in range(SCENE_ATTEMPTS):
+            text = ""
+            stage = "launch"
+            try:
+                launch(args)
+                stage = "capture"
+                capture(path)
+                stage = "OCR"
+                text = recognize(path)
+                problem = scene_problem(scene, text)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                problem = ("OCR unavailable: " if stage == "OCR" else stage + " failed: ") + str(error)
+            if problem is None:
+                break
+            if attempt + 1 < SCENE_ATTEMPTS:
+                settle(SCENE_RETRY_SETTLE)
         results.append({"frame": path.name, "scene": scene, "verified": problem is None, "stage": stage, "problem": problem, "recognizedText": text})
         (output / "scene-verification.json").write_text(json.dumps(results, indent=2) + "\n")
         if problem:
