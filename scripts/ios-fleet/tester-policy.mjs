@@ -73,6 +73,28 @@ export function countUniqueTesters(emails) {
   return seen.size;
 }
 
+// The people in a group, counted so that nobody is dropped.
+//
+// A tester who joins through a public link can be recorded with NO email at
+// all, so counting only the non-blank emails would report a group that holds
+// people as empty, and the readiness check would then claim that nobody can
+// install the build (Kody review on HogHunter PR #259, Nov 3 2026).  A tester
+// with an email is one person however many rows carry it; a tester without one
+// has no address to deduplicate by, so each such row is a person of its own.
+//
+// The input is a list of { email, id } records, which is what App Store
+// Connect returns for beta testers.
+export function countInstallableTesters(testers) {
+  const byEmail = new Set();
+  let withoutEmail = 0;
+  for (const tester of testers || []) {
+    const email = String((tester && tester.email) || "").trim().toLowerCase();
+    if (email) byEmail.add(email);
+    else withoutEmail += 1;
+  }
+  return byEmail.size + withoutEmail;
+}
+
 // The policy also decides where a new build has to go.  Under the public
 // policy it goes to the external group and needs Beta App Review; under the
 // internal policy the internal group already carries every build.

@@ -52,7 +52,7 @@ import {
 import {
   PUBLIC_GROUP_NAME,
   TESTER_POLICY_PUBLIC,
-  countUniqueTesters,
+  countInstallableTesters,
   policyNeedsBuildAssignment,
   policyRequiresTesterList,
   policyUsesInternalGroup,
@@ -603,7 +603,9 @@ export async function countPublicTesters({ api, appId }) {
     ok: true,
     groups: 1,
     groupName: group.attributes?.name || "",
-    testers: countUniqueTesters(members.rows.map((t) => t.attributes?.email))
+    testers: countInstallableTesters(
+      members.rows.map((t) => ({ email: t.attributes?.email, id: t.id }))
+    )
   };
 }
 

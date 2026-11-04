@@ -6,6 +6,7 @@ import {
   PUBLIC_GROUP_NAME,
   TESTER_POLICY_INTERNAL,
   TESTER_POLICY_PUBLIC,
+  countInstallableTesters,
   countUniqueTesters,
   hasPublicLink,
   isExternalGroup,
@@ -85,4 +86,41 @@ test("testers are counted as people", () => {
   assert.equal(countUniqueTesters(["a@b.test", "c@b.test"]), 2);
   assert.equal(countUniqueTesters(["", "  ", null, undefined]), 0);
   assert.equal(countUniqueTesters(undefined), 0);
+});
+
+test("a tester with no email is still a person", () => {
+  // A tester who joined through the public link can carry no email, and
+  // dropping them would report a group that holds people as empty.
+  assert.equal(countInstallableTesters([{ email: null, id: "a" }]), 1);
+  assert.equal(countInstallableTesters([{ email: "", id: "a" }]), 1);
+  assert.equal(
+    countInstallableTesters([
+      { email: null, id: "a" },
+      { email: null, id: "b" }
+    ]),
+    2
+  );
+});
+
+test("the same email in two rows is still one person", () => {
+  assert.equal(
+    countInstallableTesters([
+      { email: "a@b.test", id: "x" },
+      { email: "A@B.test", id: "y" }
+    ]),
+    1
+  );
+});
+
+test("email testers and link testers are counted together", () => {
+  assert.equal(
+    countInstallableTesters([
+      { email: "a@b.test", id: "x" },
+      { email: "a@b.test", id: "y" },
+      { email: null, id: "z" }
+    ]),
+    2
+  );
+  assert.equal(countInstallableTesters([]), 0);
+  assert.equal(countInstallableTesters(undefined), 0);
 });
