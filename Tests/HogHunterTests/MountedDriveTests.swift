@@ -120,7 +120,7 @@ final class MountedDriveTests: XCTestCase {
     }
 
     func testDiscoveryAcceptsEveryPhysicalBusAndRejectsVirtualOrUnknownDisks() {
-        let buses = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "SATA", "SAS", "ATA", "Secure Digital"]
+        let buses = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "Apple Fabric", "SATA", "SAS", "ATA", "Secure Digital"]
         for (index, bus) in buses.enumerated() {
             for internalDisk in [false, true] {
                 let path = "/Volumes/Drive\(index)\(internalDisk ? "i" : "e")"

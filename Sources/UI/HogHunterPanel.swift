@@ -37,6 +37,7 @@ struct HogHunterPanel: View {
 
     @ObservedObject private var mountedDrives: MountedDriveStore
     @State private var driveReadAttempted = false
+    @State private var mountedDrivePage = 0
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
@@ -872,7 +873,7 @@ struct HogHunterPanel: View {
                 }
 
                 // Every mounted Mac drive, whatever it is named
-                ForEach(mountedDrives.rows) { drive in
+                ForEach(pagedMountedDrives) { drive in
                     quickStorageRow(
                         name: "Mac (\(drive.name))",
                         icon: "externaldrive",
@@ -880,6 +881,8 @@ struct HogHunterPanel: View {
                         usedFraction: (drive.usedPercent ?? 0) / 100.0
                     )
                 }
+
+                mountedDrivePageControls
 
                 // Server Root /
                 if let root = store.maintain.vpsStore.snapshot?.rootDevice {
@@ -1080,18 +1083,49 @@ struct HogHunterPanel: View {
     /// Time Machine destination - or a backup volume that is renamed or
     /// repurposed - shows exactly the drives it actually has, and nothing
     /// reads "Not identified" for a drive that is simply gone.
+    private var mountedDrivePageCount: Int {
+        max(1, (mountedDrives.rows.count + 4) / 5)
+    }
+
+    private var currentMountedDrivePage: Int {
+        min(max(0, mountedDrivePage), mountedDrivePageCount - 1)
+    }
+
+    private var pagedMountedDrives: [MountedDriveUsage] {
+        Array(mountedDrives.rows.dropFirst(currentMountedDrivePage * 5).prefix(5))
+    }
+
+    @ViewBuilder private var mountedDrivePageControls: some View {
+        if mountedDrivePageCount > 1 {
+            HStack {
+                Button("Previous") { mountedDrivePage = currentMountedDrivePage - 1 }
+                    .disabled(currentMountedDrivePage == 0)
+                Spacer()
+                Text("Drives \(currentMountedDrivePage * 5 + 1)-\(min((currentMountedDrivePage + 1) * 5, mountedDrives.rows.count)) of \(mountedDrives.rows.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Next") { mountedDrivePage = currentMountedDrivePage + 1 }
+                    .disabled(currentMountedDrivePage == mountedDrivePageCount - 1)
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
     private var capacityCards: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: 3)
-        return LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-            capacityCard("Internal", value: quickInternalText,
-                         percent: store.diskSpace.map { $0.usedFraction * 100 })
-            ForEach(mountedDrives.rows) { drive in
-                capacityCard(drive.name, value: quickDriveText(drive),
-                             percent: drive.usedPercent)
+        return VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                capacityCard("Internal", value: quickInternalText,
+                             percent: store.diskSpace.map { $0.usedFraction * 100 })
+                ForEach(pagedMountedDrives) { drive in
+                    capacityCard(drive.name, value: quickDriveText(drive),
+                                 percent: drive.usedPercent)
+                }
+                if mountedDrives.rows.isEmpty, !driveReadAttempted || mountedDrives.isRefreshing {
+                    capacityCard("External", value: "Reading…", percent: nil)
+                }
             }
-            if mountedDrives.rows.isEmpty, !driveReadAttempted || mountedDrives.isRefreshing {
-                capacityCard("External", value: "Reading…", percent: nil)
-            }
+            mountedDrivePageControls
         }
     }
 

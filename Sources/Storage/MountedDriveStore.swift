@@ -61,7 +61,7 @@ struct WholeDiskIdentity: Sendable, Equatable {
 
 /// Bus protocols a physical disk can hang off.  Disk images and other virtual
 /// devices report no recognized protocol, which is what keeps them out.
-private let physicalDiskProtocols: Set<String> = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "SATA", "SAS", "ATA", "Secure Digital"]
+private let physicalDiskProtocols: Set<String> = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "Apple Fabric", "SATA", "SAS", "ATA", "Secure Digital"]
 
 struct MountedDriveCandidate: Sendable {
     let name: String

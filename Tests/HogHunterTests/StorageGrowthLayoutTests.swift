@@ -125,7 +125,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
     /// backup destination - or none, or three, or a backup volume renamed to
     /// ordinary storage - renders the drives it has and nothing else.
     func testCapacityCardsFollowMountedDrivesOfAnyName() async throws {
-        let driveSets: [[MountedDriveCandidate]] = [
+        var driveSets: [[MountedDriveCandidate]] = [
             // No external drives at all.
             [],
             // One ordinary external drive, no backup destination.
@@ -144,6 +144,11 @@ final class StorageGrowthLayoutTests: XCTestCase {
                                    isHidden: false, isExternalPhysical: true,
                                    totalBytes: 500_000_000_000, availableBytes: 490_000_000_000)],
         ]
+        driveSets.append((0..<12).map { index in
+            MountedDriveCandidate(name: "Drive \(index)", path: "/Volumes/Drive\(index)",
+                isLocal: true, isHidden: false, isExternalPhysical: true,
+                totalBytes: 500_000_000_000, availableBytes: 100_000_000_000)
+        })
         for (index, candidates) in driveSets.enumerated() {
             let mounted = MountedDriveStore(probe: { candidates })
             await mounted.refresh()
