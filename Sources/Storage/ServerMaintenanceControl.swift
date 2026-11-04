@@ -253,9 +253,15 @@ struct MaintenanceCaptureFailure: Error {
 enum MaintenanceSSH {
     fileprivate static func run(host: String, arguments: [String]) throws -> ServerMaintenanceResponse {
         do {
+            // The dispatch rides the app's one SSH connection, the same
+            // master the readings keep alive and recover (see SSHConnection).
+            //  There is deliberately no retry here: a failed capture cannot
+            //  prove a dispatched mutation stopped, so the failure stays
+            //  unconfirmed rather than risk dispatching the mutation twice.
             return try capture(executable: URL(fileURLWithPath: "/usr/bin/ssh"), arguments:
                 ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=3",
-                 "-o", "ServerAliveCountMax=2", host] + arguments)
+                 "-o", "ServerAliveCountMax=2"] + SSHConnection.connectionOptions(forHost: host)
+                + [host] + arguments)
         } catch is MaintenanceCaptureFailure {
             // Even a confirmed local SSH exit cannot prove that a dispatched
             // remote mutation stopped; the server retains its own serialization.

@@ -60,6 +60,20 @@ final class VPSStatusStore: ObservableObject {
         timer != nil
     }
 
+    /// Whether the snapshot on screen is an old reading rather than the
+    /// server's state now: a snapshot exists, but the latest refresh failed,
+    /// or none has landed within two poll cycles.  Views mark the server's
+    /// numbers stale while this holds, so an old reading cannot present as
+    /// live data — the failure mode of 2026-11-04, when a dead SSH socket
+    /// froze the panel on a full-disk reading taken during an incident,
+    /// hours after the space had been freed.
+    var isStale: Bool {
+        guard snapshot != nil else { return false }
+        if errorMessage != nil { return true }
+        guard let lastFetchDate else { return true }
+        return Date().timeIntervalSince(lastFetchDate) > 150
+    }
+
     func startPolling() {
         stopPolling()
         if !configuredHost.isEmpty {
@@ -171,7 +185,32 @@ final class VPSStatusStore: ObservableObject {
         return history.percentChange(host: historyHost(snapshot), metric: "directory", path: path)
     }
 
+    /// The fetcher the store uses live: one read over the app's SSH
+    /// connection (see `rawSSHFetcher`), with dead-socket recovery around it.
+    ///
+    /// When the connection's master has died, the read fails with a mux
+    /// error — a dead local socket, not an unreachable server.  The recovery
+    /// discards the dead master first and then runs the read once more, over
+    /// the fresh connection that attempt creates; no read is ever retried
+    /// over the dead socket or its path.  Recovery therefore happens on the
+    /// ordinary poll cycle, and the Retry button gets it for free because it
+    /// calls this same fetcher.  Any other failure is reported as produced.
     nonisolated static func sshFetcher() -> Fetcher {
+        let read = rawSSHFetcher()
+        return { host in
+            let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            return try await SSHConnection.retryingOnceOnDeadSocket(
+                attempt: { try await read(trimmedHost) },
+                discard: { await SSHConnection.invalidate(host: trimmedHost) }
+            )
+        }
+    }
+
+    /// One read of the server's status file over the app's SSH connection,
+    /// with no recovery of its own: a failure is reported exactly as ssh
+    /// produced it, and `sshFetcher` above decides whether the failure is a
+    /// dead socket worth discarding and retrying once.
+    nonisolated private static func rawSSHFetcher() -> Fetcher {
         { host in
             guard ApplicationRunMode.current.allowsLiveProbes else {
                 throw NSError(domain: "VPSStatusStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "SSH fetcher does not run from unit tests."])
@@ -200,6 +239,7 @@ final class VPSStatusStore: ObservableObject {
                 "-o", "ConnectTimeout=5",
                 "-o", "ServerAliveInterval=3",
                 "-o", "ServerAliveCountMax=2",
+            ] + SSHConnection.connectionOptions(forHost: trimmedHost) + [
                 trimmedHost,
                 "cat /root/vps-storage-status.json"
             ]

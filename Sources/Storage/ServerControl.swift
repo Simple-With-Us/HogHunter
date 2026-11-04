@@ -188,10 +188,25 @@ final class ServerControl: ObservableObject {
 
 /// One SSH command, one result.
 ///
-/// The reading path and the acting path both go through here, so both use the
-/// same host, the same key and the same timeout rules.
+/// The acting path goes through here, and the reading path's fetcher in
+/// `VPSStatusStore` is built the same way: both run over the app's one SSH
+/// connection (see `SSHConnection`), so both use the same host, the same key
+/// and the same timeout rules.
 enum SSHCommand {
+    /// Runs one command, recovering once from a dead socket: when the app's
+    /// connection master has died, it is discarded first and the command
+    /// runs once more over the fresh connection the retry creates.  A
+    /// control-script refusal is an answer, not an error, so it returns
+    /// from the first attempt untouched; any other failure, and any second
+    /// failure, propagates exactly as produced.
     static func run(host: String, arguments: [String], timeout: TimeInterval) async throws -> String {
+        try await SSHConnection.retryingOnceOnDeadSocket(
+            attempt: { try await runOnce(host: host, arguments: arguments, timeout: timeout) },
+            discard: { await SSHConnection.invalidate(host: host) }
+        )
+    }
+
+    private static func runOnce(host: String, arguments: [String], timeout: TimeInterval) async throws -> String {
         let errURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("hoghunter-ssh-\(UUID().uuidString).stderr")
         let outURL = FileManager.default.temporaryDirectory
@@ -211,6 +226,7 @@ enum SSHCommand {
             "-o", "ConnectTimeout=5",
             "-o", "ServerAliveInterval=3",
             "-o", "ServerAliveCountMax=2",
+        ] + SSHConnection.connectionOptions(forHost: host) + [
             host,
         ] + arguments.map(Self.shellQuote)
 

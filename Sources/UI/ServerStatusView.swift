@@ -53,9 +53,9 @@ struct VPSStatusStripView: View {
                 Spacer(minLength: 6)
 
                 if let snapshot = store.snapshot {
-                    Text(snapshot.relativeTimeString())
+                    Text(store.isStale ? "Stale · \(snapshot.relativeTimeString())" : snapshot.relativeTimeString())
                         .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(store.isStale ? Color.orange : Color.tertiary)
                 }
 
                 Image(systemName: "chevron.right")

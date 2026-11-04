@@ -283,13 +283,23 @@ enum FlaggedIssueEvaluator {
             }
 
             if let snap = vpsSnapshot {
+                // While the latest refresh is failing, every number below
+                // comes from the last good reading, so each server issue
+                // says so instead of letting an old reading pose as the
+                // server's state now — the failure mode of 2026-11-04, when
+                // a frozen snapshot kept reporting a full disk for hours
+                // after the space was freed.
+                let staleNote = (vpsError?.isEmpty == false)
+                    ? "\u{00A0} From the last successful reading; the server is not answering now."
+                    : ""
+
                 // Server root disk
                 if let root = snap.rootDevice {
                     if root.freeBytes < criticalFreeDiskFloor || (root.usedFraction ?? 0) >= 0.95 {
                         issues.append(FlaggedIssue(
                             id: "server.disk.root.critical",
                             title: "Server Root Disk (/) Critically Full",
-                            message: "\(formatBytes(root.freeBytes)) free on \(snap.host).",
+                            message: "\(formatBytes(root.freeBytes)) free on \(snap.host).\(staleNote)",
                             priority: .critical,
                             host: .server,
                             category: .disk
@@ -298,7 +308,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.disk.root.low",
                             title: "Server Root Disk Space Low",
-                            message: "\(formatBytes(root.freeBytes)) remaining (\(Int((root.usedFraction ?? 0) * 100))% used).",
+                            message: "\(formatBytes(root.freeBytes)) remaining (\(Int((root.usedFraction ?? 0) * 100))% used).\(staleNote)",
                             priority: .high,
                             host: .server,
                             category: .disk
@@ -307,7 +317,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.disk.root.warning",
                             title: "Server Root Disk Filling Up",
-                            message: "\(Int((root.usedFraction ?? 0) * 100))% used on \(snap.host).",
+                            message: "\(Int((root.usedFraction ?? 0) * 100))% used on \(snap.host).\(staleNote)",
                             priority: .medium,
                             host: .server,
                             category: .disk
@@ -321,7 +331,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.disk.extra.critical",
                             title: "Server Volume /mnt/fleet-extra Full",
-                            message: "\(formatBytes(extra.freeBytes)) remaining on extra volume.",
+                            message: "\(formatBytes(extra.freeBytes)) remaining on extra volume.\(staleNote)",
                             priority: .critical,
                             host: .server,
                             category: .disk
@@ -330,7 +340,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.disk.extra.low",
                             title: "Server Volume /mnt/fleet-extra Low",
-                            message: "\(formatBytes(extra.freeBytes)) free on /mnt/fleet-extra.",
+                            message: "\(formatBytes(extra.freeBytes)) free on /mnt/fleet-extra.\(staleNote)",
                             priority: .high,
                             host: .server,
                             category: .disk
@@ -339,7 +349,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.disk.extra.warning",
                             title: "Server /mnt/fleet-extra Filling Up",
-                            message: "\(Int((extra.usedFraction ?? 0) * 100))% used on /mnt/fleet-extra.",
+                            message: "\(Int((extra.usedFraction ?? 0) * 100))% used on /mnt/fleet-extra.\(staleNote)",
                             priority: .medium,
                             host: .server,
                             category: .disk
@@ -353,7 +363,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.cpu.high",
                             title: "Server CPU / Load High",
-                            message: "\(String(format: "%.0f%%", cpu.pct)) CPU, 1m load \(String(format: "%.1f", cpu.load1)) (\(cpu.cores) cores).",
+                            message: "\(String(format: "%.0f%%", cpu.pct)) CPU, 1m load \(String(format: "%.1f", cpu.load1)) (\(cpu.cores) cores).\(staleNote)",
                             priority: .high,
                             host: .server,
                             category: .cpu
@@ -362,7 +372,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.cpu.elevated",
                             title: "Server CPU Elevated",
-                            message: "\(String(format: "%.0f%%", cpu.pct)) CPU on \(snap.host).",
+                            message: "\(String(format: "%.0f%%", cpu.pct)) CPU on \(snap.host).\(staleNote)",
                             priority: .medium,
                             host: .server,
                             category: .cpu
@@ -376,7 +386,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.memory.high",
                             title: "Server RAM Exhaustion",
-                            message: "\(String(format: "%.0f%%", mem.usedPercentage)) used (\(formatBytes(mem.availableBytes)) available).",
+                            message: "\(String(format: "%.0f%%", mem.usedPercentage)) used (\(formatBytes(mem.availableBytes)) available).\(staleNote)",
                             priority: .high,
                             host: .server,
                             category: .memory
@@ -385,7 +395,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.memory.warning",
                             title: "Server RAM Elevated",
-                            message: "\(String(format: "%.0f%%", mem.usedPercentage)) used on \(snap.host).",
+                            message: "\(String(format: "%.0f%%", mem.usedPercentage)) used on \(snap.host).\(staleNote)",
                             priority: .medium,
                             host: .server,
                             category: .memory
@@ -397,7 +407,7 @@ enum FlaggedIssueEvaluator {
                     issues.append(FlaggedIssue(
                         id: "server.swap.high",
                         title: "Server Swap Usage High",
-                        message: "\(String(format: "%.0f%%", swap.usedPercentage)) swap used (\(formatBytes(swap.usedBytes))).",
+                        message: "\(String(format: "%.0f%%", swap.usedPercentage)) swap used (\(formatBytes(swap.usedBytes))).\(staleNote)",
                         priority: .high,
                         host: .server,
                         category: .memory
@@ -410,7 +420,7 @@ enum FlaggedIssueEvaluator {
                         issues.append(FlaggedIssue(
                             id: "server.tool.\(tool.id).stopped",
                             title: "Critical Service Stopped: \(tool.name)",
-                            message: "Essential service is stopped on \(snap.host).",
+                            message: "Essential service is stopped on \(snap.host).\(staleNote)",
                             priority: .high,
                             host: .server,
                             category: .service
