@@ -12,15 +12,13 @@
   "replaces": {
     "cleanmymac": "Uninstalled 2026-09-30. A stale `brew list` entry survives (cleanmymac-cli) with no Cellar dir and `command -v` returns 1, so every cleanmymac call was a silent no-op. All callers now use hoghunter-clean."
   },
-
   "tiers": {
     "$comment": "What each tier means to scripts/hoghunter-clean, and when the run may touch it.",
     "safe": "Every run, including the watch's cheap band.",
-    "semi-safe": "Only --band=full, which the pressure triggers take on any hit: 25 GB free or less, a 15 GB drop in free space at any level, swap, or load.  A rule with maxFreeGb also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
+    "semi-safe": "Only --band=full, which the pressure triggers take on any hit: 25 GB free or less, a 15 GB drop in free space at any level, swap, or load.  A rule with maxFreeGb (duplicate-sim-runtimes) also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
     "expensive": "Only --band=full while the disk is acute or critical (under 40 GB free).  Bulk deletes that are the biggest wins and the biggest I/O bursts.",
-    "ask-first": "Reported, never applied."
+    "ask-first": "Reported, never applied.  The stale-build-output and xcode-scratch walks run on a scan and not on a clean run."
   },
-
   "bands": {
     "$comment": "OWNER RULING 2026-10-02 (Jay): pressure changes the SHAPE of the work (2-4 bounded chunks), never its SCOPE. The previous rule -- 'swap >= 90 OR load1 > 40 => do less' -- was a guard whose threshold sat INSIDE this host's normal operating band: load1 runs 15-30 here continuously from real fleet build work, so it was true almost always, and wedded to a near-permanent swap reading it meant cleaning almost never ran. A guard whose threshold equals the normal state is an outage, not a guard. Deleting caches never reduces swap, and that still holds -- but it constrains what fixes swap, NOT how much regenerable waste may be cleared.",
     "pressureShapesWorkNotScope": true,
@@ -39,7 +37,11 @@
     "thrashDetection": {
       "$why": "load1 counts uninterruptible page-in as running, so it is a LAGGING indicator. High load1 with HIGH cpu idle and kernel_task absent from the top-CPU sample is real work, not thrash (2026-10-02 21:00: load1 25.68, 27% idle).",
       "cpuIdlePctBelow": 12,
-      "readTogether": ["cpu idle %", "kernel_task %", "load1"],
+      "readTogether": [
+        "cpu idle %",
+        "kernel_task %",
+        "load1"
+      ],
       "neverKeyASkipOn": "load1 alone"
     },
     "disk": {
@@ -48,7 +50,6 @@
       "healthyFreeGb": 80
     }
   },
-
   "idlenessGates": {
     "$comment": "No file touched in N minutes proves nothing is mid-write.",
     "scratchMinutes": 180,
@@ -57,7 +58,6 @@
     "deviceSupportDays": 7,
     "simulatorRuntimeDays": 2
   },
-
   "rules": [
     {
       "name": "snapshots",
@@ -74,7 +74,12 @@
       "op": "delete",
       "title": "Orphaned per-user temp scratch",
       "$rationale": "Long-lived fleet artifacts in DARWIN_USER_TEMP_DIR. `ssr` nests sit under RANDOM-named parents, so a top-level glob misses them -- enumerate with find -maxdepth 3 -type d -name ssr and filter on the leaf's mtime. `.com.openai.codex.*` are FILES, not directories: find -type d returns 0 and du -sh on each is wasted work. Classes are KB-scale at thousands of entries (botfleet-dsh-mcp-*, omb-*, mmx-scope-*, bf-ui-shim-*) and are deliberately not scanned.",
-      "globs": ["ssr (depth 3)", "agentic-vitest-*", "omb-api-test-*", ".com.openai.codex.*"]
+      "globs": [
+        "ssr (depth 3)",
+        "agentic-vitest-*",
+        "omb-api-test-*",
+        ".com.openai.codex.*"
+      ]
     },
     {
       "name": "app-staging",
@@ -82,7 +87,9 @@
       "op": "delete",
       "title": "Extracted but unused app updaters",
       "$rationale": "Sparkle/electron-updater leave an extracted .app plus the source zip. Gated on the OWNING updater process, not on lsof: an active ShipIt can report zero open handles while actively writing. `ShipIt` on this Mac belongs to Grok Bot (com.anysphere.sand.ShipIt) more often than to Claude, so the product name is matched from the path, never the generic name.",
-      "neverWhile": ["a process matching the product name is alive"]
+      "neverWhile": [
+        "a process matching the product name is alive"
+      ]
     },
     {
       "name": "dev-caches",
@@ -90,7 +97,12 @@
       "op": "delete",
       "title": "Package manager and toolchain caches",
       "$rationale": "All rebuild on next use. node-gyp, electron, electron-builder, deno, copilot, swiftpm, ms-playwright, npm _cacache, uv, pip, yarn. pnpm and gradle are only touched when the build fan-out is quiet -- on this Mac the fan-out is what drives load and swap, and disturbing it makes things worse.",
-      "skipWhenAny": ["xcodebuild alive", "swift-frontend alive", "clang alive", "node count > 20"]
+      "skipWhenAny": [
+        "xcodebuild alive",
+        "swift-frontend alive",
+        "clang alive",
+        "node count > 20"
+      ]
     },
     {
       "name": "app-caches",
@@ -98,15 +110,23 @@
       "op": "delete",
       "title": "Per-application cache directories",
       "$rationale": "The measured hog on this Mac was ~/Library/Caches/org.swift.swiftpm at 3.6 GB, with Codex (624 MB), pnpm (552 MB), antigravity (349 MB) and electron (248 MB) on top of it. The old rule set named a handful of specific toolchain caches and nothing else, so a host whose space went into app caches got nothing back. Everything under ~/Library/Caches is rebuildable by its app. In Application Support and the container trees only the cache-shaped children are touched (Cache, CachedData, Code Cache, GPUCache, logs, CacheStorage) -- everything else there is app state and stays untouched.",
-      "skipWhenAny": ["a file under the path was touched in the last 90 minutes", "any process holds the path open"]
+      "skipWhenAny": [
+        "a file under the path was touched in the last 90 minutes",
+        "any process holds the path open"
+      ]
     },
     {
       "name": "agent-state",
       "tier": "safe",
       "op": "delete",
       "title": "Transient state left behind by coding agents",
-      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, .tmp, cache, debug, shell-snapshots) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.  ~/.codex/.tmp holds marketplace clones that Codex's config names as live sources, so a tree holding any .git stays.",
-      "skipWhenAny": ["a file under the path was touched in the last 90 minutes", "any process holds the path open", "it holds a .git entry", "it holds a .project_root marker"]
+      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, cache, debug, shell-snapshots) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.  .tmp is not a delete target: ~/.codex/config.toml names a folder in ~/.codex/.tmp with no .git as a live marketplace source, so it is reported.",
+      "skipWhenAny": [
+        "a file under the path was touched in the last 90 minutes",
+        "any process holds the path open",
+        "it holds a .git entry",
+        "it holds a .project_root marker"
+      ]
     },
     {
       "name": "xcode-artifacts",
@@ -114,7 +134,11 @@
       "op": "delete",
       "title": "Xcode DerivedData and device support",
       "$rationale": "Per-project DerivedData with no build running. iOS DeviceSupport for OS versions older than 7 days is in the expensive tier: it re-downloads when an old device is attached. A lone xcodebuild with zero compiler children hours old is STALLED, not a real build -- check for clang/swiftc children before assuming work is in flight.",
-      "skipWhenAny": ["xcodebuild alive", "clang alive", "swift-frontend alive"]
+      "skipWhenAny": [
+        "xcodebuild alive",
+        "clang alive",
+        "swift-frontend alive"
+      ]
     },
     {
       "name": "simulator-runtimes",
@@ -132,7 +156,16 @@
       "title": "Duplicate simulator runtime images",
       "maxFreeGb": 25,
       "$rationale": "Disk images live in Apple's secure storage under /System/Library/AssetsV2, which simulator-runtimes never looks at.  Measured 2026-11-04: two iOS 27.2 images of 7.75 GB each, one never used.  Only when two or more Ready images share a runtime identifier and version.  A victim is a Disk Image with lastUsedAt null or older than the most recently used one, reports deletable true, and is never the image `simctl runtime match list` chooses, so at least one per version always stays.  That chooser speaks for one Xcode, so with any other number of Xcodes there is no candidate.  Output that does not read true gives no candidate, and that includes an absent lastUsedAt.  It calls simctl only when CoreSimulatorService is already alive, because simulator-runtimes stays shut while the service runs and simctl starts it.  Asked again right before the delete.",
-      "skipWhenAny": ["CoreSimulatorService not already alive", "any device not Shutdown", "xcodebuild alive", "Simulator alive", "Bitrig alive", "more or fewer than one Xcode installed", "simctl output is unparseable or unrecognised", "the chooser's build is not among the Ready images"]
+      "skipWhenAny": [
+        "CoreSimulatorService not already alive",
+        "any device not Shutdown",
+        "xcodebuild alive",
+        "Simulator alive",
+        "Bitrig alive",
+        "more or fewer than one Xcode installed",
+        "simctl output is unparseable or unrecognised",
+        "the chooser's build is not among the Ready images"
+      ]
     },
     {
       "name": "tool-versions",
@@ -141,27 +174,27 @@
       "title": "Superseded versions of installed tools",
       "$rationale": "Versioned stores whose layout has been read: muse-bin-* in ~/.local/bin (with its .muse-version pointer), ~/.local/share/cursor-agent/versions and ~/.local/share/claude/versions.  Keeps the newest two by mtime, what the default launcher resolves to, and any version a symlink, wrapper or LaunchAgent names.  With no proof of what the default launcher runs, or a store holding more than versions, the tool is left out.  ~/.local/share/claude/stable is not versioned and is not touched.",
       "idleDays": 7,
-      "skipWhenAny": ["any process holds it open (a running binary shows in the listing)", "a running process names it", "its access time is under 7 days old", "the tool holds a lock on it", "a keep marker"]
+      "skipWhenAny": [
+        "any process holds it open (a running binary shows in the listing)",
+        "a running process names it",
+        "its access time is under 7 days old",
+        "the tool holds a lock on it",
+        "a keep marker"
+      ]
     },
     {
       "name": "xcode-scratch",
-      "tier": "safe",
-      "op": "delete",
-      "title": "Xcode-shaped build scratch in /private/tmp",
-      "$rationale": "What xcodebuild -derivedDataPath leaves behind (3.69 GB measured 2026-11-04).  Direct children only, owned by this user, holding Build with Xcode's output folders and an Xcode cache beside it.  HH-180 is why the name and age of a temp folder prove nothing: the top level is an allowlist, every entry below it is judged against what Xcode writes there, a walk that cannot finish refuses, the identity is bound at scan time, and every gate is asked again on a fresh open-file listing right before the delete.  A writer that starts after that is the limit HH-180 records.",
-      "idleHours": 24,
-      "skipWhenAny": ["xcodebuild alive", "clang alive", "swift-frontend alive", "any process holds it open", "a running process names it", "a keep marker", "a nested repository other than a provable SwiftPM clone"]
+      "tier": "ask-first",
+      "op": "report",
+      "title": "Xcode-shaped build scratch in /private/tmp (report only)",
+      "$rationale": "What xcodebuild -derivedDataPath leaves behind (3.69 GB measured 2026-11-04).  Report only, whatever the disk level: each tree is listed with what the checks found, and a person decides.  It was a deleting rule until two adversarial review rounds on 2026-11-04 kept finding what a refuse-list misses."
     },
     {
       "name": "stale-build-output",
-      "tier": "semi-safe",
-      "op": "delete",
-      "title": "Stale ignored build output in main checkouts",
-      "maxFreeGb": 25,
-      "$rationale": "Owner's request of 2026-11-04 ('teach HH wherever possible') narrows the playbook's manual-only stance for these four names, and only at 25 GB free or less.  .build, .next, build and target directly in ~/Code/<repo>, or a path named per repo, spelled exactly so on disk.  git must ignore it and track nothing in it, and it must be unchanged for 14 days.  A tree that misses a check stays on the ask-first report with the reason.  node_modules and dist stay report-only.",
-      "idleDays": 14,
-      "neverUnder": [".muse", ".claude", "worktrees", "a linked worktree", "a nested repository", "a symlink"],
-      "skipWhenAny": ["any process holds it open", "any process has its working directory in the repo", "a running process names it", "a keep marker", "git cannot answer", "a nested repository other than a provable SwiftPM clone", "it holds keys, archives, notes, project files, another kind of repository, or source at its top level"]
+      "tier": "ask-first",
+      "op": "report",
+      "title": "Stale ignored build output in main checkouts (report only)",
+      "$rationale": "Report only, whatever the disk level.  The owner's request of 2026-11-04 ('teach HH wherever possible') allowed deleting this, and that narrowing was not used for automatic deletes: two adversarial review rounds kept finding what the checks miss (a .p8 key, a dSYM, a CLI symlinked into target/release, a server started from the parent folder), and with every gate in place it reclaimed almost nothing.  .build, .next, build and target are checked on a scan, and each row says what the checks found.  node_modules and dist get the idle row only."
     },
     {
       "name": "botfleet-rollback",
@@ -187,7 +220,9 @@
       "title": "Oversized SQLite WAL (checkpointed)",
       "$rationale": "A large -wal beside a live database is double storage. A checkpoint TRUNCATE folds it into the main file and zeroes the WAL in constant time. Unlike VACUUM it does not rewrite the database, so it is safe on a 14 GB file. Measured on Coolify app.db 2026-09-30: freelist_count=1 means VACUUM would reclaim ~4 KB while rewriting 14.7 GB -- the WAL is the correct lever, the VACUUM is not.",
       "thresholdMiB": 32,
-      "refusesWhen": ["another process holds the database open"]
+      "refusesWhen": [
+        "another process holds the database open"
+      ]
     },
     {
       "name": "brew",
@@ -213,15 +248,15 @@
         "~/apps/botfleet-* trees (may hold a seat's uncommitted work)",
         "~/Code/*/.muse/worktrees (seat worktrees, live work)",
         "~/.minimax/v2/sqlite/backups",
+        "agent .tmp folders (can hold live sources)",
         "~/.codex/.tmp/marketplaces/.staging (abandoned upgrades that hold plugin clones)",
-        "idle build output the stale-build-output rule cannot take, with the reason, and every idle node_modules and dist",
+        "idle build output with what the checks found, and every idle node_modules and dist",
         "Documents, photos, secrets, any path under ~/Library/CloudStorage",
         "any path with a .janitor-keep sentinel",
         "FileProvider bulk deletes"
       ]
     }
   ],
-
   "hardRules": {
     "neverRmRf": "rm -rf is intercepted by the mavis-trash layer on this Mac: it reports success, removes the inodes, and moves the bytes to ~/.Trash, freeing NOTHING. Every delete goes through `find <dir> -depth -delete`, and reclaim is verified with a fresh df -- never the exit code.",
     "neverPs": "Never bare `ps`, `pgrep -l`, `pgrep -fl`, or `ps -o comm` -- argv on this Mac carries live API keys and lands them in logs. Count with `pgrep -f X | wc -l` or `pgrep -x`.",
