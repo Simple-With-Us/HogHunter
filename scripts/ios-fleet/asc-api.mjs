@@ -53,6 +53,8 @@ import {
   PUBLIC_GROUP_NAME,
   TESTER_POLICY_PUBLIC,
   countInstallableTesters,
+  otherLinkOnGroups,
+  planTesterList,
   policyNeedsBuildAssignment,
   policyRequiresTesterList,
   policyUsesInternalGroup,
@@ -1217,15 +1219,29 @@ async function main() {
       }
       console.error(`${prefix}: no tester list; the members of the public group stay as they are`);
     }
-    const bad = emails.filter((e) => !EMAIL_RE.test(e));
-    if (bad.length) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS has ${bad.length} malformed entr${bad.length === 1 ? "y" : "ies"}; nothing changed`);
+    // A list that is present but wrong must NOT stop the build from reaching
+    // the group.  Under the public policy the people are already in it, so a
+    // malformed or oversized list is a warning about the list, never a reason
+    // to exit before the assignment and the review submission (Kody review
+    // on HogHunter PR #259, Nov 3 2026).
+    const listPlan = planTesterList(testerPolicy, emails, (e) => EMAIL_RE.test(e));
+    if (!listPlan.ok) {
+      const why =
+        listPlan.reason === "too-many"
+          ? `ASC_STANDING_TESTERS lists ${listPlan.count} emails; the standing list is three.  Refusing to invite`
+          : `ASC_STANDING_TESTERS has ${listPlan.malformed} malformed entr${listPlan.malformed === 1 ? "y" : "ies"}; nothing changed`;
+      console.error(`${prefix}: ${why}`);
       process.exit(2);
     }
-    if (emails.length > 5) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS lists ${emails.length} emails; the standing list is three.  Refusing to invite`);
-      process.exit(2);
+    if (listPlan.reason === "malformed") {
+      warn(
+        `ASC_STANDING_TESTERS has ${listPlan.malformed} malformed entr${listPlan.malformed === 1 ? "y" : "ies"}; they are ignored and the group is left as it is`
+      );
     }
+    if (listPlan.reason === "too-many") {
+      warn(`ASC_STANDING_TESTERS lists ${listPlan.count} emails; the standing list is three, and only the first five are added`);
+    }
+    const addable = listPlan.add;
     const rows = ascRows;
     const errText = ascErrorText;
     let warnings = 0;
@@ -1260,6 +1276,21 @@ async function main() {
           warn(`could not turn the public link on for group "${group.attributes?.name}" (${errText(linked)})`);
         }
       }
+      // Exactly one public group:  any other external group whose link is
+      // still on would distribute builds too, and two links on is the fault
+      // the owner ruled out (Kody review on HogHunter PR #259, Nov 3 2026).
+      if (testerPolicy === TESTER_POLICY_PUBLIC) {
+        for (const other of otherLinkOnGroups(rows(groupsRes), group)) {
+          const off = await api("PATCH", `/v1/betaGroups/${other.id}`, JSON.stringify({
+            data: { type: "betaGroups", id: other.id, attributes: { publicLinkEnabled: false } }
+          }));
+          if (off.ok) {
+            console.error(`${prefix}: turned the public link off for the other group "${other.attributes?.name}"`);
+          } else {
+            warn(`could not turn the public link off for group "${other.attributes?.name}" (${errText(off)})`);
+          }
+        }
+      }
     } else {
       const created = await api("POST", "/v1/betaGroups", JSON.stringify({
         data: {
@@ -1288,7 +1319,7 @@ async function main() {
       process.exit(3);
     }
     const inGroup = new Set(rows(inGroupRes).map((t) => String(t.attributes?.email || "").toLowerCase()));
-    for (const email of emails) {
+    for (const email of addable) {
       if (inGroup.has(email)) {
         console.error(`${prefix}: ${mask(email)} already in group`);
         continue;

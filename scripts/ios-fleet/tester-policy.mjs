@@ -47,18 +47,35 @@ export function hasPublicLink(group) {
   return Boolean(group && group.attributes && group.attributes.publicLinkEnabled === true);
 }
 
-// The one external group the public policy reuses.  The named group first, so
-// an app that has one keeps it; then any external group with its public link
-// on; then any external group at all.  Null when the app has no external
-// group, which is the caller's cue to create one.
+// The one external group the public policy reuses.
+//
+// The group whose public link is ON comes first, because that is the group
+// that actually distributes builds, and the named group second.  Preferring
+// the name first would let a link-off "Public Beta" win over a link-on group,
+// and turning its link on would then leave two link-on groups, which is the
+// opposite of the one-public-group rule (Kody review on HogHunter PR #259,
+// Nov 3 2026).  Null when the app has no external group at all, which is the
+// caller's cue to create one.
 export function selectPublicGroup(groups) {
   const list = Array.isArray(groups) ? groups : [];
   const external = list.filter(isExternalGroup);
   return (
-    external.find((g) => g && g.attributes && g.attributes.name === PUBLIC_GROUP_NAME) ||
     external.find(hasPublicLink) ||
+    external.find((g) => g && g.attributes && g.attributes.name === PUBLIC_GROUP_NAME) ||
     external[0] ||
     null
+  );
+}
+
+// The other external groups that still have their public link on.  Under the
+// public policy there must be exactly one, so the caller turns the rest off.
+export function otherLinkOnGroups(groups, chosen) {
+  const list = Array.isArray(groups) ? groups : [];
+  return list.filter(
+    (g) =>
+      isExternalGroup(g) &&
+      hasPublicLink(g) &&
+      !(chosen && g.id !== undefined && g.id === chosen.id)
   );
 }
 
@@ -107,4 +124,38 @@ export function policyNeedsBuildAssignment(policy) {
 // empty list is not a failure: the build still has to reach that group.
 export function policyRequiresTesterList(policy) {
   return resolveTesterPolicy(policy) === TESTER_POLICY_INTERNAL;
+}
+
+// The standing list is three people.  Five is the hard ceiling, so a list
+// that runs past it is refused rather than truncated under the policy that
+// manages the list itself.
+export const TESTER_LIST_MAX = 5;
+
+// What to do with a tester list under a policy.
+//
+// The internal policy manages the list itself, so a malformed address or an
+// oversized list refuses the whole thing and nothing changes.  The public
+// policy does NOT manage the list:  the group already holds the people, so a
+// wrong list is a warning about the list and never a reason to stop the build
+// from reaching the group (Kody review on HogHunter PR #259, Nov 3 2026).
+//
+// Returns { ok, reason, malformed, count, add }:  ok=false means the caller
+// must refuse and change nothing.
+export function planTesterList(policy, emails, isWellFormed = () => true) {
+  const list = Array.isArray(emails) ? emails : [];
+  const malformed = list.filter((email) => !isWellFormed(email)).length;
+  const fatal = policyRequiresTesterList(policy);
+  if (fatal && malformed > 0) {
+    return { ok: false, reason: "malformed", malformed, count: list.length, add: [] };
+  }
+  if (fatal && list.length > TESTER_LIST_MAX) {
+    return { ok: false, reason: "too-many", malformed, count: list.length, add: [] };
+  }
+  return {
+    ok: true,
+    reason: malformed > 0 ? "malformed" : list.length > TESTER_LIST_MAX ? "too-many" : "",
+    malformed,
+    count: list.length,
+    add: list.filter((email) => isWellFormed(email)).slice(0, TESTER_LIST_MAX)
+  };
 }
