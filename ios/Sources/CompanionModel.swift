@@ -91,6 +91,10 @@ final class CompanionModel {
     /// Set when a control call (exclusions, view, quit, tame) did not go
     /// through, so the dashboard can say so instead of silently doing nothing.
     var controlError: String?
+    /// True while a confirmed server action is out.
+    var isRunningServerAction = false
+    /// The answer to the last server action, shown in a sheet.
+    var serverActionOutcome: ServerActionOutcome?
     var showCleanDialogRequested = false
     /// When the current Clean request arrived.  The root view only builds the
     /// dashboard when the phase is `.live`, so a link that lands while the Mac
@@ -618,6 +622,73 @@ final class CompanionModel {
             return try await CompanionConnection.triggerSample(endpoint: endpoint, token: saved.token, rowId: row.id, useTLS: isUsingTLS(for: saved))
         } catch {
             return CompanionSampleResponse(status: "failed", name: row.name, error: Self.describe(error))
+        }
+    }
+
+    /// The address server actions go to.  A phone at home usually polls over
+    /// Bonjour, which the Mac refuses for these, so a saved Tailscale address
+    /// wins here even while the local one is in use for everything else.  Nil
+    /// when this phone has no way to reach the Mac over Tailscale.
+    func serverControlEndpoint(for saved: SavedMac) -> NWEndpoint? {
+        if let host = saved.remoteHost, let port = NWEndpoint.Port(rawValue: UInt16(saved.remotePort ?? 24240)) {
+            let remote = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
+            if CompanionPeer.isTailscaleEndpoint(remote) { return remote }
+        }
+        guard let active = activeEndpoint(for: saved), CompanionPeer.isTailscaleEndpoint(active) else { return nil }
+        return active
+    }
+
+    /// Whether this phone can offer server actions as if they would work.  The
+    /// Mac still decides from the socket.
+    var serverControlsReachable: Bool {
+        if isDemoMode && ProcessInfo.processInfo.arguments.contains("-HogHunterSample") { return true }
+        guard let saved else { return false }
+        return serverControlEndpoint(for: saved) != nil
+    }
+
+    /// Runs one server action the person has confirmed.  One at a time on the
+    /// phone, as on the Mac.  The answer lands in `serverActionOutcome`.
+    func runServerAction(_ action: CompanionServerActionRequest, rowName: String) async {
+        guard !isRunningServerAction else { return }
+        isRunningServerAction = true
+        defer { isRunningServerAction = false }
+        if isDemoMode {
+            try? await Task.sleep(for: .seconds(1))
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: Self.sampleServerAnswer(action, rowName: rowName))
+            return
+        }
+        guard let saved, let endpoint = serverControlEndpoint(for: saved) else {
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "tailscaleRequired", error: CompanionServerControl.tailscaleOnlyNote))
+            return
+        }
+        do {
+            let response = try await CompanionConnection.triggerServerAction(endpoint: endpoint, token: saved.token, action: action, useTLS: saved.useTLS)
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: response)
+        } catch {
+            // Not knowing is not the same as nothing having happened.
+            let text = "The Mac did not answer, so the outcome is not known.\u{00A0} Check the server before trying again.\u{00A0} \(Self.describe(error))"
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "failed", error: text))
+        }
+        await refresh()
+    }
+
+    /// What finished server actions look like in demo mode and the screenshot lane.
+    static func sampleServerAnswer(_ action: CompanionServerActionRequest, rowName: String) -> CompanionServerActionResponse {
+        switch action {
+        case .process(_, "sample"):
+            return CompanionServerActionResponse(status: "acted", message: "Sampled \(rowName) for 3 seconds", name: rowName, sampleText: "{\n  \"cpu_percent\" : 42.5,\n  \"duration_seconds\" : 3,\n  \"rss_bytes\" : 922746880,\n  \"state\" : \"running\"\n}")
+        case .process, .workload:
+            return CompanionServerActionResponse(status: "acted", message: "Done: \(rowName).", name: rowName)
+        case .maintain(let mode, let strategies, _):
+            let scan = mode == "scan"
+            let rows = strategies.map { id in
+                CompanionServerMaintenanceRow(id: id, title: ServerActionOutcome.strategyTitle(id), detail: scan ? "12 eligible records; 0 cleanup attempts" : "12 eligible records; 12 cleanup attempts")
+            }
+            return CompanionServerActionResponse(
+                status: "acted",
+                message: scan ? "Read-only scan completed; eligible items are listed below." : "Selected server maintenance completed.",
+                maintenance: CompanionServerMaintenanceSummary(mode: mode, status: scan ? "planned" : "ran", strategies: rows, removedBytesText: scan ? "0 KB" : "3.1 GB", observedChangeText: scan ? "0 KB" : "+3.4 GB")
+            )
         }
     }
 
@@ -1584,7 +1655,8 @@ final class CompanionModel {
                 category: "Storage"
             ),
         ],
-        flaggedIssuesCoverServer: true
+        flaggedIssuesCoverServer: true,
+        remoteServerControlAllowed: true
     )
 
     /// A busy but healthy server, for the sample snapshot and Demo Mode.  The
@@ -1657,16 +1729,16 @@ final class CompanionModel {
                 CompanionServerTool(id: "backup", name: "Backups", state: "unknown", stateText: "Unknown", count: 0, reason: "The backup log is not readable by the collector."),
             ],
             processes: [
-                CompanionServerProcess(id: "a1f0c2d4e6b81735", name: "postgres", owner: "postgres", container: "orders-db", cpuText: "118%", memoryText: "6.2 GB", swapText: "120 MB", isTamed: false),
-                CompanionServerProcess(id: "b2e1d3c5f7a92846", name: "node", owner: "app", container: "storefront-api", cpuText: "64%", memoryText: "1.8 GB", isTamed: false),
-                CompanionServerProcess(id: "c3d2e4b6a8f03957", name: "ffmpeg", owner: "media", cpuText: "42%", memoryText: "880 MB", isTamed: true),
-                CompanionServerProcess(id: "d4c3f5a7b9e14a68", name: "dockerd", owner: "root", cpuText: "6%", memoryText: "512 MB", isTamed: false, protectionReason: "Host infrastructure"),
+                CompanionServerProcess(id: "a1f0c2d4e6b81735", name: "postgres", owner: "postgres", container: "orders-db", cpuText: "118%", memoryText: "6.2 GB", swapText: "120 MB", isTamed: false, actions: ["quit", "forceQuit", "tame", "sample"]),
+                CompanionServerProcess(id: "b2e1d3c5f7a92846", name: "node", owner: "app", container: "storefront-api", cpuText: "64%", memoryText: "1.8 GB", isTamed: false, actions: ["quit", "forceQuit", "tame", "sample"]),
+                CompanionServerProcess(id: "c3d2e4b6a8f03957", name: "ffmpeg", owner: "media", cpuText: "42%", memoryText: "880 MB", isTamed: true, actions: ["quit", "forceQuit", "untame", "sample"]),
+                CompanionServerProcess(id: "d4c3f5a7b9e14a68", name: "dockerd", owner: "root", cpuText: "6%", memoryText: "512 MB", isTamed: false, protectionReason: "Host infrastructure", actions: []),
             ],
             processCount: 214,
             workloads: [
-                CompanionServerWorkload(id: "e5b4a6f8c0d25b79", name: "Storefront API", type: "application", status: "running", isHealthy: true, cpuText: "64%", memoryText: "1.8 GB"),
-                CompanionServerWorkload(id: "f6a5b7c9d1e36c80", name: "Orders Database", type: "database", status: "running", isHealthy: true, cpuText: "118%", memoryText: "6.2 GB"),
-                CompanionServerWorkload(id: "07f6c8dae2f47d91", name: "Nightly Reports", type: "service", status: "exited", isHealthy: false),
+                CompanionServerWorkload(id: "e5b4a6f8c0d25b79", name: "Storefront API", type: "application", status: "running", isHealthy: true, cpuText: "64%", memoryText: "1.8 GB", actions: ["stop", "restart"]),
+                CompanionServerWorkload(id: "f6a5b7c9d1e36c80", name: "Orders Database", type: "database", status: "running", isHealthy: true, cpuText: "118%", memoryText: "6.2 GB", protectionReason: "Protected database", actions: []),
+                CompanionServerWorkload(id: "07f6c8dae2f47d91", name: "Nightly Reports", type: "service", status: "exited", isHealthy: false, actions: ["restart"]),
             ]
         )
     }

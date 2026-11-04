@@ -209,9 +209,23 @@ final class HogStore: ObservableObject {
     @Published var allowRemoteServerStatus = false {
         didSet {
             persist()
+            companionServer.allowRemoteServerControl = serverControlEffective
             if !loadingSettings { publishCompanion() }
         }
     }
+    /// Off until the owner turns it on in Mac Settings, and it does nothing
+    /// while `allowRemoteServerStatus` is off: a phone that cannot see a row
+    /// cannot address it.  Never offered in the pairing alert.
+    @Published var allowRemoteServerControl = false {
+        didSet {
+            persist()
+            companionServer.allowRemoteServerControl = serverControlEffective
+            if !loadingSettings { publishCompanion() }
+        }
+    }
+    private var serverControlEffective: Bool { allowRemoteServerControl && allowRemoteServerStatus }
+    /// What the router was last told, for the tests of the opt-in.
+    var serverControlAllowedOnRouter: Bool { companionServer.allowRemoteServerControl }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
@@ -283,6 +297,9 @@ final class HogStore: ObservableObject {
     /// The one Maintain store.  The Mac's Storage tab and the iPhone
     /// route both use it, so a run started from either is the only run.
     let maintain: MaintainStore
+    /// What the phone's server control routes run.  Holds its own `ServerControl`
+    /// and `ServerMaintenanceControl`, the same types the Mac's UI uses.
+    let serverActions: CompanionServerActions
     private var maintainObservers = Set<AnyCancellable>()
 
     /// UserDefaults keys, shared with any `@AppStorage` view that edits them.
@@ -309,6 +326,7 @@ final class HogStore: ObservableObject {
         static let allowRemoteEdit = "allowRemoteEdit"
         static let allowRemoteMaintain = "allowRemoteMaintain"
         static let allowRemoteServerStatus = "allowRemoteServerStatus"
+        static let allowRemoteServerControl = "allowRemoteServerControl"
         static let companionCode = "companionCode"
         static let companionPeerID = "companionPeerID"
         static let settingsTab = "settingsTab"
@@ -429,7 +447,10 @@ final class HogStore: ObservableObject {
         infisical: InfisicalSettings? = nil,
         cleanupHistory: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
         maintain: MaintainStore? = nil,
-        startImmediately: Bool = true
+        startImmediately: Bool = true,
+        serverControl: ServerControl? = nil,
+        serverMaintenance: ServerMaintenanceControl? = nil,
+        serverAudit: CompanionServerActions.Audit? = nil
     ) {
         let infisical = infisical ?? InfisicalSettings.shared
         self.defaults = defaults
@@ -442,7 +463,15 @@ final class HogStore: ObservableObject {
         let history = HistoryStore(url: historyURL ?? HistoryStore.defaultURL)
         self.history = history
         self.bandwidth = BandwidthStore(history: history)
-        self.maintain = maintain ?? MaintainStore()
+        let maintainStore = maintain ?? MaintainStore()
+        self.maintain = maintainStore
+        self.serverActions = CompanionServerActions(
+            vps: maintainStore.vpsStore,
+            control: serverControl ?? ServerControl(),
+            maintenance: serverMaintenance ?? ServerMaintenanceControl(),
+            isMaintainRunning: { [weak maintainStore] in maintainStore?.isRunningNow ?? false },
+            audit: serverAudit ?? CompanionServerActions.defaultAudit
+        )
         loadSettings()
         setupCompanionHandlers()
         observeMaintain()
@@ -1299,6 +1328,7 @@ final class HogStore: ObservableObject {
         allowRemoteEdit = defaults.object(forKey: Key.allowRemoteEdit) as? Bool ?? false
         allowRemoteMaintain = defaults.object(forKey: Key.allowRemoteMaintain) as? Bool ?? false
         allowRemoteServerStatus = defaults.object(forKey: Key.allowRemoteServerStatus) as? Bool ?? false
+        allowRemoteServerControl = defaults.object(forKey: Key.allowRemoteServerControl) as? Bool ?? false
         let bgInterval = defaults.double(forKey: Key.backgroundRefreshInterval)
         if bgInterval >= 1 { backgroundRefreshInterval = bgInterval }
         migrateRenamedKeys()
@@ -1414,6 +1444,7 @@ final class HogStore: ObservableObject {
         defaults.set(allowRemoteEdit, forKey: Key.allowRemoteEdit)
         defaults.set(allowRemoteMaintain, forKey: Key.allowRemoteMaintain)
         defaults.set(allowRemoteServerStatus, forKey: Key.allowRemoteServerStatus)
+        defaults.set(allowRemoteServerControl, forKey: Key.allowRemoteServerControl)
         defaults.set(backgroundRefreshInterval, forKey: Key.backgroundRefreshInterval)
     }
 
@@ -1558,6 +1589,10 @@ final class HogStore: ObservableObject {
             if remoteServer != self.allowRemoteServerStatus {
                 self.allowRemoteServerStatus = remoteServer
             }
+            let remoteServerControl = self.defaults.object(forKey: Key.allowRemoteServerControl) as? Bool ?? false
+            if remoteServerControl != self.allowRemoteServerControl {
+                self.allowRemoteServerControl = remoteServerControl
+            }
         }
     }
 
@@ -1571,6 +1606,16 @@ final class HogStore: ObservableObject {
         companionServer.allowRemoteClean = allowRemoteClean
         companionServer.allowRemoteEdit = allowRemoteEdit
         companionServer.allowRemoteMaintain = allowRemoteMaintain
+        companionServer.allowRemoteServerControl = serverControlEffective
+        companionServer.onRemoteServerAction = { [weak self] request, device, completion in
+            Task { @MainActor [weak self] in
+                guard let self else { return completion((500, Data("{\"error\": \"Store unavailable\"}".utf8))) }
+                completion(await self.serverActions.perform(request, device: device))
+            }
+        }
+        companionServer.onServerControlRefused = { device, path, outcome in
+            CompanionServerActions.defaultAudit(.init(device: device, action: path, row: "", outcome: outcome))
+        }
         companionServer.onRemotePair = { [weak self] deviceName, reply in
             Task { @MainActor in
                 guard let self else { return reply(false) }
@@ -2602,6 +2647,7 @@ final class HogStore: ObservableObject {
         ))
         var plain = snapshot
         plain.remoteServerStatusAllowed = allowRemoteServerStatus
+        plain.remoteServerControlAllowed = serverControlEffective
         plain.flaggedIssues = issues.filter { !$0.isServer }
         plain.flaggedIssuesCoverServer = false
         guard allowRemoteMaintain || allowRemoteServerStatus else { return (plain, nil) }

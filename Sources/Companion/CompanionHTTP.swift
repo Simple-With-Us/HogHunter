@@ -19,6 +19,8 @@ enum CompanionHTTP {
         settingsHandler: ((CompanionSettingsUpdateRequest) -> (status: Int, body: Data))? = nil,
         sampleHandler: ((CompanionProcessRequest) -> (status: Int, body: Data))? = nil,
         maintainHandler: ((_ kind: String) -> (status: Int, body: Data))? = nil,
+        serverControlGate: (() -> (status: Int, body: Data)?)? = nil,
+        serverActionHandler: ((CompanionServerActionRequest) -> (status: Int, body: Data))? = nil,
         peerTrusted: Bool = true,
         deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
@@ -46,7 +48,8 @@ enum CompanionHTTP {
             || path == CompanionService.viewPath
             || path == CompanionService.settingsPath
             || path == CompanionService.samplePath
-            || path == CompanionService.maintainRunPath else {
+            || path == CompanionService.maintainRunPath
+            || CompanionHTTP.isServerControlPath(path) else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
@@ -278,6 +281,25 @@ enum CompanionHTTP {
             }
             let (code, resBody) = sampleHandler(CompanionProcessRequest(rowId: processRequest.rowId, pid: nil))
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if isServerControlPath(path) {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            // The opt-in and the Tailscale rule come before the body is read at
+            // all, and fail closed if the host never wired them.
+            guard let serverControlGate, let serverActionHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Server Controls Not Configured".utf8))
+            }
+            if let refusal = serverControlGate() {
+                return message(status: refusal.status, reason: reason(for: refusal.status), body: refusal.body, type: "application/json; charset=utf-8")
+            }
+            // Everything the route takes is in the body.  A query is either a
+            // mistake or a second copy of a field.
+            guard !fullPath.contains("?"), let action = parseServerAction(path: path, body: bodyData(of: request)) else {
+                return message(status: 400, reason: "Bad Request", body: serverActionRejectedBody(), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = serverActionHandler(action)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.maintainRunPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -386,6 +408,107 @@ enum CompanionHTTP {
 
     /// The answer to a control request from an address outside the local
     /// network and Tailscale.
+    static func isServerControlPath(_ path: String) -> Bool {
+        path == CompanionService.serverProcessPath
+            || path == CompanionService.serverWorkloadPath
+            || path == CompanionService.serverMaintainPath
+    }
+
+    static func serverActionRejectedBody() -> Data {
+        let response = CompanionServerActionResponse(status: "rejected", error: "That server action could not be read, so nothing was done.")
+        return (try? JSONEncoder().encode(response)) ?? Data()
+    }
+
+    /// Reads one server action, whole or not at all.  An unknown field, a
+    /// repeated field, a missing field, a wrong type or an unknown action is
+    /// nil, so a request that tried to name a host, a pid or a command fails
+    /// here instead of having the extra field quietly dropped.
+    static func parseServerAction(path: String, body: Data) -> CompanionServerActionRequest? {
+        switch path {
+        case CompanionService.serverProcessPath, CompanionService.serverWorkloadPath:
+            guard let fields = strictJSONObject(body, allowed: ["rowId", "action"]),
+                  fields.count == 2,
+                  let rowId = fields["rowId"] as? String, CompanionServerControl.isRowID(rowId),
+                  let action = fields["action"] as? String else { return nil }
+            if path == CompanionService.serverProcessPath {
+                return CompanionServerControl.processActions.contains(action) ? .process(rowId: rowId, action: action) : nil
+            }
+            return CompanionServerControl.workloadActions.contains(action) ? .workload(rowId: rowId, action: action) : nil
+        case CompanionService.serverMaintainPath:
+            guard let fields = strictJSONObject(body, allowed: ["mode", "strategies", "acknowledgeImageRemoval"]),
+                  let mode = fields["mode"] as? String, CompanionServerControl.maintainModes.contains(mode),
+                  let strategies = fields["strategies"] as? [String], !strategies.isEmpty,
+                  Set(strategies).count == strategies.count,
+                  strategies.allSatisfy(CompanionServerControl.strategies.contains) else { return nil }
+            let removesImages = mode == "run" && strategies.contains(CompanionServerControl.imageStrategy)
+            // A literal `true`, on the one request that needs it: never a 1, and
+            // never a field that means nothing on the request it came with.
+            if removesImages {
+                guard isJSONTrue(fields["acknowledgeImageRemoval"]) else { return nil }
+            } else if fields["acknowledgeImageRemoval"] != nil {
+                return nil
+            }
+            return .maintain(mode: mode, strategies: strategies, imageRemovalAcknowledged: removesImages)
+        default:
+            return nil
+        }
+    }
+
+    /// `as? Bool` also accepts the number 1, which is not an acknowledgement.
+    private static func isJSONTrue(_ value: Any?) -> Bool {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+        return number.boolValue
+    }
+
+    /// A JSON object with only `allowed` keys, each appearing once.
+    /// `JSONSerialization` keeps one copy of a repeated key without saying so,
+    /// so the keys are counted from the bytes first.
+    static func strictJSONObject(_ data: Data, allowed: Set<String>) -> [String: Any]? {
+        guard let keys = topLevelKeys(in: data), Set(keys).count == keys.count,
+              keys.allSatisfy(allowed.contains),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object.count == keys.count else { return nil }
+        return object
+    }
+
+    /// The keys of a top-level JSON object, in order, with escapes decoded so
+    /// `"a"` and `"\u0061"` count as the same key.  Nil if it is not an object.
+    private static func topLevelKeys(in data: Data) -> [String]? {
+        let bytes = [UInt8](data)
+        var keys: [String] = []
+        var index = 0
+        var depth = 0
+        var expectingKey = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == UInt8(ascii: "\"") {
+                let start = index
+                index += 1
+                while index < bytes.count, bytes[index] != UInt8(ascii: "\"") {
+                    index += bytes[index] == UInt8(ascii: "\\") ? 2 : 1
+                }
+                guard index < bytes.count else { return nil }
+                if depth == 1, expectingKey {
+                    let raw = Data(bytes[start...index])
+                    guard let key = try? JSONSerialization.jsonObject(with: raw, options: [.fragmentsAllowed]) as? String else { return nil }
+                    keys.append(key)
+                    expectingKey = false
+                }
+            } else if byte == UInt8(ascii: "{") || byte == UInt8(ascii: "[") {
+                if depth == 0 && byte != UInt8(ascii: "{") { return nil }
+                depth += 1
+                if depth == 1 { expectingKey = true }
+            } else if byte == UInt8(ascii: "}") || byte == UInt8(ascii: "]") {
+                depth -= 1
+                expectingKey = false
+            } else if byte == UInt8(ascii: ","), depth == 1 {
+                expectingKey = true
+            }
+            index += 1
+        }
+        return depth == 0 ? keys : nil
+    }
+
     static func untrustedNetworkReply() -> Data {
         let body = Data(#"{"status":"forbidden","reason":"untrusted-network","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
         return jsonReply(status: 403, body: body)
@@ -556,6 +679,15 @@ enum CompanionHTTP {
     }
 
     /// True for `GET /v1/snapshot`, whatever its auth outcome.
+    /// The path a request names, without its query.
+    static func requestPath(_ request: Data) -> String? {
+        let text = String(data: request.prefix(512), encoding: .isoLatin1) ?? ""
+        guard let line = text.components(separatedBy: "\r\n").first else { return nil }
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        return parts[1].split(separator: "?", maxSplits: 1).first.map(String.init)
+    }
+
     static func isSnapshotRequest(_ request: Data) -> Bool {
         let text = String(data: request.prefix(512), encoding: .isoLatin1) ?? ""
         guard let line = text.components(separatedBy: "\r\n").first else { return false }
@@ -868,6 +1000,10 @@ enum CompanionHTTP {
             "",
         ]
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    static func serverActionRequest(token: String, action: CompanionServerActionRequest, host: String? = nil) -> Data {
+        jsonPostRequest(path: action.path, token: token, body: action.body, host: host)
     }
 
     static func maintainRunRequest(token: String, kind: String = "full", host: String? = nil) -> Data {

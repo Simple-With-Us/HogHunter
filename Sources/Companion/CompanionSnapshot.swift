@@ -25,6 +25,13 @@ enum CompanionService {
     /// Starts a Maintain run.  Behind its own opt-in: a run can retire
     /// old git worktrees and run maintenance on remote servers.
     static let maintainRunPath = "/v1/maintain/run"
+    /// Acts on one server process.  These three are stricter than every other
+    /// route: Tailscale only, behind their own opt-in.
+    static let serverProcessPath = "/v1/server/process"
+    /// Stops or restarts one server workload.
+    static let serverWorkloadPath = "/v1/server/workload"
+    /// Scans or runs server maintenance.
+    static let serverMaintainPath = "/v1/server/maintain"
     /// The only run the phone may start.  The Mac's script also knows
     /// cheaper cadences and a pressure run; none of them is reachable from here.
     static let maintainRunKinds = ["full"]
@@ -784,6 +791,10 @@ struct CompanionSnapshot: Codable, Equatable {
     /// Whether `flaggedIssues` looked at the server.  False means the list is
     /// the Mac's alone, so an empty list does not mean all is calm.
     var flaggedIssuesCoverServer: Bool? = nil
+    /// Whether the owner allows the phone to act on the server.  Nil from an
+    /// older Mac.  True says the Mac will listen, not that this link will be
+    /// accepted: the routes also need a Tailscale connection.
+    var remoteServerControlAllowed: Bool? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
@@ -936,6 +947,101 @@ struct CompanionNetworkRow: Codable, Equatable, Identifiable {
     var establishedCount: Int
     var uniqueRemoteHosts: Int
     var sampleRemoteHosts: [String]
+}
+
+// MARK: - Server control
+
+/// The vocabulary of the three server control routes.  The phone names an
+/// action and an opaque row, and the Mac builds everything else itself, so
+/// nothing here can carry a host, a pid, a path or a command.
+enum CompanionServerControl {
+    static let processActions = ["quit", "forceQuit", "tame", "untame", "sample"]
+    static let workloadActions = ["stop", "restart"]
+    static let maintainModes = ["scan", "run"]
+    static let packageCacheStrategy = "package-cache"
+    static let rotatedLogsStrategy = "rotated-logs"
+    static let buildCacheStrategy = "docker-build-cache"
+    static let imageStrategy = "docker-images"
+    static let strategies = [packageCacheStrategy, rotatedLogsStrategy, buildCacheStrategy, imageStrategy]
+
+    /// The refusal a local-network phone hears, and the sentence the phone
+    /// shows in place of the actions.  Shared, so the two cannot differ.
+    static let tailscaleOnlyNote = "Server controls work only over Tailscale, because this link is not encrypted.\u{00A0} Connect to your Mac at its Tailscale address, then try again."
+    static let optInNote = "Controlling the server from iPhone is off.\u{00A0} Turn on Allow iPhone to Control the Server and Allow iPhone to See Server Status in Hog Hunter Settings > iPhone on your Mac."
+
+    /// A row id is what the Mac put in the server block: 16 lowercase hex
+    /// characters.  Anything else is free text and is refused unread.
+    static func isRowID(_ text: String) -> Bool {
+        text.utf8.count == 16 && text.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}
+
+/// One server action a phone asked for, already checked for shape.  Which row
+/// it means, and whether that row allows it, the Mac decides from its own copy.
+enum CompanionServerActionRequest: Equatable, Sendable {
+    case process(rowId: String, action: String)
+    case workload(rowId: String, action: String)
+    case maintain(mode: String, strategies: [String], imageRemovalAcknowledged: Bool)
+
+    var isMaintenance: Bool {
+        if case .maintain = self { return true }
+        return false
+    }
+
+    /// The wire body.  The Mac reads it with `CompanionHTTP.parseServerAction`.
+    var body: Data {
+        let object: [String: Any]
+        switch self {
+        case .process(let rowId, let action), .workload(let rowId, let action):
+            object = ["rowId": rowId, "action": action]
+        case .maintain(let mode, let strategies, let acknowledged):
+            var fields: [String: Any] = ["mode": mode, "strategies": strategies]
+            if acknowledged { fields["acknowledgeImageRemoval"] = true }
+            object = fields
+        }
+        return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+    }
+
+    var path: String {
+        switch self {
+        case .process: return CompanionService.serverProcessPath
+        case .workload: return CompanionService.serverWorkloadPath
+        case .maintain: return CompanionService.serverMaintainPath
+        }
+    }
+}
+
+/// The Mac's answer to a server action.  `status` is `acted`, `partial`,
+/// `refused`, `failed`, `busy`, `stale`, `changed`, `protected`, `rejected`,
+/// `forbidden` or `tailscaleRequired`.  A sample or a scan can name server
+/// internals, which is why these answers exist only behind the routes' gates.
+struct CompanionServerActionResponse: Codable, Equatable, Sendable {
+    var status: String
+    var message: String? = nil
+    var error: String? = nil
+    /// The row acted on.
+    var name: String? = nil
+    var sampleText: String? = nil
+    var maintenance: CompanionServerMaintenanceSummary? = nil
+
+    /// Whatever the phone should show for this answer.
+    var displayText: String { error ?? message ?? "The Mac did not say what happened." }
+    var succeeded: Bool { status == "acted" }
+}
+
+/// What a server maintenance scan or run found, in the Mac card's words.
+struct CompanionServerMaintenanceSummary: Codable, Equatable, Sendable {
+    var mode: String
+    var status: String
+    var strategies: [CompanionServerMaintenanceRow]
+    var removedBytesText: String? = nil
+    var observedChangeText: String? = nil
+}
+
+struct CompanionServerMaintenanceRow: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var detail: String
 }
 
 // MARK: - Server status
@@ -1143,6 +1249,8 @@ struct CompanionServerProcess: Codable, Equatable, Identifiable, Sendable {
     var swapText: String? = nil
     var isTamed: Bool? = nil
     var protectionReason: String? = nil
+    /// What the Mac would accept for this row, from `CompanionServerControl`.
+    var actions: [String]? = nil
 }
 
 /// One Coolify workload.  `id` is opaque, like a process's.
@@ -1154,6 +1262,9 @@ struct CompanionServerWorkload: Codable, Equatable, Identifiable, Sendable {
     var isHealthy: Bool? = nil
     var cpuText: String? = nil
     var memoryText: String? = nil
+    var protectionReason: String? = nil
+    /// What the Mac would accept for this row, from `CompanionServerControl`.
+    var actions: [String]? = nil
 }
 
 /// One Flagged Issues row.  A server row's text can name the host, a service
