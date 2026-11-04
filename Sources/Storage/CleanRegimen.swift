@@ -154,14 +154,16 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         "xcode-artifacts", "logs", "sqlite-wal", "brew",
     ]
 
-    /// Rules a regimen is allowed to schedule.  `ask-first` and `expensive`
-    /// bulk work are not in here; the expensive tier is a *property of disk
-    /// pressure*, not a rule the user enables.
+    /// Rule names a stored regimen may keep.  `ask-first` is not in here.  The
+    /// regimen runs `DiskCleaner`, not `scripts/hoghunter-clean`, so a name here
+    /// does real work only if `CleanRegimenRunner.ruleNames(for:)` maps a cleaner
+    /// category to it.  `simulator-runtimes` and a few others are older names
+    /// that select nothing.  A rule that lives only in the engine, such as
+    /// `stale-build-output`, stays out of this list.
     static let schedulableRules: [String] = [
         "snapshots", "temp-scratch", "tmp-files", "app-staging", "dev-caches",
         "app-caches", "agent-state",
         "xcode-artifacts", "simulator-runtimes", "logs", "sqlite-wal", "brew",
-        "duplicate-sim-runtimes", "tool-versions", "xcode-scratch", "stale-build-output",
     ]
 
     var isValid: Bool {

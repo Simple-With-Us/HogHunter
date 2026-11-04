@@ -143,16 +143,17 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertTrue(CleanRegimenRunner.pendingItems(from: [trash], rules: everyRule).items.isEmpty)
     }
 
-    func testTheInternalDiskRulesAreSchedulableAndNotOnByDefault() {
-        // HH-164: a rule that is not in the policy and the schedulable list
-        // does not run.  They have no Swift cleaner category, so a regimen's
-        // default set has no reason to carry them.
+    func testEngineOnlyRulesAreNotOfferedToTheRegimen() {
+        // The regimen runs DiskCleaner.  These four live only in the engine, so
+        // a stored regimen naming them is left with nothing rather than a
+        // switch that looks on and does nothing.
         for rule in ["duplicate-sim-runtimes", "tool-versions", "xcode-scratch", "stale-build-output"] {
-            XCTAssertTrue(CleanRegimen.schedulableRules.contains(rule), rule)
+            XCTAssertFalse(CleanRegimen.schedulableRules.contains(rule), rule)
             XCTAssertFalse(CleanRegimen.defaultRules.contains(rule), rule)
             var regimen = CleanRegimen()
             regimen.enabledRules = [rule]
-            XCTAssertEqual(regimen.sanitized().enabledRules, [rule], "sanitizing must keep \(rule)")
+            XCTAssertEqual(regimen.sanitized().enabledRules, [], "sanitizing must drop \(rule)")
+            XCTAssertTrue(CleanRegimenRunner.scanCategories(for: [rule]).isEmpty, rule)
         }
     }
 

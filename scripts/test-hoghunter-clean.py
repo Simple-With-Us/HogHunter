@@ -1362,6 +1362,7 @@ def test_idle_build_output_survives_a_blind_capped_walk(hh):
 
 
 def _reset_open_snapshot(hh):
+    hh._OPEN_CWDS = set()
     """The engine memoizes one snapshot for a while; a test has to start over."""
     hh._OPEN_SNAPSHOT = None
     hh._OPEN_SNAPSHOT_AT = 0.0
@@ -2055,7 +2056,10 @@ class FakeSimctl:
 def simctl_env(hh, fake, exact=0, pattern=0):
     with mock.patch.object(hh, "_simctl", fake), \
             mock.patch.object(hh, "proc_count_exact", return_value=exact) as exact_mock, \
-            mock.patch.object(hh, "proc_count", return_value=pattern):
+            mock.patch.object(hh, "proc_count", return_value=pattern), \
+            mock.patch.object(hh, "_simulator_service_alive", return_value=True, create=True), \
+            mock.patch.object(hh, "_installed_xcodes", return_value=["/Applications/Xcode.app"], create=True), \
+            mock.patch.object(hh, "read_disk_free", return_value=10.0, create=True):
         yield exact_mock
 
 
@@ -2193,7 +2197,7 @@ def test_duplicate_runtime_delete_is_refused_when_things_change_after_the_scan(h
         fake.devices = {"devices": {IOS_RUNTIME: [{"state": "Booted"}]}}
         hh.apply_candidate(c)
     assert fake.deletes() == [], "a simulator booted after the scan stops the delete"
-    assert not c.applied and "refused" in c.error, c.error
+    assert not c.applied and c.refused and not c.error, (c.refused, c.error)
 
     fake = FakeSimctl()
     with simctl_env(hh, fake):
@@ -2255,7 +2259,7 @@ def test_new_rules_scan_makes_no_change(hh):
 
 def test_semi_safe_rules_wait_for_the_full_band(hh):
     clock = FakeClock()
-    band = hh.Band(100.0, 50.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
+    band = hh.Band(20.0, 50.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
     runtime = hh.Candidate("duplicate-sim-runtimes", f"sim-runtime:{RUNTIME_B}", GIB, "x",
                            tier="semi-safe", op="simctl-runtime-delete")
     stale = hh.Candidate("stale-build-output", "/fake/.build", GIB, "x", tier="semi-safe")
@@ -2294,7 +2298,11 @@ def gates_open(hh):
             mock.patch.object(hh, "_build_running", return_value=False), \
             mock.patch.object(hh, "changed_age_min", return_value=10.0 ** 9), \
             mock.patch.object(hh, "proc_count_exact", return_value=0), \
-            mock.patch.object(hh, "proc_count", return_value=0):
+            mock.patch.object(hh, "proc_count", return_value=0), \
+            mock.patch.object(hh, "repo_has_process_cwd", return_value=False, create=True), \
+            mock.patch.object(hh, "_simulator_service_alive", return_value=True, create=True), \
+            mock.patch.object(hh, "_installed_xcodes", return_value=["/Applications/Xcode.app"], create=True), \
+            mock.patch.object(hh, "read_disk_free", return_value=10.0, create=True):
         yield
 
 
@@ -2581,7 +2589,7 @@ def test_tool_versions_refuses_at_apply_when_the_path_was_replaced(hh):
         (store / "2.1.301").unlink()
         blob(store / "2.1.301", 30)
         hh.apply_candidate(c)
-        assert not c.applied and "refused" in c.error, c.error
+        assert not c.applied and c.refused and not c.error, (c.refused, c.error)
         assert (store / "2.1.301").exists()
 
 
@@ -2690,12 +2698,9 @@ def test_xcode_scratch_nested_repositories(hh):
         (tree / "Build" / "Products" / "clone" / ".git").mkdir()
         assert hh.rule_xcode_scratch() == [], "a repository outside SwiftPM's folder"
         shutil.rmtree(tree / "Build" / "Products" / "clone")
-        clone = tree / "SourcePackages" / "checkouts" / "dep"
-        clone.parent.mkdir(parents=True)
-        git_repo(clone, ignore="")
-        run_git(clone, "tag", "1.0.0")
+        clone = upstream_clone(home, tree / "SourcePackages" / "checkouts" / "dep")
         age_all(tree, 3)
-        assert len(hh.rule_xcode_scratch()) == 1, "a clean SwiftPM clone at a tag rebuilds"
+        assert len(hh.rule_xcode_scratch()) == 1, "a clean SwiftPM clone of its upstream rebuilds"
         (clone / "edit.swift").write_text("x", encoding="utf-8")
         age(clone / "edit.swift", 3)
         assert hh.rule_xcode_scratch() == [], "an edit in the clone keeps the tree"
@@ -2716,7 +2721,7 @@ def test_xcode_scratch_is_bound_to_what_the_scan_saw(hh):
         tree.rename(moved)
         replacement = xcode_tree(home)
         hh.apply_candidate(c)
-        assert not c.applied and "something else" in c.error, c.error
+        assert not c.applied and "something else" in c.refused, c.refused
         assert replacement.is_dir() and moved.is_dir()
 
         c = hh.rule_xcode_scratch()
@@ -2725,7 +2730,7 @@ def test_xcode_scratch_is_bound_to_what_the_scan_saw(hh):
         leaf = replacement / "Build" / "Products" / "late.o"
         leaf.write_text("x", encoding="utf-8")
         hh.apply_candidate(target)
-        assert not target.applied and "24 hours" in target.error, target.error
+        assert not target.applied and "24 hours" in target.refused, target.refused
         assert leaf.exists()
         age(leaf, 3)
 
@@ -2870,12 +2875,9 @@ def test_stale_build_refuses_nested_repositories_except_a_provable_swiftpm_clone
         assert "nested repository" in hh.stale_build_refusal(repo, ".build")
         shutil.rmtree(target / "deep")
 
-        clone = target / "checkouts" / "dep"
-        clone.parent.mkdir()
-        git_repo(clone, ignore="")
-        run_git(clone, "tag", "1.0.0")
+        clone = upstream_clone(home, target / "checkouts" / "dep")
         age_all(target, 30)
-        assert hh.stale_build_refusal(repo, ".build") is None, "a clean clone at a tag rebuilds"
+        assert hh.stale_build_refusal(repo, ".build") is None, "a clean clone of its upstream rebuilds"
 
         (clone / "edit.swift").write_text("x", encoding="utf-8")
         age_all(target, 30)
@@ -2891,10 +2893,7 @@ def test_stale_build_refuses_nested_repositories_except_a_provable_swiftpm_clone
         (other / "checkouts" / "dep" / ".git").mkdir(parents=True)
         assert "nested repository" in hh.stale_build_refusal(repo, "build")
         shutil.rmtree(other / "checkouts")
-        sp = other / "derivedData" / "SourcePackages" / "checkouts" / "dep"
-        sp.parent.mkdir(parents=True)
-        git_repo(sp, ignore="")
-        run_git(sp, "tag", "1.0.0")
+        upstream_clone(home, other / "derivedData" / "SourcePackages" / "checkouts" / "dep2")
         age_all(other, 30)
         assert hh.stale_build_refusal(repo, "build") is None, "SwiftPM's folder inside derived data"
 
@@ -2937,7 +2936,7 @@ def test_stale_build_is_rechecked_right_before_the_delete(hh):
         c = hh.rule_stale_build_output()[0]
         (target / "new.o").write_text("x", encoding="utf-8")
         hh.apply_candidate(c)
-        assert not c.applied and "14 days" in c.error, c.error
+        assert not c.applied and "14 days" in c.refused, c.refused
         assert target.is_dir()
 
 
@@ -2946,6 +2945,7 @@ def test_stale_build_ask_first_reports_only_what_the_rule_cannot_take(hh):
         repo = git_repo(home / "Code" / "App", ignore=".next/\n")
         eligible = old_tree(repo / ".next")
         not_ignored = old_tree(repo / ".build")
+        hh.rule_stale_build_output()
         with mock.patch.object(hh, "open_handles", return_value=0):
             report = {c.path: c for c in hh.rule_ask_first_inventory()}
         assert str(eligible) not in report, "the rule owns it"
@@ -3032,24 +3032,6 @@ def test_ask_first_peer_work_stops_with_the_scan_share(hh):
             hh.set_budget(0)
 
 
-def test_no_new_rule_offers_peer_work_as_a_delete(hh):
-    """The owner's condition for this work: MC's worktrees and the BotFleet
-    trees are visible and can never become a candidate that deletes."""
-    with fake_home(hh) as home, gates_open(hh):
-        peer_work_home(home)
-        worktree = home / "Code" / "BotFleet" / ".muse" / "worktrees" / "one"
-        old_tree(worktree / ".build")
-        old_tree(home / "apps" / "botfleet-mm-mcode" / ".build")
-        fake = FakeSimctl()
-        with mock.patch.object(hh, "_simctl", fake), \
-                mock.patch.object(hh, "open_handles", return_value=0):
-            found = hh.scan(["duplicate-sim-runtimes", "tool-versions", "xcode-scratch",
-                             "stale-build-output", "ask-first"])
-        for c in found:
-            if ".muse" in c.path or "botfleet-" in c.path:
-                assert c.tier == "ask-first" and c.op == "report", c.path
-
-
 # --- gate helpers ---------------------------------------------------------
 
 def test_tree_in_use_treats_a_failed_snapshot_as_in_use(hh):
@@ -3094,7 +3076,7 @@ def test_a_recheck_is_not_in_the_report(hh):
 
 # --- policy registration --------------------------------------------------
 
-def test_every_rule_is_in_the_policy_and_the_new_ones_are_schedulable(hh):
+def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulable(hh):
     policy = json.loads(hh.POLICY_PATH.read_text())
     rules = {r["name"]: r for r in policy["rules"]}
     missing = [name for name in hh.RULES if name not in rules]
@@ -3107,7 +3089,7 @@ def test_every_rule_is_in_the_policy_and_the_new_ones_are_schedulable(hh):
                            ("xcode-scratch", "safe", "delete")):
         assert rules[name]["tier"] == tier, name
         assert rules[name]["op"] == op, name
-        assert f'"{name}"' in block, f"{name} is not schedulable (HH-164)"
+        assert f'"{name}"' not in block, f"the regimen cannot run {name}, so it must not offer it"
 
 
 def test_the_policy_states_the_tier_the_simulator_rule_really_runs_at(hh):
@@ -3121,6 +3103,705 @@ def test_the_policy_states_the_tier_the_simulator_rule_really_runs_at(hh):
     src = ENGINE.read_text()
     body = src.split("def rule_simulator_runtimes", 1)[1].split("def split_find_output", 1)[0]
     assert 'tier="expensive"' in body
+
+
+# --------------------------------------------------------------------------
+# HH-213 review of 5cab1de: one regression per confirmed finding, each built
+# from the reviewer's scenario in a fake home.  F<n> is the finding's number.
+# --------------------------------------------------------------------------
+
+def upstream_clone(home, clone):
+    """A real clone of a real upstream, the way SwiftPM's checkouts are."""
+    up = home / "upstream" / clone.name
+    if not up.exists():
+        git_repo(up, ignore="")
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["/usr/bin/git", "clone", "-q", str(up), str(clone)], check=True, capture_output=True)
+    return clone
+
+
+def seed_open_snapshot(hh, paths=("/unrelated/path",), cwds=()):
+    """A trustworthy lsof listing, without running lsof."""
+    hh._OPEN_SNAPSHOT = set(paths)
+    hh._OPEN_INDEX = hh._build_open_index(hh._OPEN_SNAPSHOT)
+    hh._OPEN_CWDS = set(cwds)
+    hh._OPEN_SNAPSHOT_AT = time.monotonic()
+
+
+def test_f1_a_tracked_folder_differing_only_in_case_is_not_build_output(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        for on_disk, rel, ignore in (("Build", "build", "build/\n"), ("Target", "target", "/target\n")):
+            repo = git_repo(home / "Code" / f"App{on_disk}", ignore=ignore)
+            blob(repo / on_disk / "big.bin", 30)
+            (repo / on_disk / "deploy.sh").write_text("v1\n", encoding="utf-8")
+            run_git(repo, "add", "-f", f"{on_disk}/deploy.sh")
+            run_git(repo, "commit", "-q", "-m", "tracked")
+            (repo / on_disk / "deploy.sh").write_text("uncommitted edit\n", encoding="utf-8")
+            age_all(repo / on_disk, 30)
+            refusal = hh.stale_build_refusal(repo, rel)
+            assert refusal is not None, f"tracked {on_disk}/ passed as {rel}"
+            hh._STALE_BUILD_MEMO.clear()
+            assert str(repo / rel) not in rule_paths(hh.rule_stale_build_output()), on_disk
+            assert (repo / on_disk / "deploy.sh").read_text(encoding="utf-8") == "uncommitted edit\n"
+
+
+def test_f2_a_process_running_from_the_repo_keeps_its_build_output(hh):
+    """`next start` reads .next and closes it, and `python3 build/server.py`
+    has only a relative path in argv.  Neither holds anything open under the
+    tree, so only the process's working directory shows it."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        old_tree(repo / ".next")
+        with mock.patch.object(hh, "repo_has_process_cwd", side_effect=None, return_value=True, create=True):
+            assert "working directory" in str(hh.stale_build_refusal(repo, ".next"))
+    with fake_home(hh) as home:
+        repo = git_repo(home / "Code" / "App")
+        old_tree(repo / ".next")
+        seed_open_snapshot(hh, cwds=[str(repo)])
+        with mock.patch.object(hh, "process_names_path", return_value=False), \
+                mock.patch.object(hh, "changed_age_min", return_value=10.0 ** 9):
+            assert "working directory" in str(hh.stale_build_refusal(repo, ".next"))
+            seed_open_snapshot(hh, cwds=[str(repo / "src" / "deep")])
+            assert "working directory" in str(hh.stale_build_refusal(repo, ".next")), "a subfolder counts"
+            seed_open_snapshot(hh, cwds=[str(repo) + "-other"])
+            assert hh.stale_build_refusal(repo, ".next") is None, "a sibling's name is not inside"
+
+
+def test_f2_the_listing_records_working_directories_and_fails_closed(hh):
+    listing = "p41\nfcwd\nn/some/repo\nf3\nn/some/file\nfrtd\nn/\n"
+    with mock.patch.object(hh.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, listing, "")):
+        assert hh.repo_has_process_cwd("/some/repo")
+        assert not hh.repo_has_process_cwd("/some/file"), "an open file is not a working directory"
+        assert not hh.repo_has_process_cwd("/other"), "the root directory line is not a cwd"
+    hh._OPEN_SNAPSHOT = None
+    with mock.patch.object(hh, "_load_open_snapshot", return_value=None):
+        assert hh.repo_has_process_cwd("/other"), "no listing means nobody can tell"
+
+
+def test_f3_a_clone_proof_counts_stashes_local_branches_and_local_tags(hh):
+    def scene(name, act):
+        with fake_home(hh) as home, gates_open(hh):
+            repo = git_repo(home / "Code" / "App")
+            target = old_tree(repo / ".build")
+            clone = upstream_clone(home, target / "checkouts" / "dep")
+            age_all(target, 30)
+            assert hh.stale_build_refusal(repo, ".build") is None, f"{name}: the clean clone is the control"
+            act(clone)
+            age_all(target, 30)
+            assert "no remote holds" in str(hh.stale_build_refusal(repo, ".build")), name
+
+    def stash(c):
+        (c / "main.swift").write_text("edit\n", encoding="utf-8")
+        run_git(c, "stash")
+
+    def local_branch(c):
+        run_git(c, "checkout", "-q", "-b", "wip")
+        (c / "wip.swift").write_text("x\n", encoding="utf-8")
+        run_git(c, "add", ".")
+        run_git(c, "commit", "-q", "-m", "wip")
+        run_git(c, "checkout", "-q", "-")
+
+    def local_tag(c):
+        (c / "wip.swift").write_text("x\n", encoding="utf-8")
+        run_git(c, "add", ".")
+        run_git(c, "commit", "-q", "-m", "wip")
+        run_git(c, "tag", "wip")
+        run_git(c, "reset", "-q", "--hard", "HEAD~1")
+
+    scene("stash", stash)
+    scene("local branch", local_branch)
+    scene("local tag", local_tag)
+
+
+def test_f4_a_clone_proof_ignores_git_config_that_hides_files_and_skip_worktree(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        target = old_tree(repo / ".build")
+        clone = upstream_clone(home, target / "checkouts" / "dep")
+        run_git(clone, "config", "status.showUntrackedFiles", "no")
+        (clone / "handwritten.swift").write_text("x\n", encoding="utf-8")
+        age_all(target, 30)
+        assert "local changes" in str(hh.stale_build_refusal(repo, ".build"))
+        (clone / "handwritten.swift").unlink()
+
+        for flag in ("--skip-worktree", "--assume-unchanged"):
+            run_git(clone, "update-index", flag, "main.swift")
+            (clone / "main.swift").write_text("hidden edit\n", encoding="utf-8")
+            age_all(target, 30)
+            assert "hides edits" in str(hh.stale_build_refusal(repo, ".build")), flag
+            run_git(clone, "update-index", "--no-" + flag[2:], "main.swift")
+            run_git(clone, "checkout", "--", "main.swift")
+
+
+def test_f5_ignored_build_output_with_precious_contents_stays(hh):
+    secret_name = "." + "env.local"
+    cases = ("release-key.p12", "signing.pem", "App.xcarchive/Info.plist", "notes.md", "sub/dir/notes.md",
+             "backup.git/config", "foo/.hg/store", "foo/.jj/repo", "foo/.svn/entries",
+             "plain-bare/HEAD", "data.sqlite", secret_name, "sub/App.xcodeproj/project.pbxproj",
+             "sub/Package.swift", "main.swift")
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        target = old_tree(repo / "build")
+        assert hh.stale_build_refusal(repo, "build") is None, "the control is plain build output"
+        for rel in cases:
+            path = target / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+            if rel == "plain-bare/HEAD":
+                (path.parent / "objects").mkdir()
+                (path.parent / "refs").mkdir()
+            age_all(target, 30)
+            assert hh.stale_build_refusal(repo, "build") is not None, rel
+            shutil.rmtree(target / Path(rel).parts[0]) if len(Path(rel).parts) > 1 else path.unlink()
+        assert hh.stale_build_refusal(repo, "build") is None, "and it passes again once they are gone"
+
+
+def test_f5_generated_files_a_build_really_makes_do_not_refuse(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        target = old_tree(repo / ".next")
+        for rel in ("package.json", "server/chunks/a.js", "types/routes.d.ts", "trace"):
+            path = target / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        target2 = old_tree(repo / ".build")
+        for rel in ("build.db", "debug.yaml", "arm64-apple-macosx/debug/App.derived/resource.swift",
+                    "artifacts/dep/Headers/a.h"):
+            path = target2 / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        age_all(repo / ".next", 30)
+        age_all(repo / ".build", 30)
+        assert hh.stale_build_refusal(repo, ".next") is None, hh.stale_build_refusal(repo, ".next")
+        assert hh.stale_build_refusal(repo, ".build") is None, hh.stale_build_refusal(repo, ".build")
+
+
+def test_f5_a_folder_in_a_swiftpm_store_that_is_not_a_clone_keeps_the_tree(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        target = old_tree(repo / ".build")
+        (target / "checkouts" / "mine").mkdir(parents=True)
+        (target / "checkouts" / "mine" / "secrets.p12").write_text("x", encoding="utf-8")
+        age_all(target, 30)
+        assert hh.stale_build_refusal(repo, ".build") is not None
+
+
+def test_f6_xcode_scratch_inspects_the_whole_tree_for_source(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        (tree / "Logs").mkdir()
+        (tree / "SourcePackages").mkdir()
+        assert len(hh.rule_xcode_scratch()) == 1, "the control"
+        for rel in ("Build/Package.swift", "Build/main.swift", "Logs/notes.md",
+                    "SourcePackages/mine/App.xcodeproj/project.pbxproj",
+                    "Build/Products/Debug/stray.swift", "Build/Products/Debug/App.xcworkspace/contents",
+                    "Build/Intermediates.noindex/Package.swift", "Build/Intermediates.noindex/x.py",
+                    "ModuleCache.noindex/draft.m", "Logs/deep/down/key.p12"):
+            path = tree / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+            age_all(tree, 3)
+            assert hh.rule_xcode_scratch() == [], rel
+            first = Path(rel).parts
+            if first[0] == "Logs" and len(first) > 2:
+                shutil.rmtree(tree / "Logs" / first[1])
+            elif first[0] == "SourcePackages":
+                shutil.rmtree(tree / "SourcePackages" / first[1])
+            elif "xcworkspace" in rel:
+                shutil.rmtree(path.parent)
+            else:
+                path.unlink()
+        assert len(hh.rule_xcode_scratch()) == 1, "and the clean tree still passes"
+
+
+def test_f6_xcode_scratch_allows_what_xcode_generates(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        for rel in ("Build/Intermediates.noindex/App.build/gen.swift",
+                    "Build/Intermediates.noindex/App.build/gen.h",
+                    "Build/Intermediates.noindex/XCBuildData/manifest.txt",
+                    "Build/Products/Debug/Dep.framework/Headers/Dep.h",
+                    "SourcePackages/artifacts/dep/Headers/a.h",
+                    "SourcePackages/workspace-state.json"):
+            path = tree / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        age_all(tree, 3)
+        assert len(hh.rule_xcode_scratch()) == 1, hh._xcode_scratch_refusal(tree)
+
+
+def test_f6_a_walk_that_cannot_finish_fails_closed(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        with mock.patch.object(hh, "_MAX_WALK_ENTRIES", 2, create=True):
+            assert hh.rule_xcode_scratch() == [], "too many entries to inspect"
+        with mock.patch.object(hh, "probe_timeout", return_value=-1.0):
+            assert hh.rule_xcode_scratch() == [], "out of time"
+        assert tree.is_dir()
+
+
+def test_f7_a_wrapper_or_outside_symlink_keeps_an_old_version(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        store = version_store(home)
+        wrapper = home / ".local/bin/claude-pinned"
+        wrapper.write_text(f'#!/bin/sh\nexec "{store}/2.1.301" "$@"\n', encoding="utf-8")
+        assert hh.rule_tool_versions() == [], "a wrapper names it"
+        wrapper.unlink()
+        (home / "bin").mkdir()
+        (home / "bin" / "claude-lts").symlink_to(store / "2.1.301")
+        assert hh.rule_tool_versions() == [], "a symlink in ~/bin resolves to it"
+        (home / "bin" / "claude-lts").unlink()
+        agents = home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        (agents / "com.x.plist").write_text(f"<string>{store}/2.1.301</string>", encoding="utf-8")
+        assert hh.rule_tool_versions() == [], "a LaunchAgent runs it"
+        (agents / "com.x.plist").unlink()
+        assert len(hh.rule_tool_versions()) == 1, "the control"
+
+
+def test_f7_a_version_run_recently_stays_by_access_time(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        store = version_store(home)
+        old = time.time() - 30 * 24 * 3600
+        os.utime(store / "2.1.301", (time.time(), old))
+        assert hh.rule_tool_versions() == [], "mtime says old and atime says it ran today"
+        os.utime(store / "2.1.301", (old, old))
+        cursor = cursor_store(home)
+        victim = cursor / "2026.08.01-aaaaaaa"
+        assert str(victim) in rule_paths(hh.rule_tool_versions())
+        os.utime(victim / "out.o", (time.time(), old))
+        assert str(victim) not in rule_paths(hh.rule_tool_versions()), "a file at the top of the version"
+
+
+def test_f7_the_default_launcher_must_resolve_or_the_tool_is_left_out(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        store = version_store(home)
+        launcher = home / ".local/bin/claude"
+        launcher.unlink()
+        (home / ".local/bin/claude-other").symlink_to(store / "2.1.303")
+        assert hh.rule_tool_versions() == [], "another link does not say what `claude` runs"
+        launcher.write_text("#!/bin/sh\nexec something\n", encoding="utf-8")
+        assert hh.rule_tool_versions() == [], "a launcher that is not a link cannot be proved"
+        launcher.unlink()
+        launcher.symlink_to(home / "elsewhere" / "claude")
+        assert hh.rule_tool_versions() == [], "a launcher that resolves outside the store"
+        launcher.unlink()
+        launcher.symlink_to(store / "2.1.301")
+        assert hh.rule_tool_versions() == [], "the launcher's own version is the oldest, and stays"
+
+
+def test_f7_a_running_version_stays(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        store = version_store(home)
+        running = str(store / "2.1.301")
+        with mock.patch.object(hh, "tree_in_use", side_effect=lambda p: p == running):
+            assert hh.rule_tool_versions() == []
+    with fake_home(hh) as home, gates_open(hh):
+        version_store(home)
+        with mock.patch.object(hh, "tree_in_use", wraps=None, return_value=True):
+            assert hh.rule_tool_versions() == [], "no trustworthy listing means no pick"
+
+
+def test_f8_f12_the_recheck_takes_a_fresh_lsof_listing(hh):
+    with fake_home(hh) as home:
+        tree = old_tree(home / "tree")
+        seed_open_snapshot(hh)
+        assert not hh.tree_in_use(str(tree)), "the cached listing says closed"
+        fresh = f"p7\nf3\nn{tree}/out.o\n"
+        runs = []
+
+        def lsof(argv, **kw):
+            runs.append(argv)
+            return subprocess.CompletedProcess(argv, 0, fresh, "")
+
+        c = hh.Candidate("x", str(tree), 1, "x",
+                         recheck=lambda: "held open" if hh.tree_in_use(str(tree)) else None)
+        with mock.patch.object(hh.subprocess, "run", side_effect=lsof), \
+                mock.patch.object(hh, "apply_delete", side_effect=AssertionError("deleted")):
+            hh.apply_candidate(c)
+        assert runs and runs[0][0].endswith("lsof"), runs
+        assert not c.applied and c.refused == "held open", (c.applied, c.refused)
+        assert tree.is_dir()
+
+
+def test_f11_the_recheck_cannot_spend_the_deletes_reserve(hh):
+    clock = FakeClock()
+    with fake_time(hh, clock):
+        hh.set_budget(100)
+        seen = []
+
+        def recheck():
+            seen.append(hh.probe_timeout(600.0))
+            clock.now += 50
+            return None
+
+        c = hh.Candidate("x", "/fake/tree", 64 * 1024 * 1024, "x", recheck=recheck)
+        clock.now += 60  # 40 s left
+        with mock.patch.object(hh, "apply_delete", side_effect=AssertionError("started a delete it cannot finish")):
+            hh.apply_candidate(c)
+        assert seen[0] <= 10.0, f"a recheck gets a slice, not all of what is left: {seen[0]}"
+        assert not c.applied and c.deferred, (c.applied, c.deferred, c.refused)
+        assert not c.error, "out of time is not a failure"
+        hh.set_budget(0)
+
+
+def test_f11_a_delete_gets_time_for_the_size_the_recheck_counted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        target = old_tree(repo / ".build")
+        c = hh.rule_stale_build_output()[0]
+        clock = FakeClock()
+        with fake_time(hh, clock):
+            hh.set_budget(100)
+            clock.now += 50  # 50 s left, past the 30 s floor
+            hh._WALK_ENTRIES[str(target)] = 200_000
+            with mock.patch.object(hh, "tree_content_refusal", return_value=None), \
+                    mock.patch.object(hh, "stale_build_refusal", return_value=None), \
+                    mock.patch.object(hh, "apply_delete", side_effect=AssertionError("started")):
+                hh.apply_candidate(c)
+            assert c.deferred and not c.applied and not c.error, (c.deferred, c.error)
+            hh.set_budget(0)
+        hh._WALK_ENTRIES.clear()
+        assert target.is_dir()
+
+
+def test_f11_the_clone_loop_stops_when_the_clock_runs_out(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        target = old_tree(repo / ".build")
+        upstream_clone(home, target / "checkouts" / "dep")
+        clock = FakeClock()
+        with fake_time(hh, clock):
+            hh.set_budget(100)
+            clock.now += 200
+            with mock.patch.object(hh, "_git", side_effect=AssertionError("kept going")):
+                assert "time" in str(hh.regenerable_clones_only(target))
+            hh.set_budget(0)
+
+
+def test_f9_more_than_one_xcode_gives_no_candidate(hh):
+    fake = FakeSimctl()
+    with simctl_env(hh, fake), \
+            mock.patch.object(hh, "_installed_xcodes", return_value=["/Applications/Xcode.app", "/Applications/Xcode-beta.app"], create=True):
+        assert hh.rule_duplicate_sim_runtimes() == []
+    with simctl_env(hh, FakeSimctl()), \
+            mock.patch.object(hh, "_installed_xcodes", return_value=None, create=True):
+        assert hh.rule_duplicate_sim_runtimes() == [], "the list of Xcodes could not be read"
+    with simctl_env(hh, FakeSimctl()), \
+            mock.patch.object(hh, "_installed_xcodes", return_value=[], create=True):
+        assert hh.rule_duplicate_sim_runtimes() == [], "no Xcode found means nothing is proved"
+
+
+def test_f9_the_installed_xcodes_are_read_from_every_source(hh):
+    with fake_home(hh) as home:
+        apps = home / "Applications"
+        (apps / "Xcode.app").mkdir(parents=True)
+
+        def run(argv, **kw):
+            if argv[0].endswith("mdfind"):
+                return subprocess.CompletedProcess(argv, 0, "/Volumes/X/Xcode-beta.app\n", "")
+            return subprocess.CompletedProcess(argv, 0, "/Applications/Xcode.app/Contents/Developer\n", "")
+
+        with mock.patch.object(hh.subprocess, "run", side_effect=run):
+            found = hh._installed_xcodes()
+        assert set(found) == {str(apps / "Xcode.app"), "/Volumes/X/Xcode-beta.app", "/Applications/Xcode.app"}, found
+        failed = subprocess.CompletedProcess([], 1, "", "")
+        with mock.patch.object(hh.subprocess, "run", return_value=failed):
+            assert hh._installed_xcodes() is None, "a look that failed does not say one"
+
+
+def test_f10_an_absent_or_renamed_last_used_gives_no_candidate(hh):
+    a = runtime_image(RUNTIME_A, "24B8117", last_used="2026-01-01T00:00:00Z")
+    b = runtime_image(RUNTIME_B, "24B91016s", last_used=None)
+    del b["lastUsedAt"]
+    renamed = dict(b, lastMountedAt="2026-11-04T00:00:00Z")
+    for image in (b, renamed):
+        with simctl_env(hh, FakeSimctl(images={RUNTIME_A: a, RUNTIME_B: image})):
+            assert hh.rule_duplicate_sim_runtimes() == [], image
+
+
+def test_f10_only_a_disk_image_is_a_victim(hh):
+    a = runtime_image(RUNTIME_A, "24B8117")
+    for kind in ("Legacy Download", "Bundled with Xcode", None):
+        b = runtime_image(RUNTIME_B, "24B91016s", last_used=None, kind=kind)
+        with simctl_env(hh, FakeSimctl(images={RUNTIME_A: a, RUNTIME_B: b})):
+            assert hh.rule_duplicate_sim_runtimes() == [], kind
+
+
+def test_f13_any_device_not_shut_down_counts_as_active(hh):
+    for state in ("Booting", "Shutting Down", "Creating", "Booted", None):
+        fake = FakeSimctl(devices={"devices": {IOS_RUNTIME: [{"state": state, "udid": "x"}]}})
+        with simctl_env(hh, fake):
+            assert hh.rule_duplicate_sim_runtimes() == [], state
+    fake = FakeSimctl(devices={"devices": {IOS_RUNTIME: [{"state": "Shutdown", "udid": "x"}]}})
+    with simctl_env(hh, fake):
+        assert len(hh.rule_duplicate_sim_runtimes()) == 1, "a shut down device is not in use"
+
+
+def test_f14_a_rules_own_deadline_is_reported_as_truncation(hh):
+    for rule, build in ((hh.rule_stale_build_output, lambda home: old_tree(git_repo(home / "Code" / "App") / ".build")),
+                        (hh.rule_xcode_scratch, xcode_tree),
+                        (hh.rule_tool_versions, version_store)):
+        with fake_home(hh) as home, gates_open(hh):
+            build(home)
+            hh._SCAN_BUDGET_EXHAUSTED = False
+            with mock.patch.object(hh, "rule_deadline", return_value=0.0):
+                assert rule() == [], rule.__name__
+            assert hh._SCAN_BUDGET_EXHAUSTED, f"{rule.__name__} stopped early without saying so"
+            hh._SCAN_BUDGET_EXHAUSTED = False
+
+
+def test_f14_a_tree_no_rule_listed_stays_on_the_report(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        eligible = old_tree(repo / ".next")
+        with mock.patch.object(hh, "rule_deadline", return_value=0.0):
+            hh.rule_stale_build_output()
+        hh._SCAN_BUDGET_EXHAUSTED = False
+        with mock.patch.object(hh, "open_handles", return_value=0):
+            report = {c.path: c for c in hh.rule_ask_first_inventory()}
+        assert str(eligible) in report, "neither a candidate nor a report row"
+        assert "not checked" in report[str(eligible)].reason
+
+
+def test_f14_the_report_row_walks_nothing_of_its_own(hh):
+    """The expensive answer belongs to the rule.  A cheap-band run that skipped
+    the rule must not pay for it on the report."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        old_tree(repo / ".next")
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "stale_build_refusal", side_effect=AssertionError("walked")):
+            assert any(".next" in c.path for c in hh.rule_ask_first_inventory())
+
+
+def test_f15_a_dot_tmp_candidate_is_rechecked_before_the_delete(hh):
+    with fake_home(hh) as home:
+        tmp = home / ".foo-agent-unused"
+        tmp = home / ".codex" / ".tmp"
+        tmp.mkdir(parents=True)
+        (tmp / "x").write_text("x", encoding="utf-8")
+        with agent_gates(hh):
+            c = hh.rule_agent_state()[0]
+            assert c.recheck is not None
+            (tmp / "marketplaces" / "fresh" / ".git").mkdir(parents=True)
+            with mock.patch.object(hh, "tree_in_use", return_value=False):
+                hh.apply_candidate(c)
+        assert not c.applied and "checkout" in c.refused, (c.applied, c.refused)
+        assert (tmp / "marketplaces" / "fresh" / ".git").is_dir()
+        shutil.rmtree(tmp / "marketplaces")
+        (tmp / "x").write_text("x", encoding="utf-8")
+        with agent_gates(hh):
+            c = hh.rule_agent_state()[0]
+            moved = tmp.parent / ".tmp-moved"
+            tmp.rename(moved)
+            tmp.mkdir()
+            with mock.patch.object(hh, "tree_in_use", return_value=False):
+                hh.apply_candidate(c)
+        assert not c.applied and "something else" in c.refused, c.refused
+        assert tmp.is_dir() and moved.is_dir()
+
+
+def test_f16_a_recheck_refusal_is_not_a_failure_in_the_report(hh):
+    clock = FakeClock()
+    band = hh.Band(20.0, 95.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
+
+    def refuses():
+        return "a build is running"
+
+    c = hh.Candidate("xcode-scratch", "/fake/tree", 64 * 1024 * 1024, "x", recheck=refuses)
+    out, err = io.StringIO(), io.StringIO()
+    with fake_time(hh, clock), \
+            mock.patch.object(hh, "scan", return_value=[c]), \
+            mock.patch.object(hh, "read_band", return_value=band), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        assert hh.main(["--clean", "--json"]) == 0
+    report = json.loads(out.getvalue())
+    assert report["failed_count"] == 0, report
+    assert report["refused_count"] == 1, report
+    assert report["applied_count"] == 0
+    assert report["candidates"][0]["refused"] == "a build is running"
+    assert report["candidates"][0]["error"] == ""
+
+
+def test_f17_a_killed_runtime_delete_asks_simctl_before_calling_it_failed(hh):
+    fake = FakeSimctl()
+    real = fake.__call__
+
+    def killed_but_gone(args, timeout):
+        if list(args)[:2] == ["runtime", "delete"]:
+            fake.images.pop(args[2], None)
+            return None
+        return real(args, timeout)
+
+    with simctl_env(hh, killed_but_gone):
+        c = hh.rule_duplicate_sim_runtimes()[0]
+        hh.apply_candidate(c)
+    assert c.applied and not c.error, c.error
+
+    fake = FakeSimctl()
+    real = fake.__call__
+
+    def killed_and_still_there(args, timeout):
+        return None if list(args)[:2] == ["runtime", "delete"] else real(args, timeout)
+
+    with simctl_env(hh, killed_and_still_there):
+        c = hh.rule_duplicate_sim_runtimes()[0]
+        hh.apply_candidate(c)
+    assert not c.applied and "failed" in c.error, c.error
+
+
+def test_f18_pressure_rules_apply_only_at_25_gb_free_or_less(hh):
+    def run(free, known=True, argv=("--clean", "--json", "--band=full")):
+        clock = FakeClock()
+        band = hh.Band(free, 50.0, 0.0, 1.0, False, cpu_idle_pct=50.0, disk_free_known=known)
+        cands = [
+            hh.Candidate("duplicate-sim-runtimes", f"sim-runtime:{RUNTIME_B}", GIB, "x",
+                         tier="semi-safe", op="simctl-runtime-delete"),
+            hh.Candidate("stale-build-output", "/fake/.build", GIB, "x", tier="semi-safe"),
+            hh.Candidate("snapshots", "apfs-snapshot:x", 0, "x", tier="semi-safe", op="snapshot-delete"),
+        ]
+        _code, report, _err = run_main(hh, list(argv), cands, band, clock)
+        return {c["category"] for c in report["candidates"] if c["applied"]}
+
+    both = {"duplicate-sim-runtimes", "stale-build-output"}
+    assert run(25.0) >= both, "25 GB is inside the line"
+    assert run(10.0) >= both
+    assert not run(25.01) & both, "just above the line"
+    assert not run(78.14) & both, "the measured 15 GB drop at 78 GB free"
+    assert not run(200.0) & both
+    assert not run(0.0, known=False) & both, "a df that failed reads as 0.0 and is not pressure"
+    assert "snapshots" in run(200.0), "an existing semi-safe rule keeps its schedule"
+    assert not run(10.0, argv=("--clean", "--json")) & both, "and the cheap band never reaches them"
+
+
+def test_f18_a_pressure_rule_rereads_free_space_at_the_delete(hh):
+    """Each delete can lift the disk past the line, so the check at the top of
+    the run does not speak for the last candidate."""
+    with fake_home(hh) as home, gates_open(hh):
+        tree = old_tree(home / "tree")
+        for free, why in ((26.0, "the disk has recovered"), (None, "df could not answer")):
+            c = hh.Candidate("stale-build-output", str(tree), GIB, "x", tier="semi-safe")
+            with mock.patch.object(hh, "read_disk_free", return_value=free, create=True):
+                hh.apply_candidate(c)
+            assert not c.applied and c.refused and not c.error, why
+            assert tree.is_dir(), why
+        c = hh.Candidate("stale-build-output", str(tree), GIB, "x", tier="semi-safe")
+        with mock.patch.object(hh, "read_disk_free", return_value=24.0, create=True):
+            hh.apply_candidate(c)
+        assert c.applied and not tree.exists(), (c.error, c.refused)
+
+
+def test_f18_read_band_says_when_it_could_not_read_the_disk(hh):
+    with mock.patch.object(hh, "_run", return_value=""), \
+            mock.patch.object(hh, "_read_cpu_pressures", return_value=(50.0, 0.0)):
+        assert hh.read_band().disk_free_known is False
+        assert hh.read_disk_free() is None
+
+
+def test_f18_the_policy_states_the_line_the_code_enforces(hh):
+    policy = json.loads(hh.POLICY_PATH.read_text())
+    rules = {r["name"]: r for r in policy["rules"]}
+    assert hh.PRESSURE_RULE_FREE_GB == 25.0
+    for name in hh.PRESSURE_ONLY_RULES:
+        assert rules[name]["maxFreeGb"] == hh.PRESSURE_RULE_FREE_GB, name
+    assert set(hh.PRESSURE_ONLY_RULES) == {"stale-build-output", "duplicate-sim-runtimes"}
+    root = ENGINE.parent.parent
+    for doc in ("docs/DEV-CLEANUP-PLAYBOOK.md", "AGENTS.md"):
+        text = (root / doc).read_text(encoding="utf-8")
+        assert "25 GB" in text and "stale-build-output" in text, doc
+
+
+def test_f19_the_new_rule_never_starts_the_simulator_service(hh):
+    """simulator-runtimes stays shut while CoreSimulatorService is alive, and
+    asking simctl anything starts it.  So this rule only asks when it is
+    already alive, and the older reclaim path is exactly as it was."""
+    fake = FakeSimctl()
+    with simctl_env(hh, fake), mock.patch.object(hh, "_simulator_service_alive", return_value=False, create=True):
+        assert hh.rule_duplicate_sim_runtimes() == []
+        assert hh.duplicate_runtime_victims() == []
+    assert fake.calls == [], fake.calls
+    with mock.patch.object(hh, "proc_count", return_value=0) as count:
+        assert hh._simulator_service_alive() is False
+    assert count.call_args.args[0] == "CoreSimulatorService"
+    with mock.patch.object(hh, "proc_count", return_value=1):
+        assert hh._simulator_service_alive() is True
+    with mock.patch.object(hh, "proc_count", return_value=hh.PROBE_FAILED):
+        assert hh._simulator_service_alive() is False, "a failed look must not start it"
+
+
+def test_f20_a_clean_run_skips_rules_whose_candidates_it_could_not_apply(hh):
+    def rules_scanned(argv, free):
+        ran = []
+        fakes = {}
+        for name in hh.RULES:
+            def fn(name=name):
+                ran.append(name)
+                return []
+            fakes[name] = (fn, "")
+        band = hh.Band(free, 50.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(hh, "RULES", fakes), mock.patch.object(hh, "read_band", return_value=band), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            assert hh.main(argv) == 0
+        return ran
+
+    pressure = {"duplicate-sim-runtimes", "stale-build-output"}
+    assert not pressure & set(rules_scanned(["--clean", "--json"], 10.0)), "cheap band"
+    assert not pressure & set(rules_scanned(["--clean", "--json", "--band=full"], 80.0)), "above the line"
+    assert pressure <= set(rules_scanned(["--clean", "--json", "--band=full"], 10.0)), "pressure"
+    for argv in (["--scan", "--json"], ["--scan", "--json", "--band=full"]):
+        assert pressure <= set(rules_scanned(argv, 80.0)), "a read-only scan still shows what they would pick"
+    assert "snapshots" in rules_scanned(["--clean", "--json"], 80.0), "older rules are not skipped"
+
+
+def test_f22_the_policy_tier_is_a_tier_the_rule_really_gives_its_candidates(hh):
+    """Read from each rule's own source, for every rule, so a tier that drifts
+    between the words and the code fails here."""
+    policy = {r["name"]: r for r in json.loads(hh.POLICY_PATH.read_text())["rules"]}
+    tree = ast.parse(ENGINE.read_text())
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    def tiers_in(fn):
+        out = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Candidate":
+                kw = {k.arg: k.value for k in node.keywords}
+                t = kw.get("tier")
+                out.add(t.value if isinstance(t, ast.Constant) else "safe" if t is None else "?")
+        return out
+
+    for name, (fn, _desc) in hh.RULES.items():
+        got = tiers_in(funcs[fn.__name__])
+        assert policy[name]["tier"] in got, f"{name}: policy says {policy[name]['tier']}, code gives {got}"
+    assert hh.Candidate("x", "/x", 1, "x").tier == "safe", "the default this test assumes"
+
+
+def test_f23_peer_work_is_surfaced_and_a_rule_naming_it_deletes_nothing(hh):
+    """A rule that did name a peer tree is what the guard is for, so that is what
+    this feeds it.  With is_peer_work out of is_forbidden, this fails."""
+    with fake_home(hh) as home, gates_open(hh):
+        peer_work_home(home)
+        worktree = home / "Code" / "BotFleet" / ".muse" / "worktrees" / "one"
+        lane_build = old_tree(worktree / ".build")
+        tree_build = old_tree(home / "apps" / "botfleet-mm-mcode" / ".build")
+        with mock.patch.object(hh, "open_handles", return_value=0):
+            report = {c.path: c for c in hh.rule_ask_first_inventory()}
+        for path in (worktree.parent, home / "apps" / "botfleet-mm-mcode"):
+            assert report[str(path)].op == "report", path
+
+        def rogue_rule():
+            return [hh.Candidate("rogue", str(lane_build), GIB, "x"),
+                    hh.Candidate("rogue", str(tree_build), GIB, "x")]
+
+        with mock.patch.dict(hh.RULES, {"rogue": (rogue_rule, "")}, clear=True):
+            found = hh.scan(None)
+        assert len(found) == 2
+        for c in found:
+            hh.apply_candidate(c)
+            assert not c.applied and c.error == "forbidden path", (c.path, c.error)
+        assert lane_build.is_dir() and tree_build.is_dir()
 
 
 def main() -> int:

@@ -1,10 +1,11 @@
 {
   "$comment": [
-    "Machine-readable reclaim policy for this Mac.  Single source of truth",
-    "shared by scripts/hoghunter-clean (the CLI) and Sources/Storage/",
-    "DiskCleaner.swift (the GUI).  A rule that is not listed here does not",
-    "run.  Every tier assignment is a lesson from the BF-HOUSEKEEPER wake",
-    "log -- do not relax a tier without a measured reason."
+    "Machine-readable record of the reclaim policy for this Mac.  Neither",
+    "scripts/hoghunter-clean nor Sources/Storage/DiskCleaner.swift reads it at",
+    "run time, so the code decides and this states it; a test requires every",
+    "engine rule to be listed here with a tier its code really gives.  Every",
+    "tier assignment is a lesson from the BF-HOUSEKEEPER wake log -- do not",
+    "relax a tier without a measured reason."
   ],
   "version": "1.0.0",
   "updated": "2026-11-04",
@@ -15,7 +16,7 @@
   "tiers": {
     "$comment": "What each tier means to scripts/hoghunter-clean, and when the run may touch it.",
     "safe": "Every run, including the watch's cheap band.",
-    "semi-safe": "Only --band=full, which the pressure run takes at 25 GB free or less.",
+    "semi-safe": "Only --band=full, which the pressure triggers take on any hit: 25 GB free or less, a 15 GB drop in free space at any level, swap, or load.  A rule with maxFreeGb also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
     "expensive": "Only --band=full while the disk is acute or critical (under 40 GB free).  Bulk deletes that are the biggest wins and the biggest I/O bursts.",
     "ask-first": "Reported, never applied."
   },
@@ -112,7 +113,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Xcode DerivedData and device support",
-      "$rationale": "Per-project DerivedData with no build running. iOS DeviceSupport for OS versions older than 7 days is semi-safe: it re-downloads when an old device is attached. A lone xcodebuild with zero compiler children hours old is STALLED, not a real build -- check for clang/swiftc children before assuming work is in flight.",
+      "$rationale": "Per-project DerivedData with no build running. iOS DeviceSupport for OS versions older than 7 days is in the expensive tier: it re-downloads when an old device is attached. A lone xcodebuild with zero compiler children hours old is STALLED, not a real build -- check for clang/swiftc children before assuming work is in flight.",
       "skipWhenAny": ["xcodebuild alive", "clang alive", "swift-frontend alive"]
     },
     {
@@ -129,24 +130,25 @@
       "tier": "semi-safe",
       "op": "simctl-runtime-delete",
       "title": "Duplicate simulator runtime images",
-      "$rationale": "Disk images live in Apple's secure storage under /System/Library/AssetsV2, which simulator-runtimes never looks at.  Measured 2026-11-04: two iOS 27.2 images of 7.75 GB each, one never used.  Only when two or more Ready images share a runtime identifier and version.  A victim has lastUsedAt null or older than the most recently used one, reports deletable true, and is never the image `simctl runtime match list` chooses, so at least one per version always stays.  Output that does not read true gives no candidate.  Asked again right before the delete.",
-      "skipWhenAny": ["a simulator is booted", "xcodebuild alive", "Simulator alive", "Bitrig alive", "simctl output is unparseable", "the chooser's build is not among the Ready images"]
+      "maxFreeGb": 25,
+      "$rationale": "Disk images live in Apple's secure storage under /System/Library/AssetsV2, which simulator-runtimes never looks at.  Measured 2026-11-04: two iOS 27.2 images of 7.75 GB each, one never used.  Only when two or more Ready images share a runtime identifier and version.  A victim is a Disk Image with lastUsedAt null or older than the most recently used one, reports deletable true, and is never the image `simctl runtime match list` chooses, so at least one per version always stays.  That chooser speaks for one Xcode, so with any other number of Xcodes there is no candidate.  Output that does not read true gives no candidate, and that includes an absent lastUsedAt.  It calls simctl only when CoreSimulatorService is already alive, because simulator-runtimes stays shut while the service runs and simctl starts it.  Asked again right before the delete.",
+      "skipWhenAny": ["CoreSimulatorService not already alive", "any device not Shutdown", "xcodebuild alive", "Simulator alive", "Bitrig alive", "more or fewer than one Xcode installed", "simctl output is unparseable or unrecognised", "the chooser's build is not among the Ready images"]
     },
     {
       "name": "tool-versions",
       "tier": "safe",
       "op": "delete",
       "title": "Superseded versions of installed tools",
-      "$rationale": "Versioned stores whose layout has been read: muse-bin-* in ~/.local/bin (with its .muse-version pointer), ~/.local/share/cursor-agent/versions and ~/.local/share/claude/versions.  Keeps the newest two by mtime, whatever a symlink resolves to, and what the pointer names.  A store with no way to tell what is live, or holding more than versions, is left alone.  ~/.local/share/claude/stable is not versioned and is not touched.",
+      "$rationale": "Versioned stores whose layout has been read: muse-bin-* in ~/.local/bin (with its .muse-version pointer), ~/.local/share/cursor-agent/versions and ~/.local/share/claude/versions.  Keeps the newest two by mtime, what the default launcher resolves to, and any version a symlink, wrapper or LaunchAgent names.  With no proof of what the default launcher runs, or a store holding more than versions, the tool is left out.  ~/.local/share/claude/stable is not versioned and is not touched.",
       "idleDays": 7,
-      "skipWhenAny": ["any process holds it open", "a running process names it", "the tool holds a lock on it", "a keep marker"]
+      "skipWhenAny": ["any process holds it open (a running binary shows in the listing)", "a running process names it", "its access time is under 7 days old", "the tool holds a lock on it", "a keep marker"]
     },
     {
       "name": "xcode-scratch",
       "tier": "safe",
       "op": "delete",
       "title": "Xcode-shaped build scratch in /private/tmp",
-      "$rationale": "What xcodebuild -derivedDataPath leaves behind (3.69 GB measured 2026-11-04).  Direct children only, owned by this user, holding Build with Xcode's output folders and an Xcode cache beside it, and nothing at the top that is not on an allowlist of what Xcode writes.  HH-180 is why the name and age of a temp folder prove nothing: the shape is an allowlist, the identity is bound at scan time, and every gate is asked again right before the delete.  A writer that starts after that is the limit HH-180 records.",
+      "$rationale": "What xcodebuild -derivedDataPath leaves behind (3.69 GB measured 2026-11-04).  Direct children only, owned by this user, holding Build with Xcode's output folders and an Xcode cache beside it.  HH-180 is why the name and age of a temp folder prove nothing: the top level is an allowlist, every entry below it is judged against what Xcode writes there, a walk that cannot finish refuses, the identity is bound at scan time, and every gate is asked again on a fresh open-file listing right before the delete.  A writer that starts after that is the limit HH-180 records.",
       "idleHours": 24,
       "skipWhenAny": ["xcodebuild alive", "clang alive", "swift-frontend alive", "any process holds it open", "a running process names it", "a keep marker", "a nested repository other than a provable SwiftPM clone"]
     },
@@ -155,10 +157,11 @@
       "tier": "semi-safe",
       "op": "delete",
       "title": "Stale ignored build output in main checkouts",
-      "$rationale": "Owner's request of 2026-11-04 ('teach HH wherever possible') narrows the playbook's manual-only stance for these four names.  .build, .next, build and target directly in ~/Code/<repo>, or a path named per repo.  git must ignore it and track nothing in it, and it must be untouched for 14 days.  A tree that misses a check stays on the ask-first report with the reason.  node_modules and dist stay report-only.",
+      "maxFreeGb": 25,
+      "$rationale": "Owner's request of 2026-11-04 ('teach HH wherever possible') narrows the playbook's manual-only stance for these four names, and only at 25 GB free or less.  .build, .next, build and target directly in ~/Code/<repo>, or a path named per repo, spelled exactly so on disk.  git must ignore it and track nothing in it, and it must be unchanged for 14 days.  A tree that misses a check stays on the ask-first report with the reason.  node_modules and dist stay report-only.",
       "idleDays": 14,
       "neverUnder": [".muse", ".claude", "worktrees", "a linked worktree", "a nested repository", "a symlink"],
-      "skipWhenAny": ["any process holds it open", "a running process names it", "a keep marker", "git cannot answer", "a nested repository other than a provable SwiftPM clone"]
+      "skipWhenAny": ["any process holds it open", "any process has its working directory in the repo", "a running process names it", "a keep marker", "git cannot answer", "a nested repository other than a provable SwiftPM clone", "it holds keys, archives, notes, project files, another kind of repository, or source at its top level"]
     },
     {
       "name": "botfleet-rollback",

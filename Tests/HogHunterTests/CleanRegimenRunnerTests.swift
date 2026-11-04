@@ -227,6 +227,33 @@ final class CleanRegimenRunnerTests: XCTestCase {
                        accuracy: 1)
     }
 
+    func testARegimenNamingOnlyEngineRulesSaysSoAndNeverScans() async {
+        // Behaviour, not list membership: what a person sees and what runs.
+        let now = Date()
+        let scans = LockedBox(0)
+        let cleans = LockedBox(0)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in
+                scans.value += 1
+                return CleanScanReport(categories: [], totalBytes: 0, totalSelectedBytes: 0, scannedAt: now)
+            },
+            cleanProvider: { _, _, _ in
+                cleans.value += 1
+                return CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+        let regimen = makeRegimen(enabled: true, intervalHours: 4,
+                                  rules: ["stale-build-output", "duplicate-sim-runtimes", "tool-versions", "xcode-scratch"])
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(scans.value, 0, "the walk is the expensive part, and there is nothing to find")
+        XCTAssertEqual(cleans.value, 0)
+    }
+
     func testAnUnattendedRunNeverHandsTheTrashToTheCleaner() async {
         // The regression for neverEmptyTrash, end to end.  The scan is scripted
         // to offer a selected Trash item beside a selected cache, as a real
