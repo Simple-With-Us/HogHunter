@@ -433,10 +433,18 @@ jobs:
       - name: Sync standing TestFlight testers
         # Export-only runs archive without touching remote state: no group or
         # tester mutations either (Sentry review on #184).
+        #
+        # The policy comes from scripts/ios-fleet/apps.json, so the app that
+        # owns the group decides what the sync does:  "public-group" reuses the
+        # one external group with its public link on, keeps its people, assigns
+        # this build to it and submits it for Beta App Review; the default
+        # keeps the internal all-builds group and the standing email list
+        # (owner, Nov 3 2026).
         if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
         continue-on-error: true
         env:
           ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
+          BUILD_NUMBER: ${{ needs.plan-build.outputs.build }}
         run: |
           for e in $(printf '%s' "${ASC_STANDING_TESTERS:-}" | tr ',;' '  '); do
             echo "::add-mask::${e}"
@@ -444,13 +452,18 @@ jobs:
           set +e
           appleid="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["hoghunter"]["appleId"])')"
           appleid_rc=$?
+          policy="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["hoghunter"].get("testerPolicy",""))')"
+          policy_rc=$?
           set -e
           if [ "$appleid_rc" -ne 0 ] || [ -z "$appleid" ]; then
             echo "::warning title=TestFlight standing testers::could not read the hoghunter appleId from scripts/ios-fleet/apps.json (rc=${appleid_rc}); tester sync skipped.  The TestFlight upload itself succeeded."
             exit 0
           fi
+          if [ "$policy_rc" -ne 0 ]; then
+            policy=""
+          fi
           set +e
-          node scripts/ios-fleet/asc-api.mjs ensure-standing-testers "$appleid"
+          node scripts/ios-fleet/asc-api.mjs ensure-standing-testers "$appleid" "${BUILD_NUMBER:-}" --policy "$policy"
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then

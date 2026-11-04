@@ -24,6 +24,7 @@ jobs:
           node --check scripts/ios-fleet/asc-api.mjs
           node --check scripts/ios-fleet/asc-key.mjs
           node --check scripts/ios-fleet/version-plan.mjs
+          node --check scripts/ios-fleet/tester-policy.mjs
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/ios-fleet/test-asc-credentials.sh
           node --test scripts/ios-fleet/test-asc-key.test.mjs
@@ -31,6 +32,7 @@ jobs:
           node --test scripts/ios-fleet/version-plan.test.mjs
           node --test scripts/ios-fleet/shared-build.test.mjs
           node --test scripts/ios-fleet/next-shared-build.test.mjs
+          node --test scripts/ios-fleet/tester-policy.test.mjs
           node --test scripts/infisical-fetch.node-test.mjs scripts/infisical-fetch-expand.node-test.mjs
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           bash scripts/ios-fleet/test-next-shared-build.sh

@@ -1103,6 +1103,11 @@ REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
 DISPLAY_NAME="$(json_get "$APP_KEY" displayName)"
 BUNDLE_ID="$(json_get "$APP_KEY" bundleId)"
 PLATFORM="$(json_get "$APP_KEY" platform)"
+# The tester policy for this app (owner, Nov 3 2026):  "public-group" means one
+# external group with its public link on holds the same people, every build is
+# assigned to it, and no internal group exists.  An app that names no policy
+# keeps the internal all-builds group, which is what every other fleet app has.
+TESTER_POLICY="$(json_get "$APP_KEY" testerPolicy 2>/dev/null || true)"
 SCHEME="$(json_get "$APP_KEY" scheme)"
 PROJECT_REL="$(json_get "$APP_KEY" projectRel)"
 PROJECT_REL_ALT="$(json_get "$APP_KEY" projectRelAlt)"
@@ -1570,7 +1575,7 @@ ensure_tf_ready() {
   IOS_TF_NOTES_PREV_SHA="$PREV_SHIP_SHA" \
   IOS_TF_NOTES_APP="$DISPLAY_NAME" \
   IOS_TF_NOTES_IOS_PREFIX="$IOS_PATH_PREFIX" \
-  asc_client ensure-tf-ready "$BUNDLE_ID" "$BUILD_NUM" "$MARKETING" \
+  asc_client ensure-tf-ready "$BUNDLE_ID" "$BUILD_NUM" "$MARKETING" --policy "$TESTER_POLICY" \
     >"${LOG_DIR}/ensure-tf-ready.json" 2>"${LOG_DIR}/ensure-tf-ready.err"
   local rc=$?
   set -e
@@ -1578,7 +1583,11 @@ ensure_tf_ready() {
     while IFS= read -r line; do log "tf-ready: $line"; done <"${LOG_DIR}/ensure-tf-ready.err"
   fi
   if [[ $rc -eq 0 ]]; then
-    log "TestFlight internal testers can install this build"
+    if [[ "$TESTER_POLICY" == "public-group" ]]; then
+      log "TestFlight public group testers can install this build"
+    else
+      log "TestFlight internal testers can install this build"
+    fi
     return 0
   fi
   if [[ $rc -eq 3 ]]; then
@@ -1594,6 +1603,26 @@ ensure_tf_ready() {
     log "warning: if the phone never gets this build, declare compliance by hand in App Store Connect"
     if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
       echo "::warning::ensure-tf-ready could not find uploaded build ${BUILD_NUM} for ${BUNDLE_ID}; export compliance not declared"
+    fi
+    return 0
+  fi
+  if [[ $rc -eq 5 ]]; then
+    # The build is processed, but nobody in the beta group can install it.
+    # This is NOT an export compliance problem:  compliance was declared above
+    # when it had to be, and blaming it here sent the reader after the wrong
+    # thing (2026-11-03, HH-209).
+    log "warning: build ${BUILD_NUM} is processed, but no tester in the beta group can install it yet"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning::ensure-tf-ready: build ${BUILD_NUM} is ready, but the beta group has no tester who can install it"
+    fi
+    return 0
+  fi
+  if [[ $rc -eq 6 ]]; then
+    # The groups could not be read, so installability is unverified.  Saying so
+    # is honest; claiming export compliance is not.
+    log "warning: could not read the beta groups for ${BUNDLE_ID}; installability is unverified"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning::ensure-tf-ready could not read the beta groups for ${BUNDLE_ID}; installability is unverified"
     fi
     return 0
   fi

@@ -1,0 +1,13 @@
+# Public Beta Group Policy
+
+HH-209 makes the iPhone companion's TestFlight setup the one the owner asked for on Nov 3 2026:  exactly one beta group, the public one, with the same people in it, and only 0.1.0 builds.
+
+The state was already right by hand and wrong by automation.  The app had one external group named Public Beta with its public link on and three people in it, and every build whose version was not 0.1.0 was expired.  What was missing was the machinery that keeps it that way.  The standing-tester sync needs ASC_STANDING_TESTERS, the secret was empty, and the sync exited 2 before it could assign the new build to the group or submit it for Beta App Review, so the six builds since Oct 29 sat outside the group and the public link never offered them.
+
+Two more faults made that failure look like something else.  The sync creates an internal all-builds group, which this app must not have, and the readiness check counted the internal group, so it reported zero testers for an app that was set up correctly.  The caller then said the build may be stuck on export compliance.  It never was:  the build carried usesNonExemptEncryption=false and its external state was READY_FOR_BETA_SUBMISSION.  Export compliance is declared in phase B, before the readiness wait, so a build that reached the wait was never stuck on it.
+
+The fix is a per-app tester policy in scripts/ios-fleet/apps.json, public-group for Hog Hunter, with the default keeping the internal all-builds group every other fleet app already has.  tester-policy.mjs holds the rules as pure functions and tester-policy.test.mjs tests them.  asc-api.mjs reads the policy from a --policy flag that is stripped from the positional arguments before they are read, so an omitted optional argument cannot swallow it.  Under the public policy the sync reuses the external group with the link on, leaves its members alone, assigns the build, submits it for review, creates no internal group, and needs no email list.  The readiness check counts the people who can install the build under that policy, and the exit-5 message names them instead of export compliance.
+
+The state was corrected the same day, before the code landed:  the six live 0.1.0 builds were assigned to Public Beta, the twenty-three expired 1.0.x builds were removed from that group's build list, and build 202611031318 was submitted for Beta App Review, which answered with externalBuildState=IN_BETA_TESTING.
+
+The change was proved against the live app on Nov 3 2026:  the sync ran with no tester list, reused Public Beta, assigned build 202611031318, saw externalBuildState=IN_BETA_TESTING, counted three people in the group and exited 0.  The default policy still requires the list and exits 2, so no other app changes.
