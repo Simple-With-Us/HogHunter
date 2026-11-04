@@ -16,11 +16,11 @@ The first version also deleted stale build output and Xcode scratch, and `.tmp` 
 | `duplicate-sim-runtimes` | semi-safe | 25 GB free or less | Deletes a second Ready Disk Image of one runtime and version, unused or older than the most recently used, reported `deletable`, and not the image `simctl runtime match list` chooses.  Uses `xcrun simctl runtime delete <id>`, a new op, and confirms by asking simctl again |
 | `stale-build-output` | report | on a scan | Lists `.build`, `.next`, `build` and `target` in `~/Code/<repo>`, plus `CodeCaps/ios/CodeCapsCompanion/build`, with what the checks found.  Never deletes |
 | `xcode-scratch` | report | on a scan | Lists Xcode-shaped children of `/private/tmp` with what the checks found.  Never deletes |
-| `ask-first` | report | every run | Now also `~/BotFleet-migration-backups`, `~/.botfleet/releases` other than the current one, `~/apps/botfleet-*` trees, `~/Code/*/.muse/worktrees`, `~/.minimax/v2/sqlite/backups`, agent `.tmp` folders and the Codex marketplace staging.  Every idle `node_modules` and `dist` is listed.  Bound by the scan share |
+| `ask-first` | report | every run | Now also `~/BotFleet-migration-backups`, `~/.botfleet/releases` other than the current one, `~/apps/botfleet-*` trees, `~/Code/*/.muse/worktrees`, `~/.minimax/v2/sqlite/backups`, agent `.tmp` folders and the Codex marketplace staging.  Every idle `dist` is listed, and `node_modules` on a scan.  Bound by the scan share |
 
 `is_forbidden` now refuses anything under a `.muse` folder and any `~/apps/botfleet-*` tree, so `apply_delete` turns them down whichever rule names them.
 
-The report rules sit after every rule that can act, and a clean run skips their walks because nobody reads the rows.  `agent-state` no longer takes `.tmp`, and it also refuses any tree holding a `.git`.
+The report rules sit after every rule that can act, and a clean run skips their walks because nobody reads the rows.  `agent-state` no longer takes `.tmp`, and it also refuses any tree holding a `.git`.  `temp-scratch` left the regimen's rule lists, because the Trash mapping was the only thing it selected there.
 
 **The 25 GB line.**  `--band=full` alone does not mean low disk, because the pressure triggers also fire on a 15 GB drop in free space, on swap and on load at any free level.  So `PRESSURE_ONLY_RULES` enforces the line for `duplicate-sim-runtimes`.  A clean run above it does not scan for it, `main` leaves its candidates out, and `apply_candidate` reads df again before each delete.  A df that fails is not pressure.  A read-only `--scan` still lists what it would take.  No other semi-safe rule changed when it runs: `snapshots` keeps its schedule.
 

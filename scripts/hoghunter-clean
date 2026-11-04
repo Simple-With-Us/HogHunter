@@ -1929,7 +1929,10 @@ def rule_ask_first_inventory() -> list[Candidate]:
                 continue
             if scan_share_spent():
                 return cands
-            for rel in _build_output_paths(repo, _REPORTED_BUILD_NAMES):
+            # node_modules is the one a walk is costly for, and it lists nothing
+            # a clean run can act on, so only a scan looks.
+            names = _REPORTED_BUILD_NAMES if _REPORT_DEPENDENCY_TREES else _CLEAN_RUN_BUILD_NAMES
+            for rel in _build_output_paths(repo, names):
                 target = repo / rel
                 if target.is_symlink() or not target.is_dir():
                     continue
@@ -2235,11 +2238,6 @@ def rule_agent_state() -> list[Candidate]:
             # so the name is not enough to call it transient.
             if _holds_project_root(target):
                 continue
-            # The same for a checkout: a clone is not scratch whatever its
-            # folder is called.  A probe that cannot answer protects the tree.
-            has_git = holds_keep_sentinel(s, probe_timeout(60.0), name=".git")
-            if has_git.found or not has_git.known:
-                continue
             if not claim(target):
                 continue
             if newest_file_age_min(s) < IDLE_MIN_OK:
@@ -2253,6 +2251,13 @@ def rule_agent_state() -> list[Candidate]:
             if touched_since(s, IDLE_MIN_OK / (24 * 60)):
                 continue
             if open_handles(s):
+                continue
+            # The same for a checkout: a clone is not scratch whatever its
+            # folder is called.  A probe that cannot answer protects the tree.
+            # Last, because it walks the whole tree when there is no `.git`,
+            # and the gates above turn an active tree away for less.
+            has_git = holds_keep_sentinel(s, probe_timeout(60.0), name=".git")
+            if has_git.found or not has_git.known:
                 continue
             size = dir_bytes(s)
             if size < 8 * 1024 * 1024:
@@ -3081,6 +3086,9 @@ _PROMOTED_BUILD_NAMES = (".build", ".next", "build", "target")
 # Reported when idle.  The four names above get the full checks on a scan, and
 # these two just the idle row.
 _REPORTED_BUILD_NAMES = (".build", "build", ".next", "target", "dist", "node_modules")
+_CLEAN_RUN_BUILD_NAMES = tuple(n for n in _REPORTED_BUILD_NAMES if n != "node_modules")
+# Set off for a clean run in main().
+_REPORT_DEPENDENCY_TREES = True
 # Build output one level or more down, named one repo at a time.
 _KNOWN_NESTED_BUILD = {
     "CodeCaps": ("ios/CodeCapsCompanion/build",),
@@ -3562,7 +3570,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--version", action="store_true")
     args = p.parse_args(argv)
 
-    global SIZE_ASK_FIRST, CLEAN_IOS27
+    global SIZE_ASK_FIRST, CLEAN_IOS27, _REPORT_DEPENDENCY_TREES
+    _REPORT_DEPENDENCY_TREES = not args.clean
     SIZE_ASK_FIRST = args.size_ask_first
     CLEAN_IOS27 = args.clean_ios27 or os.environ.get("HOGHUNTER_CLEAN_IOS27") == "1"
     started = time.monotonic()
@@ -3670,8 +3679,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if c.deferred:
                     budget_spent = True  # the rest of the list may still fit
                     continue
+                # Handled either way, so not left for the next run.  A refusal
+                # did not apply anything, so the log does not say it did.
                 attempted += 1
-                applied_here += 1
+                if not c.refused:
+                    applied_here += 1
             log(f"chunk {n}/{len(chunks)}: applied {applied_here} "
                 f"({len(ordered)} total)")
             if budget_spent:

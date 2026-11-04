@@ -1363,6 +1363,7 @@ def test_idle_build_output_survives_a_blind_capped_walk(hh):
 
 def _reset_open_snapshot(hh):
     hh._OPEN_CWDS = set()
+    hh._REPORT_DEPENDENCY_TREES = True
     """The engine memoizes one snapshot for a while; a test has to start over."""
     hh._OPEN_SNAPSHOT = None
     hh._OPEN_SNAPSHOT_AT = 0.0
@@ -3495,6 +3496,8 @@ def test_f16_a_recheck_refusal_is_not_a_failure_in_the_report(hh):
     assert report["applied_count"] == 0
     assert report["candidates"][0]["refused"] == "a build is running"
     assert report["candidates"][0]["error"] == ""
+    assert "applied 0" in err.getvalue(), err.getvalue()
+    assert report["remaining_count"] == 0, "a refusal was handled, not left over"
 
 
 def test_f17_a_killed_runtime_delete_asks_simctl_before_calling_it_failed(hh):
@@ -3748,6 +3751,52 @@ def test_the_policy_and_docs_state_the_line_and_the_report_rules(hh):
         assert "25 GB" in text and "duplicate-sim-runtimes" in text, doc
         assert "report only" in text.lower() or "report-only" in text.lower(), doc
         assert "not used" in text, f"{doc} must say the Nov 4 narrowing was not used"
+
+
+def test_a_clean_run_does_not_walk_node_modules_for_the_report(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = git_repo(home / "Code" / "App")
+        modules = old_tree(repo / "node_modules")
+        band = hh.Band(100.0, 50.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
+
+        def rows(argv):
+            walked = []
+            real = hh.touched_since
+
+            def spy(path, days):
+                walked.append(path)
+                return real(path, days)
+
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(hh, "read_band", return_value=band), \
+                    mock.patch.object(hh, "open_handles", return_value=0), \
+                    mock.patch.object(hh, "touched_since", side_effect=spy), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                assert hh.main(argv) == 0
+            return walked, {c["path"] for c in json.loads(out.getvalue())["candidates"]}
+
+        walked, found = rows(["--clean", "--json", "--categories=ask-first"])
+        assert str(modules) not in walked and str(modules) not in found
+        walked, found = rows(["--scan", "--json", "--categories=ask-first"])
+        assert str(modules) in walked and str(modules) in found, "a scan still shows it"
+
+
+def test_agent_state_asks_about_a_checkout_only_after_the_cheap_gates(hh):
+    with fake_home(hh) as home:
+        tmp = home / ".claude" / "logs"
+        tmp.mkdir(parents=True)
+        (tmp / "a.log").write_text("x", encoding="utf-8")
+        names = []
+        real = hh.holds_keep_sentinel
+
+        def spy(path, timeout, name=hh.KEEP_SENTINEL):
+            names.append(name)
+            return real(path, timeout, name=name)
+
+        with agent_gates(hh), mock.patch.object(hh, "holds_keep_sentinel", side_effect=spy), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            assert hh.rule_agent_state() == []
+        assert ".git" not in names, "an active tree is turned away without that walk"
 
 
 def test_a_dot_tmp_is_never_a_delete_even_with_no_checkout_in_it(hh):

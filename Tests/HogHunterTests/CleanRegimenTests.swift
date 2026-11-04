@@ -143,6 +143,16 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertTrue(CleanRegimenRunner.pendingItems(from: [trash], rules: everyRule).items.isEmpty)
     }
 
+    func testTheRuleThatOnlyEverSelectedTheTrashIsGone() {
+        // temp-scratch's one job in the regimen was the Trash mapping.  A stored
+        // regimen naming it must not keep a default-on switch that does nothing.
+        XCTAssertFalse(CleanRegimen.defaultRules.contains("temp-scratch"))
+        XCTAssertFalse(CleanRegimen.schedulableRules.contains("temp-scratch"))
+        var stored = CleanRegimen()
+        stored.enabledRules = ["temp-scratch", "logs"]
+        XCTAssertEqual(stored.sanitized().enabledRules, ["logs"])
+    }
+
     func testEngineOnlyRulesAreNotOfferedToTheRegimen() {
         // The regimen runs DiskCleaner.  These four live only in the engine, so
         // a stored regimen naming them is left with nothing rather than a
