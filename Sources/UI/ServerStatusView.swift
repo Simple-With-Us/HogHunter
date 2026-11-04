@@ -52,11 +52,7 @@ struct VPSStatusStripView: View {
 
                 Spacer(minLength: 6)
 
-                if let snapshot = store.snapshot {
-                    Text(store.isStale ? "Stale · \(snapshot.relativeTimeString())" : snapshot.relativeTimeString())
-                        .font(.system(size: 10))
-                        .foregroundStyle(store.isStale ? Color.orange : Color.tertiary)
-                }
+                trailingTime
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
@@ -79,6 +75,25 @@ struct VPSStatusStripView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Opens the server tab")
+    }
+
+    /// The snapshot's age, marked stale while refresh is failing so an old
+    /// reading never presents as live.  Its own view, not an inline
+    /// conditional in the body: the strip's body is already at the edge of
+    /// what the compiler will type-check in reasonable time.
+    @ViewBuilder
+    private var trailingTime: some View {
+        if let snapshot = store.snapshot {
+            if store.isStale {
+                Text("Stale · \(snapshot.relativeTimeString())")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            } else {
+                Text(snapshot.relativeTimeString())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
     }
 
     /// What a screen reader says.  The numbers are in the label, not only in
