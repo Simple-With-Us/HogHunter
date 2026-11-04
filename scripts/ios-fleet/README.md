@@ -24,3 +24,20 @@ Preserve this HH-specific port when refreshing the shared tools: `shared-build.m
 `asc-key.mjs`, the credential block of `asc-api.mjs` and the `load_secrets` layer of `ship-testflight.sh` carry the AFC-459 change:  they are not the canonical copy, so re-copying the canonical `ship-testflight.sh` over this one drops the credential rule.  The same goes for the AFC-517 version scheme:  re-copying the canonical `ship-testflight.sh` or `asc-api.mjs` over these drops it, so re-apply the port from `version-plan.mjs`.
 
 When the canonical copy changes, re-copy the unchanged files and re-apply the three `asc-api.mjs` patches.  Do not set `IOS_TF_MIN_INTERVAL_SEC` or pass `--force-ship` anywhere in the workflow.  Detail:  `docs/rollouts/2026-10-17-ios-auto-ship.md` and `docs/rollouts/2026-10-24-version-scheme.md`.
+
+## Tester Policy
+
+Owner ruling, Nov 3 2026:  the iPhone companion has exactly one beta group, a public one whose link is on, and the same people in it.  No internal group.  Every build whose version is not 0.1.0 is deleted or expired, so the group's build list is the 0.1.0 line and nothing else.
+
+apps.json carries the policy per app, and the default keeps the behaviour every other fleet app has:
+
+| Policy | Groups | Who installs the build | How a build reaches them | Tester list |
+|---|---|---|---|---|
+| internal-group (default) | one internal all-builds group | App Store Connect users | the internal group carries every build | required (ASC_STANDING_TESTERS) |
+| public-group | one external group with the public link on | the standing people, through the public link | the build is assigned to the group and submitted for Beta App Review | optional; the group already holds them |
+
+tester-policy.mjs holds the rules as pure functions and tester-policy.test.mjs tests them (node --test scripts/ios-fleet/tester-policy.test.mjs).  asc-api.mjs reads the policy from --policy <name>, a flag that is stripped from the positional arguments before they are read, so an omitted optional argument can never swallow it.
+
+Three consequences are worth naming.  The readiness check counts the testers who can actually install the build under the app's policy:  counting the internal group for a public-policy app reported zero for an app that was set up correctly.  And under the public policy the sync keeps exactly one external group with its public link on:  the group whose link is already on is the one it keeps, because that is the group that distributes the build, and any other external group with its link on has it turned off.  And the exit-5 message names those testers:  it used to say the build may be stuck on export compliance, which sent the reader after the wrong thing, because export compliance is declared in phase B, before the readiness wait, and a build that reached the wait was never stuck on it.
+
+This is a Hog Hunter port:  re-copying the canonical asc-api.mjs or ship-testflight.sh over these drops the policy, so re-apply it from tester-policy.mjs.

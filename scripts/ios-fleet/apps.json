@@ -6,6 +6,7 @@
       "buildNumberPolicy": "paired-release",
       "displayName": "Hog Hunter",
       "bundleId": "com.simplewithus.hoghunter.ios",
+      "testerPolicy": "public-group",
       "pairedBuildFeed": "https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml",
       "appleId": 6816633156,
       "platform": "iOS",
