@@ -1995,9 +1995,8 @@ final class HogStore: ObservableObject {
     /// settings make, so Infisical write-through and the saved config follow
     /// the way they do for a change made at the Mac.
     func applyRemoteMaintainSettings(_ validated: CompanionMaintainSettingsValidator.Validated) {
-        for (id, enabled) in validated.stepEnabled.sorted(by: { $0.key < $1.key }) where maintain.isStepEnabled(id) != enabled {
-            maintain.setStepEnabled(id, enabled: enabled)
-        }
+        // Thresholds first: saveMaintainConfig refreshes from disk, which would
+        // revert a step toggle that is not persisted yet.
         var configChanged = false
         if let gib = validated.lowFreeGiB, gib != maintain.lowFreeGiB {
             maintain.lowFreeGiB = gib
@@ -2011,6 +2010,9 @@ final class HogStore: ObservableObject {
         if let days = validated.worktreeRetireMinDays, days != maintain.worktreeRetireMinDays {
             maintain.worktreeRetireMinDays = days
             maintain.saveWorktreeRetireMinDays()
+        }
+        for (id, enabled) in validated.stepEnabled.sorted(by: { $0.key < $1.key }) where maintain.isStepEnabled(id) != enabled {
+            maintain.setStepEnabled(id, enabled: enabled)
         }
         publishCompanion()
     }

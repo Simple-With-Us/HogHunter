@@ -427,6 +427,27 @@ final class CompanionParityThreeStoreTests: XCTestCase {
         XCTAssertEqual(launched.value.first, ["--set-step", "npm_cache", "off"])
     }
 
+    func testAMixedRequestLeavesTheToggleAndTheThresholdsShowing() async throws {
+        let slow = MaintainStore(supportDirectory: support, repoRoot: support) { _ in
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+            return true
+        }
+        let mixed = HogStore(historyURL: isolatedHistoryURL(), defaults: defaults, infisical: IsolatedInfisical.make(), maintain: slow, startImmediately: false)
+        mixed.allowRemoteMaintain = true
+        let request = CompanionMaintainSettingsRequest(stepEnabled: ["npm_cache": false], lowFreeGiB: 95, worktreeRetireMinDays: 14, pm2LogsCapMB: 80)
+        XCTAssertEqual(mixed.performRemoteMaintainSettings(request).status, 200)
+        // Past the retention save's own refresh, before the toggle's save lands.
+        try await Task.sleep(nanoseconds: 800_000_000)
+        XCTAssertFalse(slow.isStepEnabled("npm_cache"))
+        XCTAssertEqual(slow.lowFreeGiB, 95)
+        XCTAssertEqual(slow.pm2LogsCapMB, 80)
+        XCTAssertEqual(slow.worktreeRetireMinDays, 14)
+        let detailed = try XCTUnwrap(mixed.companionSnapshots().detailed?.maintain)
+        XCTAssertEqual(detailed.stepSettings?.first { $0.stepId == "npm_cache" }?.isEnabled, false)
+        XCTAssertEqual(detailed.tuning?.lowFreeGiB, 95)
+        XCTAssertEqual(detailed.tuning?.worktreeRetireMinDays, 14)
+    }
+
     func testACustomScriptKeyChangesNothing() async throws {
         let reply = store.performRemoteMaintainSettings(CompanionMaintainSettingsRequest(stepEnabled: ["my_custom_script": true]))
         XCTAssertEqual(reply.status, 400)

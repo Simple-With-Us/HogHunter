@@ -167,7 +167,8 @@ final class MaintainStore: ObservableObject {
         // The config first: loadStepToggles walks visibleCatalog, which reads
         // coolifyHost, so the host has to be current before the toggles load.
         loadMaintainConfig()
-        stepToggles = loadStepToggles()
+        // A toggle still being saved is newer than the disk; keep it until the save lands.
+        if stepTogglesPersisted { stepToggles = loadStepToggles() }
         customScripts = MaintainRegistryStore.loadScripts()
     }
 
