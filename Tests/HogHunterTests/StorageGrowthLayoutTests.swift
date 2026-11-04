@@ -6,6 +6,18 @@ import XCTest
 
 @MainActor
 final class StorageGrowthLayoutTests: XCTestCase {
+    func testMountedDrivePageStaysClampedAfterRemovalAndReplug() {
+        var page = HogHunterPanel.clampedMountedDrivePage(2, count: 12)
+        XCTAssertEqual(page, 2)
+        page = HogHunterPanel.clampedMountedDrivePage(page, count: 3)
+        XCTAssertEqual(page, 0)
+        page = HogHunterPanel.clampedMountedDrivePage(page, count: 12)
+        XCTAssertEqual(page, 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(2, count: 0), 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(-1, count: 12), 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(2, count: 6), 1)
+    }
+
     private var dashboardStageWidth: CGFloat { HogHunterPanel.dashboardWidth - 154 - 24 - 36 }
 
     func testCompactRowsAndServerContentRenderWithinPanelWidth() async throws {
@@ -118,6 +130,64 @@ final class StorageGrowthLayoutTests: XCTestCase {
         host.appearance = NSAppearance(named: .aqua)
         XCTAssertLessThanOrEqual(host.fittingSize.width, width + 1)
         try render(host, size: CGSize(width: width, height: 170), name: "hh165-external-drives")
+    }
+
+    /// The capacity cards must follow the drives that are actually mounted,
+    /// whatever they are named: no fixed "Time Machine" slot.  A Mac with no
+    /// backup destination - or none, or three, or a backup volume renamed to
+    /// ordinary storage - renders the drives it has and nothing else.
+    func testCapacityCardsFollowMountedDrivesOfAnyName() async throws {
+        var driveSets: [[MountedDriveCandidate]] = [
+            // No external drives at all.
+            [],
+            // One ordinary external drive, no backup destination.
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 143_000_000_000)],
+            // A backup volume named without a space, plus repurposed storage:
+            // names that must not be classified, filtered or dropped.
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 143_000_000_000),
+             MountedDriveCandidate(name: "TimeMachine500GB", path: "/Volumes/TimeMachine500GB", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 47_000_000_000),
+             MountedDriveCandidate(name: "Storage", path: "/Volumes/Storage", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 490_000_000_000)],
+        ]
+        driveSets.append((0..<12).map { index in
+            MountedDriveCandidate(name: "Drive \(index)", path: "/Volumes/Drive\(index)",
+                isLocal: true, isHidden: false, isExternalPhysical: true,
+                totalBytes: 500_000_000_000, availableBytes: 100_000_000_000)
+        })
+        for (index, candidates) in driveSets.enumerated() {
+            let mounted = MountedDriveStore(probe: { candidates })
+            await mounted.refresh()
+            XCTAssertEqual(mounted.rows.count, candidates.count)
+            let suite = "hh-capacity-cards-\(UUID().uuidString)"
+            let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+            preferences.set("This Mac", forKey: "dashboardHostScope")
+            defer { preferences.removePersistentDomain(forName: suite) }
+            let store = populatedStore(preferences)
+
+            let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: mounted)
+                .environmentObject(store).defaultAppStorage(preferences))
+            quick.appearance = NSAppearance(named: .aqua)
+            let quickSize = quick.fittingSize
+            XCTAssertEqual(quickSize.width, HogHunterPanel.panelWidth, accuracy: 1)
+            XCTAssertGreaterThan(quickSize.height, 200)
+            XCTAssertLessThanOrEqual(quickSize.height, HogHunterPanel.panelHeight)
+            try render(quick, size: CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight), name: "hh-capacity-quick-\(index)")
+
+            let overviewSize = CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
+            let overview = NSHostingView(rootView: HogHunterPanel(mountedDrives: mounted)
+                .environmentObject(store).defaultAppStorage(preferences)
+                .frame(width: overviewSize.width, height: overviewSize.height))
+            overview.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(overview.fittingSize.width, overviewSize.width + 1)
+            try render(overview, size: overviewSize, name: "hh-capacity-cards-\(index)")
+        }
     }
 
     func testQuickViewAndInitialStorageRenderWithMountedDrives() async throws {
