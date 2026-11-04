@@ -656,6 +656,25 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(testCleaner.isSafeToDelete(url: ordinary, category: .userCaches))
     }
 
+
+    /// Debug builds live on the internal disk to keep test hosts off a removable
+    /// volume.  The name holds "HogHunter", which the user-cache scan skips, so the
+    /// developer scan has to list them or the Disk Cleaner could never free them.
+    func testTheDeveloperScanOffersHogHunterDebugBuilds() async throws {
+        let builds = tempDirectory.appendingPathComponent("Library/Caches/HogHunterDerivedData/lane-aaaa", isDirectory: true)
+        try FileManager.default.createDirectory(at: builds, withIntermediateDirectories: true)
+        try "dummy payload data".write(to: builds.appendingPathComponent("data.bin"), atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertFalse(cleaner.scanUserCaches().contains { $0.url.path.hasSuffix("HogHunterDerivedData") })
+        let item = try XCTUnwrap(cleaner.scanDeveloper().first { $0.title == "Hog Hunter Debug Builds" })
+        XCTAssertFalse(item.isSelected, "This row covers every lane, including a busy one")
+
+        let result = await cleaner.clean(items: [item], createSnapshot: false)
+        XCTAssertEqual(result.errors, [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: builds.path))
+    }
+
     func testPrimaryIOS27SimulatorPreservationAndSeparateOption() async throws {
         let fm = FileManager.default
         let simBase = tempDirectory.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)

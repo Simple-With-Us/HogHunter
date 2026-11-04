@@ -1,6 +1,6 @@
 # Permission Prompts And Code Identity
 
-Refs HH-214.
+Fixes HH-214.
 
 ## Observed Problem
 
@@ -28,6 +28,20 @@ The installed app is not the requester.  It made no removable-volume request du
 - `scripts/install.sh` refuses, before building, to install without the team's Developer ID identity, to install ad hoc to a production folder, or to create a second copy.  A signing failure now stops the install instead of falling back to ad hoc.  It signs by full certificate name, checks a staged copy before it quits the running app, and swaps that copy in, because `ditto` merges into an existing bundle and can break its seal.  An ad hoc copy never launches: it carries the production bundle id, and a grant made to it would displace the real app's.
 - `scripts/test-mac-identity.py` covers the check, the installer gates and the location script, and runs in the macOS CI job.
 
+## Internal Disk Cost
+
+Each checkout's Debug builds take about 3.8 GB on the disk the owner is trying to free, so they have to be swept.
+
+The existing `app-caches` rule did reach the folder, but only as one tree: a single busy lane would have kept every stale lane on disk, and that rule has no build gate.  `Sources/Storage/DiskCleaner.swift` skipped it altogether, because its user-cache scan ignores any name holding "hoghunter".
+
+- `xcode-artifacts` in `scripts/hoghunter-clean` now sweeps each checkout separately.  It waits for any running xcodebuild, clang or swift-frontend, reads a failed process check as busy, and keeps a checkout with a file touched in the last 90 minutes, an open handle or a keep marker.
+- `app-caches` leaves the folder to that rule.
+- The Disk Cleaner's developer scan lists it as Hog Hunter Debug Builds.
+
+The sweep runs whenever the Robotic Vacuum's reclaim step or the opt-in regimen runs `xcode-artifacts`.  A swept lane rebuilds on its next test run, which took about two and a half minutes here.
+
+Signing Debug hosts with a stable local identity would avoid the internal disk, and it was rejected.  The only candidate on this Mac is an Apple Development certificate on a personal team, which CI does not have, so the build would need a per-machine signing override.  A headless codesign can stall on a keychain prompt, which trades one dialog for another.  It would also need one Allow from the owner, and that standing grant would cover whatever code any seat builds next.
+
 ## What Code Cannot Do
 
 An app cannot grant itself Full Disk Access or removable-volume access.  A grant survives an update only while the designated requirement is unchanged, which is what these checks protect.  Moving to another Team ID, or changing the bundle id, would still cost every grant once.
@@ -36,4 +50,6 @@ An app cannot grant itself Full Disk Access or removable-volume access.  A gran
 
 - A checkout picks up the new location only after it has this change and runs `xcodegen generate`.  Lanes that have not rebased keep prompting until then.
 - A Debug run with an explicit `-derivedDataPath` on `/Volumes` still prompts.  The guard test fails afterward; it cannot prevent that dialog.
+- The owner's 5 to 10 minute cadence was not reproduced.  Retained logs show four Debug host launches between 2:24pm and 3:11pm, with gaps of about 5, 3 and 38 minutes.
+- Seven `sandboxd` removable-volume requests between 2:04pm and 2:53pm stay unattributed.  They line up with no Debug host launch, and their tccd lines had rolled off.
 - The dialog's name is unchanged.  `CFBundleName` in `macos/Info.plist` is overridden by the generated plist, so correcting it needs a build step of its own.

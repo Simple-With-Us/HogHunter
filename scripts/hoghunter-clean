@@ -1346,6 +1346,14 @@ def rule_dev_caches() -> list[Candidate]:
     return cands
 
 
+# Where scripts/xcodegen-post.sh puts each Hog Hunter checkout's default
+# DerivedData.  It is on the internal disk because an ad hoc test host run from a
+# removable volume raises a permission prompt on every build, and it costs about
+# 3.8 GB per lane, so it has to be swept per checkout: as one tree, one busy lane
+# would keep every stale lane on disk.
+_HOGHUNTER_DERIVED_DATA = "Library/Caches/HogHunterDerivedData"
+
+
 def rule_xcode_artifacts() -> list[Candidate]:
     """Xcode build products and simulator runtimes.
 
@@ -1353,6 +1361,7 @@ def rule_xcode_artifacts() -> list[Candidate]:
     biggest win on this Mac (18.5 GB measured 09-27).  Simulator *Devices*
     are NOT -- they hold user simulator state and are ask-first.
     """
+    global _SCAN_BUDGET_EXHAUSTED
     if proc_count_exact("xcodebuild") or proc_count("clang") or proc_count("swift-frontend"):
         return []
     cands: list[Candidate] = []
@@ -1366,6 +1375,32 @@ def rule_xcode_artifacts() -> list[Candidate]:
             cands.append(Candidate(
                 category="xcode-artifacts", path=str(d), bytes=dir_bytes(str(d)),
                 reason="Xcode DerivedData project, no build running",
+            ))
+    lanes_root = HOME / _HOGHUNTER_DERIVED_DATA
+    if lanes_root.is_dir() and not lanes_root.is_symlink():
+        try:
+            checkouts = sorted(lanes_root.iterdir())
+        except OSError as exc:
+            log(f"xcode-artifacts skipped {lanes_root}: {type(exc).__name__}: {exc}")
+            checkouts = []
+        for d in checkouts:
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            s = str(d)
+            if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+                continue
+            # Same order and gates as app-caches: this deletes a whole tree, and a
+            # big one can hide a recent write past newest_file_age_min's cap.
+            verdict = holds_keep_sentinel(s, probe_timeout(60.0))
+            if verdict.found or not verdict.known:
+                continue
+            if touched_since(s, IDLE_MIN_OK / (24 * 60)) or open_handles(s):
+                continue
+            cands.append(Candidate(
+                category="xcode-artifacts", path=s, bytes=dir_bytes(s),
+                reason="Hog Hunter checkout's Debug builds, idle, no build running",
+                keep_verdict=verdict,
             ))
     support = HOME / "Library/Developer/Xcode/iOS DeviceSupport"
     if support.is_dir() and newest_file_age_min(str(support)) > 60 * 24 * 7:
@@ -1689,8 +1724,12 @@ _DEV_CACHE_PATHS = (
 # holds the update generations the ask-first inventory reports and never
 # deletes; the catch-all below works on whole directories, so without this it
 # would purge a pending update before BotFleet ever applied it.
+#
+# The Debug builds are swept by xcode-artifacts instead, which waits for any
+# running build and treats each checkout separately.  This rule has neither gate.
 _APP_CACHE_KEEP = (
     "Library/Caches/BotFleet",
+    _HOGHUNTER_DERIVED_DATA,
 )
 
 

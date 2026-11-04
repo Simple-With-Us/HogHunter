@@ -1339,6 +1339,7 @@ final class DiskCleaner: @unchecked Sendable {
 
         let targets: [(name: String, path: String, detail: String)] = [
             ("Xcode DerivedData", "Library/Developer/Xcode/DerivedData", "Intermediate build files and indexing data"),
+            ("Hog Hunter Debug Builds", "Library/Caches/HogHunterDerivedData", "Debug builds and test hosts from Hog Hunter's own checkouts; they rebuild on demand"),
             ("Xcode Archives", "Library/Developer/Xcode/Archives", "Old build archives and dSYMs"),
             ("Xcode iOS DeviceSupport", "Library/Developer/Xcode/iOS DeviceSupport", "Symbols from connected physical iOS devices"),
             ("Xcode CoreSimulator Caches", "Library/Developer/CoreSimulator/Caches", "Simulator runtime caches and temporary files"),
@@ -1377,7 +1378,10 @@ final class DiskCleaner: @unchecked Sendable {
                 fileCount: stats.fileCount,
                 isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
-                isSelected: highChurn == nil && CleanCategory.developer.defaultSelected,
+                // Off by default: this one row covers every lane, including a busy
+                // one.  hoghunter-clean sweeps idle lanes one at a time.
+                isSelected: highChurn == nil && CleanCategory.developer.defaultSelected
+                    && target.path != "Library/Caches/HogHunterDerivedData",
                 detail: highChurn?.reason ?? target.detail
             ))
         }
@@ -2432,6 +2436,7 @@ final class DiskCleaner: @unchecked Sendable {
             // trailing-slash prefix could never match the directory itself.
             let allowedDeveloperPrefixes = [
                 home + "/Library/Developer/Xcode/DerivedData",
+                home + "/Library/Caches/HogHunterDerivedData",
                 home + "/Library/Developer/Xcode/Archives",
                 home + "/Library/Developer/Xcode/iOS DeviceSupport",
                 home + "/Library/Developer/CoreSimulator/Caches",

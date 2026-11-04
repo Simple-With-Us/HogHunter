@@ -1748,6 +1748,117 @@ def test_app_caches_finds_an_idle_app_cache(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _hoghunter_debug_builds(home):
+    root = home / "Library" / "Caches" / "HogHunterDerivedData"
+    for lane in ("lane-one-aaaa", "lane-two-bbbb"):
+        (root / lane).mkdir(parents=True)
+        (root / lane / "blob.bin").write_bytes(b"x" * 1024)
+    return root
+
+
+def test_xcode_artifacts_sweeps_each_idle_hoghunter_checkout(hh):
+    """Debug builds moved to the internal disk to stop permission prompts, at
+    about 3.8 GB per lane, so they have to go when idle."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "touched_since", return_value=False) as touched, \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            found = hh.rule_xcode_artifacts()
+        assert sorted(c.path for c in found) == [str(root / "lane-one-aaaa"), str(root / "lane-two-bbbb")]
+        assert {c.category for c in found} == {"xcode-artifacts"}
+        assert {c.tier for c in found} == {"safe"}
+        touched.assert_any_call(str(root / "lane-one-aaaa"), hh.IDLE_MIN_OK / (24 * 60))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_xcode_artifacts_keeps_hoghunter_checkouts_during_a_build(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        for busy in ("xcodebuild", "clang", "swift-frontend"):
+            with mock.patch.object(hh, "HOME", home), \
+                 mock.patch.object(hh, "proc_count", side_effect=lambda name: int(name == busy)), \
+                 mock.patch.object(hh, "proc_count_exact", side_effect=lambda name: int(name == busy)), \
+                 mock.patch.object(hh, "open_handles", return_value=0), \
+                 mock.patch.object(hh, "touched_since", return_value=False):
+                assert hh.rule_xcode_artifacts() == [], busy
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_xcode_artifacts_reads_a_failed_build_probe_as_busy(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=hh.PROBE_FAILED), \
+             mock.patch.object(hh, "proc_count_exact", return_value=hh.PROBE_FAILED), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "touched_since", return_value=False):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_one_busy_hoghunter_checkout_does_not_keep_the_others(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        busy, held = str(root / "lane-one-aaaa"), str(root / "lane-two-bbbb")
+        idle = root / "lane-three-cccc"
+        idle.mkdir()
+        (idle / "blob.bin").write_bytes(b"x")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "open_handles", side_effect=lambda p: int(p == held)), \
+             mock.patch.object(hh, "touched_since", side_effect=lambda p, _d: p == busy), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            found = hh.rule_xcode_artifacts()
+        assert [c.path for c in found] == [str(idle)]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_keep_marker_protects_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        (root / "lane-one-aaaa" / "Build").mkdir()
+        (root / "lane-one-aaaa" / "Build" / hh.KEEP_SENTINEL).write_text("")
+        (root / "lane-two-bbbb" / hh.KEEP_SENTINEL).write_text("")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_the_hoghunter_debug_builds_to_xcode_artifacts(hh):
+    """app-caches has no build gate and would treat every lane as one tree."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_app_caches_stops_at_its_own_deadline(hh):
     """Every candidate pays for two uncapped probes, so the rule's candidate
     loop has to consult the scan deadline itself.  Otherwise one rule overruns
