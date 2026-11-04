@@ -2,13 +2,25 @@
 # Build Hog Hunter Release, sign it, and install it.
 #
 # Usage: scripts/install.sh [--adhoc] [--no-launch] [--dry-run] [--dest PATH]
-#   --adhoc      Skip Developer ID signing even if the identity is available.
+#   --adhoc      Sign ad hoc, for a throwaway copy only.  Needs an explicit --dest
+#                outside /Applications and ~/Applications, and never launches:
+#                see "Code identity" below.
 #   --no-launch  Install but do not open Hog Hunter afterward.
 #   --dry-run    Build only.  Print what would happen next.  Never sign,
 #                quit the running app, copy to the destination, or launch.
 #   --dest PATH  Directory to install HogHunter.app into.  Default: if
 #                /Applications/HogHunter.app already exists, install there;
 #                otherwise install to ~/Applications.
+#
+# Code identity.  macOS keeps a privacy grant (Full Disk Access, removable
+# volumes, and the rest) against the app's designated requirement.  A Developer
+# ID build's requirement is the bundle id plus the Team ID, so it survives every
+# update.  An ad hoc build's requirement is its own hash, so every build is a new
+# app to macOS and every grant has to be made again.  This script therefore
+# refuses to put anything but the production identity in a production location,
+# and refuses to leave two copies there.
+#
+# Exit codes: 3 no usable identity, 4 a second copy would exist, 5 signing failed.
 set -euo pipefail
 
 ADHOC=0
@@ -63,6 +75,62 @@ INSTALLED_PATH="$DEST_DIR/Hog Hunter.app"
 # Releases before 2026-10-01 installed as HogHunter.app.  Those copies are
 # retired below so there is never a stale second copy holding the menu bar.
 LEGACY_PATH="$DEST_DIR/HogHunter.app"
+
+EXPECTED_TEAM_ID="CC8UTF7ATG"
+
+# Compares resolved paths, so a trailing slash or a symlink cannot walk an ad hoc
+# copy into a production location.
+is_production_dir() {
+  local resolved
+  resolved="$(cd "$1" 2>/dev/null && pwd -P || printf '%s' "${1%/}")"
+  [[ "$resolved" == "$SYSTEM_APPLICATIONS" || "$resolved" == "$USER_APPLICATIONS" ]] && return 0
+  [[ "$resolved" == "$(cd "$USER_APPLICATIONS" 2>/dev/null && pwd -P || echo "$USER_APPLICATIONS")" ]]
+}
+
+if [[ "$ADHOC" -eq 1 ]]; then
+  if [[ -z "$DEST_ARG" ]] || is_production_dir "$DEST_DIR"; then
+    echo "error: refusing an ad hoc install to $DEST_DIR." >&2
+    echo "An ad hoc build is a new app to macOS each time, so the owner would be asked for every permission again." >&2
+    echo "Pass --dest with a throwaway folder outside /Applications and ~/Applications, or drop --adhoc." >&2
+    exit 3
+  fi
+  if [[ "$NO_LAUNCH" -eq 0 ]]; then
+    echo "Not launching: an ad hoc build carries the production bundle id, and a grant made to it would displace the real app's."
+    NO_LAUNCH=1
+  fi
+fi
+
+# Names the certificate in full, Team ID included, so a second team's identity in
+# the keychain can never be picked up by a partial match.
+SIGNING_IDENTITY=""
+if [[ "$ADHOC" -ne 1 ]]; then
+  SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n "s/^.*\"\(Developer ID Application:[^\"]*($EXPECTED_TEAM_ID)\)\".*$/\1/p" | head -n 1 || true)"
+  if [[ -z "$SIGNING_IDENTITY" && "$DRY_RUN" -ne 1 ]]; then
+    echo "error: no Developer ID Application identity for team $EXPECTED_TEAM_ID in the keychain." >&2
+    echo "Refusing to install: without it the app would lose every permission the owner has granted." >&2
+    exit 3
+  fi
+fi
+
+# One installed copy.  Two copies with one bundle id fight over the menu bar, and
+# LaunchServices may open the stale one.
+if [[ "$ADHOC" -ne 1 ]]; then
+  for candidate_dir in "$SYSTEM_APPLICATIONS" "$USER_APPLICATIONS"; do
+    [[ "$candidate_dir" == "$DEST_DIR" ]] && continue
+    for other in "$candidate_dir/Hog Hunter.app" "$candidate_dir/HogHunter.app"; do
+      if [[ -d "$other" ]]; then
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+          echo "Warning: a real install would refuse, because a copy already exists at $other."
+        else
+          echo "error: refusing to create a second copy; one already exists at $other." >&2
+          echo "Remove it, or pass --dest with its folder to update it in place." >&2
+          exit 4
+        fi
+      fi
+    done
+  done
+fi
 
 version_of() {
   local short build
@@ -127,11 +195,7 @@ SPARKLE_PUBLIC_ED_KEY="${HOGHUNTER_SPARKLE_PUBLIC_KEY:-8nQ6+N6opPFZYkZUgMtyvfbqZ
 # Resolved before the Sparkle gate below, which needs the answer.  Kept in one
 # place so the signing block further down cannot disagree with it.
 DEVELOPER_ID_AVAILABLE=0
-if [[ "$ADHOC" -eq 1 ]]; then
-  : # --adhoc requested; skip the Developer ID check entirely.
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
-  DEVELOPER_ID_AVAILABLE=1
-fi
+[[ -n "$SIGNING_IDENTITY" ]] && DEVELOPER_ID_AVAILABLE=1
 
 _on_main=0
 [[ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo)" == "main" ]] && _on_main=1
@@ -193,7 +257,7 @@ sign_developer_id_nested() {
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
     perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
-      --sign "Developer ID Application" "$target" || return 1
+      --sign "$SIGNING_IDENTITY" "$target" || return 1
   done < <(
     /usr/bin/find "$APP_PATH/Contents/Frameworks" -mindepth 1 \( -name '*.xpc' -o -name '*.app' \) -type d 2>/dev/null
     /usr/bin/find "$APP_PATH/Contents/Frameworks" -mindepth 1 -type f -perm -u+x 2>/dev/null
@@ -202,29 +266,46 @@ sign_developer_id_nested() {
   for fw in "$APP_PATH"/Contents/Frameworks/*.framework; do
     [[ -e "$fw" ]] || continue
     perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
-      --sign "Developer ID Application" "$fw" || return 1
+      --sign "$SIGNING_IDENTITY" "$fw" || return 1
   done
   perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS_FILE" \
-    --sign "Developer ID Application" "$APP_PATH"
+    --sign "$SIGNING_IDENTITY" "$APP_PATH"
 }
 if [[ "$DEVELOPER_ID_AVAILABLE" -eq 1 ]]; then
   echo "Signing with Developer ID Application, nested code first.  20 second timeout per step."
+  # Never falls back to ad hoc: that used to replace the installed app with one
+  # macOS treats as new, and the owner lost every grant to a signing timeout.
   if sign_developer_id_nested; then
     echo "Signed with Developer ID Application."
   else
-    sign_adhoc "Developer ID signing failed or timed out"
+    echo "error: Developer ID signing failed or timed out.  Nothing was installed." >&2
+    exit 5
   fi
-elif [[ "$ADHOC" -eq 1 ]]; then
-  sign_adhoc "--adhoc requested"
 else
-  sign_adhoc "no Developer ID Application identity in keychain"
+  sign_adhoc "--adhoc requested"
 fi
 
 echo "Verifying the signature."
 codesign --verify --deep --strict "$APP_PATH"
 echo "Entitlements (get-task-allow should be absent):"
 codesign -d --entitlements - "$APP_PATH"
+if [[ "$ADHOC" -ne 1 ]]; then
+  "$REPO_ROOT/scripts/check-mac-identity.sh" --identity-only "$APP_PATH"
+fi
+
+# Staged beside the destination and checked before the running app is touched.
+# ditto merges into an existing bundle, so installing straight over one can leave
+# files the signature does not cover, and a broken seal is a broken identity.
+mkdir -p "$DEST_DIR"
+STAGE_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-install.XXXXXX")"
+trap 'rm -rf "$STAGE_DIR"' EXIT
+STAGED_PATH="$STAGE_DIR/Hog Hunter.app"
+ditto "$APP_PATH" "$STAGED_PATH"
+xattr -cr "$STAGED_PATH" || true
+if [[ "$ADHOC" -ne 1 ]]; then
+  "$REPO_ROOT/scripts/check-mac-identity.sh" "$STAGED_PATH"
+fi
 
 echo "Quitting the running Hog Hunter, if any."
 # Both names: an old copy is still called HogHunter on disk, and AppleScript
@@ -242,9 +323,10 @@ if pgrep -x HogHunter >/dev/null 2>&1; then
 fi
 
 echo "Installing to $INSTALLED_PATH."
-mkdir -p "$DEST_DIR"
-ditto "$APP_PATH" "$INSTALLED_PATH"
-xattr -cr "$INSTALLED_PATH" || true
+if [[ -e "$INSTALLED_PATH" ]]; then
+  mv "$INSTALLED_PATH" "$STAGE_DIR/previous.app"
+fi
+mv "$STAGED_PATH" "$INSTALLED_PATH"
 
 # Retire the pre-rename copy, but only after confirming it is this app and not
 # something else that happens to share the old filename.
@@ -266,20 +348,10 @@ else
   echo "Skipping launch (--no-launch)."
 fi
 
-# Warn if the other well-known location also holds a copy, so it doesn't
-# quietly run stale or fight over the menu bar item.  Doesn't touch it.
-OTHER_DIR=""
-if [[ "$DEST_DIR" == "$SYSTEM_APPLICATIONS" ]]; then
-  OTHER_DIR="$USER_APPLICATIONS"
-elif [[ "$DEST_DIR" == "$USER_APPLICATIONS" ]]; then
-  OTHER_DIR="$SYSTEM_APPLICATIONS"
-fi
-if [[ -n "$OTHER_DIR" ]]; then
-  for other in "$OTHER_DIR/Hog Hunter.app" "$OTHER_DIR/HogHunter.app"; do
-    if [[ -d "$other" ]]; then
-      echo "Warning: a duplicate copy also exists at $other -- consider removing it."
-    fi
-  done
-fi
+# Spotlight still lists a renamed backup as this app, and it can be launched by
+# accident.  Named, not touched: it may be someone's rollback.
+for backup in "$DEST_DIR"/"Hog Hunter.app".* "$DEST_DIR"/HogHunter.app.*; do
+  [[ -e "$backup" ]] && echo "Warning: a backup copy of this app is at $backup -- consider removing it."
+done
 
 echo "Installed Hog Hunter $(version_of "$INSTALLED_PATH") to $INSTALLED_PATH."

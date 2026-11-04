@@ -15,7 +15,7 @@
 Mac menu bar utility.  Finds CPU and memory hogs now, over the past hour, and over the past 24 hours.  Quit from the list after confirm.
 
 **Local:** `~/apps/HogHunter`  
-**Installed app:** `/Applications/HogHunter.app`  
+**Installed app:** `~/Applications/Hog Hunter.app`  
 **TestFlight authorization:** The owner requested external testing for the
 iPhone companion on 2026-09-27.  The release lane is tracked in issue #22.
 The App Store Connect app record exists and the guarded workflow
@@ -28,15 +28,16 @@ Hosting and routing (apexes, hostnames, hosts, deploy paths): see [`Fleet-OPS/do
 ## Build
 
 ```bash
-cd ~/apps/HogHunter
+cd <your lane>
 xcodegen generate
-xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build
-ditto build/Build/Products/Release/HogHunter.app /Applications/HogHunter.app
+scripts/install.sh
 ```
 
-Prefer `scripts/install.sh` over the manual steps above — it builds Release, signs with the "Developer ID Application" identity when it is in the keychain (adhoc otherwise), quits the running copy, installs, and relaunches.  It installs to `/Applications` by default when a copy is already there, otherwise to `~/Applications`; pass `--dest PATH` to choose explicitly.  Use `--dry-run` to check what it would do without touching the running app or the destination, or `--no-launch` to skip the relaunch.
+`scripts/install.sh` is the only install path.  It builds Release, signs with the Developer ID Application identity of team CC8UTF7ATG, checks the identity with `scripts/check-mac-identity.sh`, quits the running copy, swaps the staged bundle in, and relaunches.  It refuses to install without that identity, never falls back to ad hoc when signing fails, and refuses to create a second copy, because macOS keeps privacy grants against the designated requirement and an ad hoc build has a new one every time.  `--adhoc` needs a `--dest` outside `/Applications` and `~/Applications`, and never launches.  It installs to `/Applications` by default when a copy is already there, otherwise to `~/Applications`; pass `--dest PATH` to choose explicitly.  Use `--dry-run` to check what it would do without touching the running app or the destination, or `--no-launch` to skip the relaunch.
 
 `HogHunterTests` (XCTest, `Tests/HogHunterTests/`) covers pure logic such as `HogFormat` and the iPhone snapshot codec.  Run with `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.  CI (`.github/workflows/ci.yml`) runs the same on every push to `main` and every pull request, then builds the `HogHunterIOS` scheme for the iOS Simulator.
+
+**Keep Debug builds off the external volume.**  A Debug app or test host is signed ad hoc, so every build is a new app to macOS.  Run from a removable volume, it raises the "HogHunter would like to access files on a removable volume" dialog as it launches, on the owner's screen, and Allow lasts only until the next build.  `xcodegen generate` runs `scripts/xcodegen-post.sh`, which points this checkout's default DerivedData at `~/Library/Caches/HogHunterDerivedData`.  Run tests with plain `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`, and never pass a `-derivedDataPath` on `/Volumes` for a Debug build; `CodeIdentityGuardTests` fails if a host runs from there.  Do not read a lane's own files from a test either, since the lane is on that volume: skip such a test on `/Volumes` paths, as `testThePhoneScreenWritesItsGapsAsNonBreakingSpaces` does, and CI still runs it.  Record: `docs/rollouts/2026-11-04-tcc-prompts-and-code-identity.md`.
 
 UI changes must be covered by automated visual verification where feasible: Playwright screenshot assertions for web surfaces, `xcrun simctl io booted screenshot` for iOS simulator. The owner never takes manual screenshots and does not run local UI preview sessions. Native Mac app UI is verified through code review and CI.
 
@@ -156,7 +157,8 @@ sees it, while the executable inside the bundle stays `HogHunter`:
 | Surface | Value | Where |
 |---|---|---|
 | Installed bundle | `Hog Hunter.app` | `scripts/install.sh` copies the built `HogHunter.app` to `"$DEST_DIR/Hog Hunter.app"`, then retires a pre-rename `HogHunter.app` (only after confirming the same `CFBundleIdentifier`) |
-| `CFBundleName` / `CFBundleDisplayName` | `Hog Hunter` | `project.yml` `INFOPLIST_KEY_CFBundleName` / `...DisplayName` |
+| `CFBundleDisplayName` | `Hog Hunter` | `project.yml` `INFOPLIST_KEY_CFBundleDisplayName` |
+| `CFBundleName` | `HogHunter` | Xcode's generated plist takes it from `PRODUCT_NAME` and ignores `INFOPLIST_KEY_CFBundleName`, which is why a macOS permission dialog says "HogHunter" for the Debug and Release builds alike |
 | Executable | `HogHunter` | `project.yml` `PRODUCT_NAME` |
 | Quit-by-name | both | `scripts/install.sh` sends `tell application "Hog Hunter" to quit`, then `"HogHunter"`, because an older copy is still on disk under the old name |
 

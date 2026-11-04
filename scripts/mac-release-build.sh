@@ -249,6 +249,9 @@ sign_app_bundle() {
     if sign_with_identity "$identity"; then
       echo "signed with $identity"
       verify_app_signature
+      # A release that changes identity would cost every user every privacy
+      # grant on update, so it is refused before notarization, not after.
+      "$ROOT_DIR/scripts/check-mac-identity.sh" --identity-only "$APP_BUNDLE"
       return 0
     fi
     echo "error: signing with '$identity' failed or timed out." >&2
