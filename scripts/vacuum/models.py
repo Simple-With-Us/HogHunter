@@ -35,9 +35,11 @@ _PROBE_ONLY_STEPS = frozenset({"resource_sample"})
 
 
 def run_outcome(steps: list["StepResult"]) -> RunOutcome:
-    """ok: no step failed.  partial: a step failed, and another step ran.  failed: a step failed and nothing
-    else did any work (skips and the sampler do not count)."""
+    """An incomplete observation/sweep is partial; actual failures keep the
+    existing failed-versus-worked rule (skips and the sampler are not work)."""
     if not any(s.status == StepStatus.FAILED for s in steps):
+        if any(s.incomplete for s in steps):
+            return RunOutcome.PARTIAL
         if any(s.step_id == "housekeeper_lock" and s.status == StepStatus.SKIPPED for s in steps):
             if not any(s.status == StepStatus.RAN for s in steps):
                 return RunOutcome.SKIPPED
@@ -51,7 +53,13 @@ def outcome_summary(steps: list["StepResult"], outcome: RunOutcome) -> str:
     if outcome in (RunOutcome.OK, RunOutcome.SKIPPED):
         return ""
     failed = [s.step_id for s in steps if s.status == StepStatus.FAILED]
-    return f"{outcome.value}: {len(failed)} of {len(steps)} step(s) failed ({', '.join(failed)})"
+    incomplete = [s.step_id for s in steps if s.incomplete]
+    details = []
+    if failed:
+        details.append(f"{len(failed)} of {len(steps)} step(s) failed ({', '.join(failed)})")
+    if incomplete:
+        details.append(f"{len(incomplete)} step(s) incomplete ({', '.join(incomplete)})")
+    return f"{outcome.value}: " + "; ".join(details) if details else outcome.value
 
 
 @dataclass
@@ -62,6 +70,7 @@ class StepResult:
     reason: str = ""
     bytes_freed: int = 0
     duration_ms: int = 0
+    incomplete: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -77,6 +86,7 @@ class StepResult:
             reason=str(raw.get("reason", "")),
             bytes_freed=int(raw.get("bytes_freed", 0) or 0),
             duration_ms=int(raw.get("duration_ms", 0) or 0),
+            incomplete=raw.get("incomplete") is True,
         )
 
 
@@ -96,6 +106,8 @@ class RunRecord:
     outcome: str = RunOutcome.OK.value
     current_step: str = ""
     current_target: str = ""
+    # None in older records; engine-measured time outside logical step clocks.
+    overhead_duration_ms: Optional[int] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +123,7 @@ class RunRecord:
             "outcome": self.outcome,
             "current_step": self.current_step,
             "current_target": self.current_target,
+            "overhead_duration_ms": self.overhead_duration_ms,
             "steps": [s.as_dict() for s in self.steps],
         }
 
@@ -132,6 +145,8 @@ class RunRecord:
             outcome=str(raw.get("outcome") or (RunOutcome.FAILED.value if int(raw.get("exit_code", 0)) else run_outcome(steps).value)),
             current_step=str(raw.get("current_step") or ""),
             current_target=str(raw.get("current_target") or ""),
+            overhead_duration_ms=(int(raw["overhead_duration_ms"])
+                                  if raw.get("overhead_duration_ms") is not None else None),
         )
 
     def finish(self, exit_code: Optional[int] = None, summary: str = "") -> None:
@@ -139,6 +154,8 @@ class RunRecord:
         nothing else worked, partial (exit 0) when some steps failed and others ran, ok otherwise.  An explicit
         exit code still wins: non-zero is always a failed run, and zero is never worse than partial."""
         self.ended_at = time.time()
+        self.current_step = ""
+        self.current_target = ""
         outcome = run_outcome(self.steps)
         if exit_code is None:
             exit_code = 1 if outcome == RunOutcome.FAILED else 0

@@ -17,9 +17,9 @@
 # verifies bundle structure but an ad-hoc signature proves nothing about the
 # Developer ID team.
 #
-# Versions: CFBundleShortVersionString comes from project.yml MARKETING_VERSION,
-# so cutting a release is one edit.  CFBundleVersion is `git rev-list --count
-# HEAD`, which only ever goes up.
+# Versions: marketing stays 0.1.0; the official workflow supplies one shared
+# counter planned from complete ASC and published Sparkle floors.
+# A nonpublishing local build defaults to 1000.
 #
 # Auto-update: a staged bundle always carries the Sparkle feed and public key
 # in its Info.plist (SUFeedURL, SUPublicEDKey, automatic checks/install, hourly
@@ -96,9 +96,16 @@ short_version() {
 }
 
 bundle_version() {
-  local count
-  count="$(/usr/bin/git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || true)"
-  printf '%s\n' "${count:-1}"
+  local build="${HOGHUNTER_BUILD_NUMBER:-1000}"
+  if [[ ! "$build" =~ ^[1-9][0-9]{3,11}$ ]]; then
+    echo "error: release build must be an integer of at least1000 within the verified platform range." >&2
+    return 1
+  fi
+  if [[ "$MODE" == "--release" && -z "${HOGHUNTER_BUILD_NUMBER:-}" ]]; then
+    echo "error: publishing requires the workflow's observed-floor build plan." >&2
+    return 1
+  fi
+  printf '%s\n' "$build"
 }
 
 # Info.plist entries for Sparkle.  Updates are checked hourly, then downloaded
@@ -129,7 +136,7 @@ write_sparkle_plist_entries() {
 write_versions() {
   local short build
   build="$(bundle_version)"
-  short="1.0.${build}"
+  short="0.1.0"
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $short" "$INFO_PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build" "$INFO_PLIST"
   echo "version $short (build $build)"

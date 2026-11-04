@@ -3,6 +3,7 @@
   "apps": {
     "hoghunter": {
       "fixedMarketingVersion": "0.1.0",
+      "buildNumberPolicy": "paired-release",
       "displayName": "Hog Hunter",
       "bundleId": "com.simplewithus.hoghunter.ios",
       "pairedBuildFeed": "https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml",
@@ -11,8 +12,8 @@
       "scheme": "HogHunterIOS",
       "projectRel": "HogHunter.xcodeproj",
       "xcodegenDir": ".",
-      "marketingVersionDefault": "1.0.0",
-      "notes": "Hog Hunter iPhone companion for the macOS menu bar utility.  Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios.  The Xcode project is generated from project.yml (xcodegen at the repo root) and is not committed.  Version numbering (owner directive 2026-10-29):  the marketing version is the fixed 0.1.0 and the build is one shared merge-timestamp value per release, max(S, M + 1), where S is the merge commit's Chicago date as YYYYMMDDHHMM and M is the highest first build component across iOS, the paired macOS app and the Sparkle feed floor;  the CI plan-build job computes it once and every ship job reuses it."
+      "marketingVersionDefault": "0.1.0",
+      "notes": "Hog Hunter iPhone companion; Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios; XcodeGen project.yml; marketing version stays 0.1.0; build numbers start at 1000 and increment the observed complete ASC/feed floor, including earlier timestamp builds"
     }
   }
 }

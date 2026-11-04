@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Hermetic: every root/command/active-file probe is replaced; no SSH or Docker."""
 import importlib.util
+import contextlib
 import fcntl
+import io
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -61,6 +64,163 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
         self.assertTrue(p.exists())
         self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_healthy_legacy_scan_plan_run_and_scheduled_still_skip_without_inventory(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        self.tool.files = lambda _: self.fail("automatic healthy path inventoried")
+        self.tool.docker_candidates = self.tool.files
+        for mode in ("scan", "plan", "run", "scheduled"):
+            result = self.tool.execute(mode, ["package-cache"], confirm=True)
+            self.assertEqual(result["status"], "skipped")
+            self.assertFalse(result["pressure"])
+            self.assertNotIn("manual", result)
+            self.assertEqual(result["strategies"], [])
+        self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_explicit_manual_healthy_scan_and_plan_are_read_only(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        self.tool.audit = lambda _: self.fail("read-only manual scan wrote audit")
+        for mode in ("scan", "plan"):
+            result = self.tool.execute(mode, ["package-cache"], manual=True)
+            self.assertEqual(result["status"], "planned")
+            self.assertTrue(result["manual"])
+            self.assertFalse(result["pressure"])
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertFalse(result["lock"]["acquired"])
+            self.assertTrue(p.exists())
+        self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_explicit_manual_healthy_run_removes_only_fixture_and_requires_confirmation(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        self.assertEqual(self.tool.execute("run", ["package-cache"], manual=True)["status"], "failed")
+        self.assertTrue(p.exists())
+        result = self.tool.execute("run", ["package-cache"], confirm=True, manual=True)
+        self.assertEqual(result["status"], "ran")
+        self.assertTrue(result["manual"])
+        self.assertEqual(result["removed_file_bytes"], 5)
+        self.assertEqual(result["observed_free_delta_bytes"], 0)
+        self.assertTrue(result["lock"]["released"])
+        self.assertFalse(p.exists())
+
+    def test_manual_refuses_scheduled_unknown_duplicate_or_empty_selectors_without_work(self):
+        self.tool.files = lambda _: self.fail("invalid manual request inventoried")
+        for mode, selectors in [("scheduled", ["package-cache"]), ("run", []),
+                                ("run", ["unknown"]), ("scan", ["package-cache"] * 2)]:
+            self.assertEqual(self.tool.execute(mode, selectors, confirm=True, manual=True)["status"], "failed")
+        self.assertEqual(self.tool.execute("scan", ["package-cache"], manual=1)["status"], "failed")
+        self.assertEqual(list((self.root / "run").iterdir()), [])
+
+    def test_manual_run_cannot_bypass_live_or_uncertain_shared_lock(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        self.assertTrue(self.tool.acquire_lock())
+        self.assertEqual(self.tool.execute("run", ["package-cache"], confirm=True, manual=True)["status"], "skipped")
+        (self.tool.lock / "dispatch.json").write_text("{}")
+        self.assertEqual(self.tool.execute("run", ["package-cache"], confirm=True, manual=True)["status"], "partial")
+        self.assertTrue(p.exists())
+
+    def test_manual_busy_stays_empty_but_uncertain_lock_accounts_for_selections(self):
+        selected = ["package-cache", "rotated-logs", "docker-build-cache"]
+        def acquire():
+            self.tool.lock_state = "busy"
+            return False
+        self.tool.acquire_lock = acquire
+        busy = self.tool.execute("run", selected, confirm=True, manual=True)
+        self.assertEqual(busy["status"], "skipped")
+        self.assertEqual(busy["strategies"], [])
+        self.assertEqual(busy["reason"], "shared remote cleanup lock busy; no work started")
+        self.assertEqual(busy["lock"], {"path": "/run/fleet-housekeeper.lock", "acquired": False})
+        def uncertain():
+            self.tool.lock_state = "unknown"
+            return False
+        self.tool.acquire_lock = uncertain
+        result = self.tool.execute("run", selected, confirm=True, manual=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual([row["id"] for row in result["strategies"]], selected)
+        self.assertTrue(all(not row["inventory_complete"] and row["status"] == "partial"
+                            and row["candidate_count"] == row["removed_count"] == row["attempted_count"] == 0
+                            for row in result["strategies"]))
+
+    def test_manual_stop_before_first_inventory_accounts_for_all_requested_work(self):
+        selected = ["package-cache", "rotated-logs"]
+        self.tool.files = lambda _: self.fail("stopped request inventoried")
+        for cancelled in (False, True):
+            self.tool.cancelled = cancelled
+            with patch.object(self.tool, "check", side_effect=m.StopWork("synthetic stop")):
+                result = self.tool.execute("scan", selected, manual=True)
+            self.assertEqual(result["status"], "cancelled" if cancelled else "partial")
+            self.assertEqual([row["id"] for row in result["strategies"]], selected)
+            self.assertTrue(all(row["inventory_complete"] is False and row["candidate_count"] == 0
+                                and "not attempted" in row["reason"] for row in result["strategies"]))
+            self.assertEqual(result["cancellation"]["requested"], cancelled)
+
+    def test_manual_cancellation_after_applied_work_preserves_known_and_unattempted_rows(self):
+        cache = self.cache()
+        selected = ["package-cache", "rotated-logs", "docker-build-cache"]
+        remove = self.tool.remove_files
+        def remove_then_cancel(*args, **kwargs):
+            count = remove(*args, **kwargs)
+            self.tool.cancelled = True
+            return count
+        self.tool.remove_files = remove_then_cancel
+        events = []
+        self.tool.audit = events.append
+        result = self.tool.execute("run", selected, confirm=True, manual=True)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertFalse(cache.exists())
+        self.assertEqual(result["removed_file_bytes"], 5)
+        self.assertEqual([row["id"] for row in result["strategies"]], selected)
+        first, *unattempted = result["strategies"]
+        self.assertTrue(first["inventory_complete"])
+        self.assertEqual((first["status"], first["removed_count"]), ("ran", 1))
+        self.assertTrue(all(row["inventory_complete"] is False and row["status"] == "partial" for row in unattempted))
+        self.assertEqual(events[-1]["event"], "finished")
+        self.assertEqual(events[-1]["strategies"], result["strategies"])
+
+    def test_manual_inventory_failure_is_unknown_but_completed_empty_inventory_is_known(self):
+        def files(strategy):
+            if strategy == "package-cache":
+                raise OSError("synthetic inventory failure")
+            return []
+        self.tool.files = files
+        result = self.tool.execute("run", ["package-cache", "rotated-logs"], confirm=True, manual=True)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual([(row["id"], row["status"], row["inventory_complete"]) for row in result["strategies"]],
+                         [("package-cache", "failed", False), ("rotated-logs", "skipped", True)])
+
+    def test_busy_final_observation_failure_is_partial_with_unknown_full_coverage(self):
+        def busy():
+            self.tool.lock_state = "busy"
+            return False
+        self.tool.acquire_lock = busy
+        with patch.object(self.tool, "disk", side_effect=[dict(self.pressure), OSError("synthetic disk failure")]):
+            result = self.tool.execute("run", ["package-cache"], confirm=True, manual=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(len(result["strategies"]), 1)
+        self.assertFalse(result["strategies"][0]["inventory_complete"])
+
+    def test_cli_rejects_manual_scheduled_before_constructing_tool(self):
+        with patch.object(sys, "argv", ["hoghunter-maintain", "scheduled", "--manual"]), \
+                patch.object(m, "Maintenance", side_effect=AssertionError("invalid CLI constructed tool")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                m.main()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_cli_explicit_manual_runs_only_synthetic_healthy_fixture(self):
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        p = self.cache()
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", ["hoghunter-maintain", "run", "--manual", "--strategy", "package-cache", "--confirm"]), \
+                patch.object(m, "Maintenance", return_value=self.tool), patch.object(m.os, "geteuid", return_value=0), \
+                patch.object(m.signal, "signal"), contextlib.redirect_stdout(stdout):
+            self.assertEqual(m.main(), 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["status"], "ran")
+        self.assertTrue(result["manual"])
+        self.assertFalse(p.exists())
 
     def test_confirmation_and_duplicate_unknown_strategy_refused(self):
         for strategies, confirm in [(["package-cache"], False), (["x"], True), (["package-cache"] * 2, True)]:
@@ -268,6 +428,24 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result['status'], 'ran')
         self.assertEqual(result['strategies'][0]['attempted_count'], 2)
         self.assertTrue(result['lock']['released'])
+
+    def test_buildx_identity_regex_is_anchored_against_overlapping_record_ids(self):
+        identity = 'abcdefghijklm'
+        self.tool.docker_candidates = lambda _: [identity]
+        self.tool.verify_local_builder = lambda: None
+        commands = []
+        self.tool.runner = lambda argv: (commands.append(argv) or 0, '')
+        result = self.tool.execute('run', ['docker-build-cache'], True)
+        self.assertEqual(result['status'], 'ran')
+        command = commands[0]
+        selectors = [command[i+1] for i, arg in enumerate(command[:-1]) if arg == '--filter']
+        self.assertIn('id=^' + identity + '$', selectors)
+        pattern = next(value[3:] for value in selectors if value.startswith('id='))
+        self.assertIsNotNone(re.search(pattern, identity))
+        for other in ('x'+identity, identity+'x', 'x'+identity+'x'):
+            self.assertIsNone(re.search(pattern, other))
+        for selector in ('until=168h', 'inuse=false', 'mutable=false', 'shared=false', 'type=regular'):
+            self.assertIn(selector, selectors)
 
     def test_uncertain_dispatch_stops_before_later_cleanup_and_retains_lock(self):
         cache = self.cache()

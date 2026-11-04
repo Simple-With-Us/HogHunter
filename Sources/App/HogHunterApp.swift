@@ -70,8 +70,9 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
             self.screenshotLog("presenting Settings NSWindow directly")
+            let contentSize = NSSize(width: SettingsView.windowWidth, height: SettingsView.windowHeight)
             let win = NSWindow(
-                contentRect: NSRect(x: 200, y: 200, width: 560, height: 680),
+                contentRect: NSRect(origin: NSPoint(x: 200, y: 200), size: contentSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -80,12 +81,11 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             let store = HogStore()
             let rootView = SettingsView()
                 .environmentObject(store)
-                .frame(width: 560, height: 480)
             win.contentViewController = NSHostingController(rootView: rootView)
-            win.setContentSize(NSSize(width: 560, height: 480))
+            win.setContentSize(contentSize)
             // Headless runners presented this window title-bar-only (440x38) because
             // the tab content had no ideal height; never let it shrink below the UI.
-            win.contentMinSize = NSSize(width: 560, height: 480)
+            win.contentMinSize = contentSize
             win.center()
             // Register with the activation manager via its existing API (the
             // windowOpened() member this called was never defined) so the app
@@ -99,9 +99,10 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             self.screenshotWindow = win
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let win = self?.screenshotWindow else { return }
-                if let content = win.contentView, content.frame.height < 300 {
+                if let content = win.contentView,
+                   content.frame.width < contentSize.width || content.frame.height < contentSize.height {
                     self?.screenshotLog("content laid out too small (\(content.frame.size)); resizing")
-                    win.setContentSize(NSSize(width: 560, height: 480))
+                    win.setContentSize(contentSize)
                 }
                 self?.screenshotLog("post-layout: frame=\(win.frame) content=\(win.contentView?.frame.size ?? .zero)")
             }

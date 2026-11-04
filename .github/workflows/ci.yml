@@ -35,6 +35,8 @@ jobs:
           bash scripts/ios-fleet/test-scheduled-ship-gate.sh
           bash scripts/ios-fleet/test-next-shared-build.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
+          node --test scripts/release-inventory.test.mjs
+          node --test scripts/release-build-policy.test.mjs
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-ci-report.py
@@ -113,6 +115,9 @@ jobs:
             xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           fi
+
+      - name: Require server maintenance render
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png"
 
       - name: Build iOS companion
         run: |

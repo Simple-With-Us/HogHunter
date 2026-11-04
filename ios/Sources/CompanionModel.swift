@@ -244,6 +244,8 @@ final class CompanionModel {
         guard !started else { return }
         started = true
         if ProcessInfo.processInfo.arguments.contains("-HogHunterSample") {
+            // An explicitly requested fixture never sends control traffic.
+            isDemoMode = true
             snapshot = Self.sample
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
@@ -950,6 +952,8 @@ final class CompanionModel {
     /// network or Tailscale.  Anything else answers 403, so the phone does
     /// not offer buttons that cannot work.
     var controlsReachable: Bool {
+        // Only the inert launch fixture may present controls without an endpoint.
+        if isDemoMode && ProcessInfo.processInfo.arguments.contains("-HogHunterSample") { return true }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return false }
         return CompanionPeer.isTrustedEndpoint(endpoint)
     }
