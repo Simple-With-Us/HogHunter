@@ -16,7 +16,8 @@ import Darwin
 //
 // * A value that was not measured is left out.  It is never written as 0.
 // * The folder `~/.local/state/fleet-tools` must already exist.  The writer never creates it,
-//   so the file stays off a Mac that is not part of this fleet.
+//   so the file stays off a Mac that is not part of this fleet.  It must also belong to this
+//   user and not be group or world writable.
 // * The file is written to a temporary name and renamed over the report, with mode 0600.  A
 //   report that is a symlink is refused, never written through.
 // * Nothing is written in unit tests or in the UI harness unless a test injects a directory.
@@ -391,6 +392,12 @@ final class HostStatusReporter {
             // Not part of this fleet's Mac set up: nothing to do, and nothing to log.
             return false
         }
+        // A folder someone else owns or can write to could block the temporary name or swap
+        // the report, whatever the file's own mode says.
+        guard info.st_uid == getuid(), (info.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
+            log.error("The host status folder is not private to this user; refusing to write")
+            return false
+        }
         if lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK {
             log.error("The host status report is a symlink; refusing to write")
             return false
@@ -435,8 +442,14 @@ extension HogStore {
     /// Gathers the values a report is built from.  Runs on the main actor, reads only, and
     /// changes nothing in the store or the regimen.
     func hostStatusSource() async -> HostStatusSource {
-        // The shared drive list refreshes itself at most once a minute.
-        await MountedDriveStore.shared.refresh()
+        // The drive list stops refreshing while the panel is closed, so a report has to probe
+        // now and then or its free space goes stale.  Every fifth report, about five minutes,
+        // keeps those numbers honest without walking the volumes every minute.
+        hostStatusReportsSinceProbe += 1
+        if MountedDriveStore.shared.rows.isEmpty || hostStatusReportsSinceProbe >= 5 {
+            hostStatusReportsSinceProbe = 0
+            await MountedDriveStore.shared.refresh()
+        }
         let runner = CleanRegimenRunner.shared
         return HostStatusSource(
             pulse: pulse,

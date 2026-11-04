@@ -287,4 +287,21 @@ final class HostStatusReportTests: XCTestCase {
         if let list = value as? [Any] { return list.flatMap(strings(in:)) }
         return []
     }
+
+    func testAFolderOthersCanWriteToIsRefused() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hoststatus-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let report = folder.appendingPathComponent("hoghunter-mac.json")
+
+        for mode in [0o775, 0o777, 0o757] {
+            XCTAssertEqual(chmod(folder.path, mode_t(mode)), 0)
+            XCTAssertFalse(HostStatusReporter.atomicWrite(Data("{}".utf8), to: report), "mode \(String(mode, radix: 8))")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: report.path))
+        }
+
+        XCTAssertEqual(chmod(folder.path, 0o700), 0)
+        XCTAssertTrue(HostStatusReporter.atomicWrite(Data("{}".utf8), to: report))
+    }
 }

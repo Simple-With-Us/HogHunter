@@ -271,6 +271,8 @@ final class HogStore: ObservableObject {
     private var holdsCleanRegimen = false
     /// Writes the read-only status file Muster reads (see `HostStatusReport.swift`).
     private let hostStatus = HostStatusReporter()
+    /// Reports written since the last drive probe made for them.
+    var hostStatusReportsSinceProbe = 0
 
     /// The one Maintain store.  The Mac's Storage tab and the iPhone
     /// route both use it, so a run started from either is the only run.
