@@ -68,6 +68,19 @@ final class SSHConnectionTests: XCTestCase {
         XCTAssertFalse(url.lastPathComponent.contains(":"))
     }
 
+    func testControlPathOptionQuotesTheSpacedPath() {
+        // The real socket directory sits under Application Support, whose
+        // name contains spaces; ssh's option parser rejects the unquoted
+        // value ("extra arguments at end of line"), so the option must
+        // carry the path in double quotes.
+        let url = SSHConnection.controlSocketURL(
+            forHost: "server",
+            in: URL(fileURLWithPath: "/tmp/Application Support/HogHunter/SSH"))
+        XCTAssertEqual(
+            SSHConnection.controlPathOption(url),
+            "ControlPath=\"\(url.path)\"")
+    }
+
     // MARK: - Recovery
 
     private final class Recorder: @unchecked Sendable {

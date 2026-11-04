@@ -71,9 +71,21 @@ enum SSHConnection {
         ensureControlDirectory()
         return [
             "-o", "ControlMaster=auto",
-            "-o", "ControlPath=\(controlSocketURL(forHost: host).path)",
+            "-o", controlPathOption(controlSocketURL(forHost: host)),
             "-o", "ControlPersist=600",
         ]
+    }
+
+    /// The `-o` argument naming the control socket.  The socket lives under
+    /// Application Support, so its path contains spaces, and ssh's option
+    /// parser rejects an unquoted value outright ("keyword controlpath
+    /// extra arguments at end of line", exit 255) even when the value
+    /// travels as a single argv element — the value must carry its own
+    /// double quotes.  Verified against the real ssh on 2026-11-04: quoted,
+    /// `ssh -G` reports the full path and a master starts, checks and exits
+    /// over it; unquoted, every invocation fails before connecting.
+    static func controlPathOption(_ socket: URL) -> String {
+        "ControlPath=\"\(socket.path)\""
     }
 
     private static func ensureControlDirectory() {
@@ -129,7 +141,7 @@ enum SSHConnection {
         proc.arguments = [
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=3",
-            "-o", "ControlPath=\(socket.path)",
+            "-o", controlPathOption(socket),
             "-O", "exit",
             host,
         ]
