@@ -314,6 +314,7 @@ final class HogStore: ObservableObject {
     /// and `ServerMaintenanceControl`, the same types the Mac's UI uses.
     let serverActions: CompanionServerActions
     private var maintainObservers = Set<AnyCancellable>()
+    private var serverStatusMemo = CompanionServerStatusMemo()
 
     /// UserDefaults keys, shared with any `@AppStorage` view that edits them.
     enum Key {
@@ -2785,6 +2786,7 @@ final class HogStore: ObservableObject {
             vpsSnapshot: vps.snapshot,
             vpsError: vps.lastReadError,
             vpsConfigured: !vps.configuredHost.isEmpty,
+            vpsStale: vps.isStale,
             externalDrives: MountedDriveStore.shared.rows
         ))
         var plain = snapshot
@@ -2824,16 +2826,25 @@ final class HogStore: ObservableObject {
     /// The server block, built only for the detailed snapshot.
     private func serverStatusForPhone(now: Date) -> CompanionServerStatus {
         let vps = maintain.vpsStore
-        return CompanionServerStatusBuilder.make(
-            configuredHost: vps.configuredHost,
+        let key = CompanionServerStatusMemo.Key(
+            host: vps.configuredHost,
             snapshot: vps.snapshot,
             error: vps.lastReadError,
             fetchedAt: vps.lastFetchDate,
-            cpuHistory: vps.cpuHistory.buckets.map(\.average),
-            databaseChange: { vps.databasePercentChange(key: $0) },
-            directoryChange: { vps.directoryPercentChange(path: $0) },
-            now: now
+            readingState: CompanionServerStatus.readingState(generatedAt: vps.snapshot?.generatedAtDate, now: now)
         )
+        return serverStatusMemo.status(for: key) {
+            CompanionServerStatusBuilder.make(
+                configuredHost: vps.configuredHost,
+                snapshot: vps.snapshot,
+                error: vps.lastReadError,
+                fetchedAt: vps.lastFetchDate,
+                cpuHistory: vps.cpuHistory.buckets.map(\.average),
+                databaseChange: { vps.databasePercentChange(key: $0) },
+                directoryChange: { vps.directoryPercentChange(path: $0) },
+                now: now
+            )
+        }
     }
 
     // MARK: - Staleness
