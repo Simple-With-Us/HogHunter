@@ -90,6 +90,15 @@ final class PanelServerStatusTests: XCTestCase {
         XCTAssertEqual(VPSStatusStripView.stripLabel(snapshot: nil), "Remote server status")
     }
 
+    /// The strip's label replaces its children's text for a screen reader,
+    /// so the stale state the marker shows has to be spoken in the label.
+    func testTheStripLabelSpeaksStaleness() throws {
+        let snapshot = try sampleSnapshot()
+        let label = VPSStatusStripView.stripLabel(snapshot: snapshot, isStale: true)
+        XCTAssertTrue(label.contains("stale"), label)
+        XCTAssertTrue(label.contains("read "), label)
+    }
+
     // MARK: - What it looks like
 
     /// Draws the panel with a server to look at.  Set `HOGHUNTER_RENDER_DIR`

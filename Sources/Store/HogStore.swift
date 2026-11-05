@@ -302,6 +302,10 @@ final class HogStore: ObservableObject {
     /// process-wide, so a store releases it only if it asked for it, and the
     /// runner stops when the last holder lets go.
     private var holdsCleanRegimen = false
+    /// Writes the read-only status file Muster reads (see `HostStatusReport.swift`).
+    private let hostStatus = HostStatusReporter()
+    /// Reports written since the last drive probe made for them.
+    var hostStatusReportsSinceProbe = 0
 
     /// The one Maintain store.  The Mac's Storage tab and the iPhone
     /// route both use it, so a run started from either is the only run.
@@ -437,7 +441,7 @@ final class HogStore: ObservableObject {
     /// The full, untruncated snapshot from the last tick -- not display-sorted
     /// or cut to 25 -- so `menuBarTopHog` can find the true busiest row even
     /// when it would not have made the panel's own list.
-    private var lastProcesses: [ProcessSample] = []
+    private(set) var lastProcesses: [ProcessSample] = []
     private var lastGroups: [Grouping.Group] = []
 
     /// History is written every fifth tick, so one history tick covers five
@@ -542,6 +546,7 @@ final class HogStore: ObservableObject {
         cleanRegimen.presenceProvider = { [weak self] in self?.panelVisible ?? false }
         cleanRegimen.acquire()
         holdsCleanRegimen = true
+        hostStatus.start { [weak self] in await self?.hostStatusSource() }
         // Settle the notification decision now rather than at the moment the
         // first alert fires, which would post before the prompt was answered.
         if alertsEnabled { alerts.requestAuthorization() }
@@ -555,6 +560,7 @@ final class HogStore: ObservableObject {
         directoryIdleTask?.cancel()
         directoryIdleTask = nil
         directoryUsage.setMeasurementEnabled(false)
+        hostStatus.stop()
         timer?.invalidate()
         timer = nil
         pressureSource?.cancel()
@@ -1053,6 +1059,7 @@ final class HogStore: ObservableObject {
             vpsSnapshot: maintain.vpsStore.snapshot,
             vpsError: maintain.vpsStore.errorMessage,
             vpsConfigured: !maintain.vpsStore.configuredHost.isEmpty,
+            vpsStale: maintain.vpsStore.isStale,
             externalDrives: MountedDriveStore.shared.rows
         )
     }
