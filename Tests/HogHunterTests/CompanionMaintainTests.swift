@@ -976,7 +976,7 @@ final class CompanionMaintainCopyTests: XCTestCase {
         // host would raise a removable-volume permission prompt.  CI still runs this.
         try XCTSkipIf(root.resolvingSymlinksInPath().path.hasPrefix("/Volumes/"),
                       "Source is on an external volume; CI runs this check")
-        for name in ["ios/Sources/CompanionMaintainView.swift", "Sources/UI/MaintainView.swift"] {
+        for name in ["ios/Sources/CompanionMaintainView.swift", "ios/Sources/CompanionServerView.swift", "Sources/UI/MaintainView.swift"] {
             let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
             let code = source.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for line in code {

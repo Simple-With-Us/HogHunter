@@ -11,6 +11,11 @@ final class VPSStatusStore: ObservableObject {
     @Published private(set) var snapshot: VPSStatusSnapshot?
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var errorMessage: String?
+    /// The last read's failure, kept until a read succeeds.  `errorMessage`
+    /// clears the moment a retry starts, and a retry against a dead host takes
+    /// up to 15 seconds, so a reader that polls would see the failure come and
+    /// go.  The phone polls.
+    @Published private(set) var lastReadError: String?
     @Published private(set) var lastFetchDate: Date?
     @Published private(set) var configuredHost: String = ""
 
@@ -52,6 +57,7 @@ final class VPSStatusStore: ObservableObject {
         snapshot = nil
         lastFetchDate = nil
         errorMessage = nil
+        lastReadError = nil
         cancelStalenessTimer()
         cpuHistory = CpuMinuteHistory()
         if !configuredHost.isEmpty {
@@ -173,6 +179,7 @@ final class VPSStatusStore: ObservableObject {
                     self.cpuHistory.record(percent: cpu.pct, at: Date())
                 }
                 self.errorMessage = nil
+                self.lastReadError = nil
                 let fetchedAt = Date()
                 self.lastFetchDate = fetchedAt
                 self.scheduleStalenessFlip(after: fetchedAt.addingTimeInterval(150).timeIntervalSinceNow)
@@ -181,6 +188,7 @@ final class VPSStatusStore: ObservableObject {
                 // read `isStale` as true without waiting for the timer.
                 self.cancelStalenessTimer()
                 self.errorMessage = err.localizedDescription
+                self.lastReadError = err.localizedDescription
             }
             self.isLoading = false
         }

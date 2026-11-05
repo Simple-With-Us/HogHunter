@@ -4,6 +4,7 @@ enum CompanionTab: String, CaseIterable, Identifiable {
     case activity = "Activity"
     case storage = "Storage"
     case network = "Network"
+    case server = "Server"
     var id: String { rawValue }
 }
 
@@ -442,7 +443,13 @@ struct SampleOutcome: Identifiable {
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
-    @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
+    @State private var selectedTab: CompanionTab = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterStorage") { return .storage }
+        if arguments.contains("-HogHunterNetwork") { return .network }
+        if arguments.contains("-HogHunterServer") { return .server }
+        return .activity
+    }()
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
     /// Counts the sort requests this view has sent, so a reply for an older
@@ -698,6 +705,12 @@ struct DashboardView: View {
             List {
                 hostHeaderSection
 
+                // The first tab a person sees and the tab about the server: the
+                // two places "is anything wrong?" gets asked.
+                if selectedTab == .activity || selectedTab == .server {
+                    FlaggedIssuesSection(snapshot: snapshot)
+                }
+
                 switch selectedTab {
                 case .activity:
                     activityContent
@@ -705,6 +718,8 @@ struct DashboardView: View {
                     storageContent
                 case .network:
                     networkContent
+                case .server:
+                    ServerTabContent(snapshot: snapshot)
                 }
             }
             .listStyle(.insetGrouped)

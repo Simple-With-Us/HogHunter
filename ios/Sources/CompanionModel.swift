@@ -1099,7 +1099,9 @@ final class CompanionModel {
         // memory), so comparing bytes cannot suppress the reload.  Write
         // every poll the container can actually hold, and rate limit the reload.
         let containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil
-        let data = try? CompanionJSON.encode(fetched)
+        // The widget draws nothing from the server, and this copy outlives the
+        // screen in a shared container, so server internals stay out of it.
+        let data = try? CompanionJSON.encode(fetched.withoutServerDetail())
         guard let defaults = sharedWidgetDefaults(), let data else { return }
         defaults.set(data, forKey: "last_snapshot")
         let cleanKeys = [
@@ -1568,8 +1570,106 @@ final class CompanionModel {
         ),
         remoteMaintainAllowed: true,
         // Relative to launch, so the sample reads "3 hours ago", not a year ago.
-        maintain: sampleMaintain(now: Date())
+        maintain: sampleMaintain(now: Date()),
+        remoteServerStatusAllowed: true,
+        server: sampleServer(now: Date()),
+        flaggedIssues: [
+            CompanionFlaggedIssue(
+                id: "server.disk.extra.warning",
+                title: "Server Data Volume Filling Up",
+                message: "86% used on /mnt/data.",
+                priority: 2,
+                priorityText: "Warning",
+                host: CompanionFlaggedIssue.serverHost,
+                category: "Storage"
+            ),
+        ],
+        flaggedIssuesCoverServer: true
     )
+
+    /// A busy but healthy server, for the sample snapshot and Demo Mode.  The
+    /// names are made up: this data can end up in a store screenshot.
+    static func sampleServer(now: Date) -> CompanionServerStatus {
+        let reading = now.addingTimeInterval(-90)
+        return CompanionServerStatus(
+            state: CompanionServerState.ok.rawValue,
+            host: "web-01",
+            generatedAt: reading,
+            fetchedAt: now.addingTimeInterval(-20),
+            headline: CompanionServerHeadline(
+                host: "web-01",
+                cpuText: "38%",
+                cpuSeverity: "calm",
+                memoryText: "71%",
+                memorySeverity: "calm",
+                diskText: "61% used",
+                diskSeverity: "calm",
+                extraDiskText: "86% used",
+                extraDiskSeverity: "elevated"
+            ),
+            cpu: CompanionServerCPU(
+                percent: 38.4,
+                percentText: "38.4%",
+                severity: "calm",
+                cores: 8,
+                loadText: "2.41",
+                history: [24, 27, 31, 29, 36, 44, 52, 48, 41, 37, 33, 30, 34, 39, 46, 51, 43, 38, 36, 35, 38, 40, 37, 38]
+            ),
+            memory: CompanionServerMeter(percent: 71, percentText: "71%", detail: "22.7 GB of 32.0 GB", severity: "calm"),
+            swap: CompanionServerMeter(percent: 12, percentText: "12%", detail: "491 MB of 4.0 GB swapped", severity: "calm"),
+            pressure: CompanionServerPressure(
+                sampledAt: reading,
+                durationSeconds: 2,
+                swapInText: "0 KB/s",
+                swapOutText: "12 KB/s",
+                memoryStallsText: "0.2%"
+            ),
+            devices: [
+                CompanionServerDevice(id: "root", title: "Disk (/)", mount: "/", freeText: "117 GB", totalText: "300 GB", usedPercent: 61, usedText: "61% used", severity: "calm"),
+                CompanionServerDevice(id: "data", title: "Data Volume (/mnt/data)", mount: "/mnt/data", freeText: "143 GB", totalText: "1024 GB", usedPercent: 86, usedText: "86% used", severity: "elevated"),
+                // A device whose size the server does not report: free space and a dash.
+                CompanionServerDevice(id: "tmp", title: "Tmpfs (/tmp)", mount: "/tmp", freeText: "15.2 GB"),
+            ],
+            databases: [
+                CompanionServerSizeRow(id: "orders", name: "Orders", bytesText: "18.4 GB", changeText: "↑1.2%", changePercent: 1.2),
+                CompanionServerSizeRow(id: "analytics", name: "Analytics", bytesText: "6.7 GB", changeText: "~0%", changePercent: 0),
+                // New this week, so there is no day of history to compare with.
+                CompanionServerSizeRow(id: "sessions", name: "Sessions", bytesText: "412 MB"),
+            ],
+            directories: [
+                CompanionServerSizeRow(id: "/var/lib/docker", name: "/var/lib/docker", bytesText: "84.1 GB", changeText: "↑3.4%", changePercent: 3.4),
+                CompanionServerSizeRow(id: "/var/log", name: "/var/log", bytesText: "2.3 GB", changeText: "↓-8.1%", changePercent: -8.1),
+            ],
+            storageDiagnostics: CompanionServerStorageDiagnostics(
+                sampledAt: reading,
+                durationSeconds: 3,
+                categoriesComplete: true,
+                categories: [
+                    CompanionServerStorageCategory(id: "images", title: "Images", sizeText: "41.6 GB", reclaimableText: "12.2 GB"),
+                    CompanionServerStorageCategory(id: "build_cache", title: "Build Cache", sizeText: "9.8 GB", reclaimableText: "9.8 GB"),
+                    CompanionServerStorageCategory(id: "volumes", title: "Volumes", sizeText: "27.3 GB", reclaimableText: "1.1 GB"),
+                ],
+                usesContainerd: false
+            ),
+            tools: [
+                CompanionServerTool(id: "docker", name: "Docker", state: "running", stateText: "Running", count: 1),
+                CompanionServerTool(id: "postgres", name: "Postgres", state: "running", stateText: "Running", count: 4),
+                CompanionServerTool(id: "backup", name: "Backups", state: "unknown", stateText: "Unknown", count: 0, reason: "The backup log is not readable by the collector."),
+            ],
+            processes: [
+                CompanionServerProcess(id: "a1f0c2d4e6b81735", name: "postgres", owner: "postgres", container: "orders-db", cpuText: "118%", memoryText: "6.2 GB", swapText: "120 MB", isTamed: false),
+                CompanionServerProcess(id: "b2e1d3c5f7a92846", name: "node", owner: "app", container: "storefront-api", cpuText: "64%", memoryText: "1.8 GB", isTamed: false),
+                CompanionServerProcess(id: "c3d2e4b6a8f03957", name: "ffmpeg", owner: "media", cpuText: "42%", memoryText: "880 MB", isTamed: true),
+                CompanionServerProcess(id: "d4c3f5a7b9e14a68", name: "dockerd", owner: "root", cpuText: "6%", memoryText: "512 MB", isTamed: false, protectionReason: "Host infrastructure"),
+            ],
+            processCount: 214,
+            workloads: [
+                CompanionServerWorkload(id: "e5b4a6f8c0d25b79", name: "Storefront API", type: "application", status: "running", isHealthy: true, cpuText: "64%", memoryText: "1.8 GB"),
+                CompanionServerWorkload(id: "f6a5b7c9d1e36c80", name: "Orders Database", type: "database", status: "running", isHealthy: true, cpuText: "118%", memoryText: "6.2 GB"),
+                CompanionServerWorkload(id: "07f6c8dae2f47d91", name: "Nightly Reports", type: "service", status: "exited", isHealthy: false),
+            ]
+        )
+    }
 
     /// A healthy Maintain whose last full run ended `endedSecondsAgo`
     /// before `now`, for the sample snapshot and Demo Mode.

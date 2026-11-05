@@ -771,6 +771,19 @@ struct CompanionSnapshot: Codable, Equatable {
     /// Maintain status.  Nil from an older Mac, and on a Mac that has
     /// never run it.
     var maintain: CompanionMaintainStatus? = nil
+    /// Whether the owner allows the phone to see server status.  Nil from an
+    /// older Mac.  Says nothing about the server itself, so it travels in the
+    /// plain snapshot and the phone can say why the block is missing.
+    var remoteServerStatusAllowed: Bool? = nil
+    /// The server's readings.  Nil from an older Mac, while the opt-in is off,
+    /// and always in the plain snapshot the shared code reads.
+    var server: CompanionServerStatus? = nil
+    /// Flagged Issues, most urgent first.  Nil from an older Mac.  Server rows
+    /// are here only when `server` is.
+    var flaggedIssues: [CompanionFlaggedIssue]? = nil
+    /// Whether `flaggedIssues` looked at the server.  False means the list is
+    /// the Mac's alone, so an empty list does not mean all is calm.
+    var flaggedIssuesCoverServer: Bool? = nil
 }
 
 struct CompanionPulse: Codable, Equatable {
@@ -923,6 +936,306 @@ struct CompanionNetworkRow: Codable, Equatable, Identifiable {
     var establishedCount: Int
     var uniqueRemoteHosts: Int
     var sampleRemoteHosts: [String]
+}
+
+// MARK: - Server status
+
+/// Which of the phone's server states a reading is in.  The wire carries a
+/// plain string, so a state a later Mac adds cannot stop this phone decoding
+/// the whole snapshot.
+enum CompanionServerState: String, Equatable, Sendable {
+    /// The Mac has no server set up.  Nothing is wrong and nothing can be read.
+    case notConfigured
+    /// A server is set up and the Mac has not read it yet.
+    case noReading
+    /// The last read failed.  Earlier readings may still be in the block.
+    case error
+    /// The server's own reading is too old to be taken as the state of it now.
+    case stale
+    case ok
+}
+
+/// The server's readings, as the Mac last fetched them.
+///
+/// Process names, directories, mount notes and tool reasons name server
+/// internals, so this block goes only to a phone's own token on the local
+/// network or Tailscale while the owner has allowed it, and never into the
+/// plain snapshot the shared pairing code reads.
+///
+/// A number the Mac does not have is nil and the phone draws `dash`, because a
+/// zero would read as a measurement.  Everything is optional so an older or
+/// newer Mac still decodes.
+struct CompanionServerStatus: Codable, Equatable, Sendable {
+    /// What the phone draws in place of a missing number.
+    static let dash = "—"
+    /// How old the server's own reading can be and still count as current.
+    /// The same 15 minutes the Mac's pressure and storage readings allow.
+    static let staleAfter: TimeInterval = 900
+    /// How far ahead of this clock a reading can claim to be.  Further than
+    /// this is a wrong clock on one side, not a fresh reading.
+    static let futureTolerance: TimeInterval = 300
+
+    var state: String
+    var host: String? = nil
+    /// When the server wrote the reading.
+    var generatedAt: Date? = nil
+    /// When the Mac last fetched it.
+    var fetchedAt: Date? = nil
+    /// The last read's failure, as one short line.  Can name the host.
+    var errorText: String? = nil
+    var headline: CompanionServerHeadline? = nil
+    var cpu: CompanionServerCPU? = nil
+    var memory: CompanionServerMeter? = nil
+    var swap: CompanionServerMeter? = nil
+    var pressure: CompanionServerPressure? = nil
+    var devices: [CompanionServerDevice]? = nil
+    var databases: [CompanionServerSizeRow]? = nil
+    var directories: [CompanionServerSizeRow]? = nil
+    var storageDiagnostics: CompanionServerStorageDiagnostics? = nil
+    var tools: [CompanionServerTool]? = nil
+    /// The busiest processes.  `processCount` is how many the server listed,
+    /// which can be more than travel here.
+    var processes: [CompanionServerProcess]? = nil
+    var processCount: Int? = nil
+    var workloads: [CompanionServerWorkload]? = nil
+
+    /// Whether anything in the block came from a reading.
+    var hasReading: Bool { generatedAt != nil || cpu != nil || memory != nil || devices?.isEmpty == false }
+
+    /// The state to show now.  The Mac stamps a state when it publishes, and
+    /// the phone keeps showing that snapshot if the Mac then goes quiet, so a
+    /// reading that was current when it was sent still ages here.
+    func resolvedState(now: Date = Date()) -> CompanionServerState {
+        switch CompanionServerState(rawValue: state) {
+        case .notConfigured: return .notConfigured
+        case .noReading, nil: return .noReading
+        case .error: return .error
+        case .stale, .ok: return Self.readingState(generatedAt: generatedAt, now: now)
+        }
+    }
+
+    /// A reading with no usable time cannot be called current.
+    static func readingState(generatedAt: Date?, now: Date) -> CompanionServerState {
+        guard let generatedAt else { return .stale }
+        let age = now.timeIntervalSince(generatedAt)
+        return age > staleAfter || age < -futureTolerance ? .stale : .ok
+    }
+}
+
+/// The one-line answer to "is the server all right?".
+struct CompanionServerHeadline: Codable, Equatable, Sendable {
+    var host: String
+    var cpuText: String? = nil
+    var cpuSeverity: String? = nil
+    var memoryText: String? = nil
+    var memorySeverity: String? = nil
+    var diskText: String? = nil
+    var diskSeverity: String? = nil
+    var extraDiskText: String? = nil
+    var extraDiskSeverity: String? = nil
+}
+
+struct CompanionServerCPU: Codable, Equatable, Sendable {
+    var percent: Double? = nil
+    var percentText: String? = nil
+    var severity: String? = nil
+    var cores: Int? = nil
+    var loadText: String? = nil
+    /// One mean per minute, oldest first, 0 to 100.
+    var history: [Double]? = nil
+}
+
+/// Memory or swap: how full it is and how much that is.
+struct CompanionServerMeter: Codable, Equatable, Sendable {
+    var percent: Double? = nil
+    var percentText: String? = nil
+    var detail: String? = nil
+    var severity: String? = nil
+}
+
+/// Paging and stalls, measured over a short window on the server.
+struct CompanionServerPressure: Codable, Equatable, Sendable {
+    var sampledAt: Date? = nil
+    var durationSeconds: Double? = nil
+    var swapInText: String? = nil
+    var swapOutText: String? = nil
+    var memoryStallsText: String? = nil
+
+    /// The same rule as the Mac's: a measured window of up to 10 seconds,
+    /// taken within the last 15 minutes.
+    func isFresh(now: Date = Date()) -> Bool {
+        guard let sampledAt, let durationSeconds, durationSeconds > 0, durationSeconds <= 10 else { return false }
+        let age = now.timeIntervalSince(sampledAt)
+        return age >= -5 && age <= CompanionServerStatus.staleAfter
+    }
+}
+
+struct CompanionServerDevice: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var mount: String? = nil
+    var freeText: String? = nil
+    var totalText: String? = nil
+    /// Nil when the server does not say how large the device is.
+    var usedPercent: Double? = nil
+    var usedText: String? = nil
+    var severity: String? = nil
+    var note: String? = nil
+}
+
+/// A database or a directory, with how much it changed over the last day.
+struct CompanionServerSizeRow: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+    var bytesText: String? = nil
+    /// Nil until the Mac has a day of history to compare with.
+    var changeText: String? = nil
+    var changePercent: Double? = nil
+}
+
+struct CompanionServerStorageDiagnostics: Codable, Equatable, Sendable {
+    var sampledAt: Date? = nil
+    var durationSeconds: Double? = nil
+    /// False when Docker's totals could not be read: the rows are then absent,
+    /// not zero.
+    var categoriesComplete: Bool? = nil
+    var categories: [CompanionServerStorageCategory]? = nil
+    var usesContainerd: Bool? = nil
+    /// The containerd blob reading, or why there is none.
+    var blobText: String? = nil
+
+    /// The same rule as the Mac's: a window of up to 15 seconds, taken within
+    /// the last 15 minutes.
+    func isFresh(now: Date = Date()) -> Bool {
+        guard let sampledAt, let durationSeconds, durationSeconds >= 0, durationSeconds <= 15 else { return false }
+        let age = now.timeIntervalSince(sampledAt)
+        return age >= -5 && age <= CompanionServerStatus.staleAfter
+    }
+}
+
+struct CompanionServerStorageCategory: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var title: String
+    var sizeText: String? = nil
+    var reclaimableText: String? = nil
+}
+
+struct CompanionServerTool: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+    /// `running`, `stopped`, `absent` or `unknown`.
+    var state: String
+    var stateText: String
+    var count: Int? = nil
+    /// Why the state is what it is.  Names server internals.
+    var reason: String? = nil
+}
+
+/// One server process.  `id` is opaque: it carries no pid, no boot id and no
+/// start time, and only the Mac can turn it back into a process.
+struct CompanionServerProcess: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+    var owner: String? = nil
+    var container: String? = nil
+    var cpuText: String? = nil
+    var memoryText: String? = nil
+    var swapText: String? = nil
+    var isTamed: Bool? = nil
+    var protectionReason: String? = nil
+}
+
+/// One Coolify workload.  `id` is opaque, like a process's.
+struct CompanionServerWorkload: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+    var type: String? = nil
+    var status: String? = nil
+    var isHealthy: Bool? = nil
+    var cpuText: String? = nil
+    var memoryText: String? = nil
+}
+
+/// One Flagged Issues row.  A server row's text can name the host, a service
+/// or a raw connection error, so a server row travels only with the server
+/// block.  A Mac row names only what the plain snapshot's rows and drives name.
+struct CompanionFlaggedIssue: Codable, Equatable, Identifiable, Sendable {
+    static let serverHost = "Server"
+
+    var id: String
+    var title: String
+    var message: String
+    /// 0 is most urgent, 4 is informational.
+    var priority: Int
+    var priorityText: String
+    /// `Mac` or `Server`.
+    var host: String
+    var category: String? = nil
+
+    var isServer: Bool { host == Self.serverHost }
+}
+
+/// What the phone can say about server status on this link.
+enum CompanionServerAccess: Equatable, Sendable {
+    /// The Mac predates server status.
+    case macTooOld
+    /// The owner has not turned on Allow iPhone to See Server Status.
+    case optInOff
+    /// It is on, but this link reads the plain snapshot: the shared pairing
+    /// code, or an address outside the local network and Tailscale.
+    case notOnThisLink
+    case available(CompanionServerStatus)
+}
+
+/// What the top of the phone's issues section says.
+enum CompanionFlaggedSummary: Equatable, Sendable {
+    /// An older Mac sends no issues.  Silence, not "calm".
+    case unavailable
+    /// Issues to list.  `serverIncluded` says whether the server was looked at.
+    case issues(count: Int, serverIncluded: Bool)
+    /// Nothing on the Mac and nothing on a server with a current reading, or
+    /// no server at all.  The only case that may say All Systems Calm.
+    case allCalm
+    /// Nothing on the Mac, and server issues are withheld on this link.
+    case macCalmServerNotShown
+    /// Nothing on the Mac, and the server has no current reading to judge.
+    case macCalmServerUnknown
+}
+
+extension CompanionSnapshot {
+    var serverAccess: CompanionServerAccess {
+        if let server { return .available(server) }
+        switch remoteServerStatusAllowed {
+        case nil: return .macTooOld
+        case false?: return .optInOff
+        case true?: return .notOnThisLink
+        }
+    }
+
+    /// An empty list only means calm when the server was looked at and its
+    /// reading is current, or when there is no server to look at.
+    func flaggedSummary(now: Date = Date()) -> CompanionFlaggedSummary {
+        guard let flaggedIssues else { return .unavailable }
+        let included = flaggedIssuesCoverServer == true && server != nil
+        if !flaggedIssues.isEmpty {
+            return .issues(count: flaggedIssues.count, serverIncluded: included)
+        }
+        guard included, let server else { return .macCalmServerNotShown }
+        switch server.resolvedState(now: now) {
+        case .ok, .notConfigured: return .allCalm
+        case .noReading, .stale, .error: return .macCalmServerUnknown
+        }
+    }
+
+    /// This snapshot with everything that names server internals taken out,
+    /// for anything that outlives the screen: the widget's shared container.
+    func withoutServerDetail() -> CompanionSnapshot {
+        var copy = self
+        copy.server = nil
+        copy.flaggedIssues = flaggedIssues?.filter { !$0.isServer }
+        copy.flaggedIssuesCoverServer = flaggedIssues == nil ? nil : false
+        return copy
+    }
 }
 
 enum CompanionJSON {
