@@ -972,7 +972,7 @@ final class CompanionMaintainCopyTests: XCTestCase {
     /// after a sentence inside a string literal.
     func testThePhoneScreenWritesItsGapsAsNonBreakingSpaces() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        for name in ["ios/Sources/CompanionMaintainView.swift", "Sources/UI/MaintainView.swift"] {
+        for name in ["ios/Sources/CompanionMaintainView.swift", "ios/Sources/CompanionServerView.swift", "Sources/UI/MaintainView.swift"] {
             let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
             let code = source.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for line in code {

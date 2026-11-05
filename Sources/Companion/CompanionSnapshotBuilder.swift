@@ -227,7 +227,7 @@ enum CompanionSnapshotBuilder {
         }
     }
 
-    private static func severityName(_ severity: Severity) -> String {
+    static func severityName(_ severity: Severity) -> String {
         switch severity {
         case .calm: return "calm"
         case .elevated: return "elevated"
