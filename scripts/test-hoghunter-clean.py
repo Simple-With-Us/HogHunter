@@ -1863,10 +1863,12 @@ def test_a_failed_lsof_listing_keeps_a_hoghunter_checkout(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
-def _hoghunter_lane_candidate(hh, home):
+def _hoghunter_lane_candidate(hh, home, subfolder=None):
     """One lane the scan accepted, and the root it lives in."""
     root = _hoghunter_debug_builds(home)
     shutil.rmtree(root / "lane-two-bbbb")
+    if subfolder:
+        (root / "lane-one-aaaa" / subfolder).mkdir()
     with mock.patch.object(hh, "HOME", home), \
          mock.patch.object(hh, "proc_count", return_value=0), \
          mock.patch.object(hh, "proc_count_exact", return_value=0), \
@@ -1931,13 +1933,67 @@ def test_a_hoghunter_checkout_used_after_the_scan_is_kept(hh):
 def test_a_keep_marker_added_after_the_scan_keeps_a_hoghunter_checkout(hh):
     home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
     try:
-        candidate, lane = _hoghunter_lane_candidate(hh, home)
-        (lane / "Build").mkdir()
+        # The subfolder exists before the scan, so the marker leaves the lane
+        # folder's own mtime alone and only the recheck's walk can find it.
+        candidate, lane = _hoghunter_lane_candidate(hh, home, subfolder="Build")
         (lane / "Build" / hh.KEEP_SENTINEL).write_text("")
         _apply_with_open_gates(hh, candidate)
-        assert candidate.refused, candidate
+        assert candidate.refused == "holds a keep marker, or the look failed", candidate
         assert not candidate.applied
         assert (lane / "Build" / hh.KEEP_SENTINEL).exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_marker_walk_that_fails_at_the_recheck_keeps_a_hoghunter_checkout(hh):
+    """The candidate says apply_delete need not walk, so this walk is the only one."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        with mock.patch.object(hh, "holds_keep_sentinel", return_value=hh.MarkerVerdict(False, False)):
+            _apply_with_open_gates(hh, candidate)
+        assert candidate.refused == "holds a keep marker, or the look failed", candidate
+        assert not candidate.applied
+        assert (lane / "blob.bin").exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_marker_walk_that_fails_at_the_scan_keeps_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "holds_keep_sentinel", return_value=hh.MarkerVerdict(False, False)), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_hoghunter_checkout_loop_stops_at_the_scan_deadline(hh):
+    """Each lane pays for a full-tree walk, so the loop has to consult the deadline."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        walk = mock.Mock(return_value=hh.MarkerVerdict(False, True))
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "holds_keep_sentinel", walk), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3), \
+             mock.patch.object(hh, "_SCAN_DEADLINE", 1.0), \
+             mock.patch.object(hh, "_SCAN_BUDGET_EXHAUSTED", False), \
+             mock.patch.object(hh, "scan_budget_left", return_value=0.0):
+            assert hh.rule_xcode_artifacts() == []
+            assert hh._SCAN_BUDGET_EXHAUSTED is True, "a truncated scan has to say so"
+        walk.assert_not_called()
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

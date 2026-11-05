@@ -8,9 +8,9 @@
 #   --no-launch  Install but do not open Hog Hunter afterward.
 #   --dry-run    Build only.  Print what would happen next.  Never sign,
 #                quit the running app, copy to the destination, or launch.
-#   --dest PATH  Directory to install HogHunter.app into.  Default: if
-#                /Applications/HogHunter.app already exists, install there;
-#                otherwise install to ~/Applications.
+#   --dest PATH  Directory to install Hog Hunter.app into.  Default: if
+#                /Applications holds a copy, in any folder or left aside by an
+#                interrupted install, install there; otherwise ~/Applications.
 #
 # Code identity.  macOS keeps a privacy grant (Full Disk Access, removable
 # volumes, and the rest) against the app's designated requirement.  A Developer
@@ -20,8 +20,9 @@
 # refuses to put anything but the production identity in a production location,
 # and refuses to leave two copies there.
 #
-# Exit codes: 3 no usable identity, 4 a second copy would exist, 5 signing failed,
-# 6 the new copy could not be put in place or failed its check.
+# Exit codes: 1 bad arguments or a failed build, 3 no usable identity, 4 a second
+# copy would exist, 5 signing failed, 6 the new copy could not be put in place or
+# failed its check.
 set -euo pipefail
 
 ADHOC=0
@@ -35,7 +36,9 @@ while [[ $# -gt 0 ]]; do
     --no-launch) NO_LAUNCH=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --dest)
-      if [[ $# -lt 2 ]]; then
+      # An empty value is refused too: an unset variable in a caller must not turn a
+      # scoped install into a production one.
+      if [[ $# -lt 2 || -z "$2" ]]; then
         echo "--dest requires a PATH argument" >&2
         exit 1
       fi
@@ -64,12 +67,24 @@ APP_PATH="build/Build/Products/Release/HogHunter.app"
 SYSTEM_APPLICATIONS="/Applications"
 USER_APPLICATIONS="$HOME/Applications"
 
+# Every copy of this app under a production folder, one path per line: at the top,
+# in a subfolder, or set aside in a .hoghunter-* folder by an interrupted install.
+# Bundles are pruned, so the walk stays small and never reads inside one.
+copies_under() {
+  /usr/bin/find -H "$1" \( -type d -o -type l \) -iname '*.app' -prune \
+    \( -iname 'hog hunter.app' -o -iname 'hoghunter.app' \) -print 2>/dev/null || true
+}
+
 if [[ -n "$DEST_ARG" ]]; then
   DEST_DIR="$DEST_ARG"
   echo "Destination: $DEST_DIR (explicit --dest)."
 elif [[ -d "$SYSTEM_APPLICATIONS/Hog Hunter.app" || -d "$SYSTEM_APPLICATIONS/HogHunter.app" ]]; then
   DEST_DIR="$SYSTEM_APPLICATIONS"
   echo "Destination: $DEST_DIR (found an existing install there)."
+elif [[ -n "$(copies_under "$SYSTEM_APPLICATIONS")" ]]; then
+  # The app's only copy may be the hidden one, so the install stays where it was.
+  DEST_DIR="$SYSTEM_APPLICATIONS"
+  echo "Destination: $DEST_DIR (found a copy of this app there that is not at the top of the folder)."
 else
   DEST_DIR="$USER_APPLICATIONS"
   echo "Destination: $DEST_DIR (default; no existing install found in $SYSTEM_APPLICATIONS)."
@@ -175,13 +190,19 @@ fi
 # Names the certificate in full, Team ID included, so a second team's identity in
 # the keychain can never be picked up by a partial match.
 SIGNING_IDENTITY=""
+WOULD_REFUSE=0
 if [[ "$ADHOC" -ne 1 ]]; then
   SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
     | sed -n "s/^.*\"\(Developer ID Application:[^\"]*($EXPECTED_TEAM_ID)\)\".*$/\1/p" | head -n 1 || true)"
-  if [[ -z "$SIGNING_IDENTITY" && "$DRY_RUN" -ne 1 ]]; then
-    echo "error: no Developer ID Application identity for team $EXPECTED_TEAM_ID in the keychain." >&2
-    echo "Refusing to install: without it the app would lose every permission the owner has granted." >&2
-    exit 3
+  if [[ -z "$SIGNING_IDENTITY" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "Warning: a real install would refuse, because there is no Developer ID Application identity for team $EXPECTED_TEAM_ID in the keychain."
+      WOULD_REFUSE=1
+    else
+      echo "error: no Developer ID Application identity for team $EXPECTED_TEAM_ID in the keychain." >&2
+      echo "Refusing to install: without it the app would lose every permission the owner has granted." >&2
+      exit 3
+    fi
   fi
 fi
 
@@ -189,22 +210,27 @@ fi
 # LaunchServices may open the stale one.
 if [[ "$ADHOC" -ne 1 ]]; then
   for candidate_dir in "$SYSTEM_APPLICATIONS" "$USER_APPLICATIONS"; do
-    # By identity, so `--dest ~/Applications/` or `~/applications` is an update in
-    # place, not a second copy.
-    if same_dir "$candidate_dir" "$DEST_DIR"; then
-      continue
-    fi
-    for other in "$candidate_dir/Hog Hunter.app" "$candidate_dir/HogHunter.app"; do
-      if [[ -d "$other" ]]; then
-        if [[ "$DRY_RUN" -eq 1 ]]; then
-          echo "Warning: a real install would refuse, because a copy already exists at $other."
-        else
-          echo "error: refusing to create a second copy; one already exists at $other." >&2
-          echo "Remove it, or pass --dest with its folder to update it in place." >&2
-          exit 4
-        fi
+    while IFS= read -r other; do
+      # What an interrupted install set aside belongs to the folder it sits in, and
+      # a later step of this run retires it when that folder is the destination.
+      copy_folder="$(dirname "$other")"
+      case "$(basename "$copy_folder")" in
+        .hoghunter-previous.*|.hoghunter-install.*) copy_folder="$(dirname "$copy_folder")" ;;
+      esac
+      # By identity, so `--dest ~/Applications/` or `~/applications` is an update in
+      # place, not a second copy.
+      if same_dir "$copy_folder" "$DEST_DIR"; then
+        continue
       fi
-    done
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "Warning: a real install would refuse, because a copy already exists at $other."
+        WOULD_REFUSE=1
+      else
+        echo "error: refusing to create a second copy; one already exists at $other." >&2
+        echo "Remove it, or pass --dest with its folder to update it in place." >&2
+        exit 4
+      fi
+    done < <(copies_under "$candidate_dir")
   done
 fi
 
@@ -318,7 +344,15 @@ fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "Dry run: built $APP_PATH."
-  echo "Would sign it, quit the running Hog Hunter, install to $INSTALLED_PATH, and launch it.  Doing none of that."
+  if [[ "$WOULD_REFUSE" -eq 1 ]]; then
+    echo "A real install would stop at the refusal above and change nothing.  Doing none of it."
+  elif [[ "$ADHOC" -eq 1 ]]; then
+    echo "Would sign it ad hoc, leave the running Hog Hunter alone, stop only a copy running from $DEST_DIR, install to $INSTALLED_PATH, and not launch it.  Doing none of that."
+  elif [[ "$NO_LAUNCH" -eq 1 ]]; then
+    echo "Would sign it with Developer ID, quit the running Hog Hunter, install to $INSTALLED_PATH, and leave it closed.  Doing none of that."
+  else
+    echo "Would sign it with Developer ID, quit the running Hog Hunter, install to $INSTALLED_PATH, and launch it.  Doing none of that."
+  fi
   echo "Hog Hunter $(version_of "$APP_PATH") (dry run, not installed)."
   exit 0
 fi
@@ -377,16 +411,21 @@ if [[ "$DEVELOPER_ID_AVAILABLE" -eq 1 ]]; then
     echo "error: Developer ID signing failed or timed out.  Nothing was installed." >&2
     exit 5
   fi
-else
-  sign_adhoc "--adhoc requested"
+elif ! sign_adhoc "--adhoc requested"; then
+  echo "error: ad hoc signing failed.  Nothing was installed." >&2
+  exit 5
 fi
 
 echo "Verifying the signature."
-codesign --verify --deep --strict "$APP_PATH"
+if ! codesign --verify --deep --strict "$APP_PATH"; then
+  echo "error: the signature did not verify.  Nothing was installed." >&2
+  exit 5
+fi
 echo "Entitlements (get-task-allow should be absent):"
 codesign -d --entitlements - "$APP_PATH"
-if [[ "$ADHOC" -ne 1 ]]; then
-  "$REPO_ROOT/scripts/check-mac-identity.sh" --identity-only "$APP_PATH"
+if [[ "$ADHOC" -ne 1 ]] && ! "$REPO_ROOT/scripts/check-mac-identity.sh" --identity-only "$APP_PATH"; then
+  echo "error: the build failed its identity check.  Nothing was installed." >&2
+  exit 6
 fi
 
 STAGE_DIR=""
@@ -395,6 +434,9 @@ BACKUP_DIR=""
 SWAP_COMMITTED=0
 SWAP_ABORTED=0
 QUIT_FOR_INSTALL=0
+MOVING_NEW_COPY=0
+LAUNCH_ATTEMPTED=0
+FINAL_STATUS=0
 
 # Puts the previous copy back.  It sits outside STAGE_DIR, so nothing but this moves
 # it, and whatever is at the installed path while it is aside is the new copy.
@@ -405,48 +447,72 @@ restore_previous() {
   mv "$BACKUP_DIR/Hog Hunter.app" "$INSTALLED_PATH" || return 1
 }
 
-# Says what is actually on disk afterward, naming the backup when it is still there.
+# What is left when there is no previous copy to put back.
+nothing_to_restore_text() {
+  if [[ -d "$LEGACY_PATH" ]]; then
+    echo "Nothing is installed at $INSTALLED_PATH.  The older copy at $LEGACY_PATH is still there."
+  else
+    echo "There was no previous copy to restore, so nothing is installed at $INSTALLED_PATH."
+  fi
+}
+
+# Puts things back first and reports after, so a reader that has gone away cannot
+# stop the restore: a write to a dead pipe or a closed stderr fails here and nothing
+# more.  The report says what is actually on disk, naming the backup if it is there.
 abort_swap() {
   local previous="$BACKUP_DIR/Hog Hunter.app"
-  trap '' INT TERM HUP
+  local outcome
+  trap '' INT TERM HUP PIPE
+  set +e
   SWAP_ABORTED=1
-  echo "error: $1" >&2
   if [[ -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
     if restore_previous; then
-      rmdir "$BACKUP_DIR" 2>/dev/null || true
-      echo "The previous copy was restored to $INSTALLED_PATH." >&2
+      rmdir "$BACKUP_DIR" 2>/dev/null
+      outcome="The previous copy was restored to $INSTALLED_PATH."
     else
-      echo "error: could not restore the previous copy.  It is at $previous.  Move it back to $INSTALLED_PATH by hand." >&2
+      outcome="error: could not restore the previous copy.  It is at $previous.  Move it back to $INSTALLED_PATH by hand."
     fi
-  elif [[ -e "$INSTALLED_PATH" && ! -e "$STAGED_PATH" ]]; then
-    # The new copy did move, and it failed.  There is no previous copy to go back to.
+  elif [[ "$MOVING_NEW_COPY" -eq 1 && -e "$INSTALLED_PATH" && ! -e "$STAGED_PATH" ]]; then
+    # The new copy did move, and it never passed.  There is no previous copy to go back to.
     if mv "$INSTALLED_PATH" "$STAGE_DIR/rejected.app"; then
-      echo "There was no previous copy to restore, so nothing is installed at $INSTALLED_PATH." >&2
+      outcome="$(nothing_to_restore_text)"
     else
-      echo "error: the copy that failed is still at $INSTALLED_PATH, and there was no previous copy to restore." >&2
+      outcome="error: the copy that failed is still at $INSTALLED_PATH, and there was no previous copy to restore."
     fi
+  elif [[ -e "$INSTALLED_PATH" || -L "$INSTALLED_PATH" ]]; then
+    outcome="The copy at $INSTALLED_PATH was not changed."
   else
-    echo "There was no previous copy to restore, so nothing is installed at $INSTALLED_PATH." >&2
+    outcome="$(nothing_to_restore_text)"
   fi
+  echo "error: $1" >&2
+  echo "$outcome" >&2
   if [[ "$QUIT_FOR_INSTALL" -eq 1 ]]; then
     echo "This install quit the running Hog Hunter and has not reopened it." >&2
   fi
 }
 
-# Every way out of the swap ends here, a signal included.  Signals are ignored for
-# the length of it, so one cannot land between putting the app back and clearing up.
+# Every way out from here on ends in this trap, a signal included.  Signals are
+# ignored for the length of it, so one cannot land between putting the app back and
+# clearing up, and it reports nothing until the files are settled.
 finish_install() {
   local status=$?
   local previous="$BACKUP_DIR/Hog Hunter.app"
-  trap '' INT TERM HUP
+  trap '' INT TERM HUP PIPE
+  set +e
   if [[ "$SWAP_COMMITTED" -eq 1 ]]; then
-    [[ -z "$BACKUP_DIR" ]] || rm -rf "$BACKUP_DIR" || true
-  elif [[ "$SWAP_ABORTED" -ne 1 && -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
-    abort_swap "the install stopped before the new copy passed its check."
+    [[ -z "$BACKUP_DIR" ]] || rm -rf "$BACKUP_DIR"
+    if [[ "$status" -ne 0 && "$QUIT_FOR_INSTALL" -eq 1 && "$LAUNCH_ATTEMPTED" -ne 1 ]]; then
+      echo "The new copy is installed at $INSTALLED_PATH.  This install quit the running Hog Hunter and has not reopened it." >&2
+    fi
+  elif [[ "$SWAP_ABORTED" -ne 1 ]]; then
+    if [[ "$QUIT_FOR_INSTALL" -eq 1 || "$MOVING_NEW_COPY" -eq 1 ]] \
+      || [[ -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
+      abort_swap "the install stopped before the new copy passed its check."
+    fi
   fi
   # Only ever an empty folder: rmdir refuses one that still holds the backup.
-  [[ -z "$BACKUP_DIR" ]] || rmdir "$BACKUP_DIR" 2>/dev/null || true
-  [[ -z "$STAGE_DIR" ]] || rm -rf "$STAGE_DIR" || true
+  [[ -z "$BACKUP_DIR" ]] || rmdir "$BACKUP_DIR" 2>/dev/null
+  [[ -z "$STAGE_DIR" ]] || rm -rf "$STAGE_DIR"
   exit "$status"
 }
 
@@ -486,7 +552,10 @@ stop_copy_running_from_destination() {
 # Staged beside the destination and checked before the running app is touched.
 # ditto merges into an existing bundle, so installing straight over one can leave
 # files the signature does not cover, and a broken seal is a broken identity.
-mkdir -p "$DEST_DIR"
+if ! mkdir -p "$DEST_DIR"; then
+  echo "error: could not create $DEST_DIR." >&2
+  exit 6
+fi
 # Asked again now the folder exists and minutes have passed: this answer is exact.
 if [[ "$ADHOC" -eq 1 ]] && is_production_dir "$DEST_DIR"; then
   echo "error: refusing an ad hoc install to $DEST_DIR, which is now a production location." >&2
@@ -496,12 +565,23 @@ trap finish_install EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-STAGE_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-install.XXXXXX")"
+# A reader that goes away must not decide how this ends, and errexit stops here: from
+# now on a failed line could strand the app closed or aside, so each step that
+# matters is checked by hand and takes its own way out.
+trap '' PIPE
+set +e
+
+stage_failed() {
+  echo "error: $1  The running Hog Hunter was not touched." >&2
+  exit 6
+}
+
+STAGE_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-install.XXXXXX")" || stage_failed "could not create a staging folder in $DEST_DIR."
 STAGED_PATH="$STAGE_DIR/Hog Hunter.app"
-ditto "$APP_PATH" "$STAGED_PATH"
-xattr -cr "$STAGED_PATH" || true
+ditto "$APP_PATH" "$STAGED_PATH" || stage_failed "could not copy the new Hog Hunter beside the destination."
+xattr -cr "$STAGED_PATH"
 if [[ "$ADHOC" -ne 1 ]]; then
-  "$REPO_ROOT/scripts/check-mac-identity.sh" "$STAGED_PATH"
+  "$REPO_ROOT/scripts/check-mac-identity.sh" "$STAGED_PATH" || stage_failed "the staged copy failed its check."
 fi
 
 if [[ "$ADHOC" -eq 1 ]]; then
@@ -511,7 +591,11 @@ if [[ "$ADHOC" -eq 1 ]]; then
   stop_copy_running_from_destination
 else
   echo "Quitting the running Hog Hunter, if any."
-  QUIT_FOR_INSTALL=1
+  # Status 1 is pgrep's plain "none".  Anything else cannot rule one out.
+  pgrep -x HogHunter >/dev/null 2>&1
+  if [[ $? -ne 1 ]]; then
+    QUIT_FOR_INSTALL=1
+  fi
   # Both names: an old copy is still called HogHunter on disk, and AppleScript
   # resolves the app by its installed display name.
   osascript -e 'tell application "Hog Hunter" to quit' >/dev/null 2>&1 || true
@@ -532,9 +616,17 @@ echo "Installing to $INSTALLED_PATH."
 # trap cannot delete it.  It is removed only once the new bundle is in place and
 # verified; a failed swap or an interruption puts it back.
 if [[ -e "$INSTALLED_PATH" || -L "$INSTALLED_PATH" ]]; then
-  BACKUP_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-previous.XXXXXX")"
-  mv "$INSTALLED_PATH" "$BACKUP_DIR/Hog Hunter.app"
+  if ! BACKUP_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-previous.XXXXXX")"; then
+    BACKUP_DIR=""
+    abort_swap "could not make a folder to hold the previous copy."
+    exit 6
+  fi
+  if ! mv "$INSTALLED_PATH" "$BACKUP_DIR/Hog Hunter.app"; then
+    abort_swap "could not move the previous copy aside."
+    exit 6
+  fi
 fi
+MOVING_NEW_COPY=1
 if ! mv "$STAGED_PATH" "$INSTALLED_PATH"; then
   abort_swap "could not move the new Hog Hunter into place."
   exit 6
@@ -544,8 +636,13 @@ if ! installed_copy_verifies; then
   exit 6
 fi
 SWAP_COMMITTED=1
+
+# The new copy has passed.  What remains is tidying and reopening the app, so a
+# failure here is a warning and never keeps a good install closed.
 if [[ -n "$BACKUP_DIR" ]]; then
-  rm -rf "$BACKUP_DIR"
+  if ! rm -rf "$BACKUP_DIR"; then
+    echo "Warning: could not remove the previous copy at $BACKUP_DIR.  The next finished install tries again." >&2
+  fi
   BACKUP_DIR=""
 fi
 
@@ -553,7 +650,9 @@ fi
 for leftover in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
   [[ -d "$leftover" && ! -L "$leftover" && "$leftover" != "$STAGE_DIR" ]] || continue
   echo "Removing what an interrupted install left at $leftover."
-  rm -rf "$leftover"
+  if ! rm -rf "$leftover"; then
+    echo "Warning: could not remove $leftover.  It may still hold a signed copy of this app.  The next finished install tries again." >&2
+  fi
 done
 
 # Retire the pre-rename copy, but only after confirming it is this app and not
@@ -563,7 +662,9 @@ if [[ -d "$LEGACY_PATH" && "$LEGACY_PATH" != "$INSTALLED_PATH" ]]; then
   new_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INSTALLED_PATH/Contents/Info.plist" 2>/dev/null || echo "")
   if [[ -n "$legacy_id" && "$legacy_id" == "$new_id" ]]; then
     echo "Removing the pre-rename copy at $LEGACY_PATH (same bundle id)."
-    rm -rf "$LEGACY_PATH"
+    if ! rm -rf "$LEGACY_PATH"; then
+      echo "Warning: could not remove the pre-rename copy at $LEGACY_PATH." >&2
+    fi
   else
     echo "Warning: $LEGACY_PATH exists but its bundle id is not $new_id -- leaving it alone."
   fi
@@ -571,7 +672,11 @@ fi
 
 if [[ "$NO_LAUNCH" -eq 0 ]]; then
   echo "Launching Hog Hunter."
-  open "$INSTALLED_PATH"
+  LAUNCH_ATTEMPTED=1
+  if ! open "$INSTALLED_PATH"; then
+    echo "error: the new copy is installed, but it could not be opened.  Hog Hunter is not running." >&2
+    FINAL_STATUS=1
+  fi
 else
   echo "Skipping launch (--no-launch)."
 fi
@@ -583,3 +688,4 @@ for backup in "$DEST_DIR"/"Hog Hunter.app".* "$DEST_DIR"/HogHunter.app.*; do
 done
 
 echo "Installed Hog Hunter $(version_of "$INSTALLED_PATH") to $INSTALLED_PATH."
+exit "$FINAL_STATUS"

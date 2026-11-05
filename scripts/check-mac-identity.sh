@@ -59,4 +59,5 @@ if [[ "$CHECK_SEAL" -eq 1 ]]; then
   codesign --verify --deep --strict "$APP" >/dev/null 2>&1 || refuse "codesign --verify --deep --strict failed, so macOS would not honor its identity"
 fi
 
-echo "Identity ok: $EXPECTED_BUNDLE_ID, Team ID $EXPECTED_TEAM_ID, Developer ID."
+# Only a report.  A reader that has gone away does not change the verdict.
+echo "Identity ok: $EXPECTED_BUNDLE_ID, Team ID $EXPECTED_TEAM_ID, Developer ID." || true
