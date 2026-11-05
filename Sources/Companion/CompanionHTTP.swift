@@ -19,6 +19,8 @@ enum CompanionHTTP {
         settingsHandler: ((CompanionSettingsUpdateRequest) -> (status: Int, body: Data))? = nil,
         sampleHandler: ((CompanionProcessRequest) -> (status: Int, body: Data))? = nil,
         maintainHandler: ((_ kind: String) -> (status: Int, body: Data))? = nil,
+        maintainSettingsHandler: ((CompanionMaintainSettingsRequest) -> (status: Int, body: Data))? = nil,
+        cleanSettingsHandler: ((CompanionCleanSettingsRequest) -> (status: Int, body: Data))? = nil,
         serverControlGate: (() -> (status: Int, body: Data)?)? = nil,
         serverActionHandler: ((CompanionServerActionRequest) -> (status: Int, body: Data))? = nil,
         peerTrusted: Bool = true,
@@ -49,6 +51,8 @@ enum CompanionHTTP {
             || path == CompanionService.settingsPath
             || path == CompanionService.samplePath
             || path == CompanionService.maintainRunPath
+            || path == CompanionService.maintainSettingsPath
+            || path == CompanionService.cleanSettingsPath
             || CompanionHTTP.isServerControlPath(path) else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
@@ -299,6 +303,36 @@ enum CompanionHTTP {
                 return message(status: 400, reason: "Bad Request", body: serverActionRejectedBody(), type: "application/json; charset=utf-8")
             }
             let (code, resBody) = serverActionHandler(action)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.maintainSettingsPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let maintainSettingsHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Maintain Settings Not Configured".utf8))
+            }
+            // Everything the route takes is in the body.  A query is either a
+            // mistake or a second copy of a field.
+            guard !fullPath.contains("?"),
+                  let updateReq = try? JSONDecoder().decode(CompanionMaintainSettingsRequest.self, from: bodyData(of: request)),
+                  !updateReq.isEmpty else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The maintenance settings change could not be read, or was empty."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = maintainSettingsHandler(updateReq)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.cleanSettingsPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let cleanSettingsHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Clean Settings Not Configured".utf8))
+            }
+            guard !fullPath.contains("?"),
+                  let updateReq = try? JSONDecoder().decode(CompanionCleanSettingsRequest.self, from: bodyData(of: request)),
+                  !updateReq.isEmpty else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The cleaner settings change could not be read, or was empty."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = cleanSettingsHandler(updateReq)
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.maintainRunPath {
             guard method == "POST" else {
@@ -988,6 +1022,20 @@ enum CompanionHTTP {
         encoder.outputFormatting = [.sortedKeys]
         let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
         return jsonPostRequest(path: CompanionService.settingsPath, token: token, body: body, host: host)
+    }
+
+    static func maintainSettingsRequest(token: String, update: CompanionMaintainSettingsRequest, host: String? = nil) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
+        return jsonPostRequest(path: CompanionService.maintainSettingsPath, token: token, body: body, host: host)
+    }
+
+    static func cleanSettingsRequest(token: String, update: CompanionCleanSettingsRequest, host: String? = nil) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
+        return jsonPostRequest(path: CompanionService.cleanSettingsPath, token: token, body: body, host: host)
     }
 
     static func sampleRequest(token: String, rowId: String, host: String? = nil) -> Data {

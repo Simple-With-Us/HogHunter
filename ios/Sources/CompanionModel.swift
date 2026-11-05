@@ -179,6 +179,13 @@ final class CompanionModel {
     /// `controlError`: the maintain screen is pushed over the dashboard, and two
     /// alerts on one error cannot both present.
     var maintainError: String?
+    /// Why the last step or threshold change did not go through.  Its own
+    /// field, so the run alert and this one never fight for the screen.
+    var maintainSettingsError: String?
+    private(set) var maintainSettingsInFlight = 0
+    var isApplyingMaintainSettings: Bool { maintainSettingsInFlight > 0 }
+    private(set) var cleanSettingsInFlight = 0
+    var isApplyingCleanSettings: Bool { cleanSettingsInFlight > 0 }
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
 
@@ -724,6 +731,78 @@ final class CompanionModel {
         await refresh()
     }
 
+    /// Sends a step or threshold change to the Mac.  The Mac checks every
+    /// value and applies the change whole or not at all; a refusal lands in
+    /// `maintainSettingsError`.
+    func updateMaintainSettings(_ update: CompanionMaintainSettingsRequest) async {
+        maintainSettingsError = nil
+        if isDemoMode {
+            guard var maintain = snapshot?.maintain else { return }
+            for (id, enabled) in update.stepEnabled ?? [:] {
+                if let index = maintain.stepSettings?.firstIndex(where: { $0.stepId == id }) {
+                    maintain.stepSettings?[index].isEnabled = enabled
+                }
+            }
+            if let value = update.lowFreeGiB { maintain.tuning?.lowFreeGiB = value }
+            if let value = update.worktreeRetireMinDays { maintain.tuning?.worktreeRetireMinDays = value }
+            if let value = update.pm2LogsCapMB { maintain.tuning?.pm2LogsCapMB = value }
+            snapshot?.maintain = maintain
+            return
+        }
+        guard controlsReachable else {
+            maintainSettingsError = Self.controlNetworkNote
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            maintainSettingsError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        maintainSettingsInFlight += 1
+        defer { maintainSettingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerMaintainSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
+            if res.status != "ok" {
+                maintainSettingsError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            maintainSettingsError = Self.describe(error)
+        }
+        // The Mac saves the change just after it answers.
+        try? await Task.sleep(for: .milliseconds(600))
+        await refresh()
+    }
+
+    /// Sends the temp file minimum to the Mac.  A refusal lands in
+    /// `cleanerError`, inside the cleaner screen.
+    func updateTempFileMinimumHours(_ hours: Double) async {
+        cleanerError = nil
+        let update = CompanionCleanSettingsRequest(tempFileMinimumHours: hours)
+        if isDemoMode {
+            snapshot?.storage?.tempFileMinimumHours = hours
+            return
+        }
+        guard controlsReachable else {
+            cleanerError = Self.controlNetworkNote
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            cleanerError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        cleanSettingsInFlight += 1
+        defer { cleanSettingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerCleanSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
+            if res.status != "ok" {
+                cleanerError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            cleanerError = Self.describe(error)
+        }
+        try? await Task.sleep(for: .milliseconds(400))
+        await refresh()
+    }
+
     /// Demo mode only: shows clean progress on the dashboard without a Mac.
     func demoSetCleanProgress(_ progress: CompanionCleanProgress) {
         snapshot?.cleanProgress = progress
@@ -760,6 +839,7 @@ final class CompanionModel {
             if let value = update.appearance { settings.appearance = value }
             if let value = update.backgroundRefreshInterval { settings.backgroundRefreshInterval = value }
             if let value = update.menuBarLabelMode { settings.menuBarLabelMode = value }
+            if let value = update.launchesAtLogin { settings.launchesAtLogin = value }
             if let url = update.webhookURL {
                 settings.webhookConfigured = !url.isEmpty
                 settings.webhookHost = url.isEmpty ? nil : URL(string: url)?.host
@@ -1591,7 +1671,15 @@ final class CompanionModel {
             excludedPaths: [
                 "/Users/jay/Code/HogHunter",
                 "/Users/jay/Documents/CriticalArchive"
-            ]
+            ],
+            categoryTotals: [
+                CompanionStorageCategoryTotal(id: "applicationSupport", title: "Application Support", bytes: 18_400_000_000, text: "18.4 GB"),
+                CompanionStorageCategoryTotal(id: "bundle", title: "App bundle", bytes: 12_100_000_000, text: "12.1 GB"),
+                CompanionStorageCategoryTotal(id: "caches", title: "Caches", bytes: 6_300_000_000, text: "6.3 GB"),
+                CompanionStorageCategoryTotal(id: "containers", title: "Containers", bytes: 3_900_000_000, text: "3.9 GB"),
+                CompanionStorageCategoryTotal(id: "logs", title: "Logs", bytes: 820_000_000, text: "820 MB"),
+            ],
+            tempFileMinimumHours: 72
         ),
         network: [
             CompanionNetworkRow(
@@ -1638,7 +1726,8 @@ final class CompanionModel {
             webhookConfigured: true,
             webhookHost: "hooks.example.com",
             webhookStatus: "Delivered (200) at 9:41:07 AM",
-            notificationsDenied: false
+            notificationsDenied: false,
+            launchesAtLogin: true
         ),
         remoteMaintainAllowed: true,
         // Relative to launch, so the sample reads "3 hours ago", not a year ago.
@@ -1770,7 +1859,21 @@ final class CompanionModel {
                 CompanionMaintainStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
             ],
             recentRuns: sampleRecentRuns(ended: ended),
-            watch: sampleWatch(now: now)
+            watch: sampleWatch(now: now),
+            stepSettings: [
+                CompanionMaintainStepSetting(stepId: "resource_sample", title: "Check Disk and Memory", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "hoghunter_reclaim", title: "Hog Hunter Disk Reclaim", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "janitor_worktree_retire", title: "Retire Old Merged Git Worktrees", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "janitor_cache_reclaim", title: "Reclaim Caches Under Low Disk", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "pm2_logs", title: "Cap Oversized PM2 Logs", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "npm_cache", title: "Trim npm Download Cache", isEnabled: false),
+                CompanionMaintainStepSetting(stepId: "coolify_remote", title: "Remote Server Maintenance", isEnabled: false, isRemoteServer: true),
+            ],
+            tuning: CompanionMaintainTuning(lowFreeGiB: 80, worktreeRetireMinDays: 7, pm2LogsCapMB: 50),
+            customScripts: [
+                CompanionMaintainScript(name: "prune-docker.sh", isEnabled: true, mode: "owned", scope: "local"),
+                CompanionMaintainScript(name: "Hog Hunter Maintenance", isEnabled: true, mode: "observed", scope: "local"),
+            ]
         )
     }
 

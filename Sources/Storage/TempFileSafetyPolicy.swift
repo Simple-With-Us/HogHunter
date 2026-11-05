@@ -6,7 +6,8 @@ import CoreFoundation
 struct TempFileSafetyPolicy: Equatable, Sendable {
     static let defaultsKey = "hoghunter.cleaner.tempMinimumUntouchedHours"
     static let defaultHours: Double = 72
-    static let allowedHours: ClosedRange<Double> = 1...8_760
+    /// Shared with the phone's route, so the two cannot disagree.
+    static let allowedHours: ClosedRange<Double> = CompanionCleanLimits.tempFileHoursRange
     let minimumUntouchedHours: Double
 
     init(hours: Double = defaultHours) {

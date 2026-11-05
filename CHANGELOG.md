@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+The iPhone closes the small gaps with the Mac (HH-215, batch 3):
+
+- The Storage tab shows what a Standard clean could free and the space by kind of data.  The Maintain screen lists the custom scripts by name and state, turns the built-in steps on or off, and sets the disk threshold, worktree retention and PM2 log cap.  The Disk Cleaner screen sets the temp file minimum untouched hours.  Settings can open Hog Hunter at login.
+- Two new routes, `POST /v1/maintain/settings` and `POST /v1/clean/settings`, sit behind the existing Run Maintenance and Run Disk Cleaner opt-ins.  Custom scripts cannot be turned on from the phone, turning on server maintenance needs its own confirmation, and every value is checked against the same ranges the Mac's controls use.  Full context in `docs/rollouts/2026-11-04-phone-parity-batch-3.md`.
+
 The iPhone can act on the server, over Tailscale only (HH-215, stage 2):
 
 - New routes let a paired phone quit, tame or sample server processes, stop or restart Coolify workloads, and scan or run server maintenance.  Each is behind a new opt-in, Allow iPhone to Control the Server, which also needs Allow iPhone to See Server Status.

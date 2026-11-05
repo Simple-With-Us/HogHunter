@@ -154,8 +154,10 @@ struct ServerTabContent: View {
             machinesSection(server: nil)
             noteSection(icon: "network.slash", title: "Not Available on This Connection", note: Self.linkNote)
         case .available(let server):
-            machinesSection(server: server)
-            stateSection(server)
+            if ServerScreenshotFrame.current == .top {
+                machinesSection(server: server)
+                stateSection(server)
+            }
             if server.hasReading {
                 ServerControlNote(snapshot: snapshot, model: model)
                 ServerReadings(server: server, controls: ServerRowControls(snapshot: snapshot, model: model))
@@ -225,7 +227,7 @@ struct ServerTabContent: View {
         switch server.resolvedState() {
         case .ok:
             Section {
-                LabeledContent("Reading From", value: ServerFormat.age(server.generatedAt))
+                LabeledContent("Last Reading", value: ServerFormat.age(server.generatedAt))
             }
         case .notConfigured:
             noteSection(icon: "server.rack", title: "No Server Set Up", note: Self.notConfiguredNote)
@@ -294,21 +296,41 @@ private struct MachineCard: View {
     }
 }
 
+/// The screenshot lane's flags.  A UI capture sees only the top of a long list,
+/// so a flag starts the list further down and every row gets looked at.
+private enum ServerScreenshotFrame {
+    case top, details, controls
+
+    static var current: ServerScreenshotFrame {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterServerControls") { return .controls }
+        if arguments.contains("-HogHunterServerDetails") { return .details }
+        return .top
+    }
+}
+
 /// Everything the block carries, in the order the Mac's card shows it.
 private struct ServerReadings: View {
     let server: CompanionServerStatus
     let controls: ServerRowControls
 
     var body: some View {
-        activitySection
-        pressureSection
-        devicesSection
-        sizeSection("App Databases", rows: server.databases)
-        sizeSection("Directories", rows: server.directories)
-        diagnosticsSection
-        toolsSection
-        processesSection
-        workloadsSection
+        let frame = ServerScreenshotFrame.current
+        if frame == .top {
+            activitySection
+            pressureSection
+        }
+        if frame != .controls {
+            devicesSection
+            sizeSection("App Databases", rows: server.databases)
+            sizeSection("Directories", rows: server.directories)
+            diagnosticsSection
+            toolsSection
+        }
+        if frame != .details {
+            processesSection
+            workloadsSection
+        }
     }
 
     private var activitySection: some View {

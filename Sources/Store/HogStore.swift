@@ -251,6 +251,15 @@ final class HogStore: ObservableObject {
     private var tempPolicyObserver: AnyCancellable?
     /// Tests substitute an isolated local policy, never the owner's defaults.
     var remoteTempPolicy: () -> TempFileSafetyPolicy = { TempFileSafetyPolicy.load() }
+    /// Saves the temp file minimum the way Settings > Cleaner does.  Injected
+    /// so no test writes the app's real cleaner settings.
+    var remoteTempPolicySaver: (Double) -> Void = { _ = TempFileSafetyPolicy.save(hours: $0) }
+    /// Registers or unregisters Hog Hunter as a login item.  Injected so no
+    /// test touches the real login items.
+    var loginItemRegistrar: (Bool) throws -> Void = { enabled in
+        if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+    }
+    var loginItemIsEnabled: () -> Bool = { SMAppService.mainApp.status == .enabled }
     /// How long a scan may run before a new one is allowed to replace it.
     var remoteScanWatchdog: TimeInterval = 15 * 60
     /// What a phone-started scan runs.  Tests replace it so no real folder is
@@ -1280,19 +1289,24 @@ final class HogStore: ObservableObject {
     func toggleLoginItem() {
         loginItemError = nil
         do {
-            if launchesAtLogin {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
+            try loginItemRegistrar(!launchesAtLogin)
             refreshLoginItem()
         } catch {
             loginItemError = error.localizedDescription
         }
     }
 
+    /// Sets the login item to a state rather than flipping it, so a phone that
+    /// asks for what the Mac already has changes nothing.  The result is read
+    /// back, so a registration the system refused leaves the old state showing.
+    func setLoginItem(_ enabled: Bool) {
+        refreshLoginItem()
+        guard enabled != launchesAtLogin else { return }
+        toggleLoginItem()
+    }
+
     private func refreshLoginItem() {
-        launchesAtLogin = SMAppService.mainApp.status == .enabled
+        launchesAtLogin = loginItemIsEnabled()
     }
 
     // MARK: - Settings
@@ -1672,6 +1686,18 @@ final class HogStore: ObservableObject {
             }
             return self.performRemoteMaintainRun(kind: kind)
         }
+        companionServer.onRemoteMaintainSettings = { [weak self] req in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteMaintainSettings(req)
+        }
+        companionServer.onRemoteCleanSettings = { [weak self] req in
+            guard let self else {
+                return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
+            }
+            return self.performRemoteCleanSettings(req)
+        }
         companionServer.onRemoteExclusionsUpdate = { [weak self] req in
             guard let self else {
                 return (500, Data("{\"error\": \"Store unavailable\"}".utf8))
@@ -1954,7 +1980,69 @@ final class HogStore: ObservableObject {
         if let choice = validated.appearance, choice != appearance { appearance = choice }
         if let interval = validated.backgroundRefreshInterval, interval != backgroundRefreshInterval { backgroundRefreshInterval = interval }
         if let mode = validated.menuBarLabelMode, mode != menuBarLabelMode { menuBarLabelMode = mode }
+        if let login = validated.launchesAtLogin { setLoginItem(login) }
         if validated.testWebhook { alerts.sendTestWebhook(to: alertWebhookURL) }
+        publishCompanion()
+    }
+
+    /// Checks a Maintain settings change and applies it on the main actor,
+    /// whole or not at all.  The router has already checked the opt-in.
+    nonisolated func performRemoteMaintainSettings(_ req: CompanionMaintainSettingsRequest) -> (status: Int, body: Data) {
+        let encoder = JSONEncoder()
+        switch CompanionMaintainSettingsValidator.validate(req) {
+        case .failure(let rejection):
+            return (400, (try? encoder.encode(CompanionSettingsUpdateResponse.rejected(rejection.message))) ?? Data())
+        case .success(let validated):
+            Task { @MainActor [weak self] in self?.applyRemoteMaintainSettings(validated) }
+            let ok = CompanionSettingsUpdateResponse(status: "ok", message: "Maintenance settings updated.", error: nil)
+            return (200, (try? encoder.encode(ok)) ?? Data())
+        }
+    }
+
+    /// Applies a checked change through the calls the Mac's Maintenance
+    /// settings make, so Infisical write-through and the saved config follow
+    /// the way they do for a change made at the Mac.
+    func applyRemoteMaintainSettings(_ validated: CompanionMaintainSettingsValidator.Validated) {
+        // Thresholds first: saveMaintainConfig refreshes from disk, which would
+        // revert a step toggle that is not persisted yet.
+        var configChanged = false
+        if let gib = validated.lowFreeGiB, gib != maintain.lowFreeGiB {
+            maintain.lowFreeGiB = gib
+            configChanged = true
+        }
+        if let cap = validated.pm2LogsCapMB, cap != maintain.pm2LogsCapMB {
+            maintain.pm2LogsCapMB = cap
+            configChanged = true
+        }
+        if configChanged { maintain.saveMaintainConfig() }
+        if let days = validated.worktreeRetireMinDays, days != maintain.worktreeRetireMinDays {
+            maintain.worktreeRetireMinDays = days
+            maintain.saveWorktreeRetireMinDays()
+        }
+        for (id, enabled) in validated.stepEnabled.sorted(by: { $0.key < $1.key }) where maintain.isStepEnabled(id) != enabled {
+            maintain.setStepEnabled(id, enabled: enabled)
+        }
+        publishCompanion()
+    }
+
+    /// Checks a cleaner settings change and applies it on the main actor.
+    /// The router has already checked the cleaner opt-in.
+    nonisolated func performRemoteCleanSettings(_ req: CompanionCleanSettingsRequest) -> (status: Int, body: Data) {
+        let encoder = JSONEncoder()
+        switch CompanionCleanSettingsValidator.validate(req) {
+        case .failure(let rejection):
+            return (400, (try? encoder.encode(CompanionSettingsUpdateResponse.rejected(rejection.message))) ?? Data())
+        case .success(let validated):
+            Task { @MainActor [weak self] in self?.applyRemoteCleanSettings(validated) }
+            let ok = CompanionSettingsUpdateResponse(status: "ok", message: "Cleaner settings updated.", error: nil)
+            return (200, (try? encoder.encode(ok)) ?? Data())
+        }
+    }
+
+    func applyRemoteCleanSettings(_ validated: CompanionCleanSettingsValidator.Validated) {
+        if validated.tempFileMinimumHours != remoteTempPolicy().minimumUntouchedHours {
+            remoteTempPolicySaver(validated.tempFileMinimumHours)
+        }
         publishCompanion()
     }
 
@@ -2536,7 +2624,22 @@ final class HogStore: ObservableObject {
             from: maintain.status,
             history: maintain.history,
             isRunning: maintain.isRunningNow,
-            includeSteps: detailed && allowRemoteMaintain
+            includeSteps: detailed && allowRemoteMaintain,
+            settings: detailed && allowRemoteMaintain ? maintainSettingsForPhone() : nil
+        )
+    }
+
+    /// The steps, thresholds and custom script names the phone may see and
+    /// change, under the same opt-in as the step detail.
+    private func maintainSettingsForPhone() -> CompanionMaintain.Settings {
+        CompanionMaintain.Settings(
+            stepSettings: CompanionMaintain.stepSettings(visible: maintain.visibleCatalog, isEnabled: { maintain.isStepEnabled($0) }),
+            tuning: CompanionMaintainTuning(
+                lowFreeGiB: maintain.lowFreeGiB,
+                worktreeRetireMinDays: maintain.worktreeRetireMinDays,
+                pm2LogsCapMB: maintain.pm2LogsCapMB
+            ),
+            customScripts: CompanionMaintain.scripts(maintain.customScripts, isEnabled: { maintain.isStepEnabled($0) })
         )
     }
 
@@ -2562,6 +2665,33 @@ final class HogStore: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishCompanion() } }
             .store(in: &maintainObservers)
+        // A step, threshold or script change reaches a phone allowed to see
+        // them when it lands, whoever made it.
+        maintain.$stepToggles
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishMaintainSettingsChange() } }
+            .store(in: &maintainObservers)
+        maintain.$lowFreeGiB
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishMaintainSettingsChange() } }
+            .store(in: &maintainObservers)
+        maintain.$pm2LogsCapMB
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishMaintainSettingsChange() } }
+            .store(in: &maintainObservers)
+        maintain.$worktreeRetireMinDays
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishMaintainSettingsChange() } }
+            .store(in: &maintainObservers)
+        maintain.$customScripts
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.publishMaintainSettingsChange() } }
+            .store(in: &maintainObservers)
         // A new server reading reaches the phone when it arrives, not at the
         // next sample, and only matters to a phone allowed to see it.
         maintain.vpsStore.$snapshot
@@ -2583,6 +2713,10 @@ final class HogStore: ObservableObject {
         CompanionNetworkCache.shared.refreshIfStale(completion: { [weak self] in
             Task { @MainActor [weak self] in self?.publishCompanion() }
         })
+    }
+
+    private func publishMaintainSettingsChange() {
+        if allowRemoteMaintain { publishCompanion() }
     }
 
     private func publishServerChange() {
@@ -2636,7 +2770,8 @@ final class HogStore: ObservableObject {
                 menuBarLabelMode: menuBarLabelMode,
                 sort: sort,
                 sortAscending: sortAscending,
-                resolvedAppearance: appearance.resolvedName
+                resolvedAppearance: appearance.resolvedName,
+                launchesAtLogin: launchesAtLogin
             ),
             remoteMaintainAllowed: allowRemoteMaintain,
             maintain: maintainStatusForPhone()
@@ -2655,6 +2790,13 @@ final class HogStore: ObservableObject {
             externalDrives: MountedDriveStore.shared.rows
         ))
         var plain = snapshot
+        if plain.storage != nil {
+            plain.storage?.tempFileMinimumHours = remoteTempPolicy().minimumUntouchedHours
+            if let cleanable = standardCleanableForPhone(now: now) {
+                plain.storage?.standardCleanableBytes = cleanable
+                plain.storage?.standardCleanableText = HogFormat.memory(cleanable) + " Cleanable"
+            }
+        }
         plain.remoteServerStatusAllowed = allowRemoteServerStatus
         plain.flaggedIssues = issues.filter { !$0.isServer }
         plain.flaggedIssuesCoverServer = false
@@ -2670,6 +2812,15 @@ final class HogStore: ObservableObject {
             detailed.flaggedIssuesCoverServer = true
         }
         return (plain, detailed)
+    }
+
+    /// What a Standard clean could free, from the scan the Mac holds for the
+    /// phone.  Nil when no Standard scan is held or it is too old to trust.
+    /// A scan runs only when someone asks for one, so this never starts one.
+    private func standardCleanableForPhone(now: Date) -> UInt64? {
+        guard let scan = readyRemoteScan, scan.tier == .standard,
+              now.timeIntervalSince(scan.scannedAt) < CompanionCleanerReport.scanLifetime else { return nil }
+        return scan.totalBytes
     }
 
     /// The server block, built only for the detailed snapshot.
