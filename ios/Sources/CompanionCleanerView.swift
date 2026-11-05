@@ -4,10 +4,17 @@ import SwiftUI
 /// Mac, tick what to clean, confirm, and read the history.  The Mac does the
 /// scanning and the cleaning; this screen shows what it found and sends back
 /// short references to the items the person ticked, never paths.
+/// Where the temp file stepper starts before the Mac has said what it holds.
+private enum TempFileSafetyDefaults {
+    static let hours: Double = 72
+}
+
 struct CleanerView: View {
     @Bindable var model: CompanionModel
     @State private var showConfirm = false
     @State private var expanded: Set<String> = []
+    @State private var tempHoursDraft: Int = Int(TempFileSafetyDefaults.hours)
+    @State private var pendingTempHours: Int?
 
     private var snapshot: CompanionSnapshot? { model.snapshot }
     private var hostName: String { snapshot?.hostName ?? "your Mac" }
@@ -33,6 +40,7 @@ struct CleanerView: View {
                 }
             }
             tierSection
+            tempFileSection
             statusSection
             if scanMatchesTier, let report {
                 ForEach(report.categories) { category in
@@ -66,6 +74,24 @@ struct CleanerView: View {
                 sizeText: iPhoneStorage.format(bytes: model.selectedCleanBytes),
                 itemCount: model.selectedCleanRefs.count
             ))
+        }
+        .confirmationDialog(
+            "Change the Temp File Minimum to \(pendingTempHours ?? 0) Hours?",
+            isPresented: Binding(
+                get: { pendingTempHours != nil },
+                set: { if !$0 { pendingTempHours = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let hours = pendingTempHours {
+                Button("Set to \(hours) Hours") {
+                    pendingTempHours = nil
+                    Task { await model.updateTempFileMinimumHours(Double(hours)) }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingTempHours = nil }
+        } message: {
+            Text("\(hostName) will list temp files in /tmp once they have sat untouched for this long.\u{00A0} A shorter time lists more files in the next scan.\u{00A0} Nothing is removed until you clean.")
         }
         .alert(
             "Could Not Continue",
@@ -111,6 +137,56 @@ struct CleanerView: View {
                 }
                 .padding(.vertical, 4)
             }
+        }
+    }
+
+    // MARK: - Temp file safety
+
+    private var tempHoursOnMac: Int? {
+        snapshot?.storage?.tempFileMinimumHours.map { Int($0) }
+    }
+
+    /// The Mac's Settings > Cleaner > Temp File Safety.  Shown only when the Mac
+    /// sends it, and changed under the same opt-in as the cleaner.
+    @ViewBuilder
+    private var tempFileSection: some View {
+        if let onMac = tempHoursOnMac {
+            let range = Int(CompanionCleanLimits.tempFileHoursRange.lowerBound)...Int(CompanionCleanLimits.tempFileHoursRange.upperBound)
+            Section {
+                Stepper(value: $tempHoursDraft, in: range) {
+                    HStack {
+                        Text("Minimum Untouched Time")
+                        Spacer()
+                        Text("\(tempHoursDraft) hours")
+                            .font(.body.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
+                HStack(spacing: 8) {
+                    ForEach([24, 72, 168, 720], id: \.self) { hours in
+                        Button("\(hours)") { tempHoursDraft = hours }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
+                    }
+                    Spacer()
+                    Text("Presets, in hours")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if tempHoursDraft != onMac {
+                    Button("Apply \(tempHoursDraft) Hours") { pendingTempHours = tempHoursDraft }
+                        .font(.subheadline.weight(.semibold))
+                        .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
+                }
+            } header: {
+                Text("Temp File Safety")
+            } footer: {
+                Text("Temp files appear in a scan after at least \(onMac) untouched hours on \(hostName).\u{00A0} Choose 1 to 8,760 whole hours.")
+            }
+            .onAppear { tempHoursDraft = onMac }
+            .onChange(of: onMac) { _, value in tempHoursDraft = value }
         }
     }
 

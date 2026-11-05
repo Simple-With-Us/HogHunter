@@ -91,6 +91,10 @@ final class CompanionModel {
     /// Set when a control call (exclusions, view, quit, tame) did not go
     /// through, so the dashboard can say so instead of silently doing nothing.
     var controlError: String?
+    /// True while a confirmed server action is out.
+    var isRunningServerAction = false
+    /// The answer to the last server action, shown in a sheet.
+    var serverActionOutcome: ServerActionOutcome?
     var showCleanDialogRequested = false
     /// When the current Clean request arrived.  The root view only builds the
     /// dashboard when the phase is `.live`, so a link that lands while the Mac
@@ -175,6 +179,13 @@ final class CompanionModel {
     /// `controlError`: the maintain screen is pushed over the dashboard, and two
     /// alerts on one error cannot both present.
     var maintainError: String?
+    /// Why the last step or threshold change did not go through.  Its own
+    /// field, so the run alert and this one never fight for the screen.
+    var maintainSettingsError: String?
+    private(set) var maintainSettingsInFlight = 0
+    var isApplyingMaintainSettings: Bool { maintainSettingsInFlight > 0 }
+    private(set) var cleanSettingsInFlight = 0
+    var isApplyingCleanSettings: Bool { cleanSettingsInFlight > 0 }
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
 
@@ -621,6 +632,74 @@ final class CompanionModel {
         }
     }
 
+    /// The address server actions go to.  A phone at home usually polls over
+    /// Bonjour, which the Mac refuses for these, so a saved Tailscale address
+    /// wins here even while the local one is in use for everything else.  Nil
+    /// when this phone has no way to reach the Mac over Tailscale.
+    func serverControlEndpoint(for saved: SavedMac) -> NWEndpoint? {
+        if let host = saved.remoteHost, let port = NWEndpoint.Port(rawValue: UInt16(saved.remotePort ?? 24240)) {
+            let remote = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
+            if CompanionPeer.isTailscaleEndpoint(remote, usesTLS: isUsingTLS(for: saved)) { return remote }
+        }
+        guard let active = activeEndpoint(for: saved),
+              CompanionPeer.isTailscaleEndpoint(active, usesTLS: isUsingTLS(for: saved)) else { return nil }
+        return active
+    }
+
+    /// Whether this phone can offer server actions as if they would work.  The
+    /// Mac still decides from the socket.
+    var serverControlsReachable: Bool {
+        if isDemoMode && ProcessInfo.processInfo.arguments.contains("-HogHunterSample") { return true }
+        guard let saved else { return false }
+        return serverControlEndpoint(for: saved) != nil
+    }
+
+    /// Runs one server action the person has confirmed.  One at a time on the
+    /// phone, as on the Mac.  The answer lands in `serverActionOutcome`.
+    func runServerAction(_ action: CompanionServerActionRequest, rowName: String) async {
+        guard !isRunningServerAction else { return }
+        isRunningServerAction = true
+        defer { isRunningServerAction = false }
+        if isDemoMode {
+            try? await Task.sleep(for: .seconds(1))
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: Self.sampleServerAnswer(action, rowName: rowName))
+            return
+        }
+        guard let saved, let endpoint = serverControlEndpoint(for: saved) else {
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "tailscaleRequired", error: CompanionServerControl.tailscaleOnlyNote))
+            return
+        }
+        do {
+            let response = try await CompanionConnection.triggerServerAction(endpoint: endpoint, token: saved.token, action: action, useTLS: false)
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: response)
+        } catch {
+            // Not knowing is not the same as nothing having happened.
+            let text = "The Mac did not answer, so the outcome is not known.\u{00A0} Check the server before trying again.\u{00A0} \(Self.describe(error))"
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "unknown", error: text))
+        }
+        await refresh()
+    }
+
+    /// What finished server actions look like in demo mode and the screenshot lane.
+    static func sampleServerAnswer(_ action: CompanionServerActionRequest, rowName: String) -> CompanionServerActionResponse {
+        switch action {
+        case .process(_, "sample"):
+            return CompanionServerActionResponse(status: "acted", message: "Sampled \(rowName) for 3 seconds", name: rowName, sampleText: "{\n  \"cpu_percent\" : 42.5,\n  \"duration_seconds\" : 3,\n  \"rss_bytes\" : 922746880,\n  \"state\" : \"running\"\n}")
+        case .process, .workload:
+            return CompanionServerActionResponse(status: "acted", message: "Done: \(rowName).", name: rowName)
+        case .maintain(let mode, let strategies, _):
+            let scan = mode == "scan"
+            let rows = strategies.map { id in
+                CompanionServerMaintenanceRow(id: id, title: ServerActionOutcome.strategyTitle(id), detail: scan ? "12 eligible records; 0 cleanup attempts" : "12 eligible records; 12 cleanup attempts")
+            }
+            return CompanionServerActionResponse(
+                status: "acted",
+                message: scan ? "Read-only scan completed; eligible items are listed below." : "Selected server maintenance completed.",
+                maintenance: CompanionServerMaintenanceSummary(mode: mode, status: scan ? "planned" : "ran", strategies: rows, removedBytesText: scan ? "0 KB" : "3.1 GB", observedChangeText: scan ? "0 KB" : "+3.4 GB")
+            )
+        }
+    }
+
     /// Asks the Mac to start a full Maintain run.  The Mac answers at once
     /// and runs it by itself, so this returns when the run has started; the
     /// snapshot then shows it running.  A refusal lands in `maintainError`.
@@ -649,6 +728,78 @@ final class CompanionModel {
         }
         // The Mac marks the run as going just after it answers.
         try? await Task.sleep(for: .milliseconds(600))
+        await refresh()
+    }
+
+    /// Sends a step or threshold change to the Mac.  The Mac checks every
+    /// value and applies the change whole or not at all; a refusal lands in
+    /// `maintainSettingsError`.
+    func updateMaintainSettings(_ update: CompanionMaintainSettingsRequest) async {
+        maintainSettingsError = nil
+        if isDemoMode {
+            guard var maintain = snapshot?.maintain else { return }
+            for (id, enabled) in update.stepEnabled ?? [:] {
+                if let index = maintain.stepSettings?.firstIndex(where: { $0.stepId == id }) {
+                    maintain.stepSettings?[index].isEnabled = enabled
+                }
+            }
+            if let value = update.lowFreeGiB { maintain.tuning?.lowFreeGiB = value }
+            if let value = update.worktreeRetireMinDays { maintain.tuning?.worktreeRetireMinDays = value }
+            if let value = update.pm2LogsCapMB { maintain.tuning?.pm2LogsCapMB = value }
+            snapshot?.maintain = maintain
+            return
+        }
+        guard controlsReachable else {
+            maintainSettingsError = Self.controlNetworkNote
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            maintainSettingsError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        maintainSettingsInFlight += 1
+        defer { maintainSettingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerMaintainSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
+            if res.status != "ok" {
+                maintainSettingsError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            maintainSettingsError = Self.describe(error)
+        }
+        // The Mac saves the change just after it answers.
+        try? await Task.sleep(for: .milliseconds(600))
+        await refresh()
+    }
+
+    /// Sends the temp file minimum to the Mac.  A refusal lands in
+    /// `cleanerError`, inside the cleaner screen.
+    func updateTempFileMinimumHours(_ hours: Double) async {
+        cleanerError = nil
+        let update = CompanionCleanSettingsRequest(tempFileMinimumHours: hours)
+        if isDemoMode {
+            snapshot?.storage?.tempFileMinimumHours = hours
+            return
+        }
+        guard controlsReachable else {
+            cleanerError = Self.controlNetworkNote
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            cleanerError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        cleanSettingsInFlight += 1
+        defer { cleanSettingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerCleanSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
+            if res.status != "ok" {
+                cleanerError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            cleanerError = Self.describe(error)
+        }
+        try? await Task.sleep(for: .milliseconds(400))
         await refresh()
     }
 
@@ -688,6 +839,7 @@ final class CompanionModel {
             if let value = update.appearance { settings.appearance = value }
             if let value = update.backgroundRefreshInterval { settings.backgroundRefreshInterval = value }
             if let value = update.menuBarLabelMode { settings.menuBarLabelMode = value }
+            if let value = update.launchesAtLogin { settings.launchesAtLogin = value }
             if let url = update.webhookURL {
                 settings.webhookConfigured = !url.isEmpty
                 settings.webhookHost = url.isEmpty ? nil : URL(string: url)?.host
@@ -1099,7 +1251,9 @@ final class CompanionModel {
         // memory), so comparing bytes cannot suppress the reload.  Write
         // every poll the container can actually hold, and rate limit the reload.
         let containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil
-        let data = try? CompanionJSON.encode(fetched)
+        // The widget draws nothing from the server, and this copy outlives the
+        // screen in a shared container, so server internals stay out of it.
+        let data = try? CompanionJSON.encode(fetched.withoutServerDetail())
         guard let defaults = sharedWidgetDefaults(), let data else { return }
         defaults.set(data, forKey: "last_snapshot")
         let cleanKeys = [
@@ -1517,7 +1671,15 @@ final class CompanionModel {
             excludedPaths: [
                 "/Users/jay/Code/HogHunter",
                 "/Users/jay/Documents/CriticalArchive"
-            ]
+            ],
+            categoryTotals: [
+                CompanionStorageCategoryTotal(id: "applicationSupport", title: "Application Support", bytes: 18_400_000_000, text: "18.4 GB"),
+                CompanionStorageCategoryTotal(id: "bundle", title: "App bundle", bytes: 12_100_000_000, text: "12.1 GB"),
+                CompanionStorageCategoryTotal(id: "caches", title: "Caches", bytes: 6_300_000_000, text: "6.3 GB"),
+                CompanionStorageCategoryTotal(id: "containers", title: "Containers", bytes: 3_900_000_000, text: "3.9 GB"),
+                CompanionStorageCategoryTotal(id: "logs", title: "Logs", bytes: 820_000_000, text: "820 MB"),
+            ],
+            tempFileMinimumHours: 72
         ),
         network: [
             CompanionNetworkRow(
@@ -1564,12 +1726,112 @@ final class CompanionModel {
             webhookConfigured: true,
             webhookHost: "hooks.example.com",
             webhookStatus: "Delivered (200) at 9:41:07 AM",
-            notificationsDenied: false
+            notificationsDenied: false,
+            launchesAtLogin: true
         ),
         remoteMaintainAllowed: true,
         // Relative to launch, so the sample reads "3 hours ago", not a year ago.
-        maintain: sampleMaintain(now: Date())
+        maintain: sampleMaintain(now: Date()),
+        remoteServerStatusAllowed: true,
+        server: sampleServer(now: Date()),
+        flaggedIssues: [
+            CompanionFlaggedIssue(
+                id: "server.disk.extra.warning",
+                title: "Server Data Volume Filling Up",
+                message: "86% used on /mnt/data.",
+                priority: 2,
+                priorityText: "Warning",
+                host: CompanionFlaggedIssue.serverHost,
+                category: "Storage"
+            ),
+        ],
+        flaggedIssuesCoverServer: true,
+        remoteServerControlAllowed: true
     )
+
+    /// A busy but healthy server, for the sample snapshot and Demo Mode.  The
+    /// names are made up: this data can end up in a store screenshot.
+    static func sampleServer(now: Date) -> CompanionServerStatus {
+        let reading = now.addingTimeInterval(-90)
+        return CompanionServerStatus(
+            state: CompanionServerState.ok.rawValue,
+            host: "web-01",
+            generatedAt: reading,
+            fetchedAt: now.addingTimeInterval(-20),
+            headline: CompanionServerHeadline(
+                host: "web-01",
+                cpuText: "38%",
+                cpuSeverity: "calm",
+                memoryText: "71%",
+                memorySeverity: "calm",
+                diskText: "61% used",
+                diskSeverity: "calm",
+                extraDiskText: "86% used",
+                extraDiskSeverity: "elevated"
+            ),
+            cpu: CompanionServerCPU(
+                percent: 38.4,
+                percentText: "38.4%",
+                severity: "calm",
+                cores: 8,
+                loadText: "2.41",
+                history: [24, 27, 31, 29, 36, 44, 52, 48, 41, 37, 33, 30, 34, 39, 46, 51, 43, 38, 36, 35, 38, 40, 37, 38]
+            ),
+            memory: CompanionServerMeter(percent: 71, percentText: "71%", detail: "22.7 GB of 32.0 GB", severity: "calm"),
+            swap: CompanionServerMeter(percent: 12, percentText: "12%", detail: "491 MB of 4.0 GB swapped", severity: "calm"),
+            pressure: CompanionServerPressure(
+                sampledAt: reading,
+                durationSeconds: 2,
+                swapInText: "0 KB/s",
+                swapOutText: "12 KB/s",
+                memoryStallsText: "0.2%"
+            ),
+            devices: [
+                CompanionServerDevice(id: "root", title: "Disk (/)", mount: "/", freeText: "117 GB", totalText: "300 GB", usedPercent: 61, usedText: "61% used", severity: "calm"),
+                CompanionServerDevice(id: "data", title: "Data Volume (/mnt/data)", mount: "/mnt/data", freeText: "143 GB", totalText: "1024 GB", usedPercent: 86, usedText: "86% used", severity: "elevated"),
+                // A device whose size the server does not report: free space and a dash.
+                CompanionServerDevice(id: "tmp", title: "Tmpfs (/tmp)", mount: "/tmp", freeText: "15.2 GB"),
+            ],
+            databases: [
+                CompanionServerSizeRow(id: "orders", name: "Orders", bytesText: "18.4 GB", changeText: "↑1.2%", changePercent: 1.2),
+                CompanionServerSizeRow(id: "analytics", name: "Analytics", bytesText: "6.7 GB", changeText: "~0%", changePercent: 0),
+                // New this week, so there is no day of history to compare with.
+                CompanionServerSizeRow(id: "sessions", name: "Sessions", bytesText: "412 MB"),
+            ],
+            directories: [
+                CompanionServerSizeRow(id: "/var/lib/docker", name: "/var/lib/docker", bytesText: "84.1 GB", changeText: "↑3.4%", changePercent: 3.4),
+                CompanionServerSizeRow(id: "/var/log", name: "/var/log", bytesText: "2.3 GB", changeText: "↓-8.1%", changePercent: -8.1),
+            ],
+            storageDiagnostics: CompanionServerStorageDiagnostics(
+                sampledAt: reading,
+                durationSeconds: 3,
+                categoriesComplete: true,
+                categories: [
+                    CompanionServerStorageCategory(id: "images", title: "Images", sizeText: "41.6 GB", reclaimableText: "12.2 GB"),
+                    CompanionServerStorageCategory(id: "build_cache", title: "Build Cache", sizeText: "9.8 GB", reclaimableText: "9.8 GB"),
+                    CompanionServerStorageCategory(id: "volumes", title: "Volumes", sizeText: "27.3 GB", reclaimableText: "1.1 GB"),
+                ],
+                usesContainerd: false
+            ),
+            tools: [
+                CompanionServerTool(id: "docker", name: "Docker", state: "running", stateText: "Running", count: 1),
+                CompanionServerTool(id: "postgres", name: "Postgres", state: "running", stateText: "Running", count: 4),
+                CompanionServerTool(id: "backup", name: "Backups", state: "unknown", stateText: "Unknown", count: 0, reason: "The backup log is not readable by the collector."),
+            ],
+            processes: [
+                CompanionServerProcess(id: "a1f0c2d4e6b81735", name: "postgres", owner: "postgres", container: "orders-db", cpuText: "118%", memoryText: "6.2 GB", swapText: "120 MB", isTamed: false, actions: ["quit", "forceQuit", "tame", "sample"]),
+                CompanionServerProcess(id: "b2e1d3c5f7a92846", name: "node", owner: "app", container: "storefront-api", cpuText: "64%", memoryText: "1.8 GB", isTamed: false, actions: ["quit", "forceQuit", "tame", "sample"]),
+                CompanionServerProcess(id: "c3d2e4b6a8f03957", name: "ffmpeg", owner: "media", cpuText: "42%", memoryText: "880 MB", isTamed: true, actions: ["quit", "forceQuit", "untame", "sample"]),
+                CompanionServerProcess(id: "d4c3f5a7b9e14a68", name: "dockerd", owner: "root", cpuText: "6%", memoryText: "512 MB", isTamed: false, protectionReason: "Host infrastructure", actions: []),
+            ],
+            processCount: 214,
+            workloads: [
+                CompanionServerWorkload(id: "e5b4a6f8c0d25b79", name: "Storefront API", type: "application", status: "running", isHealthy: true, cpuText: "64%", memoryText: "1.8 GB", actions: ["stop", "restart"]),
+                CompanionServerWorkload(id: "f6a5b7c9d1e36c80", name: "Orders Database", type: "database", status: "running", isHealthy: true, cpuText: "118%", memoryText: "6.2 GB", protectionReason: "Protected database", actions: []),
+                CompanionServerWorkload(id: "07f6c8dae2f47d91", name: "Nightly Reports", type: "service", status: "exited", isHealthy: false, actions: ["restart"]),
+            ]
+        )
+    }
 
     /// A healthy Maintain whose last full run ended `endedSecondsAgo`
     /// before `now`, for the sample snapshot and Demo Mode.
@@ -1597,7 +1859,21 @@ final class CompanionModel {
                 CompanionMaintainStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
             ],
             recentRuns: sampleRecentRuns(ended: ended),
-            watch: sampleWatch(now: now)
+            watch: sampleWatch(now: now),
+            stepSettings: [
+                CompanionMaintainStepSetting(stepId: "resource_sample", title: "Check Disk and Memory", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "hoghunter_reclaim", title: "Hog Hunter Disk Reclaim", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "janitor_worktree_retire", title: "Retire Old Merged Git Worktrees", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "janitor_cache_reclaim", title: "Reclaim Caches Under Low Disk", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "pm2_logs", title: "Cap Oversized PM2 Logs", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "npm_cache", title: "Trim npm Download Cache", isEnabled: false),
+                CompanionMaintainStepSetting(stepId: "coolify_remote", title: "Remote Server Maintenance", isEnabled: false, isRemoteServer: true),
+            ],
+            tuning: CompanionMaintainTuning(lowFreeGiB: 80, worktreeRetireMinDays: 7, pm2LogsCapMB: 50),
+            customScripts: [
+                CompanionMaintainScript(name: "prune-docker.sh", isEnabled: true, mode: "owned", scope: "local"),
+                CompanionMaintainScript(name: "Hog Hunter Maintenance", isEnabled: true, mode: "observed", scope: "local"),
+            ]
         )
     }
 

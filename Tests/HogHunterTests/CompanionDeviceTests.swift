@@ -168,7 +168,7 @@ final class CompanionDeviceRoutingTests: XCTestCase {
         let disposition = server.syncOnQueue { server.disposition(for: request, peer: peer ?? lan, now: now ?? t0) }
         switch disposition {
         case .reply(let data): return CompanionHTTP.parseResponse(data)?.status
-        case .startClean, .startCleanScan, .startCleanReport, .startSample: return 202
+        case .startClean, .startCleanScan, .startCleanReport, .startSample, .startServerAction: return 202
         }
     }
 

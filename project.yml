@@ -14,6 +14,9 @@ options:
     iOS: "17.0"
   xcodeVersion: "16.0"
   createIntermediateGroups: true
+  # Keeps Debug builds and test hosts off external DerivedData, where they raise
+  # a removable-volume permission prompt at every launch.
+  postGenCommand: scripts/xcodegen-post.sh
 
 # 2026-10-11 — Sentry (project `hoghunter`).  sentry-cocoa serves the macOS
 #   menubar app and the iOS companion.  The DSN is never stored here: both

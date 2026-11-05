@@ -656,6 +656,71 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(testCleaner.isSafeToDelete(url: ordinary, category: .userCaches))
     }
 
+
+    /// Debug builds live on the internal disk to keep test hosts off a removable
+    /// volume.  The name holds "HogHunter", which the user-cache scan skips, so the
+    /// developer scan has to list them or the Disk Cleaner could never free them.
+    func testTheDeveloperScanOffersHogHunterDebugBuilds() async throws {
+        let builds = tempDirectory.appendingPathComponent("Library/Caches/HogHunterDerivedData/lane-aaaa", isDirectory: true)
+        try FileManager.default.createDirectory(at: builds, withIntermediateDirectories: true)
+        try "dummy payload data".write(to: builds.appendingPathComponent("data.bin"), atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertFalse(cleaner.scanUserCaches().contains { $0.url.path.hasSuffix("HogHunterDerivedData") })
+        let item = try XCTUnwrap(cleaner.scanDeveloper().first { $0.title == "Hog Hunter Debug Builds" })
+        XCTAssertFalse(item.isSelected, "This row covers every lane, including a busy one")
+
+        let result = await cleaner.clean(items: [item], createSnapshot: false)
+        XCTAssertEqual(result.errors, [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: builds.path))
+    }
+
+    /// A lane the size of a real one: more entries than the bounded marker walk reads.
+    private func makeDebugBuildsLane(_ name: String, markerIn folder: String?) throws -> URL {
+        let fm = FileManager.default
+        let lane = tempDirectory.appendingPathComponent("Library/Caches/HogHunterDerivedData/\(name)", isDirectory: true)
+        let index = lane.appendingPathComponent("A.noindex", isDirectory: true)
+        try fm.createDirectory(at: index, withIntermediateDirectories: true)
+        for entry in 0..<2_500 {
+            XCTAssertTrue(fm.createFile(atPath: index.appendingPathComponent("unit-\(entry)").path, contents: Data("x".utf8)))
+        }
+        if let folder {
+            let holder = lane.appendingPathComponent(folder, isDirectory: true)
+            try fm.createDirectory(at: holder, withIntermediateDirectories: true)
+            XCTAssertTrue(fm.createFile(atPath: holder.appendingPathComponent(KeepSentinel.fileName).path, contents: Data()))
+        }
+        return lane
+    }
+
+    func testAMarkedDebugBuildsLaneIsNeverRemovedHoweverBigTheTree() async throws {
+        let deep = try makeDebugBuildsLane("lane-deep", markerIn: "Z/Y/X/W/V/U/T/S")
+        let top = try makeDebugBuildsLane("lane-top", markerIn: ".")
+        let plain = try makeDebugBuildsLane("lane-plain", markerIn: nil)
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertFalse(KeepSentinel.containsMarker(url: deep), "the bounded walk cannot see this marker")
+
+        let items = cleaner.scanDeveloper().filter { $0.title == "Hog Hunter Debug Builds" }
+        XCTAssertEqual(Set(items.map { $0.url.lastPathComponent }), ["lane-deep", "lane-top", "lane-plain"])
+        XCTAssertFalse(items.contains(where: \.isSelected))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: deep, category: .developer))
+        XCTAssertFalse(cleaner.isSafeToDelete(url: top, category: .developer))
+        XCTAssertTrue(cleaner.isSafeToDelete(url: plain, category: .developer))
+
+        _ = await cleaner.clean(items: items, createSnapshot: false)
+        let fm = FileManager.default
+        XCTAssertTrue(fm.fileExists(atPath: deep.path), "a marked lane stays")
+        XCTAssertTrue(fm.fileExists(atPath: top.path), "a marked lane stays")
+        XCTAssertFalse(fm.fileExists(atPath: plain.path), "an unmarked lane still goes")
+    }
+
+    func testTheDebugBuildsRootIsNeverCleanedWhole() async throws {
+        let lane = try makeDebugBuildsLane("lane-plain", markerIn: nil)
+        let root = lane.deletingLastPathComponent()
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        XCTAssertFalse(cleaner.isSafeToDelete(url: root, category: .developer))
+        XCTAssertTrue(cleaner.isSafeToDelete(url: lane, category: .developer))
+    }
+
     func testPrimaryIOS27SimulatorPreservationAndSeparateOption() async throws {
         let fm = FileManager.default
         let simBase = tempDirectory.appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)

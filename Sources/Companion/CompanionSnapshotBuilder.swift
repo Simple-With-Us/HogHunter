@@ -131,7 +131,8 @@ enum CompanionSnapshotBuilder {
             topApps: Self.cachedTopApps(),
             topAppsScannedAt: Self.topAppsCache?.at,
             drives: Self.driveRows(drives, homeURL: homeURL, totalBytes: totalBytes, freeBytes: freeBytes, usedPercent: usedPct),
-            topDirectories: Self.directoryRows(directories)
+            topDirectories: Self.directoryRows(directories),
+            categoryTotals: Self.cachedCategoryTotals()
         )
     }
 
@@ -227,7 +228,7 @@ enum CompanionSnapshotBuilder {
         }
     }
 
-    private static func severityName(_ severity: Severity) -> String {
+    static func severityName(_ severity: Severity) -> String {
         switch severity {
         case .calm: return "calm"
         case .elevated: return "elevated"
@@ -266,6 +267,7 @@ enum CompanionSnapshotBuilder {
     private struct TopAppsCacheEntry {
         var at: Date
         var rows: [CompanionAppStorageRow]
+        var categoryTotals: [CompanionStorageCategoryTotal]
     }
 
     nonisolated(unsafe) private static var topAppsCache: TopAppsCacheEntry?
@@ -278,6 +280,25 @@ enum CompanionSnapshotBuilder {
     /// reads this on every request, so it has to be free.
     static func cachedTopApps() -> [CompanionAppStorageRow] {
         topAppsCache?.rows ?? []
+    }
+
+    /// The category totals from the same scan as `cachedTopApps`, or nil before
+    /// the first scan lands.  Free to call, like `cachedTopApps`.
+    static func cachedCategoryTotals() -> [CompanionStorageCategoryTotal]? {
+        topAppsCache?.categoryTotals
+    }
+
+    /// The Mac's own category totals, in the phone's shape.  The Mac sums them
+    /// over the apps its Storage tab shows, and so does the phone.
+    static func categoryTotals(from apps: [StorageUsage]) -> [CompanionStorageCategoryTotal] {
+        StorageStore.categoryTotals(from: Array(apps.prefix(StorageStore.displayedLimit))).map { total in
+            CompanionStorageCategoryTotal(
+                id: total.category.rawValue,
+                title: total.category.displayName,
+                bytes: total.bytes,
+                text: HogFormat.memory(total.bytes)
+            )
+        }
     }
 
     /// Kicks off a `StorageScanner` walk on a utility queue if the cache is
@@ -295,8 +316,9 @@ enum CompanionSnapshotBuilder {
         topAppsQueue.async {
             let scanner = StorageScanner()
             let apps = scanner.installedApps(runningBundleIds: runningBundleIds())
-            let top = apps
-                .sorted { $0.totalBytes > $1.totalBytes }
+            let ordered = apps.sorted { $0.totalBytes > $1.totalBytes }
+            let totals = categoryTotals(from: ordered)
+            let top = ordered
                 .prefix(limit)
                 .map { usage -> CompanionAppStorageRow in
                     CompanionAppStorageRow(
@@ -314,7 +336,7 @@ enum CompanionSnapshotBuilder {
                     )
                 }
             DispatchQueue.main.async {
-                topAppsCache = TopAppsCacheEntry(at: Date(), rows: Array(top))
+                topAppsCache = TopAppsCacheEntry(at: Date(), rows: Array(top), categoryTotals: totals)
                 topAppsScanInFlight = false
             }
         }

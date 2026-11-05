@@ -4,6 +4,7 @@ enum CompanionTab: String, CaseIterable, Identifiable {
     case activity = "Activity"
     case storage = "Storage"
     case network = "Network"
+    case server = "Server"
     var id: String { rawValue }
 }
 
@@ -442,7 +443,13 @@ struct SampleOutcome: Identifiable {
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
-    @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
+    @State private var selectedTab: CompanionTab = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterStorage") { return .storage }
+        if arguments.contains("-HogHunterNetwork") { return .network }
+        if arguments.contains("-HogHunterServer") { return .server }
+        return .activity
+    }()
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
     /// Counts the sort requests this view has sent, so a reply for an older
@@ -698,6 +705,12 @@ struct DashboardView: View {
             List {
                 hostHeaderSection
 
+                // The first tab a person sees and the tab about the server: the
+                // two places "is anything wrong?" gets asked.
+                if selectedTab == .activity || selectedTab == .server {
+                    FlaggedIssuesSection(snapshot: snapshot)
+                }
+
                 switch selectedTab {
                 case .activity:
                     activityContent
@@ -705,9 +718,14 @@ struct DashboardView: View {
                     storageContent
                 case .network:
                     networkContent
+                case .server:
+                    ServerTabContent(snapshot: snapshot, model: model)
                 }
             }
             .listStyle(.insetGrouped)
+            .sheet(item: $model.serverActionOutcome) { outcome in
+                ServerActionResultView(outcome: outcome)
+            }
         }
         .confirmationDialog(
             "Clean \(snapshot.hostName)?",
@@ -1274,6 +1292,14 @@ struct DashboardView: View {
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
+
+                    // What a Standard clean found on its last scan, when the
+                    // Mac holds a current one.
+                    if let cleanable = storage.standardCleanableText {
+                        Label("Standard Clean: \(cleanable)", systemImage: "sparkles")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(.vertical, 4)
             } else {
@@ -1350,7 +1376,24 @@ struct DashboardView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-        } else if snapshot.storage != nil {
+        }
+
+        // What the scanned apps add up to by kind of data, the Mac's subtitle.
+        if let totals = snapshot.storage?.categoryTotals, !totals.isEmpty {
+            Section {
+                ForEach(totals) { total in
+                    LabeledContent(total.title, value: total.text)
+                }
+            } header: {
+                Text("Space by Kind")
+            } footer: {
+                Text("What the Mac's listed apps add up to on \(snapshot.hostName), by kind of data.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if snapshot.storage?.topApps?.isEmpty ?? true, snapshot.storage != nil {
             // Storage summary landed but the per-app walk has not yet returned;
             // show a single "Scanning" hint instead of nothing so the section
             // does not silently disappear on first render.
