@@ -160,6 +160,9 @@ final class CompanionServer: @unchecked Sendable {
     private let maintainRunningFlag = CompanionLocked(false)
     private let serverControlFlag = CompanionLocked(false)
     private let serverActionBusyFlag = CompanionLocked(false)
+    private let serverStatusFlag = CompanionLocked(false)
+    /// When the last forced server read was accepted, from any phone.
+    private let lastServerRefresh = CompanionLocked<Date?>(nil)
 
     var allowRemoteQuit: Bool {
         get { quitFlag.value }
@@ -195,6 +198,17 @@ final class CompanionServer: @unchecked Sendable {
         get { serverControlFlag.value }
         set { serverControlFlag.value = newValue }
     }
+    /// Off until the owner turns on Allow iPhone to See Server Status in
+    /// Settings.  Gates the server refresh route, which reads and changes
+    /// nothing on the server, so it needs no more than the status it refreshes.
+    var allowRemoteServerStatus: Bool {
+        get { serverStatusFlag.value }
+        set { serverStatusFlag.value = newValue }
+    }
+    /// Asks the Mac to read the server again now.  Called on the server queue
+    /// with the paired phone's name, for the Mac's log.  It must not wait: the
+    /// read goes over SSH, and the phone watches the snapshot for the result.
+    var onRemoteServerRefresh: ((_ device: String) -> Void)? = nil
     /// Runs one server action off this queue and calls `completion` once, from
     /// any thread.  Set by the host.  The router allows one at a time.
     var onRemoteServerAction: ((_ request: CompanionServerActionRequest, _ device: String, _ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
@@ -579,6 +593,10 @@ final class CompanionServer: @unchecked Sendable {
                 // Placeholder: never sent.  `startServerAction` answers later.
                 return (202, Data())
             },
+            serverRefreshHandler: { [weak self] in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8), nil) }
+                return self.serverRefresh(device: authenticatedDevice, now: now)
+            },
             peerTrusted: peer.isTrusted,
             deviceAuthenticator: { [devices] presented in
                 let matched = devices.authenticate(presented, now: now)
@@ -662,6 +680,42 @@ final class CompanionServer: @unchecked Sendable {
     static var maintainBusyReply: Reply {
         let body = #"{"status":"busy","error":"A Maintain run is already going on this Mac.\u00a0 Watch its progress in the app."}"#
         return (409, Data(body.utf8))
+    }
+
+    /// Runs a server refresh the router has let through: a phone's own token
+    /// from the local network or Tailscale.  The opt-in comes first, then the
+    /// interval, which holds for every phone together, so two phones cannot
+    /// double the rate.  Only an accepted refresh starts the interval.
+    func serverRefresh(device: String, now: Date) -> (status: Int, body: Data, retryAfter: Int?) {
+        guard allowRemoteServerStatus else {
+            return (403, Self.encodeRefreshReply(CompanionServerRefreshResponse(status: "forbidden", error: Self.serverRefreshOptInNote)), nil)
+        }
+        guard let handler = onRemoteServerRefresh else {
+            return (501, Data("{\"error\": \"Server refresh handler not configured\"}".utf8), nil)
+        }
+        let wait: Int? = lastServerRefresh.withLock { last in
+            if let previous = last {
+                let elapsed = now.timeIntervalSince(previous)
+                if elapsed >= 0, elapsed < CompanionServerRefresh.minimumInterval {
+                    return max(1, Int((CompanionServerRefresh.minimumInterval - elapsed).rounded(.up)))
+                }
+            }
+            last = now
+            return nil
+        }
+        if let wait {
+            let response = CompanionServerRefreshResponse(status: "throttled", error: "The server was refreshed moments ago.\u{00A0} Wait \(wait) seconds, then try again.", retryAfter: wait)
+            return (429, Self.encodeRefreshReply(response), wait)
+        }
+        handler(device)
+        let response = CompanionServerRefreshResponse(status: "started", message: "The Mac is reading the server again.\u{00A0} The numbers update when the reading lands.")
+        return (200, Self.encodeRefreshReply(response), nil)
+    }
+
+    static let serverRefreshOptInNote = "Server status on iPhone is off.\u{00A0} Turn on Allow iPhone to See Server Status in Hog Hunter Settings > iPhone on your Mac."
+
+    static func encodeRefreshReply(_ response: CompanionServerRefreshResponse) -> Data {
+        (try? JSONEncoder().encode(response)) ?? Data()
     }
 
     /// Why a server control request stops at the gate, or nil.  The opt-in is

@@ -297,6 +297,19 @@ enum CompanionConnection {
         return CompanionServerActionResponse.answer(status: reply.status, body: reply.body)
     }
 
+    /// Asks the Mac to read the server again now.  The Mac answers at once,
+    /// `started`, and the phone watches the snapshot for the new reading.
+    static func triggerServerRefresh(endpoint: NWEndpoint, token: String, useTLS: Bool? = nil) async throws -> CompanionServerRefreshResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.serverRefreshRequest(token: token, host: hostHeader(for: endpoint)),
+            timeout: defaultTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
+        )
+        // Not `decode`: a 403 or a 429 has to stay a readable refusal.
+        return CompanionServerRefreshResponse.answer(status: reply.status, body: reply.body)
+    }
+
     /// Starts a full Maintain run on the Mac.  The Mac answers at once,
     /// "started" or "busy" (409), and carries the run on by itself: the run
     /// takes minutes, so the phone watches the snapshot instead of waiting.

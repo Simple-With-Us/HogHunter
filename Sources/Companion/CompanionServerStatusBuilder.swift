@@ -92,9 +92,21 @@ enum CompanionServerStatusBuilder {
         )
     }
 
-    /// The Flagged Issues as the phone reads them.  The Mac's action buttons
-    /// stay behind: this stage of the phone cannot act on them.
-    static func issues(_ issues: [FlaggedIssue]) -> [CompanionFlaggedIssue] {
+    /// Which issue buttons the phone may show: each is on only while the
+    /// opt-in its action needs is on.  All off by default.
+    struct IssueActionsAllowed: Equatable, Sendable {
+        var quit = false
+        var clean = false
+        var refresh = false
+
+        static let none = IssueActionsAllowed()
+    }
+
+    /// The Flagged Issues as the phone reads them.  The Mac's button travels as
+    /// an action kind, and only when the phone may do it: Retry is the server
+    /// refresh, Quit is the phone's own quit flow with its confirmation, and
+    /// Clean opens the phone's Disk Cleaner.  Nothing here is a new route.
+    static func issues(_ issues: [FlaggedIssue], allowed: IssueActionsAllowed = .none) -> [CompanionFlaggedIssue] {
         issues.map { issue in
             CompanionFlaggedIssue(
                 id: issue.id,
@@ -103,8 +115,20 @@ enum CompanionServerStatusBuilder {
                 priority: issue.priority.rawValue,
                 priorityText: issue.priority.shortLabel,
                 host: issue.host == .server ? CompanionFlaggedIssue.serverHost : issue.host.rawValue,
-                category: issue.category.rawValue
+                category: issue.category.rawValue,
+                action: action(for: issue, allowed: allowed)?.rawValue
             )
+        }
+    }
+
+    /// The phone's action for one issue, or nil.  Matched on the Mac's button
+    /// title and the host, so a Mac button with no phone counterpart stays home.
+    static func action(for issue: FlaggedIssue, allowed: IssueActionsAllowed) -> CompanionIssueAction? {
+        switch (issue.actionTitle, issue.host) {
+        case ("Clean", .mac): return allowed.clean ? .clean : nil
+        case ("Quit", .mac): return allowed.quit ? .quit : nil
+        case ("Retry", .server): return allowed.refresh ? .retry : nil
+        default: return nil
         }
     }
 

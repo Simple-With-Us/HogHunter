@@ -209,6 +209,7 @@ final class HogStore: ObservableObject {
     @Published var allowRemoteServerStatus = false {
         didSet {
             persist()
+            companionServer.allowRemoteServerStatus = allowRemoteServerStatus
             companionServer.allowRemoteServerControl = serverControlEffective
             if !loadingSettings { publishCompanion() }
         }
@@ -1629,6 +1630,10 @@ final class HogStore: ObservableObject {
         companionServer.allowRemoteEdit = allowRemoteEdit
         companionServer.allowRemoteMaintain = allowRemoteMaintain
         companionServer.allowRemoteServerControl = serverControlEffective
+        companionServer.allowRemoteServerStatus = allowRemoteServerStatus
+        companionServer.onRemoteServerRefresh = { [weak self] device in
+            Task { @MainActor [weak self] in self?.serverActions.refresh(device: device) }
+        }
         companionServer.onRemoteServerAction = { [weak self] request, device, completion in
             Task { @MainActor [weak self] in
                 guard let self else { return completion((500, Data("{\"error\": \"Store unavailable\"}".utf8))) }
@@ -2788,7 +2793,7 @@ final class HogStore: ObservableObject {
             vpsConfigured: !vps.configuredHost.isEmpty,
             vpsStale: vps.isStale,
             externalDrives: MountedDriveStore.shared.rows
-        ))
+        ), allowed: .init(quit: allowRemoteQuit, clean: allowRemoteClean, refresh: allowRemoteServerStatus))
         var plain = snapshot
         if plain.storage != nil {
             plain.storage?.tempFileMinimumHours = remoteTempPolicy().minimumUntouchedHours
