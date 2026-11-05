@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+The iPhone gets the Mac's navigation structure (HH-212):
+
+- A new **Overview** tab, now the first screen, matches the Mac: the CPU and memory meters, the six busiest rows (a total CPU-then-memory ranking in shared code, covered by `CompanionOverviewRankingTests`) with a jump into Activity, and the server's strip with a jump into the Server tab.  Storage splits into the Mac's three panes (Apps, Cleaner, Drives), and Maintain is its own tab instead of a section inside Storage.  With six tabs the top picker carries the Mac's own icons, names kept as accessibility labels.  No snapshot field, route or opt-in changes; every pane shows the same data as before.
+
 The iPhone closes the small gaps with the Mac (HH-215, batch 3):
 
 - The Storage tab shows what a Standard clean could free and the space by kind of data.  The Maintain screen lists the custom scripts by name and state, turns the built-in steps on or off, and sets the disk threshold, worktree retention and PM2 log cap.  The Disk Cleaner screen sets the temp file minimum untouched hours.  Settings can open Hog Hunter at login.

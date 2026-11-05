@@ -1,10 +1,36 @@
 import SwiftUI
 
 enum CompanionTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case activity = "Activity"
     case storage = "Storage"
+    case maintain = "Maintain"
     case network = "Network"
     case server = "Server"
+    var id: String { rawValue }
+
+    /// The same SF Symbol the Mac's window uses for this tab
+    /// (Sources/UI/HogHunterPanel.swift), so the phone's compact picker and
+    /// the Mac's tabs read as one control.
+    var symbol: String {
+        switch self {
+        case .overview: return "house"
+        case .activity: return "chart.bar.xaxis"
+        case .storage: return "internaldrive"
+        case .maintain: return "wrench.and.screwdriver"
+        case .network: return "network"
+        case .server: return "server.rack"
+        }
+    }
+}
+
+/// The Mac's Storage subtabs on the phone (HH-212).  The Mac names them
+/// Installed Apps, Disk Cleaner and Drives & Folders; the phone shortens the
+/// labels so the segmented picker fits.
+enum CompanionStorageSubTab: String, CaseIterable, Identifiable {
+    case apps = "Apps"
+    case cleaner = "Cleaner"
+    case drives = "Drives"
     var id: String { rawValue }
 }
 
@@ -446,9 +472,11 @@ struct DashboardView: View {
     @State private var selectedTab: CompanionTab = {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("-HogHunterStorage") { return .storage }
+        if arguments.contains("-HogHunterMaintain") { return .maintain }
         if arguments.contains("-HogHunterNetwork") { return .network }
         if arguments.contains("-HogHunterServer") { return .server }
-        return .activity
+        // The Mac opens on Overview; the phone matches (HH-212).
+        return .overview
     }()
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
@@ -457,6 +485,15 @@ struct DashboardView: View {
     @State private var sortRequestGeneration: Int = 0
     @State private var networkSortOrder: CompanionNetworkSort = .connections
     @State private var appStorageSortOrder: CompanionAppStorageSort = .total
+    /// The Storage pane on screen.  Drives stays the default so the Mac's own
+    /// disk usage keeps its place as the first storage a person sees.  The
+    /// flags exist for the screenshot lane, which has to reach each pane.
+    @State private var storageSubTab: CompanionStorageSubTab = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterStorageApps") { return .apps }
+        if arguments.contains("-HogHunterStorageCleaner") { return .cleaner }
+        return .drives
+    }()
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
     @State private var isForceQuit = false
@@ -694,7 +731,12 @@ struct DashboardView: View {
                     .padding(.top, 6)
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(CompanionTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
+                        // Six named segments do not fit a phone, so the picker
+                        // carries the Mac's own icons; the names stay as the
+                        // accessibility labels (HH-212).
+                        Image(systemName: tab.symbol)
+                            .accessibilityLabel(tab.rawValue)
+                            .tag(tab)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -707,15 +749,19 @@ struct DashboardView: View {
 
                 // The first tab a person sees and the tab about the server: the
                 // two places "is anything wrong?" gets asked.
-                if selectedTab == .activity || selectedTab == .server {
+                if selectedTab == .overview || selectedTab == .activity || selectedTab == .server {
                     FlaggedIssuesSection(snapshot: snapshot)
                 }
 
                 switch selectedTab {
+                case .overview:
+                    overviewContent
                 case .activity:
                     activityContent
                 case .storage:
                     storageContent
+                case .maintain:
+                    maintainContent
                 case .network:
                     networkContent
                 case .server:
@@ -939,44 +985,154 @@ struct DashboardView: View {
         }
     }
 
+    /// The CPU and memory meters with their pills.  Overview and Activity
+    /// both lead with these, the pair the Mac's own Overview opens with.
     @ViewBuilder
-    private var activityContent: some View {
-        Section {
-            HStack(alignment: .top, spacing: 12) {
-                MeterCard(
-                    title: "CPU",
-                    value: snapshot.pulse.cpuPercent,
-                    headline: snapshot.pulse.cpuText,
-                    caption: snapshot.pulse.cpuCaption,
-                    severity: snapshot.pulse.cpuSeverity,
-                    history: snapshot.cpuHistory
-                )
-                MeterCard(
-                    title: "Memory",
-                    value: snapshot.pulse.memoryPercent,
-                    headline: snapshot.pulse.memoryText,
-                    caption: snapshot.pulse.memoryCaption,
-                    severity: snapshot.pulse.pressureSeverity
-                )
-            }
-            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-            if snapshot.pulse.swapText != nil || snapshot.pulse.pressureText != nil || snapshot.pulse.batteryText != nil || (snapshot.pulse.thermalState != nil && snapshot.pulse.thermalState != "nominal") {
-                HStack(spacing: 8) {
-                    if let swap = snapshot.pulse.swapText {
-                        Pill(text: swap, severity: snapshot.pulse.pressureSeverity)
-                    }
-                    if let pressure = snapshot.pulse.pressureText {
-                        Pill(text: pressure, severity: snapshot.pulse.pressureSeverity)
-                    }
-                    if let battery = snapshot.pulse.batteryText {
-                        Pill(text: (snapshot.pulse.isCharging == true ? "⚡ " : "🔋 ") + battery, severity: "calm")
-                    }
-                    if let thermal = snapshot.pulse.thermalState, thermal != "nominal" {
-                        Pill(text: "Thermal: \(thermal)", severity: (thermal == "critical" || thermal == "serious") ? "hot" : "elevated")
-                    }
+    private var metersAndPills: some View {
+        HStack(alignment: .top, spacing: 12) {
+            MeterCard(
+                title: "CPU",
+                value: snapshot.pulse.cpuPercent,
+                headline: snapshot.pulse.cpuText,
+                caption: snapshot.pulse.cpuCaption,
+                severity: snapshot.pulse.cpuSeverity,
+                history: snapshot.cpuHistory
+            )
+            MeterCard(
+                title: "Memory",
+                value: snapshot.pulse.memoryPercent,
+                headline: snapshot.pulse.memoryText,
+                caption: snapshot.pulse.memoryCaption,
+                severity: snapshot.pulse.pressureSeverity
+            )
+        }
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        if snapshot.pulse.swapText != nil || snapshot.pulse.pressureText != nil || snapshot.pulse.batteryText != nil || (snapshot.pulse.thermalState != nil && snapshot.pulse.thermalState != "nominal") {
+            HStack(spacing: 8) {
+                if let swap = snapshot.pulse.swapText {
+                    Pill(text: swap, severity: snapshot.pulse.pressureSeverity)
+                }
+                if let pressure = snapshot.pulse.pressureText {
+                    Pill(text: pressure, severity: snapshot.pulse.pressureSeverity)
+                }
+                if let battery = snapshot.pulse.batteryText {
+                    Pill(text: (snapshot.pulse.isCharging == true ? "⚡ " : "🔋 ") + battery, severity: "calm")
+                }
+                if let thermal = snapshot.pulse.thermalState, thermal != "nominal" {
+                    Pill(text: "Thermal: \(thermal)", severity: (thermal == "critical" || thermal == "serious") ? "hot" : "elevated")
                 }
             }
         }
+    }
+
+    /// The Overview's busiest rows, ranked in shared code
+    /// (`rankedByActivity`, covered by the Mac test bundle): strictly
+    /// descending CPU, then memory, name and id.  A total order, never an
+    /// epsilon comparator, so the list cannot cycle; and independent of the
+    /// shared sort, so it keeps its meaning when Activity is sorted by
+    /// memory.
+    private var overviewTopRows: [CompanionRow] {
+        snapshot.rows.rankedByActivity()
+    }
+
+    /// The Mac's Overview tab on the phone (HH-212): the meters, the busiest
+    /// rows and the server's strip.  Each part opens the tab that owns it;
+    /// nothing here is a second place to manage anything.
+    @ViewBuilder
+    private var overviewContent: some View {
+        Section { metersAndPills }
+
+        Section {
+            HStack {
+                Text("Top Activity")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Open Activity") { selectedTab = .activity }
+                    .font(.caption.weight(.medium))
+            }
+            if overviewTopRows.isEmpty {
+                Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(overviewTopRows.prefix(6).enumerated()), id: \.element.id) { index, row in
+                    HStack(spacing: 8) {
+                        Text("#\(index + 1)")
+                            .font(.caption.weight(.bold).monospacedDigit())
+                            .foregroundStyle(index < 3 ? Color.orange : Color.secondary)
+                            .frame(width: 24, alignment: .leading)
+                        Text(row.name)
+                            .font(.subheadline)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(row.cpuText)
+                        Text(row.memoryText)
+                    }
+                    .font(.caption.monospacedDigit())
+                }
+            }
+        }
+
+        if let server = snapshot.server {
+            Section {
+                Button { selectedTab = .server } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "server.rack")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Server")
+                                .font(.subheadline.weight(.semibold))
+                            Text(serverStripLine(server))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// One line about the server for the Overview strip.  The state comes
+    /// first, so a stale or failed reading is never presented as current
+    /// numbers; the numbers themselves are the Mac's own headline words.
+    private func serverStripLine(_ server: CompanionServerStatus) -> String {
+        switch server.resolvedState() {
+        case .notConfigured:
+            return "No server set up on the Mac."
+        case .noReading:
+            return "Waiting for the first reading."
+        case .error:
+            return server.errorText ?? "The last read failed."
+        case .stale:
+            return "This reading is stale.\u{00A0}The Server tab has what the Mac last saw."
+        case .ok:
+            let parts = [server.headline?.cpuText, server.headline?.memoryText, server.headline?.diskText].compactMap { $0 }
+            return parts.isEmpty ? "Readings are on the Server tab." : parts.joined(separator: " · ")
+        }
+    }
+
+    /// The Mac's Maintenance tab as its own entry (HH-212).  This is the card
+    /// that used to sit inside Storage; its destination is unchanged.
+    @ViewBuilder
+    private var maintainContent: some View {
+        Section("Maintain") {
+            NavigationLink {
+                MaintainView(snapshot: snapshot, model: model)
+            } label: {
+                MaintainSummaryRow(snapshot: snapshot)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var activityContent: some View {
+        Section { metersAndPills }
 
         Section {
             VStack(spacing: 8) {
@@ -1262,6 +1418,21 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var storageContent: some View {
+        Section {
+            Picker("Storage Pane", selection: $storageSubTab) {
+                ForEach(CompanionStorageSubTab.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+        }
+
+        // The sections below keep their old order inside the Mac's three
+        // panes (HH-212): drives and folders under Drives, per-app storage and
+        // the kind-of-data totals under Apps, the cleaner and its categories
+        // and exclusions under Cleaner.  Maintain moved out to its own tab.
+        if storageSubTab == .drives {
         // Mac storage is intentionally FIRST.  Prior to 1.0.6 the iPhone-storage
         // section sat on top and several users assumed it WAS the Mac storage
         // (the phone is showing its own storage, not the Mac's).  Putting the
@@ -1341,6 +1512,9 @@ struct DashboardView: View {
             }
         }
 
+        }
+
+        if storageSubTab == .apps {
         if let apps = snapshot.storage?.topApps, !apps.isEmpty {
             Section {
                 ForEach(sortedAppStorageRows) { app in
@@ -1407,6 +1581,9 @@ struct DashboardView: View {
             }
         }
 
+        }
+
+        if storageSubTab == .drives {
         Section("iPhone Storage") {
             if let phoneStorage = iPhoneStorage.summary() {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1440,6 +1617,9 @@ struct DashboardView: View {
             }
         }
 
+        }
+
+        if storageSubTab == .cleaner {
         Section("Disk & System Clutter") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -1581,14 +1761,6 @@ struct DashboardView: View {
             }
         }
 
-        Section("Maintain") {
-            NavigationLink {
-                MaintainView(snapshot: snapshot, model: model)
-            } label: {
-                MaintainSummaryRow(snapshot: snapshot)
-            }
-        }
-
         if let storage = snapshot.storage {
             Section("Cleanable Categories") {
                 if let breakdown = storage.categoryBreakdown, !breakdown.isEmpty {
@@ -1703,6 +1875,7 @@ struct DashboardView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+        }
         }
     }
 

@@ -945,6 +945,31 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     var canTame: Bool? = false
 }
 
+extension Array where Element == CompanionRow {
+    /// The phone Overview's busiest ranking (HH-212): strictly descending
+    /// CPU, then memory, then name, then id.  A total order, so the list is
+    /// stable and cannot cycle the way an epsilon comparator can (a within
+    /// 0.05 of b and b within 0.05 of c says nothing about a and c).  A row
+    /// from an older Mac carries no numbers and ranks after numbered rows.
+    func rankedByActivity() -> [CompanionRow] {
+        sorted { a, b in
+            // JSON decoding already refuses NaN and infinity, so no snapshot
+            // delivers them; a hand-built row still gets them counted as
+            // missing, because NaN's unordered comparisons would break the
+            // total order.
+            let aCPU = a.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? -1
+            let bCPU = b.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? -1
+            if aCPU != bCPU { return aCPU > bCPU }
+            let aMem = a.memoryBytes ?? 0
+            let bMem = b.memoryBytes ?? 0
+            if aMem != bMem { return aMem > bMem }
+            let byName = a.name.localizedStandardCompare(b.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return a.id < b.id
+        }
+    }
+}
+
 struct CompanionStorageCategorySummary: Codable, Equatable, Identifiable, Sendable {
     var id: String
     var title: String

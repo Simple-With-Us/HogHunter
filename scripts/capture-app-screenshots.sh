@@ -68,6 +68,9 @@ def launch_pid(udid):
 EXTRA_SCREENS = [
     ("network", ["-HogHunterNetwork"]),
     ("storage", ["-HogHunterStorage"]),
+    ("storage-apps", ["-HogHunterStorage", "-HogHunterStorageApps"]),
+    ("storage-cleaner", ["-HogHunterStorage", "-HogHunterStorageCleaner"]),
+    ("maintain", ["-HogHunterMaintain"]),
     ("server", ["-HogHunterServer"]),
     ("server-confirm", ["-HogHunterServer", "-HogHunterServerConfirm"]),
     ("server-details", ["-HogHunterServer", "-HogHunterServerDetails"]),
