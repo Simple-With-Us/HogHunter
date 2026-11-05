@@ -1750,6 +1750,344 @@ def test_app_caches_finds_an_idle_app_cache(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _hoghunter_debug_builds(home):
+    root = home / "Library" / "Caches" / "HogHunterDerivedData"
+    for lane in ("lane-one-aaaa", "lane-two-bbbb"):
+        (root / lane).mkdir(parents=True)
+        (root / lane / "blob.bin").write_bytes(b"x" * 1024)
+    return root
+
+
+def test_xcode_artifacts_sweeps_each_idle_hoghunter_checkout(hh):
+    """Debug builds moved to the internal disk to stop permission prompts, at
+    about 3.8 GB per lane, so they have to go when idle."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False) as touched, \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            found = hh.rule_xcode_artifacts()
+        assert sorted(c.path for c in found) == [str(root / "lane-one-aaaa"), str(root / "lane-two-bbbb")]
+        assert {c.category for c in found} == {"xcode-artifacts"}
+        assert {c.tier for c in found} == {"safe"}
+        touched.assert_any_call(str(root / "lane-one-aaaa"), hh.IDLE_MIN_OK / (24 * 60))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_xcode_artifacts_keeps_hoghunter_checkouts_during_a_build(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        for busy in ("xcodebuild", "clang", "swift-frontend"):
+            with mock.patch.object(hh, "HOME", home), \
+                 mock.patch.object(hh, "proc_count", side_effect=lambda name: int(name == busy)), \
+                 mock.patch.object(hh, "proc_count_exact", side_effect=lambda name: int(name == busy)), \
+                 mock.patch.object(hh, "tree_in_use", return_value=False), \
+                 mock.patch.object(hh, "touched_since", return_value=False):
+                assert hh.rule_xcode_artifacts() == [], busy
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_xcode_artifacts_reads_a_failed_build_probe_as_busy(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=hh.PROBE_FAILED), \
+             mock.patch.object(hh, "proc_count_exact", return_value=hh.PROBE_FAILED), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def _lanes_found_with_open_gates(hh, home, **patches):
+    with mock.patch.object(hh, "HOME", home), \
+         mock.patch.object(hh, "proc_count", return_value=0), \
+         mock.patch.object(hh, "proc_count_exact", return_value=0), \
+         mock.patch.object(hh, "tree_in_use", return_value=False), \
+         mock.patch.object(hh, "touched_since", return_value=False), \
+         mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+        if patches:
+            with mock.patch.multiple(hh, **patches):
+                return sorted(c.path for c in hh.rule_xcode_artifacts())
+        return sorted(c.path for c in hh.rule_xcode_artifacts())
+
+
+def test_the_sweep_never_walks_a_debug_builds_root_that_is_a_symlink(hh):
+    """Pointed at the external volume, the root would take that volume's lanes with it."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        real = _hoghunter_debug_builds(home)
+        moved = home / "elsewhere"
+        real.rename(moved)
+        real.symlink_to(moved, target_is_directory=True)
+        assert _lanes_found_with_open_gates(hh, home) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_sweep_skips_a_lane_that_is_a_symlink(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        target = home / "elsewhere"
+        target.mkdir()
+        (root / "lane-link").symlink_to(target, target_is_directory=True)
+        found = _lanes_found_with_open_gates(hh, home)
+        assert found == [str(root / "lane-one-aaaa"), str(root / "lane-two-bbbb")]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_sweep_skips_a_forbidden_lane(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        forbidden = str(root / "lane-one-aaaa")
+        found = _lanes_found_with_open_gates(hh, home, is_forbidden=lambda path: path == forbidden)
+        assert found == [str(root / "lane-two-bbbb")]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_keep_marker_above_the_lanes_keeps_them_all(hh):
+    """holds_keep_sentinel only looks down, so this one rests on has_keep_sentinel."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        (root / hh.KEEP_SENTINEL).touch()
+        assert _lanes_found_with_open_gates(hh, home) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_one_busy_hoghunter_checkout_does_not_keep_the_others(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        busy, held = str(root / "lane-one-aaaa"), str(root / "lane-two-bbbb")
+        idle = root / "lane-three-cccc"
+        idle.mkdir()
+        (idle / "blob.bin").write_bytes(b"x")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", side_effect=lambda p: p == held), \
+             mock.patch.object(hh, "touched_since", side_effect=lambda p, _d: p == busy), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            found = hh.rule_xcode_artifacts()
+        assert [c.path for c in found] == [str(idle)]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_keep_marker_protects_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        (root / "lane-one-aaaa" / "Build").mkdir()
+        (root / "lane-one-aaaa" / "Build" / hh.KEEP_SENTINEL).write_text("")
+        (root / "lane-two-bbbb" / hh.KEEP_SENTINEL).write_text("")
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_failed_lsof_listing_keeps_a_hoghunter_checkout(hh):
+    """The per-path fallback cannot see a Debug host running from deep in the
+    tree, so a listing that failed has to read as in use."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "_load_open_snapshot", return_value=None), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def _hoghunter_lane_candidate(hh, home, subfolder=None):
+    """One lane the scan accepted, and the root it lives in."""
+    root = _hoghunter_debug_builds(home)
+    shutil.rmtree(root / "lane-two-bbbb")
+    if subfolder:
+        (root / "lane-one-aaaa" / subfolder).mkdir()
+    with mock.patch.object(hh, "HOME", home), \
+         mock.patch.object(hh, "proc_count", return_value=0), \
+         mock.patch.object(hh, "proc_count_exact", return_value=0), \
+         mock.patch.object(hh, "tree_in_use", return_value=False), \
+         mock.patch.object(hh, "touched_since", return_value=False), \
+         mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+        found = hh.rule_xcode_artifacts()
+    assert len(found) == 1, found
+    return found[0], root / "lane-one-aaaa"
+
+
+def _apply_with_open_gates(hh, candidate, **overrides):
+    gates = {"proc_count": 0, "proc_count_exact": 0, "tree_in_use": False, "touched_since": False}
+    gates.update(overrides)
+    with mock.patch.object(hh, "proc_count", return_value=gates["proc_count"]), \
+         mock.patch.object(hh, "proc_count_exact", return_value=gates["proc_count_exact"]), \
+         mock.patch.object(hh, "tree_in_use", return_value=gates["tree_in_use"]), \
+         mock.patch.object(hh, "touched_since", return_value=gates["touched_since"]):
+        hh.apply_candidate(candidate)
+
+
+def test_a_hoghunter_checkout_is_deleted_when_its_gates_still_hold(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        assert candidate.recheck is not None
+        _apply_with_open_gates(hh, candidate)
+        assert candidate.applied, candidate
+        assert not candidate.refused
+        assert not lane.exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_build_started_after_the_scan_keeps_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        for probe in ("proc_count", "proc_count_exact"):
+            candidate, lane = _hoghunter_lane_candidate(hh, home)
+            _apply_with_open_gates(hh, candidate, **{probe: 1})
+            assert candidate.refused == "a build is running", candidate
+            assert not candidate.applied
+            assert lane.is_dir()
+            shutil.rmtree(lane.parent)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_hoghunter_checkout_used_after_the_scan_is_kept(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        for gate, why in (("touched_since", "touched in the last 90 minutes"), ("tree_in_use", "held open")):
+            candidate, lane = _hoghunter_lane_candidate(hh, home)
+            _apply_with_open_gates(hh, candidate, **{gate: True})
+            assert candidate.refused == why, candidate
+            assert lane.is_dir()
+            shutil.rmtree(lane.parent)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_keep_marker_added_after_the_scan_keeps_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        # The subfolder exists before the scan, so the marker leaves the lane
+        # folder's own mtime alone and only the recheck's walk can find it.
+        candidate, lane = _hoghunter_lane_candidate(hh, home, subfolder="Build")
+        (lane / "Build" / hh.KEEP_SENTINEL).write_text("")
+        _apply_with_open_gates(hh, candidate)
+        assert candidate.refused == "holds a keep marker, or the look failed", candidate
+        assert not candidate.applied
+        assert (lane / "Build" / hh.KEEP_SENTINEL).exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_marker_walk_that_fails_at_the_recheck_keeps_a_hoghunter_checkout(hh):
+    """The candidate says apply_delete need not walk, so this walk is the only one."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        with mock.patch.object(hh, "holds_keep_sentinel", return_value=hh.MarkerVerdict(False, False)):
+            _apply_with_open_gates(hh, candidate)
+        assert candidate.refused == "holds a keep marker, or the look failed", candidate
+        assert not candidate.applied
+        assert (lane / "blob.bin").exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_marker_walk_that_fails_at_the_scan_keeps_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "holds_keep_sentinel", return_value=hh.MarkerVerdict(False, False)), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_hoghunter_checkout_loop_stops_at_the_scan_deadline(hh):
+    """Each lane pays for a full-tree walk, so the loop has to consult the deadline."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        walk = mock.Mock(return_value=hh.MarkerVerdict(False, True))
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "holds_keep_sentinel", walk), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3), \
+             mock.patch.object(hh, "_SCAN_DEADLINE", 1.0), \
+             mock.patch.object(hh, "_SCAN_BUDGET_EXHAUSTED", False), \
+             mock.patch.object(hh, "scan_budget_left", return_value=0.0):
+            assert hh.rule_xcode_artifacts() == []
+            assert hh._SCAN_BUDGET_EXHAUSTED is True, "a truncated scan has to say so"
+        walk.assert_not_called()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_hoghunter_checkout_swapped_after_the_scan_is_kept(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        shutil.rmtree(lane)
+        lane.mkdir()
+        (lane / "other.bin").write_bytes(b"x")
+        _apply_with_open_gates(hh, candidate)
+        assert candidate.refused == "the path now holds something else", candidate
+        assert (lane / "other.bin").exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_app_caches_leaves_the_hoghunter_debug_builds_to_xcode_artifacts(hh):
+    """app-caches has no build gate and would treat every lane as one tree."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_app_caches() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_app_caches_stops_at_its_own_deadline(hh):
     """Every candidate pays for two uncapped probes, so the rule's candidate
     loop has to consult the scan deadline itself.  Otherwise one rule overruns

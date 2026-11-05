@@ -15,7 +15,7 @@
 Mac menu bar utility.  Finds CPU and memory hogs now, over the past hour, and over the past 24 hours.  Quit from the list after confirm.
 
 **Local:** `~/apps/HogHunter`  
-**Installed app:** `/Applications/HogHunter.app`  
+**Installed app:** `~/Applications/Hog Hunter.app`  
 **TestFlight authorization:** The owner requested external testing for the
 iPhone companion on 2026-09-27.  The release lane is tracked in issue #22.
 The App Store Connect app record exists and the guarded workflow
@@ -28,15 +28,16 @@ Hosting and routing (apexes, hostnames, hosts, deploy paths): see [`Fleet-OPS/do
 ## Build
 
 ```bash
-cd ~/apps/HogHunter
+cd <your lane>
 xcodegen generate
-xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build
-ditto build/Build/Products/Release/HogHunter.app /Applications/HogHunter.app
+scripts/install.sh
 ```
 
-Prefer `scripts/install.sh` over the manual steps above — it builds Release, signs with the "Developer ID Application" identity when it is in the keychain (adhoc otherwise), quits the running copy, installs, and relaunches.  It installs to `/Applications` by default when a copy is already there, otherwise to `~/Applications`; pass `--dest PATH` to choose explicitly.  Use `--dry-run` to check what it would do without touching the running app or the destination, or `--no-launch` to skip the relaunch.
+`scripts/install.sh` is the only install path.  It builds Release, signs with the Developer ID Application identity of team CC8UTF7ATG, checks the identity with `scripts/check-mac-identity.sh`, quits the running copy, swaps the staged bundle in, and relaunches.  It refuses to install without that identity, never falls back to ad hoc when signing fails, and refuses to create a second copy, because macOS keeps privacy grants against the designated requirement and an ad hoc build has a new one every time.  `--adhoc` needs a `--dest` outside `/Applications` and `~/Applications`, and never launches.  It installs to `/Applications` by default when a copy is already there, otherwise to `~/Applications`; pass `--dest PATH` to choose explicitly.  Use `--dry-run` to check what it would do without touching the running app or the destination, or `--no-launch` to skip the relaunch.  With `--no-launch` nothing shows the new copy starts, so a production run retires nothing: the previous copy stays in a `.hoghunter-previous.*` folder the script names, leftovers and a pre-rename copy stay too, and the next install that opens Hog Hunter removes them.  An ad hoc run never opens a copy, so it still tidies its throwaway folder.  `--dest` is made physical before the swap, so a spelling through the bundle such as `X/Hog Hunter.app/..` is the folder `X`, and one through a bundle that is not there is refused.
 
 `HogHunterTests` (XCTest, `Tests/HogHunterTests/`) covers pure logic such as `HogFormat` and the iPhone snapshot codec.  Run with `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.  CI (`.github/workflows/ci.yml`) runs the same on every push to `main` and every pull request, then builds the `HogHunterIOS` scheme for the iOS Simulator.
+
+**Keep Debug builds off the external volume.**  A Debug app or test host is signed ad hoc, so every build is a new app to macOS.  Run from a removable volume, it raises the "HogHunter would like to access files on a removable volume" dialog as it launches, on the owner's screen, and Allow lasts only until the next build.  `xcodegen generate` runs `scripts/xcodegen-post.sh`, which points this checkout's default DerivedData at `~/Library/Caches/HogHunterDerivedData`.  Run tests with plain `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`, and never pass a `-derivedDataPath` on `/Volumes` for a Debug build; `CodeIdentityGuardTests` fails if a host runs from there.  `xcode-artifacts` in `scripts/hoghunter-clean` sweeps each idle checkout's folder, about 3.8 GB, and never during a build.  Do not read a lane's own files from a test either, since the lane is on that volume: skip such a test on `/Volumes` paths, as `testThePhoneScreenWritesItsGapsAsNonBreakingSpaces` does, and CI still runs it.  Record: `docs/rollouts/2026-11-04-tcc-prompts-and-code-identity.md`.
 
 UI changes must be covered by automated visual verification where feasible: Playwright screenshot assertions for web surfaces, `xcrun simctl io booted screenshot` for iOS simulator. The owner never takes manual screenshots and does not run local UI preview sessions. Native Mac app UI is verified through code review and CI.
 
@@ -91,7 +92,7 @@ The regimen's controls stay on the Mac for now: the phone has no route, no snaps
 - `Sources/Storage/CleanRegimenRunner.swift` — the runner.  A singleton (`CleanRegimenRunner.shared`), started and stopped by `HogStore` (`Sources/Store/HogStore.swift` `start()` / `stop()` / `deinit`).  It drives a `Task` loop, not a `Timer` on a `RunLoop`.  It takes the lock through an **injected** `lockProvider`, never by constructing one itself, so a test can supply its own.
 - `Sources/Storage/HousekeeperLock.swift` — the Swift mirror of `scripts/vacuum/lock.py`.  It takes the **same** mkdir-based lock (`~/.claude-disk-janitor/.housekeeper.lock`, stale after 120 minutes) as the Python engine, so the in-app regimen and the launchd ticks never reclaim at once.  Re-entrant through `HOUSEKEEPER_LOCK_OWNER=1`; read that with `getenv`, never `ProcessInfo.processInfo.environment`, which is a launch-time snapshot and would miss a token set later.  It releases only a lock it took, and `removeIfEmpty()` matches Python's `rmdir` so it never removes a peer's.
 - `Sources/Storage/KeepSentinel.swift` — the `.janitor-keep` marker, matched case-insensitively like the Python engine's `find -iname`.  `isKept` finds one on a path or any parent; `containsMarker` finds one anywhere inside a tree (bounded to 6 levels and 2,000 entries), which matters because the cleaner deletes whole trees and would take the marker with them.
-- `Sources/Storage/DiskCleaner.swift` `isSafeToDelete` — refuses `<home>/apps/lanes` **by name** as well as by volume, because `apps/lanes` resolves to the internal disk when the external volume is unmounted.  It also refuses any external volume (`isOnExternalVolume`) and anything `isHandsOff` finds marked, which asks both `KeepSentinel` questions; the scan and the clean filter with the same check, and a symlink item is checked at its resolved target.
+- `Sources/Storage/DiskCleaner.swift` `isSafeToDelete` — refuses `<home>/apps/lanes` **by name** as well as by volume, because `apps/lanes` resolves to the internal disk when the external volume is unmounted.  It also refuses any external volume (`isOnExternalVolume`) and anything `isHandsOff` finds marked, which asks both `KeepSentinel` questions; the scan and the clean filter with the same check, except that a Hog Hunter Debug Builds row is walked whole only at the clean, and a symlink item is checked at its resolved target.
 
 The housekeeper owner record is a **shared protocol**, not a Hog Hunter format: the same file is written and read by four programs (Hog Hunter's Python engine and its Swift lock, plus AFC's `mac-auto-cleanup.sh` and `mac-resource-watch.py`).  All four must publish the same exact key set — `pid`, `host`, `acquired_at`, `lock`, `start` — and refuse a record that does not match it, because a record the readers refuse is not evidence of anything.  Writers retain the local `start` token from `/bin/ps -o lstart= -p <pid>` run with PATH and `LC_ALL=C` alone during the AFC-582 reader-first rollout.  Readers run that command with `TZ=UTC0` and accept an exact UTC token or a legacy local C-locale timestamp interpreted as UTC within a 24-hour offset, provided the current process started no later than `acquired_at`.  That acquisition bound prevents a pid reused after lock acquisition from being mistaken for the prior holder.  A dead pid proves the holder is gone; a parseable token outside the permitted offset or a current process that started after acquisition also proves it is gone.  A token that cannot be read or parsed is no evidence at all, so the existing age rule decides.  All four readers must land before the separate UTC writer phase.  The owner file must be strictly newer than the lock directory beside it, and a file that cannot be read as an owner record is **left alone**, never deleted.  The two Hog Hunter implementations stay separate code on purpose;  the agreement between them and AFC's two is enforced by the cross-implementation check in `docs/rollouts/2026-10-28-housekeeper-owner-record-protocol.md`, not by a shared module.
 
@@ -172,7 +173,8 @@ sees it, while the executable inside the bundle stays `HogHunter`:
 | Surface | Value | Where |
 |---|---|---|
 | Installed bundle | `Hog Hunter.app` | `scripts/install.sh` copies the built `HogHunter.app` to `"$DEST_DIR/Hog Hunter.app"`, then retires a pre-rename `HogHunter.app` (only after confirming the same `CFBundleIdentifier`) |
-| `CFBundleName` / `CFBundleDisplayName` | `Hog Hunter` | `project.yml` `INFOPLIST_KEY_CFBundleName` / `...DisplayName` |
+| `CFBundleDisplayName` | `Hog Hunter` | `project.yml` `INFOPLIST_KEY_CFBundleDisplayName` |
+| `CFBundleName` | `HogHunter` | Xcode's generated plist takes it from `PRODUCT_NAME` and ignores `INFOPLIST_KEY_CFBundleName`, which is why a macOS permission dialog says "HogHunter" for the Debug and Release builds alike |
 | Executable | `HogHunter` | `project.yml` `PRODUCT_NAME` |
 | Quit-by-name | both | `scripts/install.sh` sends `tell application "Hog Hunter" to quit`, then `"HogHunter"`, because an older copy is still on disk under the old name |
 
