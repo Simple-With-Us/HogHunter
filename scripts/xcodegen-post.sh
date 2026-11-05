@@ -18,6 +18,9 @@ LOCATION="$HOME/Library/Caches/HogHunterDerivedData/$(basename "$ROOT")-$KEY"
 # shared one.  It is generated and git-ignored along with the rest of the project.
 SETTINGS_DIR="$ROOT/HogHunter.xcodeproj/project.xcworkspace/xcuserdata/$(/usr/bin/id -un).xcuserdatad"
 
+# XML-escaped: a path with &, < or > would otherwise break the plist.
+LOCATION_XML="$(printf '%s' "$LOCATION" | /usr/bin/sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+
 /bin/mkdir -p "$SETTINGS_DIR"
 /bin/cat > "$SETTINGS_DIR/WorkspaceSettings.xcsettings" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -27,7 +30,7 @@ SETTINGS_DIR="$ROOT/HogHunter.xcodeproj/project.xcworkspace/xcuserdata/$(/usr/bi
 	<key>BuildLocationStyle</key>
 	<string>UseAppPreferences</string>
 	<key>DerivedDataCustomLocation</key>
-	<string>$LOCATION</string>
+	<string>$LOCATION_XML</string>
 	<key>DerivedDataLocationStyle</key>
 	<string>AbsolutePath</string>
 </dict>

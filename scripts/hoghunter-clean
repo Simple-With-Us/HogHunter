@@ -1612,12 +1612,13 @@ def rule_xcode_artifacts() -> list[Candidate]:
             s = str(d)
             if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
                 continue
-            # Same order and gates as app-caches: this deletes a whole tree, and a
-            # big one can hide a recent write past newest_file_age_min's cap.
+            # Cheap idleness probe first (it quits at the first recent file), then the
+            # full-tree keep-marker walk only for lanes that are idle.  This deletes a
+            # whole tree, and a big one can hide a recent write past newest_file_age_min's cap.
+            if touched_since(s, IDLE_MIN_OK / (24 * 60)) or open_handles(s):
+                continue
             verdict = holds_keep_sentinel(s, probe_timeout(60.0))
             if verdict.found or not verdict.known:
-                continue
-            if touched_since(s, IDLE_MIN_OK / (24 * 60)) or open_handles(s):
                 continue
             cands.append(Candidate(
                 category="xcode-artifacts", path=s, bytes=dir_bytes(s),

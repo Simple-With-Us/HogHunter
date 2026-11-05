@@ -85,9 +85,15 @@ resolved_dir() {
 }
 
 is_production_dir() {
-  local resolved
+  # Containment, not equality: a folder inside /Applications is still production.
+  local resolved production
   resolved="$(resolved_dir "$1")"
-  [[ "$resolved" == "$(resolved_dir "$SYSTEM_APPLICATIONS")" || "$resolved" == "$(resolved_dir "$USER_APPLICATIONS")" ]]
+  for production in "$(resolved_dir "$SYSTEM_APPLICATIONS")" "$(resolved_dir "$USER_APPLICATIONS")"; do
+    if [[ "$resolved" == "$production" || "$resolved" == "$production/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 if [[ "$ADHOC" -eq 1 ]]; then
@@ -274,7 +280,7 @@ sign_developer_id_nested() {
   done
   perl -e 'alarm 20; exec @ARGV or exit 1' codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS_FILE" \
-    --sign "$SIGNING_IDENTITY" "$APP_PATH"
+    --sign "$SIGNING_IDENTITY" "$APP_PATH" || return 1
 }
 if [[ "$DEVELOPER_ID_AVAILABLE" -eq 1 ]]; then
   echo "Signing with Developer ID Application, nested code first.  20 second timeout per step."
@@ -327,10 +333,31 @@ if pgrep -x HogHunter >/dev/null 2>&1; then
 fi
 
 echo "Installing to $INSTALLED_PATH."
+# The previous bundle waits beside the destination, outside STAGE_DIR, so the EXIT
+# trap cannot delete it.  It is removed only once the new bundle is in place and
+# verified; a failed swap puts it back.
+BACKUP_DIR=""
 if [[ -e "$INSTALLED_PATH" ]]; then
-  mv "$INSTALLED_PATH" "$STAGE_DIR/previous.app"
+  BACKUP_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-previous.XXXXXX")"
+  mv "$INSTALLED_PATH" "$BACKUP_DIR/Hog Hunter.app"
 fi
-mv "$STAGED_PATH" "$INSTALLED_PATH"
+if ! mv "$STAGED_PATH" "$INSTALLED_PATH"; then
+  if [[ -n "$BACKUP_DIR" ]]; then
+    mv "$BACKUP_DIR/Hog Hunter.app" "$INSTALLED_PATH" || true
+    rmdir "$BACKUP_DIR" 2>/dev/null || true
+  fi
+  echo "error: could not move the new Hog Hunter into place.  The previous copy was restored." >&2
+  exit 6
+fi
+if [[ -n "$BACKUP_DIR" ]]; then
+  if codesign --verify --deep --strict "$INSTALLED_PATH" \
+    && { [[ "$ADHOC" -eq 1 ]] || "$REPO_ROOT/scripts/check-mac-identity.sh" "$INSTALLED_PATH"; }; then
+    rm -rf "$BACKUP_DIR"
+  else
+    echo "error: the installed copy failed verification.  The previous copy is kept at $BACKUP_DIR/Hog Hunter.app." >&2
+    exit 6
+  fi
+fi
 
 # Retire the pre-rename copy, but only after confirming it is this app and not
 # something else that happens to share the old filename.

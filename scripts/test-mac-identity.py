@@ -92,6 +92,17 @@ class IdentityCheckTests(unittest.TestCase):
         result = self.run_check(make_bundle(self.dir))
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_the_quoted_team_id_rendering_is_accepted_too(self) -> None:
+        # codesign prints a leaf OU bare when the Team ID starts with a letter and
+        # quoted otherwise; both are the same requirement.
+        self.fake_codesign(self.good_details(), requirement=REQUIREMENT.replace(f"= {TEAM}", f'= "{TEAM}"'))
+        result = self.run_check(make_bundle(self.dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_different_team_in_the_requirement_is_refused(self) -> None:
+        self.fake_codesign(self.good_details(), requirement=REQUIREMENT.replace(TEAM, "ZZZZZZZZZZ"))
+        self.assertEqual(self.run_check(make_bundle(self.dir)).returncode, 2)
+
     def test_an_ad_hoc_signature_is_refused(self) -> None:
         self.fake_codesign(
             f"Identifier={BUNDLE_ID}\nCodeDirectory v=20400 size=453 flags=0x2(adhoc) hashes=3+7\n"
@@ -180,6 +191,11 @@ class InstallerGateTests(unittest.TestCase):
         for destination in ("/Applications", "/Applications/", f"{self.home}/Applications", f"{self.home}/Applications/"):
             self.assert_refused(self.install("--adhoc", "--dest", destination), 3, "refusing an ad hoc install")
 
+    def test_ad_hoc_is_refused_inside_a_production_folder(self) -> None:
+        (self.home / "Applications" / "Nested").mkdir(parents=True)
+        for destination in ("/Applications/SomeFolder", f"{self.home}/Applications/Nested", f"{self.home}/Applications/Nested/"):
+            self.assert_refused(self.install("--adhoc", "--dest", destination), 3, "refusing an ad hoc install")
+
     def test_ad_hoc_to_a_throwaway_folder_passes_the_gates_and_never_launches(self) -> None:
         result = self.install("--adhoc", "--dest", str(self.dir / "scratch"))
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
@@ -234,6 +250,21 @@ class SourceRuleTests(unittest.TestCase):
         self.assertIn(f'EXPECTED_TEAM_ID="{TEAM}"', CHECK.read_text())
         self.assertIn(f'EXPECTED_TEAM_ID="{TEAM}"', INSTALL.read_text())
 
+    def test_the_previous_app_is_kept_outside_the_staging_folder_until_the_new_one_is_verified(self) -> None:
+        source = INSTALL.read_text()
+        self.assertNotIn("previous.app", source)
+        self.assertLess(source.index('mv "$INSTALLED_PATH" "$BACKUP_DIR/Hog Hunter.app"'), source.index('mv "$STAGED_PATH" "$INSTALLED_PATH"'))
+        self.assertLess(source.index('mv "$STAGED_PATH" "$INSTALLED_PATH"'), source.index('rm -rf "$BACKUP_DIR"'))
+
+    def test_the_release_signs_with_the_production_team_certificate(self) -> None:
+        source = (ROOT / "scripts" / "mac-release-build.sh").read_text()
+        self.assertIn(f"({TEAM})", source[source.index("resolve_codesign_identity() {"):source.index("short_version()")])
+
+    def test_the_lane_sweep_probes_idleness_before_walking_for_keep_markers(self) -> None:
+        source = (ROOT / "scripts" / "hoghunter-clean").read_text()
+        block = source[source.index("lanes_root = HOME / _HOGHUNTER_DERIVED_DATA"):]
+        self.assertLess(block.index("touched_since(s,"), block.index("holds_keep_sentinel(s,"))
+
     def test_the_project_runs_the_location_script(self) -> None:
         self.assertIn("postGenCommand: scripts/xcodegen-post.sh", (ROOT / "project.yml").read_text())
 
@@ -259,6 +290,19 @@ class DerivedDataLocationTests(unittest.TestCase):
             for location in locations:
                 self.assertTrue(location.startswith(str(base / "home" / "Library" / "Caches") + "/"))
             self.assertNotEqual(locations[0], locations[1])
+
+    def test_a_home_with_xml_characters_still_writes_a_valid_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw).resolve()
+            scripts = base / "lane" / "scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy(POST_GEN, scripts / POST_GEN.name)
+            home = base / "a&b<c>d"
+            subprocess.run([str(scripts / POST_GEN.name)], env=dict(os.environ, HOME=str(home)), check=True)
+            found = list((base / "lane").glob("HogHunter.xcodeproj/project.xcworkspace/xcuserdata/*/WorkspaceSettings.xcsettings"))
+            with open(found[0], "rb") as handle:
+                settings = plistlib.load(handle)
+            self.assertTrue(settings["DerivedDataCustomLocation"].startswith(str(home) + "/Library/Caches/"))
 
 
 if __name__ == "__main__":

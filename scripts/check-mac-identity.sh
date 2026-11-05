@@ -50,7 +50,10 @@ authority="$(sed -n 's/^Authority=//p' <<<"$details" | head -n 1)"
 [[ "$authority" == "Developer ID Application: "* ]] || refuse "first signing authority is '${authority:-none}', expected a Developer ID Application certificate"
 
 requirement="$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => //p' | head -n 1 || true)"
-[[ "$requirement" == "$EXPECTED_REQUIREMENT" ]] || refuse "designated requirement is '${requirement:-none}', expected '$EXPECTED_REQUIREMENT'"
+# codesign prints the leaf OU bare for a Team ID that starts with a letter and
+# quoted otherwise; both spell the same requirement, so both are accepted.
+QUOTED_REQUIREMENT="${EXPECTED_REQUIREMENT%= $EXPECTED_TEAM_ID}= \"$EXPECTED_TEAM_ID\""
+[[ "$requirement" == "$EXPECTED_REQUIREMENT" || "$requirement" == "$QUOTED_REQUIREMENT" ]] || refuse "designated requirement is '${requirement:-none}', expected '$EXPECTED_REQUIREMENT'"
 
 if [[ "$CHECK_SEAL" -eq 1 ]]; then
   codesign --verify --deep --strict "$APP" >/dev/null 2>&1 || refuse "codesign --verify --deep --strict failed, so macOS would not honor its identity"
