@@ -972,7 +972,11 @@ final class CompanionMaintainCopyTests: XCTestCase {
     /// after a sentence inside a string literal.
     func testThePhoneScreenWritesItsGapsAsNonBreakingSpaces() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        for name in ["ios/Sources/CompanionMaintainView.swift", "Sources/UI/MaintainView.swift"] {
+        // A lane lives on an external volume, and reading it from the ad hoc test
+        // host would raise a removable-volume permission prompt.  CI still runs this.
+        try XCTSkipIf(root.resolvingSymlinksInPath().path.hasPrefix("/Volumes/"),
+                      "Source is on an external volume; CI runs this check")
+        for name in ["ios/Sources/CompanionMaintainView.swift", "ios/Sources/CompanionServerView.swift", "Sources/UI/MaintainView.swift"] {
             let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
             let code = source.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for line in code {

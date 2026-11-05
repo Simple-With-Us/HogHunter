@@ -1080,7 +1080,7 @@ class TestMaintenanceTimingAndIncomplete(_EngineHome):
         with patch.dict(sys.modules, {spec.name: cleaner}):
             loader.exec_module(cleaner)
         candidate = cleaner.Candidate("synthetic", str(self.home / "synthetic"), 9_000_000_000, "synthetic")
-        def scan(*args):
+        def scan(*args, skip=()):
             cleaner._SCAN_BUDGET_EXHAUSTED = True
             return [candidate]
         def apply(item):

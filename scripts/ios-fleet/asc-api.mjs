@@ -51,15 +51,12 @@ import {
 } from "./version-plan.mjs";
 import {
   PUBLIC_GROUP_NAME,
-  TESTER_POLICY_PUBLIC,
   countInstallableTesters,
   otherLinkOnGroups,
   planTesterList,
-  policyNeedsBuildAssignment,
-  policyRequiresTesterList,
-  policyUsesInternalGroup,
   resolveTesterPolicy,
-  selectPublicGroup
+  selectPublicGroup,
+  testerPolicyRefusal
 } from "./tester-policy.mjs";
 
 function base64url(input) {
@@ -444,17 +441,18 @@ function buildReleaseNotes({ marketing, displayName, title, subjects, iosPathPre
 // WHY THIS EXISTS (found 2026-10-09, GH #1018): moving a fleet iOS app to a new
 // bundle ID means a NEW App Store Connect app record, and a new record starts
 // with no TestFlight groups at all.  The ship uploaded 14 VALID builds to
-// app.botfleet.ios and every run was green, while the owner saw nothing: the
-// legacy record had an internal group ("BotFleet Testers", all builds) and the
-// new one had none, so no internal tester existed, and the external group's
-// testers were never invited because no build had cleared Beta App Review.
-// Internal testers are App Store Connect users; they need no review and get
-// every build the moment it finishes processing, so the internal group is the
-// path that must always exist.
+// app.botfleet.ios and every run was green, while the owner saw nothing:  no
+// beta group held the build, and the external group's testers were never
+// invited because no build had cleared Beta App Review.
+//
+// There is ONE group now (owner ruling, Nov 4 2026, HH-217):  the public
+// external group whose link is on.  The internal all-builds group is gone --
+// it is not created, not required and not waited for.  An app record that
+// still carries one from before keeps it:  the lane does not delete it, does
+// not use it and does not fail because it exists.
 //
 // These helpers take the caller's `api(method, path, jsonBody)` so a test can
 // drive them with a fake and so main() keeps one authenticated client.
-export const INTERNAL_GROUP_NAME = "Internal Testers";
 
 // A resource row is { id: <string>, attributes: <object>, ... }.  This client is
 // dependency-free on purpose (the hosted ios-ship workflow runs it with plain
@@ -506,16 +504,12 @@ export function maskEmail(email) {
 // Tester records are PER APP on Apple's side: filter[email] on its own returns
 // every record that email has across the team's apps, and adding another app's
 // record to this app's group answers 409 STATE_ERROR "Tester(s) cannot be
-// assigned" (seen live on 2026-10-09 for the owner's own address).  So:
-//   - createFirst (the internal group path): POST /v1/betaTesters with the group
-//     relationship.  For an existing address on THIS app Apple answers with that
-//     app's own record, and for an App Store Connect user it makes an internal
-//     tester.  Falls back to the lookup below if the create is refused.
-//   - lookup: prefer a record already tied to this app (filter[apps]), then any
-//     record with the address, then create.  filter[email] is an exact match, so
-//     a tester stored with different letter case is missed and the create
-//     answers 409; the case-insensitive search over the app's testers recovers it.
-export async function addTesterToGroup({ api, appId, groupId, email, createFirst = false }) {
+// assigned" (seen live on 2026-10-09 for the owner's own address).  So the
+// record for THIS app is looked up first, then any record with the address,
+// and only then is one created.  filter[email] is an exact match, so a tester
+// stored with different letter case is missed and the create answers 409; the
+// case-insensitive search over the app's testers recovers it.
+export async function addTesterToGroup({ api, appId, groupId, email }) {
   const wanted = String(email).toLowerCase();
   const create = () => api("POST", "/v1/betaTesters", JSON.stringify({
     data: {
@@ -524,10 +518,6 @@ export async function addTesterToGroup({ api, appId, groupId, email, createFirst
       relationships: { betaGroups: { data: [{ type: "betaGroups", id: groupId }] } }
     }
   }));
-  if (createFirst) {
-    const made = await create();
-    if (made.ok) return { ok: true, existing: false, res: made };
-  }
   const sameEmail = (t) => String(t.attributes?.email || "").toLowerCase() === wanted;
   let existing = ascRows(await api("GET", `/v1/betaTesters?filter[email]=${encodeURIComponent(email)}&filter[apps]=${appId}&limit=5`)).find(sameEmail);
   if (!existing) {
@@ -561,33 +551,9 @@ export async function addTesterToGroup({ api, appId, groupId, email, createFirst
   return { ok: Boolean(res.ok || res.status === 204), existing: Boolean(existing), res };
 }
 
-// How many testers can install every build of the app without Beta App Review:
-// the members of internal groups that have access to all builds.  Never throws;
-// { ok:false } means the count could not be read, which is not the same as zero.
-export async function countInternalTesters({ api, appId }) {
-  const groupsRes = await api("GET", `/v1/apps/${appId}/betaGroups?limit=200&fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds`);
-  if (!groupsRes.ok) return { ok: false, error: ascErrorText(groupsRes), groups: 0, testers: 0 };
-  const groups = ascRows(groupsRes).filter(
-    (g) => g.attributes?.isInternalGroup === true && g.attributes?.hasAccessToAllBuilds === true
-  );
-  // One Set across ALL groups: a tester in two all-builds groups is one person.
-  const seen = new Set();
-  for (const g of groups) {
-    const members = await ascAllRows({ api, url: `/v1/betaGroups/${g.id}/betaTesters?limit=200&fields[betaTesters]=email` });
-    if (!members.ok) return { ok: false, error: members.error, groups: groups.length, testers: seen.size };
-    for (const t of members.rows) seen.add(String(t.attributes?.email || "").toLowerCase());
-  }
-  return { ok: true, groups: groups.length, testers: seen.size };
-}
-
-// The testers of the PUBLIC policy: the people in the external group whose
-// public link is on.  An app under that policy has no internal group, so this
-// is the only group whose members can install the build, and counting the
-// internal all-builds group would report zero for an app that is perfectly
-// well set up.
-//
-// Returns { ok, groups, testers }: ok=false means the state could not be read,
-// which is not the same as zero testers.
+// The testers who can install the build: the people in the public group, the
+// one group this lane uses.  Never throws; { ok:false } means the count could
+// not be read, which is not the same as zero.
 export async function countPublicTesters({ api, appId }) {
   const groupsRes = await api(
     "GET",
@@ -609,84 +575,6 @@ export async function countPublicTesters({ api, appId }) {
       members.rows.map((t) => ({ email: t.attributes?.email, id: t.id }))
     )
   };
-}
-
-// Make sure the app has an internal group with access to all builds, and that
-// every standing email that is an App Store Connect user is in it.  Idempotent,
-// ADD-ONLY (never removes a tester or a group), prints emails masked.  An
-// existing all-builds internal group is reused whatever its name.  Emails that
-// are not ASC users stay external-only: Apple refuses them in an internal group.
-// Returns { groupId, created, added, alreadyIn, external, testers, warnings }.
-export async function ensureInternalTesterGroup({ api, appId, emails, log, warn }) {
-  const out = { groupId: null, created: false, added: 0, alreadyIn: 0, external: 0, testers: 0, warnings: 0 };
-  const fail = (msg) => { out.warnings += 1; warn(msg); return out; };
-
-  const groupsRes = await api("GET", `/v1/apps/${appId}/betaGroups?limit=200&fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds`);
-  if (!groupsRes.ok) return fail(`internal group list failed (${ascErrorText(groupsRes)})`);
-  let group = ascRows(groupsRes).find(
-    (g) => g.attributes?.isInternalGroup === true && g.attributes?.hasAccessToAllBuilds === true
-  );
-  if (group) {
-    log(`reusing internal group "${group.attributes?.name}" id=${group.id}`);
-  } else {
-    const created = await api("POST", "/v1/betaGroups", JSON.stringify({
-      data: {
-        type: "betaGroups",
-        attributes: { name: INTERNAL_GROUP_NAME, isInternalGroup: true, hasAccessToAllBuilds: true, feedbackEnabled: true },
-        relationships: { app: { data: { type: "apps", id: appId } } }
-      }
-    }));
-    if (!created.ok) {
-      return fail(`could not create internal group "${INTERNAL_GROUP_NAME}" (${ascErrorText(created)}); create it by hand in App Store Connect > TestFlight > Internal Testing`);
-    }
-    group = created.parsed.data;
-    out.created = true;
-    log(`created internal group "${INTERNAL_GROUP_NAME}" id=${group.id} (all builds)`);
-  }
-  out.groupId = group.id;
-
-  // Internal testers must be App Store Connect users.  Read the team's users to
-  // know which standing emails qualify; when the list is unreadable, try them
-  // all and let Apple answer.  Paginate so teams with >200 users are not silently
-  // truncated (GH #1018: the internal group must hold every ASC standing email).
-  // A failure on ANY page (or an oversized list) makes the list incomplete, so it
-  // reads as unreadable (try every standing email), never as "everyone else is
-  // not a user".
-  const users = await ascAllRows({ api, url: "/v1/users?limit=200&fields[users]=username" });
-  const usersReadable = users.ok;
-  const ascUsers = new Set(users.rows.map((u) => String(u.attributes?.username || "").toLowerCase()));
-  if (!usersReadable) log(`could not read App Store Connect users; trying every standing email`);
-
-  const members = await ascAllRows({ api, url: `/v1/betaGroups/${group.id}/betaTesters?limit=200&fields[betaTesters]=email` });
-  if (!members.ok) return fail(`could not list testers in internal group (${members.error}); not re-adding anyone`);
-  const inGroup = new Set(members.rows.map((t) => String(t.attributes?.email || "").toLowerCase()));
-
-  for (const email of emails) {
-    const key = email.toLowerCase();
-    if (inGroup.has(key)) {
-      out.alreadyIn += 1;
-      log(`${maskEmail(email)} already in internal group`);
-      continue;
-    }
-    if (usersReadable && !ascUsers.has(key)) {
-      out.external += 1;
-      log(`${maskEmail(email)} is not an App Store Connect user; external group only`);
-      continue;
-    }
-    const added = await addTesterToGroup({ api, appId, groupId: group.id, email, createFirst: true });
-    if (added.ok) {
-      out.added += 1;
-      inGroup.add(key);
-      log(`added ${maskEmail(email)} to internal group`);
-    } else {
-      fail(`could not add ${maskEmail(email)} to internal group (${ascErrorText(added.res)})`);
-    }
-  }
-  out.testers = inGroup.size;
-  if (out.testers === 0) {
-    fail("the internal group has no tester: none of the standing emails is an App Store Connect user, so nobody can install builds without Beta App Review.  Add an App Store Connect user to ASC_STANDING_TESTERS or to TestFlight > Internal Testing by hand");
-  }
-  return out;
 }
 
 async function setWhatToTest({ api, buildId, appId, marketing }) {
@@ -797,7 +685,8 @@ async function main() {
   // being read as a build version and sent to Apple as one).
   const argv = process.argv.slice(2);
   const policyFlagAt = argv.indexOf("--policy");
-  const testerPolicy = resolveTesterPolicy(policyFlagAt >= 0 ? argv[policyFlagAt + 1] : "");
+  const policyArg = policyFlagAt >= 0 ? argv[policyFlagAt + 1] : "";
+  const testerPolicy = resolveTesterPolicy(policyArg);
   const positional = policyFlagAt >= 0
     ? [...argv.slice(0, policyFlagAt), ...argv.slice(policyFlagAt + 2)]
     : argv;
@@ -813,6 +702,16 @@ async function main() {
     console.error("       node asc-api.mjs plan-release-build <bundleId> [pairedBundleId] [floor...] --merge-stamp <S>");
     console.error("       node asc-api.mjs max-platform-build <bundleId> [platform=IOS]");
     process.exit(1);
+  }
+  // A request for the internal group is REFUSED here, before any App Store
+  // Connect call:  the internal group is gone (owner ruling, Nov 4 2026,
+  // HH-217), so the lane cannot create one, cannot use one and must not
+  // pretend that a request for one means the public group.  The lane stops
+  // with a readable reason instead, which is what a legacy apps.json needs.
+  const policyRefusal = testerPolicyRefusal(policyArg);
+  if (policyRefusal) {
+    console.error(`${method}: ${policyRefusal}`);
+    process.exit(2);
   }
 
   async function api(methodName, apiPath, jsonBody) {
@@ -986,7 +885,7 @@ async function main() {
 
   // After upload: find THE BUILD THIS RUN JUST UPLOADED, declare export
   // compliance on it, set its TestFlight "What to Test" notes, and wait until
-  // internal testers can actually install it.
+  // the testers in the public group can actually install it.
   //
   // WHY THE BUILD VERSION IS A REQUIRED ARGUMENT (defect found 2026-08-13):
   // this used to do
@@ -996,8 +895,8 @@ async function main() {
   // new build has NO record at all -- the newest build is the PREVIOUS ship,
   // which is already VALID and already IN_BETA_TESTING. So the compliance PATCH
   // was a no-op on an old build and the readiness poll returned success on poll
-  // 1, printing "TestFlight internal testers can install this build" about a
-  // build it had never inspected.
+  // 1, printing "TestFlight internal testers can install this build" (the
+  // wording of that day) about a build it had never inspected.
   //
   // Reproduced from two ships on 2026-08-13:
   //   usage       archive CURRENT_PROJECT_VERSION=202608131759
@@ -1013,8 +912,8 @@ async function main() {
   // Exit codes: 0 ready | 2 usage/API error | 3 readiness timeout (build found,
   // still processing) | 4 the uploaded build never appeared within the discovery
   // budget, so compliance was NOT declared on it | 5 the build is ready but the
-  // app has no internal tester who could install it (see countInternalTesters) |
-  // 6 the build is ready but the internal-tester count could not be read, so
+  // public group holds nobody who could install it (see countPublicTesters) |
+  // 6 the build is ready but the public-group count could not be read, so
   // whether anyone can install it is unverified.
   if (method === "ensure-appstore-profiles") {
     const mapPath = path;
@@ -1191,9 +1090,13 @@ async function main() {
   // faked) and reports Apple's error verbatim if the app record is missing
   // review data.
   //
+  // The group is the PUBLIC one and it is the only group:  the internal
+  // all-builds group is gone (owner ruling, Nov 4 2026, HH-217).
+  //
   // Exit codes: 0 everything in place | 3 partial (warnings printed) |
-  // 2 usage / config error.  The ship workflow treats non-zero as a loud
-  // warning and never fails the TestFlight ship on it.
+  // 2 usage / config error, including a refused tester policy.  The ship
+  // workflow treats non-zero as a loud warning and never fails the TestFlight
+  // ship on it.
   if (method === "ensure-standing-testers") {
     const appId = String(path || "").trim();
     const wantBuild = String(body || "").trim();
@@ -1207,32 +1110,24 @@ async function main() {
       console.error(`${prefix}: usage: node asc-api.mjs ensure-standing-testers <appleId> [buildVersion]`);
       process.exit(2);
     }
-    // The email list is only REQUIRED when the policy adds people to a group.
-    // Under the public policy the group already holds the standing people, so
-    // an empty list is not a failure:  the build still has to reach that
-    // group, and failing here is what kept the last six builds out of the
-    // public link (2026-11-03).
+    const rows = ascRows;
+    const errText = ascErrorText;
+    let warnings = 0;
+    const warn = (msg) => { warnings += 1; console.error(`${prefix}: WARNING ${msg}`); };
+
+    // The email list is never REQUIRED:  the public group already holds the
+    // standing people, so an empty list is not a failure.  The build still has
+    // to reach that group, and failing here is what kept the last six builds
+    // out of the public link (2026-11-03).
     if (!emails.length) {
-      if (policyRequiresTesterList(testerPolicy)) {
-        console.error(`${prefix}: ASC_STANDING_TESTERS is empty; set the repo secret to the standing tester emails`);
-        process.exit(2);
-      }
       console.error(`${prefix}: no tester list; the members of the public group stay as they are`);
     }
     // A list that is present but wrong must NOT stop the build from reaching
-    // the group.  Under the public policy the people are already in it, so a
-    // malformed or oversized list is a warning about the list, never a reason
-    // to exit before the assignment and the review submission (Kody review
-    // on HogHunter PR #259, Nov 3 2026).
-    const listPlan = planTesterList(testerPolicy, emails, (e) => EMAIL_RE.test(e));
-    if (!listPlan.ok) {
-      const why =
-        listPlan.reason === "too-many"
-          ? `ASC_STANDING_TESTERS lists ${listPlan.count} emails; the standing list is three.  Refusing to invite`
-          : `ASC_STANDING_TESTERS has ${listPlan.malformed} malformed entr${listPlan.malformed === 1 ? "y" : "ies"}; nothing changed`;
-      console.error(`${prefix}: ${why}`);
-      process.exit(2);
-    }
+    // the group.  The people are already in it, so a malformed or oversized
+    // list is a warning about the list, never a reason to exit before the
+    // assignment and the review submission (Kody review on HogHunter PR #259,
+    // Nov 3 2026).
+    const listPlan = planTesterList(emails, (e) => EMAIL_RE.test(e));
     if (listPlan.reason === "malformed") {
       warn(
         `ASC_STANDING_TESTERS has ${listPlan.malformed} malformed entr${listPlan.malformed === 1 ? "y" : "ies"}; they are ignored and the group is left as it is`
@@ -1242,30 +1137,21 @@ async function main() {
       warn(`ASC_STANDING_TESTERS lists ${listPlan.count} emails; the standing list is three, and only the first five are added`);
     }
     const addable = listPlan.add;
-    const rows = ascRows;
-    const errText = ascErrorText;
-    let warnings = 0;
-    const warn = (msg) => { warnings += 1; console.error(`${prefix}: WARNING ${msg}`); };
 
-    // 1) External beta group.  The public policy reuses the external group
-    //    whose public link is on; the internal policy keeps the old rule, the
-    //    group named "Public Beta" else the first external group.
+    // 1) The public beta group:  the one external group whose public link is
+    //    on.  It is the only group:  the internal all-builds group is gone
+    //    (owner ruling, Nov 4 2026, HH-217), so this group is the only way in.
     const groupsRes = await api("GET", `/v1/apps/${appId}/betaGroups?limit=200&fields[betaGroups]=name,isInternalGroup,publicLinkEnabled`);
     if (!groupsRes.ok) {
       console.error(`${prefix}: beta group list failed (${errText(groupsRes)})`);
       process.exit(3);
     }
-    const external = rows(groupsRes).filter((g) => g.attributes?.isInternalGroup === false);
-    let group =
-      testerPolicy === TESTER_POLICY_PUBLIC
-        ? selectPublicGroup(rows(groupsRes))
-        : external.find((g) => g.attributes?.name === PUBLIC_GROUP_NAME) || external[0];
+    let group = selectPublicGroup(rows(groupsRes));
     if (group) {
       console.error(`${prefix}: reusing external group "${group.attributes?.name}" id=${group.id} publicLink=${group.attributes?.publicLinkEnabled ? "on" : "off"}`);
-      // Under the public policy the link IS the distribution channel, so a
-      // group whose link is off has to have it turned on.  The people in it
-      // are not touched.
-      if (testerPolicy === TESTER_POLICY_PUBLIC && group.attributes?.publicLinkEnabled !== true) {
+      // The link IS the distribution channel, so a group whose link is off has
+      // to have it turned on.  The people in it are not touched.
+      if (group.attributes?.publicLinkEnabled !== true) {
         const linked = await api("PATCH", `/v1/betaGroups/${group.id}`, JSON.stringify({
           data: { type: "betaGroups", id: group.id, attributes: { publicLinkEnabled: true } }
         }));
@@ -1279,25 +1165,21 @@ async function main() {
       // Exactly one public group:  any other external group whose link is
       // still on would distribute builds too, and two links on is the fault
       // the owner ruled out (Kody review on HogHunter PR #259, Nov 3 2026).
-      if (testerPolicy === TESTER_POLICY_PUBLIC) {
-        for (const other of otherLinkOnGroups(rows(groupsRes), group)) {
-          const off = await api("PATCH", `/v1/betaGroups/${other.id}`, JSON.stringify({
-            data: { type: "betaGroups", id: other.id, attributes: { publicLinkEnabled: false } }
-          }));
-          if (off.ok) {
-            console.error(`${prefix}: turned the public link off for the other group "${other.attributes?.name}"`);
-          } else {
-            warn(`could not turn the public link off for group "${other.attributes?.name}" (${errText(off)})`);
-          }
+      for (const other of otherLinkOnGroups(rows(groupsRes), group)) {
+        const off = await api("PATCH", `/v1/betaGroups/${other.id}`, JSON.stringify({
+          data: { type: "betaGroups", id: other.id, attributes: { publicLinkEnabled: false } }
+        }));
+        if (off.ok) {
+          console.error(`${prefix}: turned the public link off for the other group "${other.attributes?.name}"`);
+        } else {
+          warn(`could not turn the public link off for group "${other.attributes?.name}" (${errText(off)})`);
         }
       }
     } else {
       const created = await api("POST", "/v1/betaGroups", JSON.stringify({
         data: {
           type: "betaGroups",
-          attributes: testerPolicy === TESTER_POLICY_PUBLIC
-            ? { name: PUBLIC_GROUP_NAME, isInternalGroup: false, publicLinkEnabled: true }
-            : { name: PUBLIC_GROUP_NAME },
+          attributes: { name: PUBLIC_GROUP_NAME, isInternalGroup: false, publicLinkEnabled: true },
           relationships: { app: { data: { type: "apps", id: appId } } }
         }
       }));
@@ -1306,10 +1188,7 @@ async function main() {
         process.exit(3);
       }
       group = created.parsed.data;
-      console.error(
-        `${prefix}: created external group "${PUBLIC_GROUP_NAME}" id=${group.id} (public link ` +
-        `${testerPolicy === TESTER_POLICY_PUBLIC ? "on" : "off"})`
-      );
+      console.error(`${prefix}: created external group "${PUBLIC_GROUP_NAME}" id=${group.id} (public link on)`);
     }
 
     // 2) Testers: add each standing email to the group, reusing tester records.
@@ -1334,22 +1213,10 @@ async function main() {
       }
     }
 
-    // 2b) Internal group: App Store Connect users install every build with no
-    //     Beta App Review.  This is the path that reaches the owner's phone; a
-    //     new app record has none until this creates it (GH #1018).
-    //     Its warnings go through warn(), so they count toward the exit code.
-    //     The PUBLIC policy app must not have one:  it has exactly one beta
-    //     group, the public one, and that is where its people and its builds
-    //     live.  A second way in is what the owner ruled out.
-    if (policyUsesInternalGroup(testerPolicy)) {
-      await ensureInternalTesterGroup({
-        api, appId, emails,
-        log: (m) => console.error(`${prefix}: ${m}`),
-        warn
-      });
-    } else {
-      console.error(`${prefix}: public-group policy; no internal group is created`);
-    }
+    // There is no second group.  The internal all-builds group is gone (owner
+    // ruling, Nov 4 2026, HH-217):  it is not created, not required and not
+    // waited for.  An app record that still carries one from before keeps it
+    // -- it is not deleted, not used, and its absence is never a failure.
 
     // 3) Build: the given CFBundleVersion, else the newest upload.
     const buildQuery = wantBuild
@@ -1372,12 +1239,9 @@ async function main() {
       console.error(`${prefix}: ${buildLabel} assigned to group "${group.attributes?.name}"`);
     } else {
       warn(`could not assign ${buildLabel} to group (${errText(link)})`);
-      if (policyNeedsBuildAssignment(testerPolicy)) {
-        // Under the public policy there is no other way in:  there is no
-        // internal group, so a build that never reaches the public group
-        // reaches nobody.
-        warn(`the public-group policy has no other route for ${buildLabel}; nobody can install it`);
-      }
+      // There is no other way in:  the public group is the only group, so a
+      // build that never reaches it reaches nobody.
+      warn(`the public group is the only route for ${buildLabel}; nobody can install it`);
     }
 
     // 4) Beta App Review: external testers only get a build Apple approved.
@@ -1402,18 +1266,15 @@ async function main() {
       warn(`${buildLabel} cannot reach external testers (externalBuildState=${ext})`);
     }
 
-    // The public group is the only way in for that policy, so a group with
-    // nobody in it means the build reaches nobody.  Say so instead of exiting
-    // green.
-    if (testerPolicy === TESTER_POLICY_PUBLIC) {
-      const counted = await countPublicTesters({ api, appId });
-      if (!counted.ok) {
-        warn(`could not read the public group (${counted.error})`);
-      } else if (counted.testers === 0) {
-        warn(`the public group "${counted.groupName || PUBLIC_GROUP_NAME}" has no testers, so nobody can install the build`);
-      } else {
-        console.error(`${prefix}: public group "${counted.groupName || PUBLIC_GROUP_NAME}" holds ${counted.testers} tester(s)`);
-      }
+    // The public group is the only way in, so a group with nobody in it means
+    // the build reaches nobody.  Say so instead of exiting green.
+    const counted = await countPublicTesters({ api, appId });
+    if (!counted.ok) {
+      warn(`could not read the public group (${counted.error})`);
+    } else if (counted.testers === 0) {
+      warn(`the public group "${counted.groupName || PUBLIC_GROUP_NAME}" has no testers, so nobody can install the build`);
+    } else {
+      console.error(`${prefix}: public group "${counted.groupName || PUBLIC_GROUP_NAME}" holds ${counted.testers} tester(s)`);
     }
 
     console.error(`${prefix}: done (${emails.length} standing tester(s), ${warnings} warning(s))`);
@@ -1550,26 +1411,17 @@ async function main() {
       console.error(`ensure-tf-ready: poll ${pollNo} enc=${attrs.usesNonExemptEncryption} internal=${state}`);
       if (state === "IN_BETA_TESTING" || state === "READY_FOR_BETA_TESTING") {
         // READY_FOR_BETA_TESTING only says Apple finished processing.  It does
-        // not say anyone can install the build: a new app record has no internal
-        // group, and that is how 14 green ships reached nobody (GH #1018).
-        // The POLICY says who can install it:  the internal all-builds group
-        // by default, the public group under the public policy.  Counting the
-        // other one reports zero for an app that is set up correctly, and the
+        // not say anyone can install the build: a new app record has no beta
+        // group at all, and that is how 14 green ships reached nobody
+        // (GH #1018).  The public group is the only group, so the people who
+        // can install the build are the people in it.  Counting any other
+        // group reports zero for an app that is set up correctly, and the
         // caller then blamed export compliance for it (2026-11-03).
-        const publicPolicy = testerPolicy === TESTER_POLICY_PUBLIC;
-        const installable = publicPolicy
-          ? await countPublicTesters({ api, appId })
-          : await countInternalTesters({ api, appId });
+        const installable = await countPublicTesters({ api, appId });
         if (installable.ok) {
-          console.error(
-            publicPolicy
-              ? `ensure-tf-ready: public group testers=${installable.testers} (groups=${installable.groups})`
-              : `ensure-tf-ready: internal testers with access to all builds=${installable.testers} (groups=${installable.groups})`
-          );
+          console.error(`ensure-tf-ready: public group testers=${installable.testers} (groups=${installable.groups})`);
         } else {
-          console.error(
-            `ensure-tf-ready: could not count ${publicPolicy ? "public group" : "internal"} testers (${installable.error})`
-          );
+          console.error(`ensure-tf-ready: could not count public group testers (${installable.error})`);
         }
         const nobody = installable.ok && installable.testers === 0;
         console.log(JSON.stringify({
@@ -1579,7 +1431,7 @@ async function main() {
           internalBuildState: state,
           usesNonExemptEncryption: attrs.usesNonExemptEncryption,
           testerPolicy,
-          internalTesterCount: installable.ok ? installable.testers : null,
+          publicTesterCount: installable.ok ? installable.testers : null,
           installableTesterCount: installable.ok ? installable.testers : null
         }));
         // 5 = read and zero; 6 = could not be read, so installability is unverified.

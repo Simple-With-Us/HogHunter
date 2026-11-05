@@ -74,6 +74,9 @@ jobs:
       - name: Test Capture Supervisor on macOS
         run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
 
+      - name: Test Code Identity Rules on macOS
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-mac-identity.py
+
       - name: Install dependencies
         run: |
           curl -sSL --fail --retry 3 --retry-all-errors -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip

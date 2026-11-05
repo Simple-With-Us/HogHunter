@@ -871,8 +871,10 @@ final class DiskCleaner: @unchecked Sendable {
                 context.incomplete = false
                 progress?(category.title)
                 let items = scanCategory(category, installedApps: installedApps)
-                    .filter { !scanShouldStop() && !exclusions.isPathExcluded($0.path) && ($0.category == .apfsSnapshots || scanAllows($0.url)) && !isHandsOff($0.url) }
-                if context.incomplete || items.contains(where: \.isApproximate) { incomplete.append(category) }
+                    .filter { !scanShouldStop() && !exclusions.isPathExcluded($0.path) && ($0.category == .apfsSnapshots || scanAllows($0.url)) && !isHandsOff($0.url, wholeTree: false) }
+                // A Debug Builds row is unselected, and a lane is too big to size inside the
+                // scan's limits, so its lower bound says nothing about what the scan missed.
+                if context.incomplete || items.contains(where: { $0.isApproximate && !isUnderHogHunterDebugBuilds($0.url) }) { incomplete.append(category) }
                 reports.append(CleanCategoryReport(category: category, items: items,
                     totalBytes: items.reduce(0) { $0 &+ $1.bytes },
                     selectedBytes: items.filter(\.isSelected).reduce(0) { $0 &+ $1.bytes }, itemCount: items.count))
@@ -1332,6 +1334,74 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+    /// Where `scripts/xcodegen-post.sh` puts each Hog Hunter checkout's Debug builds.
+    private static let hogHunterDebugBuildsPath = "Library/Caches/HogHunterDerivedData"
+
+    private var hogHunterDebugBuildsRoot: String {
+        ((userHomeURL.path as NSString).standardizingPath as NSString)
+            .appendingPathComponent(Self.hogHunterDebugBuildsPath)
+    }
+
+    private func isUnderHogHunterDebugBuilds(_ url: URL) -> Bool {
+        let root = URL(fileURLWithPath: hogHunterDebugBuildsRoot).resolvingSymlinksInPath().path
+        let tree = url.resolvingSymlinksInPath().path
+        return tree == root || tree.hasPrefix(root + "/")
+    }
+
+    /// A lane's size for its row.  A lane runs past the per-target limits and holds
+    /// symlinks, so its size is a lower bound, and that must not make the scan partial:
+    /// the regimen records no run after a partial scan, and it never selects this row,
+    /// so it could never clear the condition.  The entries go back too, because one lane
+    /// would otherwise spend most of the scan's budget.  A scan that really has run out
+    /// is still marked, by the next check of its deadline or budget.
+    private func debugBuildsRowStats(at lane: URL) -> DirectoryStats {
+        let context = Self.scanContext
+        let incomplete = context?.incomplete
+        let remaining = context?.remaining
+        let stats = directoryStats(at: lane)
+        if let incomplete { context?.incomplete = incomplete }
+        if let remaining { context?.remaining = remaining }
+        return stats
+    }
+
+    /// One row per checkout, so a keep marker in one lane keeps that lane and no
+    /// other, and is looked for across the whole lane.  Off by default, because a
+    /// row here says nothing about whether that lane is building right now;
+    /// hoghunter-clean is the sweep that waits for an idle one.
+    private func scanHogHunterDebugBuilds() -> [CleanItem] {
+        let root = userHomeURL.appendingPathComponent(Self.hogHunterDebugBuildsPath, isDirectory: true)
+        // hoghunter-clean's two refusals, in the order that never reads through a link
+        // before the gate has seen where it goes.  This folder is one the build makes.
+        guard scanAllows(root),
+              (try? fileManager.destinationOfSymbolicLink(atPath: root.path)) == nil else { return [] }
+        let lanes = (try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        )) ?? []
+        var items: [CleanItem] = []
+        for lane in lanes.sorted(by: { $0.path < $1.path }) {
+            if scanShouldStop() { break }
+            let values = try? lane.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values?.isDirectory == true, values?.isSymbolicLink != true else { continue }
+            let stats = debugBuildsRowStats(at: lane)
+            guard stats.bytes > 0 else { continue }
+            items.append(CleanItem(
+                category: .developer,
+                title: "Hog Hunter Debug Builds",
+                subtitle: "~/\(Self.hogHunterDebugBuildsPath)/\(lane.lastPathComponent)",
+                url: lane,
+                bytes: stats.bytes,
+                fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate,
+                lastModified: stats.lastModified,
+                isSelected: false,
+                detail: "Debug builds and test hosts from one Hog Hunter checkout; they rebuild on demand.  Select only when no build is running"
+            ))
+        }
+        return items
+    }
+
     /// Scans developer build artifacts and package manager caches.
     func scanDeveloper() -> [CleanItem] {
         if Self.scanContext == nil { return withScanBudget { scanDeveloper() } }
@@ -1381,6 +1451,8 @@ final class DiskCleaner: @unchecked Sendable {
                 detail: highChurn?.reason ?? target.detail
             ))
         }
+
+        items.append(contentsOf: scanHogHunterDebugBuilds())
 
         if !scanShouldStop() {
             // iOS Simulator Devices — installed simulators + runtimes.  Opt-in only:
@@ -2452,6 +2524,9 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/.docker/buildx/cache",
                 home + "/Library/Caches/com.docker.docker"
             ] + Self.codingPlatformCacheTargets.map { home + "/" + $0.path }
+            // Below the Debug builds root only, never the root: it holds every
+            // checkout, and one marked lane must not go with the rest.
+            if path.hasPrefix(hogHunterDebugBuildsRoot + "/") { return true }
             return allowedDeveloperPrefixes.contains { path == $0 || path.hasPrefix($0 + "/") }
 
         case .orphanedData:
@@ -2711,12 +2786,22 @@ final class DiskCleaner: @unchecked Sendable {
     ///
     /// A symlink item has its *target's* children trashed (see `clean`), so the
     /// inside question is asked of the resolved target.
-    private func isHandsOff(_ url: URL) -> Bool {
+    ///
+    /// `wholeTree` is off only for the scan's filter, which must not spend its bounded
+    /// time on a lane.  A row there can hold a marker the bounded walk did not see, and
+    /// the clean, which walks the whole lane, refuses it.
+    private func isHandsOff(_ url: URL, wholeTree: Bool = true) -> Bool {
         if KeepSentinel.isKept(url: url, fileManager: fileManager) { return true }
         let tree = url.resolvingSymlinksInPath()
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: tree.path, isDirectory: &isDir), isDir.boolValue else {
             return false
+        }
+        // A checkout's Debug builds run to hundreds of thousands of entries, so the
+        // bounded walk would spend its cap in the index and miss a marker in the
+        // lane.  These trees get the whole walk, which fails closed.
+        if wholeTree, isUnderHogHunterDebugBuilds(tree) {
+            return KeepSentinel.containsMarkerInWholeTree(url: tree, fileManager: fileManager)
         }
         return KeepSentinel.containsMarker(url: tree, fileManager: fileManager)
     }

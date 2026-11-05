@@ -21,6 +21,11 @@ struct CompanionPeer: Equatable, Sendable {
     var key: String
     /// Loopback, link-local, private (RFC 1918 and unique-local) or Tailscale.
     var isTrusted: Bool
+    /// Whether this connection is proven to have arrived over Tailscale.  Only
+    /// `provingTailscaleArrival` sets it, from the kernel's view of the socket.
+    /// A client address alone never does, and neither does a forwarded header,
+    /// which a client could write.
+    var arrivedOverTailscale = false
 
     /// Used when the address cannot be read.  Never trusted.
     static let unknown = CompanionPeer(key: "unknown", isTrusted: false)
@@ -39,6 +44,99 @@ struct CompanionPeer: Equatable, Sendable {
         @unknown default:
             return .unknown
         }
+    }
+
+    /// This peer, marked as having arrived over Tailscale if the socket proves it.
+    ///
+    /// Both ends have to agree.  The client's address must be in Tailscale's
+    /// range, and the address it connected to must be one this Mac holds on a
+    /// `utun` interface.  The second half is what tells Tailscale from a carrier
+    /// that hands out the same 100.64.0.0/10 range to a home router: there the
+    /// Mac's own address sits on a Wi-Fi or Ethernet interface.  A host on the
+    /// local network that forges a Tailscale source address never completes the
+    /// handshake, because the Mac's reply is routed into the tunnel.
+    func provingTailscaleArrival(
+        remote: NWEndpoint?,
+        local: NWEndpoint?,
+        tunnelAddresses: () -> Set<String> = CompanionPeer.localTunnelAddresses
+    ) -> CompanionPeer {
+        var copy = self
+        copy.arrivedOverTailscale = false
+        guard let remote, let local,
+              Self.isTailscaleAddress(remote), Self.isTailscaleAddress(local),
+              let localKey = Self.addressKey(local), tunnelAddresses().contains(localKey) else {
+            return copy
+        }
+        copy.arrivedOverTailscale = true
+        return copy
+    }
+
+    /// Tailscale's two ranges: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
+    static func isTailscaleIPv4(_ b: [UInt8]) -> Bool {
+        b.count == 4 && b[0] == 100 && (64...127).contains(b[1])
+    }
+
+    static func isTailscaleIPv6(_ b: [UInt8]) -> Bool {
+        if b.count == 16, let embedded = mappedIPv4(b) { return isTailscaleIPv4(embedded) }
+        return b.count == 16 && Array(b.prefix(6)) == [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0]
+    }
+
+    /// Whether a numeric endpoint is in Tailscale's ranges.  A name is not.
+    static func isTailscaleAddress(_ endpoint: NWEndpoint) -> Bool {
+        guard case let .hostPort(host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address): return isTailscaleIPv4([UInt8](address.rawValue))
+        case .ipv6(let address): return isTailscaleIPv6([UInt8](address.rawValue))
+        default: return false
+        }
+    }
+
+    /// Whether the phone is about to reach the Mac over Tailscale, so it can
+    /// offer the server controls.  Only a hint for the buttons: the Mac decides
+    /// from the socket.  A Bonjour service is on the local link, never Tailscale.
+    /// Port 443 and a TLS link are Tailscale Serve's shape, which reaches the Mac
+    /// over loopback and is always refused, so they are not offered either.
+    static func isTailscaleEndpoint(_ endpoint: NWEndpoint, usesTLS: Bool = false) -> Bool {
+        guard !usesTLS, case let .hostPort(host, port) = endpoint, port.rawValue != 443 else { return false }
+        if case .name(let name, _) = host {
+            var lowered = name.lowercased()
+            if lowered.hasSuffix(".") { lowered.removeLast() }
+            return lowered.hasSuffix(".ts.net")
+        }
+        return isTailscaleAddress(endpoint)
+    }
+
+    /// One form for an address, whichever way it was spelled.
+    static func addressKey(_ endpoint: NWEndpoint) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let address): return make(ipv4: [UInt8](address.rawValue)).key
+        case .ipv6(let address): return make(ipv6: [UInt8](address.rawValue)).key
+        default: return nil
+        }
+    }
+
+    /// The Tailscale-range addresses this Mac holds on `utun` interfaces.
+    static func localTunnelAddresses() -> Set<String> {
+        var result = Set<String>()
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(first) }
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard String(cString: pointer.pointee.ifa_name).hasPrefix("utun"), let address = pointer.pointee.ifa_addr else { continue }
+            if address.pointee.sa_family == sa_family_t(AF_INET) {
+                let bytes = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { pointer in
+                    withUnsafeBytes(of: pointer.pointee.sin_addr) { [UInt8]($0) }
+                }
+                if isTailscaleIPv4(bytes) { result.insert(make(ipv4: bytes).key) }
+            } else if address.pointee.sa_family == sa_family_t(AF_INET6) {
+                let bytes = address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { pointer in
+                    withUnsafeBytes(of: pointer.pointee.sin6_addr) { [UInt8]($0) }
+                }
+                if isTailscaleIPv6(bytes) { result.insert(make(ipv6: bytes).key) }
+            }
+        }
+        return result
     }
 
     /// Key for a forwarded request whose client address cannot be read.
