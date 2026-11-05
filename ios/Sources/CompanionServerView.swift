@@ -131,6 +131,10 @@ private struct FlaggedIssueRow: View {
 /// next to the Mac itself, so it is always plain which machine a number is from.
 struct ServerTabContent: View {
     let snapshot: CompanionSnapshot
+    @Bindable var model: CompanionModel
+    /// The screenshot lane's flag.  The rows are far down a lazy list, so the
+    /// frame's confirmation hangs off the top card instead.
+    @State private var previewProcess: PendingServerProcessAction?
 
     static let optInNote = "Server status on iPhone is off.\u{00A0} Turn on Allow iPhone to See Server Status in Hog Hunter Settings > iPhone on your Mac."
     static let linkNote = "Server status is on, but it reaches only a phone paired with its own token on your local network or Tailscale.\u{00A0} Connect that way, or pair this phone again, to see it."
@@ -153,7 +157,11 @@ struct ServerTabContent: View {
             machinesSection(server: server)
             stateSection(server)
             if server.hasReading {
-                ServerReadings(server: server)
+                ServerControlNote(snapshot: snapshot, model: model)
+                ServerReadings(server: server, controls: ServerRowControls(snapshot: snapshot, model: model))
+                if server.host != nil {
+                    ServerMaintenanceSection(snapshot: snapshot, model: model)
+                }
             }
         }
     }
@@ -188,6 +196,12 @@ struct ServerTabContent: View {
                 )
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            .modifier(ServerProcessConfirmation(pending: $previewProcess, host: server?.host, model: model))
+            .onAppear {
+                guard ProcessInfo.processInfo.arguments.contains("-HogHunterServerConfirm"), previewProcess == nil,
+                      let row = server?.processes?.first else { return }
+                previewProcess = PendingServerProcessAction(row: row, action: "quit")
+            }
         } header: {
             Text("Mac and Server")
         }
@@ -283,6 +297,7 @@ private struct MachineCard: View {
 /// Everything the block carries, in the order the Mac's card shows it.
 private struct ServerReadings: View {
     let server: CompanionServerStatus
+    let controls: ServerRowControls
 
     var body: some View {
         activitySection
@@ -494,6 +509,7 @@ private struct ServerReadings: View {
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .frame(minWidth: 56, alignment: .trailing)
+                            ServerProcessMenu(process: process, host: server.host, controls: controls)
                         }
                         if let caption = processCaption(process) {
                             Text(caption)
@@ -550,6 +566,7 @@ private struct ServerReadings: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .frame(minWidth: 56, alignment: .trailing)
+                        ServerWorkloadMenu(workload: workload, host: server.host, controls: controls)
                     }
                     .accessibilityElement(children: .combine)
                 }
@@ -596,5 +613,347 @@ private struct MeterRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Server Controls
+
+/// One finished server action, for the result sheet.
+struct ServerActionOutcome: Identifiable {
+    let id = UUID()
+    let title: String
+    let response: CompanionServerActionResponse
+
+    static func strategyTitle(_ id: String) -> String {
+        switch id {
+        case CompanionServerControl.packageCacheStrategy: return "Package Cache"
+        case CompanionServerControl.rotatedLogsStrategy: return "Rotated Backup Logs"
+        case CompanionServerControl.buildCacheStrategy: return "Docker Build Cache"
+        case CompanionServerControl.imageStrategy: return "Unused Docker Images"
+        default: return id
+        }
+    }
+}
+
+/// Whether the rows may offer their actions on this link.
+@MainActor
+struct ServerRowControls {
+    let snapshot: CompanionSnapshot
+    let model: CompanionModel
+
+    var enabled: Bool {
+        snapshot.remoteServerControlAllowed == true && model.serverControlsReachable && !model.isRunningServerAction
+    }
+}
+
+/// Says why the actions are missing, rather than offering ones that would fail.
+private struct ServerControlNote: View {
+    let snapshot: CompanionSnapshot
+    let model: CompanionModel
+
+    var body: some View {
+        if snapshot.remoteServerControlAllowed == false {
+            note(icon: "lock", title: "Server Controls Are Off", text: CompanionServerControl.optInNote)
+        } else if snapshot.remoteServerControlAllowed == true, !model.serverControlsReachable {
+            note(icon: "network.slash", title: "Server Controls Need Tailscale", text: CompanionServerControl.tailscaleOnlyNote)
+        }
+    }
+
+    private func note(icon: String, title: String, text: String) -> some View {
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                Label(title, systemImage: icon)
+                    .font(.subheadline.weight(.semibold))
+                Text(text)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+}
+
+struct PendingServerProcessAction: Equatable {
+    let row: CompanionServerProcess
+    let action: String
+
+    /// Named for what it does, on the button and in the title.
+    var buttonTitle: String {
+        switch action {
+        case "quit": return "Stop Process"
+        case "forceQuit": return "Force Quit Process"
+        case "tame": return "Tame Process"
+        case "untame": return "Restore Priority"
+        default: return "Sample Process"
+        }
+    }
+
+    var isDestructive: Bool { action == "quit" || action == "forceQuit" }
+
+    var message: String {
+        switch action {
+        case "tame", "untame":
+            return "This changes scheduling priority and may affect response times.\u{00A0} The server rechecks the process identity and its protections before acting."
+        case "sample":
+            return "This reads the process's kernel counters for 3 seconds and changes nothing.\u{00A0} The result can name server internals."
+        default:
+            if row.container != nil {
+                return "This interrupts a server workload and may lose unsaved work.\u{00A0} The server rechecks the process identity and its protections before acting."
+            }
+            return "Unsaved work may be lost.\u{00A0} The server rechecks the process identity and its protections before acting."
+        }
+    }
+}
+
+/// The confirmation every process action goes through.
+private struct ServerProcessConfirmation: ViewModifier {
+    @Binding var pending: PendingServerProcessAction?
+    let host: String?
+    let model: CompanionModel
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "\(pending?.buttonTitle ?? "Act On") \(pending?.row.name ?? "Process") on \(host ?? "the Server")?",
+            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let confirmed = pending {
+                Button(confirmed.buttonTitle, role: confirmed.isDestructive ? .destructive : nil) {
+                    pending = nil
+                    Task { await model.runServerAction(.process(rowId: confirmed.row.id, action: confirmed.action), rowName: confirmed.row.name) }
+                }
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        } message: {
+            Text(pending?.message ?? "")
+        }
+    }
+}
+
+private struct ServerProcessMenu: View {
+    let process: CompanionServerProcess
+    let host: String?
+    let controls: ServerRowControls
+    @State private var pending: PendingServerProcessAction?
+
+    private static let titles = [("quit", "Stop Process…"), ("forceQuit", "Force Quit Process…"), ("tame", "Tame Process…"), ("untame", "Restore Priority…"), ("sample", "Sample Process…")]
+
+    var body: some View {
+        // A protected row has no actions, so it has no button at all.
+        if controls.snapshot.remoteServerControlAllowed == true, process.actions?.isEmpty == false {
+            Menu {
+                ForEach(Self.titles, id: \.0) { action, title in
+                    if process.actions?.contains(action) == true {
+                        Button(title, role: action == "quit" || action == "forceQuit" ? .destructive : nil) {
+                            pending = PendingServerProcessAction(row: process, action: action)
+                        }
+                    }
+                }
+            } label: {
+                Label("Actions for \(process.name)", systemImage: "ellipsis.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(!controls.enabled)
+            .modifier(ServerProcessConfirmation(pending: $pending, host: host, model: controls.model))
+        }
+    }
+}
+
+private struct ServerWorkloadMenu: View {
+    let workload: CompanionServerWorkload
+    let host: String?
+    let controls: ServerRowControls
+    @State private var pendingAction: String?
+
+    private func buttonTitle(_ action: String?) -> String {
+        action == "stop" ? "Stop Workload" : "Restart Workload"
+    }
+
+    var body: some View {
+        if controls.snapshot.remoteServerControlAllowed == true, workload.actions?.isEmpty == false {
+            Menu {
+                if workload.actions?.contains("stop") == true {
+                    Button("Stop Workload…", role: .destructive) { pendingAction = "stop" }
+                }
+                if workload.actions?.contains("restart") == true {
+                    Button("Restart Workload…") { pendingAction = "restart" }
+                }
+            } label: {
+                Label("Actions for \(workload.name)", systemImage: "ellipsis.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(!controls.enabled)
+            .confirmationDialog(
+                "\(buttonTitle(pendingAction)) \(workload.name) on \(host ?? "the Server")?",
+                isPresented: Binding(get: { pendingAction != nil }, set: { if !$0 { pendingAction = nil } }),
+                titleVisibility: .visible
+            ) {
+                if let action = pendingAction {
+                    Button(buttonTitle(action), role: .destructive) {
+                        pendingAction = nil
+                        Task { await controls.model.runServerAction(.workload(rowId: workload.id, action: action), rowName: workload.name) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { pendingAction = nil }
+            } message: {
+                Text("This interrupts the server workload and may lose unsaved work.\u{00A0} Coolify may restart workloads it is configured to keep alive, and changed or protected containers are refused.")
+            }
+        }
+    }
+}
+
+/// Scan and run, as on the Mac's card.  A scan needs one confirmation and
+/// changes nothing.  A run that removes images needs a second, separate one.
+private struct ServerMaintenanceSection: View {
+    let snapshot: CompanionSnapshot
+    let model: CompanionModel
+    @State private var selected: Set<String> = [
+        CompanionServerControl.packageCacheStrategy,
+        CompanionServerControl.rotatedLogsStrategy,
+        CompanionServerControl.buildCacheStrategy,
+    ]
+    @State private var confirmScan = false
+    @State private var confirmRun = false
+    @State private var confirmImages = false
+
+    private var enabled: Bool {
+        snapshot.remoteServerControlAllowed == true && model.serverControlsReachable && !model.isRunningServerAction
+    }
+    private var host: String { snapshot.server?.host ?? "the Server" }
+    /// In the order the Mac lists them, whichever order they were ticked in.
+    private var chosen: [String] { CompanionServerControl.strategies.filter(selected.contains) }
+    private var removesImages: Bool { selected.contains(CompanionServerControl.imageStrategy) }
+    private var chosenTitles: String { chosen.map(ServerActionOutcome.strategyTitle).joined(separator: ", ") }
+
+    var body: some View {
+        if snapshot.remoteServerControlAllowed == true {
+            Section {
+                ForEach(CompanionServerControl.strategies, id: \.self) { strategy in
+                    Toggle(ServerActionOutcome.strategyTitle(strategy), isOn: Binding(
+                        get: { selected.contains(strategy) },
+                        set: { if $0 { selected.insert(strategy) } else { selected.remove(strategy) } }
+                    ))
+                    .disabled(!enabled)
+                }
+                Button("Scan Server") { confirmScan = true }
+                    .disabled(!enabled || chosen.isEmpty)
+                    .confirmationDialog("Scan \(host)?", isPresented: $confirmScan, titleVisibility: .visible) {
+                        Button("Scan Server") {
+                            Task { await model.runServerAction(.maintain(mode: "scan", strategies: chosen, imageRemovalAcknowledged: false), rowName: "Server Scan") }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("A scan lists what is eligible for \(chosenTitles) and changes nothing.")
+                    }
+                Button("Run Server Maintenance", role: .destructive) { confirmRun = true }
+                    .disabled(!enabled || chosen.isEmpty)
+                    .confirmationDialog("Run Server Maintenance on \(host)?", isPresented: $confirmRun, titleVisibility: .visible) {
+                        Button("Run Server Maintenance", role: .destructive) {
+                            if removesImages {
+                                // The first dialog has to finish closing, or the second never opens.
+                                Task {
+                                    try? await Task.sleep(for: .milliseconds(400))
+                                    confirmImages = true
+                                }
+                            } else {
+                                run(acknowledged: false)
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This permanently removes eligible items for \(chosenTitles), even when disk pressure is low.\u{00A0} The server rechecks age, current use, protection markers and the cleanup lock.")
+                    }
+                    .alert("Remove Unused Docker Images?", isPresented: $confirmImages) {
+                        Button("Remove Images", role: .destructive) { run(acknowledged: true) }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Removing old untagged images can remove local rollback options and require downloading or rebuilding them again.")
+                    }
+            } header: {
+                Text("Server Maintenance")
+            } footer: {
+                Text("Only age-qualified, unused items are eligible.\u{00A0} Containers, volumes and active logs are protected.")
+            }
+        }
+    }
+
+    private func run(acknowledged: Bool) {
+        Task { await model.runServerAction(.maintain(mode: "run", strategies: chosen, imageRemovalAcknowledged: acknowledged), rowName: "Server Maintenance") }
+    }
+}
+
+/// What came back.  A sample or a scan can name server internals, and it is
+/// shown here and kept nowhere.
+struct ServerActionResultView: View {
+    let outcome: ServerActionOutcome
+    @Environment(\.dismiss) private var dismiss
+
+    private var result: CompanionServerActionOutcome { outcome.response.outcome }
+
+    private var icon: String {
+        switch result {
+        case .done: return "checkmark.circle.fill"
+        case .partial: return "circle.lefthalf.filled"
+        case .unknown: return "questionmark.circle.fill"
+        case .noWork: return "minus.circle.fill"
+        case .refused: return "xmark.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch result {
+        case .done: return .green
+        case .noWork: return .secondary
+        case .partial, .unknown, .refused: return .orange
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Label(result.headline, systemImage: icon)
+                        .font(.headline)
+                        .foregroundStyle(tint)
+                    Text(outcome.response.displayText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                if let sample = outcome.response.sampleText {
+                    Section("Process Sample") {
+                        Text(sample)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                }
+                if let maintenance = outcome.response.maintenance {
+                    Section("Strategies") {
+                        ForEach(maintenance.strategies) { row in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(row.title)
+                                    .font(.subheadline)
+                                Text(row.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                    Section {
+                        LabeledContent("Removed File Bytes", value: maintenance.removedBytesText ?? ServerFormat.dash)
+                        LabeledContent("Available Space Change", value: maintenance.observedChangeText ?? ServerFormat.dash)
+                    } footer: {
+                        Text("Available space also changes with other server activity, and Docker requests do not prove physical bytes reclaimed.")
+                    }
+                }
+            }
+            .navigationTitle(outcome.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }

@@ -719,10 +719,13 @@ struct DashboardView: View {
                 case .network:
                     networkContent
                 case .server:
-                    ServerTabContent(snapshot: snapshot)
+                    ServerTabContent(snapshot: snapshot, model: model)
                 }
             }
             .listStyle(.insetGrouped)
+            .sheet(item: $model.serverActionOutcome) { outcome in
+                ServerActionResultView(outcome: outcome)
+            }
         }
         .confirmationDialog(
             "Clean \(snapshot.hostName)?",

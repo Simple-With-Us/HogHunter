@@ -321,7 +321,8 @@ enum CompanionServerStatusBuilder {
             memoryText: process.memoryBytes.flatMap { $0 >= 0 ? size($0) : nil },
             swapText: process.swapBytes.flatMap { $0 >= 0 ? size($0) : nil },
             isTamed: process.nice == nil ? nil : process.isTamed,
-            protectionReason: process.protectionReason?.isEmpty == false ? process.protectionReason : nil
+            protectionReason: process.protectionReason?.isEmpty == false ? process.protectionReason : nil,
+            actions: CompanionServerControl.processActions.filter { process.can(action: CompanionServerActions.macAction(forProcess: $0)) }
         )
     }
 
@@ -333,7 +334,9 @@ enum CompanionServerStatusBuilder {
             status: resource.status.isEmpty ? nil : resource.status,
             isHealthy: resource.status.isEmpty ? nil : resource.isHealthy,
             cpuText: nonNegative(resource.cpuPercent).map { String(format: "%.0f%%", $0) },
-            memoryText: resource.memoryBytes.flatMap { $0 >= 0 ? size($0) : nil }
+            memoryText: resource.memoryBytes.flatMap { $0 >= 0 ? size($0) : nil },
+            protectionReason: resource.protectionReason?.isEmpty == false ? resource.protectionReason : nil,
+            actions: CompanionServerControl.workloadActions.filter(resource.can(action:))
         )
     }
 

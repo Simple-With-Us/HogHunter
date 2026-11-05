@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+The iPhone can act on the server, over Tailscale only (HH-215, stage 2):
+
+- New routes let a paired phone quit, tame or sample server processes, stop or restart Coolify workloads, and scan or run server maintenance.  Each is behind a new opt-in, Allow iPhone to Control the Server, which also needs Allow iPhone to See Server Status.
+- These routes refuse the local network, because the link is not encrypted, and the phone says to connect over the Tailscale address.  The phone sends an opaque row id and the Mac builds everything else from its own current reading, so a stale reading or a protected row does nothing.  Full context in `docs/rollouts/2026-11-04-iphone-server-status.md`.
+
 The iPhone can see the server (HH-215, stage 1, read-only):
 
 - A new Server tab shows the Mac and the server side by side, then the server's CPU, memory, swap, paging, disks, databases and directories with daily change, container storage, tools, top processes and Coolify workloads.  The phone tells no server set up, no reading yet, a stale reading and a failed read apart, and draws a missing number as a dash, never 0.

@@ -158,6 +158,8 @@ final class CompanionServer: @unchecked Sendable {
     private let editFlag = CompanionLocked(false)
     private let maintainFlag = CompanionLocked(false)
     private let maintainRunningFlag = CompanionLocked(false)
+    private let serverControlFlag = CompanionLocked(false)
+    private let serverActionBusyFlag = CompanionLocked(false)
 
     var allowRemoteQuit: Bool {
         get { quitFlag.value }
@@ -186,6 +188,18 @@ final class CompanionServer: @unchecked Sendable {
         get { maintainFlag.value }
         set { maintainFlag.value = newValue }
     }
+    /// Off until the owner turns on both Allow iPhone to Control the Server and
+    /// Allow iPhone to See Server Status in Settings.  Not offered in the
+    /// pairing alert.
+    var allowRemoteServerControl: Bool {
+        get { serverControlFlag.value }
+        set { serverControlFlag.value = newValue }
+    }
+    /// Runs one server action off this queue and calls `completion` once, from
+    /// any thread.  Set by the host.  The router allows one at a time.
+    var onRemoteServerAction: ((_ request: CompanionServerActionRequest, _ device: String, _ completion: @escaping @Sendable (Reply) -> Void) -> Void)? = nil
+    /// Hears a server control request refused at the gate, for the Mac's log.
+    var onServerControlRefused: ((_ device: String, _ path: String, _ outcome: String) -> Void)? = nil
     /// Whether a Maintain run is going on the Mac, whoever started it.
     /// The host keeps it current; the router also sets it when it accepts a
     /// phone's request, so two quick taps cannot both start a run.
@@ -317,7 +331,11 @@ final class CompanionServer: @unchecked Sendable {
                 }
                 // Only a loopback peer (a tunnel daemon on this Mac) may name
                 // its client in a forwarded header; other peers' are ignored.
-                let effectivePeer = peer.resolvingForwardedClient(in: buffer)
+                // The socket's own addresses, read here because an accepted
+                // connection has no path until it is ready.
+                let effectivePeer = peer
+                    .provingTailscaleArrival(remote: connection.endpoint, local: connection.currentPath?.localEndpoint)
+                    .resolvingForwardedClient(in: buffer)
                 if let deviceName = CompanionHTTP.pairDeviceName(in: buffer) {
                     self.handlePair(connection, deviceName: deviceName, peer: effectivePeer)
                     return
@@ -340,6 +358,8 @@ final class CompanionServer: @unchecked Sendable {
                     self.startCleanReport(on: connection)
                 case .startSample(let target):
                     self.startSample(target, on: connection)
+                case .startServerAction(let request, let device):
+                    self.startServerAction(request, device: device, on: connection)
                 }
             }
         }
@@ -364,6 +384,9 @@ final class CompanionServer: @unchecked Sendable {
         case startCleanReport
         /// A sample takes at least its three seconds, so it is held the same way.
         case startSample(CompanionTarget)
+        /// A server action goes over SSH, so it is held the same way.  The
+        /// device is the paired phone's name, for the Mac's log.
+        case startServerAction(CompanionServerActionRequest, device: String)
     }
 
     /// Routes one request.  Runs on `queue`; split out so tests can drive it
@@ -378,6 +401,8 @@ final class CompanionServer: @unchecked Sendable {
         var scanRequested: CompanionCleanScanRequest?
         var reportRequested = false
         var sampleRequested: CompanionTarget?
+        var serverActionRequested: CompanionServerActionRequest?
+        var authenticatedDevice = ""
         let response = CompanionHTTP.response(
             request: buffer,
             body: payload,
@@ -500,13 +525,43 @@ final class CompanionServer: @unchecked Sendable {
                 // check and the set below cannot interleave with another phone
                 // request.
                 guard !self.maintainRunningFlag.value else { return Self.maintainBusyReply }
+                // A run can include the remote step, which would meet the server
+                // action already out, so it waits for that to finish.
+                guard !self.serverActionBusyFlag.value else { return Self.maintainWaitsForServerReply }
                 self.maintainRunningFlag.value = true
                 let reply = handler(kind)
                 if !(200..<300).contains(reply.status) { self.maintainRunningFlag.value = false }
                 return reply
             },
+            serverControlGate: { [weak self] in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                let refusal = self.serverControlRefusal(for: peer)
+                if let refusal {
+                    let path = CompanionHTTP.requestPath(buffer) ?? "server control"
+                    self.onServerControlRefused?(authenticatedDevice, path, refusal.outcome)
+                }
+                return refusal.map { ($0.status, $0.body) }
+            },
+            serverActionHandler: { [weak self] request in
+                guard let self else { return (500, Data("{\"error\": \"Server unavailable\"}".utf8)) }
+                guard self.onRemoteServerAction != nil else {
+                    return (501, Data("{\"error\": \"Server action handler not configured\"}".utf8))
+                }
+                // Requests are handled one at a time on this queue, so this
+                // check and set cannot interleave with another phone's.
+                guard !self.serverActionBusyFlag.value else { return Self.serverActionBusyReply }
+                if request.isMaintenance, self.maintainRunningFlag.value { return Self.serverActionBusyReply }
+                self.serverActionBusyFlag.value = true
+                serverActionRequested = request
+                // Placeholder: never sent.  `startServerAction` answers later.
+                return (202, Data())
+            },
             peerTrusted: peer.isTrusted,
-            deviceAuthenticator: { [devices] presented in devices.authenticate(presented, now: now) }
+            deviceAuthenticator: { [devices] presented in
+                let matched = devices.authenticate(presented, now: now)
+                if matched { authenticatedDevice = devices.deviceName(for: presented) ?? "" }
+                return matched
+            }
         )
         // 401 is a wrong credential.  404 never got as far as checking one.
         // Anything else means the credential was accepted.
@@ -520,6 +575,7 @@ final class CompanionServer: @unchecked Sendable {
         if let scanRequested { return .startCleanScan(scanRequested) }
         if reportRequested { return .startCleanReport }
         if let sampleRequested { return .startSample(sampleRequested) }
+        if let serverActionRequested { return .startServerAction(serverActionRequested, device: authenticatedDevice) }
         if CompanionHTTP.isSnapshotRequest(buffer), status == 200 {
             onSnapshotServed?()
         }
@@ -582,6 +638,71 @@ final class CompanionServer: @unchecked Sendable {
     /// The answer to a Maintain run while one is already going.
     static var maintainBusyReply: Reply {
         let body = #"{"status":"busy","error":"A Maintain run is already going on this Mac.\u00a0 Watch its progress in the app."}"#
+        return (409, Data(body.utf8))
+    }
+
+    /// Why a server control request stops at the gate, or nil.  The opt-in is
+    /// first, then the stricter network rule.  The peer's address class never
+    /// decides this alone: see `CompanionPeer.provingTailscaleArrival`.
+    private func serverControlRefusal(for peer: CompanionPeer) -> (status: Int, body: Data, outcome: String)? {
+        guard allowRemoteServerControl else {
+            let reply = Self.serverControlOptInRefusal
+            return (reply.status, reply.body, "refused: opt-in off")
+        }
+        guard peer.arrivedOverTailscale else {
+            let reply = Self.serverControlTailscaleRefusal
+            return (reply.status, reply.body, "refused: not on Tailscale")
+        }
+        return nil
+    }
+
+    static var serverControlOptInRefusal: Reply {
+        (403, encodeServerReply(CompanionServerActionResponse(status: "forbidden", error: CompanionServerControl.optInNote)))
+    }
+
+    static var serverControlTailscaleRefusal: Reply {
+        (403, encodeServerReply(CompanionServerActionResponse(status: "tailscaleRequired", error: CompanionServerControl.tailscaleOnlyNote)))
+    }
+
+    static var serverActionBusyReply: Reply {
+        (409, encodeServerReply(CompanionServerActionResponse(status: "busy", error: "Another server action is already running.\u{00A0} Wait for it to finish, then try again.")))
+    }
+
+    static func encodeServerReply(_ response: CompanionServerActionResponse) -> Data {
+        (try? JSONEncoder().encode(response)) ?? Data()
+    }
+
+    /// How long a server action's connection is held.  Past the 30 seconds
+    /// `ServerControl` gives SSH and the 105 seconds `MaintenanceSSH` gives a
+    /// maintenance run, so the Mac's answer is the one the phone hears.
+    static let serverActionReplyDeadline: TimeInterval = 40
+    static let serverMaintenanceReplyDeadline: TimeInterval = 115
+
+    /// Runs a request the router accepted, and frees the one-at-a-time slot when
+    /// it actually ends, which can be after the phone stopped waiting.
+    func runServerAction(_ request: CompanionServerActionRequest, device: String, completion: @escaping @Sendable (Reply) -> Void) {
+        let busy = serverActionBusyFlag
+        guard let handler = onRemoteServerAction else {
+            busy.value = false
+            completion((501, Data("{\"error\": \"Server action handler not configured\"}".utf8)))
+            return
+        }
+        handler(request, device) { reply in
+            busy.value = false
+            completion(reply)
+        }
+    }
+
+    private func startServerAction(_ request: CompanionServerActionRequest, device: String, on connection: NWConnection) {
+        let body = Self.encodeServerReply(CompanionServerActionResponse(status: "unknown", error: "The server has not answered, so the outcome is not known.\u{00A0} Check the server before trying again."))
+        let deadline = request.isMaintenance ? Self.serverMaintenanceReplyDeadline : Self.serverActionReplyDeadline
+        hold(connection, deadline: deadline, timeout: (504, body)) { done in
+            runServerAction(request, device: device, completion: done)
+        }
+    }
+
+    static var maintainWaitsForServerReply: Reply {
+        let body = #"{"status":"busy","error":"A server action is running from iPhone.\u00a0 Wait for it to finish, then start the Maintain run."}"#
         return (409, Data(body.utf8))
     }
 

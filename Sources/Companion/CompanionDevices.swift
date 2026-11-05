@@ -103,6 +103,16 @@ final class CompanionDeviceRegistry: @unchecked Sendable {
         return true
     }
 
+    /// The name a phone paired under, for the Mac's own log.  Nil when the
+    /// token belongs to nobody.
+    func deviceName(for token: String) -> String? {
+        guard CompanionToken.isDeviceToken(token) else { return nil }
+        let presented = Self.hash(token)
+        lock.lock()
+        defer { lock.unlock() }
+        return stored.last { CompanionToken.matches(presented, $0.tokenHash) }?.name
+    }
+
     /// Cuts off one phone.  Returns false if it was not there.
     @discardableResult
     func revoke(id: String) -> Bool {

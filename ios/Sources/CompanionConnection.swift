@@ -13,6 +13,9 @@ enum CompanionConnection {
     /// Sample for 3 Seconds answers when the report is written.  Longer than
     /// the Mac's own 45 second deadline for it.
     static let sampleTimeout: TimeInterval = 50
+    /// A server action goes over SSH.  Past the Mac's own 40 and 115 second holds.
+    static let serverActionTimeout: TimeInterval = 45
+    static let serverMaintenanceTimeout: TimeInterval = 120
     /// A clean answers when the Mac has finished, which can take minutes.
     /// Longer than the Mac's own 15 minute reply deadline.
     static let cleanTimeout: TimeInterval = 16 * 60
@@ -278,6 +281,20 @@ enum CompanionConnection {
             useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
         )
         return try decode(CompanionSampleResponse.self, from: reply)
+    }
+
+    /// Runs one server action.  The Mac answers when the server has.  Longer
+    /// than the Mac's own deadlines, so its answer is the one heard here.
+    static func triggerServerAction(endpoint: NWEndpoint, token: String, action: CompanionServerActionRequest, useTLS: Bool? = nil) async throws -> CompanionServerActionResponse {
+        let reply = try await exchange(
+            endpoint: endpoint,
+            request: CompanionHTTP.serverActionRequest(token: token, action: action, host: hostHeader(for: endpoint)),
+            timeout: action.isMaintenance ? serverMaintenanceTimeout : serverActionTimeout,
+            useTLS: shouldUseTLS(for: endpoint, explicitlyRequested: useTLS)
+        )
+        // Not `decode`: it throws on a 403 before reading the body, and a refusal
+        // here has to stay a refusal, not become a failure to hear back.
+        return CompanionServerActionResponse.answer(status: reply.status, body: reply.body)
     }
 
     /// Starts a full Maintain run on the Mac.  The Mac answers at once,
