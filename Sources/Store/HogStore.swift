@@ -1015,6 +1015,7 @@ final class HogStore: ObservableObject {
             vpsSnapshot: maintain.vpsStore.snapshot,
             vpsError: maintain.vpsStore.errorMessage,
             vpsConfigured: !maintain.vpsStore.configuredHost.isEmpty,
+            vpsStale: maintain.vpsStore.isStale,
             externalDrives: MountedDriveStore.shared.rows
         )
     }
