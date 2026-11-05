@@ -711,6 +711,15 @@ struct HogHunterPanel: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// The marker shown beside the server's readings while refresh is
+    /// failing: the numbers on screen are the last good reading, not the
+    /// server's state now.
+    private var serverStaleChip: some View {
+        Text("Stale")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.orange)
+    }
+
     private var serverCPUColumn: some View {
         let cpu = store.maintain.vpsStore.snapshot?.cpu
         return VStack(alignment: .leading, spacing: 3) {
@@ -721,6 +730,9 @@ struct HogHunterPanel: View {
                 Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
                     .font(.system(size: 9.5, weight: .medium))
                     .lineLimit(1)
+                if store.maintain.vpsStore.isStale {
+                    serverStaleChip
+                }
                 Spacer(minLength: 2)
                 if let cpu {
                     Text(String(format: "%.0f%%", cpu.pct))
@@ -816,6 +828,9 @@ struct HogHunterPanel: View {
                             .foregroundStyle(.secondary)
                         Text("Server")
                             .font(.system(size: 9.5, weight: .medium))
+                        if store.maintain.vpsStore.isStale {
+                            serverStaleChip
+                        }
                         Spacer()
                         Text(String(format: "%.0f%% (%@ / %@)", mem.usedPercentage, HogFormat.memory(UInt64(max(0, mem.usedBytes))), HogFormat.memory(UInt64(max(0, mem.totalBytes)))))
                             .font(.system(size: 9, weight: .semibold).monospacedDigit())
@@ -887,7 +902,7 @@ struct HogHunterPanel: View {
                 // Server Root /
                 if let root = store.maintain.vpsStore.snapshot?.rootDevice {
                     quickStorageRow(
-                        name: "Server (Root /)",
+                        name: store.maintain.vpsStore.isStale ? "Server (Root /) · Stale" : "Server (Root /)",
                         icon: "server.rack",
                         freeBytes: UInt64(max(0, root.freeBytes)),
                         usedFraction: root.usedFraction
@@ -897,7 +912,7 @@ struct HogHunterPanel: View {
                 // Server Fleet Extra /mnt/fleet-extra
                 if let extra = store.maintain.vpsStore.snapshot?.fleetExtraDevice {
                     quickStorageRow(
-                        name: "Server (/mnt/fleet-extra)",
+                        name: store.maintain.vpsStore.isStale ? "Server (/mnt/fleet-extra) · Stale" : "Server (/mnt/fleet-extra)",
                         icon: "externaldrive.connected.to.line.below",
                         freeBytes: UInt64(max(0, extra.freeBytes)),
                         usedFraction: extra.usedFraction

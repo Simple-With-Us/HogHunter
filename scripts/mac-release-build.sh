@@ -81,13 +81,15 @@ codesign_bounded() {
   /usr/bin/perl -e 'alarm 30; exec @ARGV' /usr/bin/codesign "$@"
 }
 
+# Selects the production team's certificate (the Team ID check-mac-identity.sh pins),
+# so another team's Developer ID in the keychain is never picked up.
 resolve_codesign_identity() {
   if [[ -n "${HOGHUNTER_CODESIGN_IDENTITY:-}" ]]; then
     printf '%s\n' "$HOGHUNTER_CODESIGN_IDENTITY"
     return 0
   fi
   /usr/bin/security find-identity -v -p codesigning 2>/dev/null \
-    | /usr/bin/sed -n 's/^.*"\(Developer ID Application:[^"]*\)".*$/\1/p' \
+    | /usr/bin/sed -n 's/^.*"\(Developer ID Application:[^"]*(CC8UTF7ATG)\)".*$/\1/p' \
     | /usr/bin/head -n 1
 }
 
@@ -249,6 +251,9 @@ sign_app_bundle() {
     if sign_with_identity "$identity"; then
       echo "signed with $identity"
       verify_app_signature
+      # A release that changes identity would cost every user every privacy
+      # grant on update, so it is refused before notarization, not after.
+      "$ROOT_DIR/scripts/check-mac-identity.sh" --identity-only "$APP_BUNDLE"
       return 0
     fi
     echo "error: signing with '$identity' failed or timed out." >&2

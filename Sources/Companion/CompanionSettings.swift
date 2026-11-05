@@ -23,6 +23,8 @@ enum CompanionSettingsValidator {
         var backgroundRefreshInterval: Double?
         /// What the Mac's menu bar shows.
         var menuBarLabelMode: MenuBarLabelMode?
+        /// Opens Hog Hunter at login on the Mac.
+        var launchesAtLogin: Bool?
     }
 
     static func validate(_ request: CompanionSettingsUpdateRequest) -> Result<Validated, CompanionSettingsRejection> {
@@ -80,6 +82,7 @@ enum CompanionSettingsValidator {
             }
             validated.menuBarLabelMode = mode
         }
+        validated.launchesAtLogin = request.launchesAtLogin
         return .success(validated)
     }
 
@@ -155,7 +158,8 @@ extension CompanionSnapshotBuilder {
         menuBarLabelMode: MenuBarLabelMode = .machinePercent,
         sort: HogSort = .cpu,
         sortAscending: Bool = false,
-        resolvedAppearance: String = "Light"
+        resolvedAppearance: String = "Light",
+        launchesAtLogin: Bool? = nil
     ) -> CompanionSettingsSummary {
         let trimmed = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let configured = !trimmed.isEmpty
@@ -177,7 +181,8 @@ extension CompanionSnapshotBuilder {
             menuBarLabelMode: menuBarLabelMode.rawValue,
             sort: sort.rawValue,
             sortAscending: sortAscending,
-            resolvedAppearance: resolvedAppearance
+            resolvedAppearance: resolvedAppearance,
+            launchesAtLogin: launchesAtLogin
         )
     }
 

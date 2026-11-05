@@ -86,9 +86,11 @@ struct VPSResourceCardView: View {
             }
             Spacer()
             if let snapshot = store.snapshot {
-                Text("Snapshot \(snapshot.relativeTimeString())")
+                Text(store.isStale
+                     ? "Snapshot \(snapshot.relativeTimeString()) · Earlier Reading"
+                     : "Snapshot \(snapshot.relativeTimeString())")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(store.isStale ? Color.orange : Color.secondary)
             }
             Button {
                 store.fetch(force: true)

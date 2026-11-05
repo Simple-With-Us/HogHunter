@@ -318,7 +318,7 @@ private struct CleanerSettingsTab: View {
         Form {
             Section("Temp File Safety") {
                 HStack {
-                    Stepper(value: $tempHoursDraft, in: 1...8_760) {
+                    Stepper(value: $tempHoursDraft, in: Int(TempFileSafetyPolicy.allowedHours.lowerBound)...Int(TempFileSafetyPolicy.allowedHours.upperBound)) {
                         HStack {
                             Text("Minimum Untouched Time")
                             TextField("Hours", value: $tempHoursDraft, format: .number.grouping(.never))
@@ -559,7 +559,7 @@ private struct MaintenanceSettingsContent: View {
                         Text("\(Int(maintain.lowFreeGiB)) GB")
                             .font(.system(size: 12, weight: .bold))
                     }
-                    Slider(value: $maintain.lowFreeGiB, in: 30...200, step: 5)
+                    Slider(value: $maintain.lowFreeGiB, in: CompanionMaintainLimits.lowFreeGiBRange, step: CompanionMaintainLimits.lowFreeGiBStep)
                         .onChange(of: maintain.lowFreeGiB) { _ in maintain.saveMaintainConfig() }
                     Text("Trigger cache reclaim when available disk space falls below this limit (default 80 GB).")
                         .font(.system(size: 10))
@@ -578,7 +578,7 @@ private struct MaintenanceSettingsContent: View {
                     Slider(value: Binding(
                         get: { Double(maintain.pm2LogsCapMB) },
                         set: { maintain.pm2LogsCapMB = Int($0) }
-                    ), in: 10...200, step: 10)
+                    ), in: Double(CompanionMaintainLimits.pm2LogsCapMBRange.lowerBound)...Double(CompanionMaintainLimits.pm2LogsCapMBRange.upperBound), step: Double(CompanionMaintainLimits.pm2LogsCapMBStep))
                         .onChange(of: maintain.pm2LogsCapMB) { _ in maintain.saveMaintainConfig() }
                     Text("Truncate Node.js PM2 process manager logs in ~/.pm2/logs that exceed this file size.")
                         .font(.system(size: 10))
@@ -599,7 +599,7 @@ private struct MaintenanceSettingsContent: View {
                                 maintain.worktreeRetireMinDays = $0
                                 maintain.saveWorktreeRetireMinDays()
                             }
-                        ), in: 1...90)
+                        ), in: CompanionMaintainLimits.worktreeRetireDaysRange)
                         .labelsHidden()
                         .help("Choose 1 to 90 whole days")
                     }
@@ -854,7 +854,18 @@ private struct IPhoneSettingsTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick the first three choices.\u{00A0} Running maintenance is never offered there.\u{00A0} Turn it on here, on purpose.")
+                    Toggle("Allow iPhone to See Server Status", isOn: $store.allowRemoteServerStatus)
+                    Text("When enabled, a paired iPhone on your local network or Tailscale can read what this Mac reads from your server: its CPU, memory, disks, databases, directories, tools, processes and workloads, and the server's flagged issues.\u{00A0} These name server internals, so they never go to the shared pairing code or to an address outside your network.\u{00A0} The phone cannot act on the server with this.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Allow iPhone to Control the Server", isOn: $store.allowRemoteServerControl)
+                        .disabled(!store.allowRemoteServerStatus)
+                    Text("When enabled with server status above, a paired iPhone connected over Tailscale can quit, tame or sample server processes, stop or restart Coolify workloads, and scan or run server maintenance.\u{00A0} The phone confirms each action, this Mac checks the row against its own current reading, and the server rechecks it again.\u{00A0} It never works over the local network, because that link is not encrypted.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick the first three choices.\u{00A0} Running maintenance, seeing server status and controlling the server are never offered there.\u{00A0} Turn them on here, on purpose.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
