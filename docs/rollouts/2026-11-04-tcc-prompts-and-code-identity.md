@@ -26,6 +26,10 @@ The installed app is not the requester.  It made no removable-volume request du
 - `testThePhoneScreenWritesItsGapsAsNonBreakingSpaces` reads repository source, so it now skips on `/Volumes`, and CI still runs it.
 - `scripts/check-mac-identity.sh` refuses anything but the production bundle id, Team ID CC8UTF7ATG, a Developer ID certificate and the exact designated requirement.  `scripts/mac-release-build.sh` runs it after signing, before notarization, so the Sparkle path cannot publish a changed identity.
 - `scripts/install.sh` refuses, before building, to install without the team's Developer ID identity, to install ad hoc to a production folder, or to create a second copy.  A signing failure now stops the install instead of falling back to ad hoc.  It signs by full certificate name, checks a staged copy before it quits the running app, and swaps that copy in, because `ditto` merges into an existing bundle and can break its seal.  An ad hoc copy never launches: it carries the production bundle id, and a grant made to it would displace the real app's.
+- `scripts/install.sh` decides whether a destination is a production folder by device and inode, walking up from the deepest folder that exists, so a case variant, a symlink, `//Applications/x` or `/private/../Applications/x` all count.  A path it cannot judge, such as a dangling symlink or a `..` below a folder that does not exist yet, counts as production.  It asks again once the folder exists, right before it stages.  A relative `--dest` means the caller's folder.
+- An ad hoc install to a throwaway folder no longer quits the running app.  It stops a copy only when that copy's executable is the one in the folder being replaced, and only by pid.
+- Every way out of the swap ends in one trap.  A failed move, a failed check after the move, and an interruption all put the previous copy back, and a failure with no previous copy to restore leaves no failed copy behind.  The message says what is on disk, and when the restore fails it names the backup, which is never deleted.
+- A SIGKILL or a power loss can still leave a `.hoghunter-previous.*` or `.hoghunter-install.*` folder holding a signed copy.  A later run names them before it builds, and removes them only after its own copy is in place and has passed, so the one copy left on disk is never the one removed.
 - `scripts/test-mac-identity.py` covers the check, the installer gates and the location script, and runs in the macOS CI job.
 
 ## Internal Disk Cost
@@ -34,9 +38,9 @@ Each checkout's Debug builds take about 3.8 GB on the disk the owner is trying t
 
 The existing `app-caches` rule did reach the folder, but only as one tree: a single busy lane would have kept every stale lane on disk, and that rule has no build gate.  `Sources/Storage/DiskCleaner.swift` skipped it altogether, because its user-cache scan ignores any name holding "hoghunter".
 
-- `xcode-artifacts` in `scripts/hoghunter-clean` now sweeps each checkout separately.  It waits for any running xcodebuild, clang or swift-frontend, reads a failed process check as busy, and keeps a checkout with a file touched in the last 90 minutes, an open handle or a keep marker.
+- `xcode-artifacts` in `scripts/hoghunter-clean` now sweeps each checkout separately.  It waits for any running xcodebuild, clang or swift-frontend, reads a failed process check as busy, and keeps a checkout with a file touched in the last 90 minutes, an open handle or a keep marker.  A failed `lsof` listing reads as in use, because the per-path fallback cannot see a Debug host running from deep in the tree.  Every one of those gates is asked again right before the delete, on a fresh listing.
 - `app-caches` leaves the folder to that rule.
-- The Disk Cleaner's developer scan lists it as Hog Hunter Debug Builds.
+- The Disk Cleaner's developer scan lists each checkout as its own Hog Hunter Debug Builds row, off by default, and refuses to clean the folder above them whole.  One row for the whole folder could not honor a keep marker in one lane: the bounded marker walk reads 2,000 entries, and a lane runs far past that.  These rows get a walk of the whole lane with a 30 second budget instead, which answers "kept" when it runs out of time or cannot read part of the tree.  The bound on every other tree is unchanged (HH-184).
 
 The sweep runs whenever the Robotic Vacuum's reclaim step or the opt-in regimen runs `xcode-artifacts`.  A swept lane rebuilds on its next test run, which took about two and a half minutes here.
 

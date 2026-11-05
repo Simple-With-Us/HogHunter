@@ -1767,7 +1767,7 @@ def test_xcode_artifacts_sweeps_each_idle_hoghunter_checkout(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "proc_count", return_value=0), \
              mock.patch.object(hh, "proc_count_exact", return_value=0), \
-             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
              mock.patch.object(hh, "touched_since", return_value=False) as touched, \
              mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
             found = hh.rule_xcode_artifacts()
@@ -1787,7 +1787,7 @@ def test_xcode_artifacts_keeps_hoghunter_checkouts_during_a_build(hh):
             with mock.patch.object(hh, "HOME", home), \
                  mock.patch.object(hh, "proc_count", side_effect=lambda name: int(name == busy)), \
                  mock.patch.object(hh, "proc_count_exact", side_effect=lambda name: int(name == busy)), \
-                 mock.patch.object(hh, "open_handles", return_value=0), \
+                 mock.patch.object(hh, "tree_in_use", return_value=False), \
                  mock.patch.object(hh, "touched_since", return_value=False):
                 assert hh.rule_xcode_artifacts() == [], busy
     finally:
@@ -1801,7 +1801,7 @@ def test_xcode_artifacts_reads_a_failed_build_probe_as_busy(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "proc_count", return_value=hh.PROBE_FAILED), \
              mock.patch.object(hh, "proc_count_exact", return_value=hh.PROBE_FAILED), \
-             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
              mock.patch.object(hh, "touched_since", return_value=False):
             assert hh.rule_xcode_artifacts() == []
     finally:
@@ -1819,7 +1819,7 @@ def test_one_busy_hoghunter_checkout_does_not_keep_the_others(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "proc_count", return_value=0), \
              mock.patch.object(hh, "proc_count_exact", return_value=0), \
-             mock.patch.object(hh, "open_handles", side_effect=lambda p: int(p == held)), \
+             mock.patch.object(hh, "tree_in_use", side_effect=lambda p: p == held), \
              mock.patch.object(hh, "touched_since", side_effect=lambda p, _d: p == busy), \
              mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
             found = hh.rule_xcode_artifacts()
@@ -1838,10 +1838,120 @@ def test_a_keep_marker_protects_a_hoghunter_checkout(hh):
         with mock.patch.object(hh, "HOME", home), \
              mock.patch.object(hh, "proc_count", return_value=0), \
              mock.patch.object(hh, "proc_count_exact", return_value=0), \
-             mock.patch.object(hh, "open_handles", return_value=0), \
+             mock.patch.object(hh, "tree_in_use", return_value=False), \
              mock.patch.object(hh, "touched_since", return_value=False), \
              mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
             assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_failed_lsof_listing_keeps_a_hoghunter_checkout(hh):
+    """The per-path fallback cannot see a Debug host running from deep in the
+    tree, so a listing that failed has to read as in use."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        _hoghunter_debug_builds(home)
+        with mock.patch.object(hh, "HOME", home), \
+             mock.patch.object(hh, "proc_count", return_value=0), \
+             mock.patch.object(hh, "proc_count_exact", return_value=0), \
+             mock.patch.object(hh, "_load_open_snapshot", return_value=None), \
+             mock.patch.object(hh, "touched_since", return_value=False), \
+             mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+            assert hh.rule_xcode_artifacts() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def _hoghunter_lane_candidate(hh, home):
+    """One lane the scan accepted, and the root it lives in."""
+    root = _hoghunter_debug_builds(home)
+    shutil.rmtree(root / "lane-two-bbbb")
+    with mock.patch.object(hh, "HOME", home), \
+         mock.patch.object(hh, "proc_count", return_value=0), \
+         mock.patch.object(hh, "proc_count_exact", return_value=0), \
+         mock.patch.object(hh, "tree_in_use", return_value=False), \
+         mock.patch.object(hh, "touched_since", return_value=False), \
+         mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+        found = hh.rule_xcode_artifacts()
+    assert len(found) == 1, found
+    return found[0], root / "lane-one-aaaa"
+
+
+def _apply_with_open_gates(hh, candidate, **overrides):
+    gates = {"proc_count": 0, "proc_count_exact": 0, "tree_in_use": False, "touched_since": False}
+    gates.update(overrides)
+    with mock.patch.object(hh, "proc_count", return_value=gates["proc_count"]), \
+         mock.patch.object(hh, "proc_count_exact", return_value=gates["proc_count_exact"]), \
+         mock.patch.object(hh, "tree_in_use", return_value=gates["tree_in_use"]), \
+         mock.patch.object(hh, "touched_since", return_value=gates["touched_since"]):
+        hh.apply_candidate(candidate)
+
+
+def test_a_hoghunter_checkout_is_deleted_when_its_gates_still_hold(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        assert candidate.recheck is not None
+        _apply_with_open_gates(hh, candidate)
+        assert candidate.applied, candidate
+        assert not candidate.refused
+        assert not lane.exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_build_started_after_the_scan_keeps_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        for probe in ("proc_count", "proc_count_exact"):
+            candidate, lane = _hoghunter_lane_candidate(hh, home)
+            _apply_with_open_gates(hh, candidate, **{probe: 1})
+            assert candidate.refused == "a build is running", candidate
+            assert not candidate.applied
+            assert lane.is_dir()
+            shutil.rmtree(lane.parent)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_hoghunter_checkout_used_after_the_scan_is_kept(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        for gate, why in (("touched_since", "touched in the last 90 minutes"), ("tree_in_use", "held open")):
+            candidate, lane = _hoghunter_lane_candidate(hh, home)
+            _apply_with_open_gates(hh, candidate, **{gate: True})
+            assert candidate.refused == why, candidate
+            assert lane.is_dir()
+            shutil.rmtree(lane.parent)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_keep_marker_added_after_the_scan_keeps_a_hoghunter_checkout(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        (lane / "Build").mkdir()
+        (lane / "Build" / hh.KEEP_SENTINEL).write_text("")
+        _apply_with_open_gates(hh, candidate)
+        assert candidate.refused, candidate
+        assert not candidate.applied
+        assert (lane / "Build" / hh.KEEP_SENTINEL).exists()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_hoghunter_checkout_swapped_after_the_scan_is_kept(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        candidate, lane = _hoghunter_lane_candidate(hh, home)
+        shutil.rmtree(lane)
+        lane.mkdir()
+        (lane / "other.bin").write_bytes(b"x")
+        _apply_with_open_gates(hh, candidate)
+        assert candidate.refused == "the path now holds something else", candidate
+        assert (lane / "other.bin").exists()
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

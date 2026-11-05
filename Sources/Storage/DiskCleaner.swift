@@ -1332,6 +1332,48 @@ final class DiskCleaner: @unchecked Sendable {
         return items.sorted { $0.bytes > $1.bytes }
     }
 
+    /// Where `scripts/xcodegen-post.sh` puts each Hog Hunter checkout's Debug builds.
+    private static let hogHunterDebugBuildsPath = "Library/Caches/HogHunterDerivedData"
+
+    private var hogHunterDebugBuildsRoot: String {
+        ((userHomeURL.path as NSString).standardizingPath as NSString)
+            .appendingPathComponent(Self.hogHunterDebugBuildsPath)
+    }
+
+    /// One row per checkout, so a keep marker in one lane keeps that lane and no
+    /// other, and is looked for across the whole lane.  Off by default, because a
+    /// row here says nothing about whether that lane is building right now;
+    /// hoghunter-clean is the sweep that waits for an idle one.
+    private func scanHogHunterDebugBuilds() -> [CleanItem] {
+        let root = userHomeURL.appendingPathComponent(Self.hogHunterDebugBuildsPath, isDirectory: true)
+        let lanes = (try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        )) ?? []
+        var items: [CleanItem] = []
+        for lane in lanes.sorted(by: { $0.path < $1.path }) {
+            if scanShouldStop() { break }
+            let values = try? lane.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values?.isDirectory == true, values?.isSymbolicLink != true else { continue }
+            let stats = directoryStats(at: lane)
+            guard stats.bytes > 0 else { continue }
+            items.append(CleanItem(
+                category: .developer,
+                title: "Hog Hunter Debug Builds",
+                subtitle: "~/\(Self.hogHunterDebugBuildsPath)/\(lane.lastPathComponent)",
+                url: lane,
+                bytes: stats.bytes,
+                fileCount: stats.fileCount,
+                isApproximate: stats.isApproximate,
+                lastModified: stats.lastModified,
+                isSelected: false,
+                detail: "Debug builds and test hosts from one Hog Hunter checkout; they rebuild on demand.  Select only when no build is running"
+            ))
+        }
+        return items
+    }
+
     /// Scans developer build artifacts and package manager caches.
     func scanDeveloper() -> [CleanItem] {
         if Self.scanContext == nil { return withScanBudget { scanDeveloper() } }
@@ -1339,7 +1381,6 @@ final class DiskCleaner: @unchecked Sendable {
 
         let targets: [(name: String, path: String, detail: String)] = [
             ("Xcode DerivedData", "Library/Developer/Xcode/DerivedData", "Intermediate build files and indexing data"),
-            ("Hog Hunter Debug Builds", "Library/Caches/HogHunterDerivedData", "Debug builds and test hosts from Hog Hunter's own checkouts; they rebuild on demand.  Select only when no build is running"),
             ("Xcode Archives", "Library/Developer/Xcode/Archives", "Old build archives and dSYMs"),
             ("Xcode iOS DeviceSupport", "Library/Developer/Xcode/iOS DeviceSupport", "Symbols from connected physical iOS devices"),
             ("Xcode CoreSimulator Caches", "Library/Developer/CoreSimulator/Caches", "Simulator runtime caches and temporary files"),
@@ -1378,13 +1419,12 @@ final class DiskCleaner: @unchecked Sendable {
                 fileCount: stats.fileCount,
                 isApproximate: stats.isApproximate,
                 lastModified: stats.lastModified,
-                // Off by default: this one row covers every lane, including a busy
-                // one.  hoghunter-clean sweeps idle lanes one at a time.
-                isSelected: highChurn == nil && CleanCategory.developer.defaultSelected
-                    && target.path != "Library/Caches/HogHunterDerivedData",
+                isSelected: highChurn == nil && CleanCategory.developer.defaultSelected,
                 detail: highChurn?.reason ?? target.detail
             ))
         }
+
+        items.append(contentsOf: scanHogHunterDebugBuilds())
 
         if !scanShouldStop() {
             // iOS Simulator Devices — installed simulators + runtimes.  Opt-in only:
@@ -2436,7 +2476,6 @@ final class DiskCleaner: @unchecked Sendable {
             // trailing-slash prefix could never match the directory itself.
             let allowedDeveloperPrefixes = [
                 home + "/Library/Developer/Xcode/DerivedData",
-                home + "/Library/Caches/HogHunterDerivedData",
                 home + "/Library/Developer/Xcode/Archives",
                 home + "/Library/Developer/Xcode/iOS DeviceSupport",
                 home + "/Library/Developer/CoreSimulator/Caches",
@@ -2457,6 +2496,9 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/.docker/buildx/cache",
                 home + "/Library/Caches/com.docker.docker"
             ] + Self.codingPlatformCacheTargets.map { home + "/" + $0.path }
+            // Below the Debug builds root only, never the root: it holds every
+            // checkout, and one marked lane must not go with the rest.
+            if path.hasPrefix(hogHunterDebugBuildsRoot + "/") { return true }
             return allowedDeveloperPrefixes.contains { path == $0 || path.hasPrefix($0 + "/") }
 
         case .orphanedData:
@@ -2722,6 +2764,13 @@ final class DiskCleaner: @unchecked Sendable {
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: tree.path, isDirectory: &isDir), isDir.boolValue else {
             return false
+        }
+        // A checkout's Debug builds run to hundreds of thousands of entries, so the
+        // bounded walk would spend its cap in the index and miss a marker in the
+        // lane.  These trees get the whole walk, which fails closed.
+        let debugBuildsRoot = URL(fileURLWithPath: hogHunterDebugBuildsRoot).resolvingSymlinksInPath().path
+        if tree.path == debugBuildsRoot || tree.path.hasPrefix(debugBuildsRoot + "/") {
+            return KeepSentinel.containsMarkerInWholeTree(url: tree, fileManager: fileManager)
         }
         return KeepSentinel.containsMarker(url: tree, fileManager: fileManager)
     }

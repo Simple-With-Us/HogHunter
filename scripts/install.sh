@@ -20,7 +20,8 @@
 # refuses to put anything but the production identity in a production location,
 # and refuses to leave two copies there.
 #
-# Exit codes: 3 no usable identity, 4 a second copy would exist, 5 signing failed.
+# Exit codes: 3 no usable identity, 4 a second copy would exist, 5 signing failed,
+# 6 the new copy could not be put in place or failed its check.
 set -euo pipefail
 
 ADHOC=0
@@ -48,6 +49,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# A relative --dest means the folder the caller is in, so it is settled before the
+# script moves to the repository.
+if [[ -n "$DEST_ARG" && "$DEST_ARG" != /* ]]; then
+  DEST_ARG="$PWD/$DEST_ARG"
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -78,19 +85,75 @@ LEGACY_PATH="$DEST_DIR/HogHunter.app"
 
 EXPECTED_TEAM_ID="CC8UTF7ATG"
 
-# Compares resolved paths, so a trailing slash or a symlink cannot walk an ad hoc
-# copy into a production location.
-resolved_dir() {
-  (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "${1%/}"
+# Folders are compared by device and inode, never by text.  `pwd -P` keeps the case
+# as typed, so on a case-insensitive volume /applications reads as a different
+# folder from /Applications while being the same one.
+dir_identity() {
+  /usr/bin/stat -f '%d:%i' "$1" 2>/dev/null
 }
 
+lowercase() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Splits a path into the deepest ancestor that exists, as a physical path, and the
+# part still to be created: SPLIT_BASE and SPLIT_REST.  Fails when the path cannot
+# be judged.  A dangling symlink could point anywhere, and `..` below a folder that
+# does not exist yet climbs back out of it once `mkdir -p` has created it.
+split_existing() {
+  local path="$1" rest="" name parent
+  while [[ ! -e "$path" ]]; do
+    [[ ! -L "$path" ]] || return 1
+    name="$(basename "$path")"
+    [[ "$name" != ".." ]] || return 1
+    [[ "$name" == "." ]] || rest="$name${rest:+/$rest}"
+    parent="$(dirname "$path")"
+    [[ "$parent" != "$path" ]] || return 1
+    path="$parent"
+  done
+  SPLIT_BASE="$(cd "$path" 2>/dev/null && pwd -P)" || return 1
+  SPLIT_REST="$rest"
+}
+
+# Both spellings name one folder, whether or not it exists yet.
+same_dir() {
+  local base rest id
+  split_existing "$1" || return 1
+  base="$SPLIT_BASE"
+  rest="$SPLIT_REST"
+  split_existing "$2" || return 1
+  [[ "$(lowercase "$rest")" == "$(lowercase "$SPLIT_REST")" ]] || return 1
+  id="$(dir_identity "$base")" || return 1
+  [[ -n "$id" && "$id" == "$(dir_identity "$SPLIT_BASE")" ]]
+}
+
+# Containment, not equality: a folder inside /Applications is still production, so
+# every parent of the destination counts.  A path that cannot be judged counts too.
 is_production_dir() {
-  # Containment, not equality: a folder inside /Applications is still production.
-  local resolved production
-  resolved="$(resolved_dir "$1")"
-  for production in "$(resolved_dir "$SYSTEM_APPLICATIONS")" "$(resolved_dir "$USER_APPLICATIONS")"; do
-    if [[ "$resolved" == "$production" || "$resolved" == "$production/"* ]]; then
-      return 0
+  local base rest production id walk parent missing
+  split_existing "$1" || return 0
+  base="$SPLIT_BASE"
+  rest="$(lowercase "$SPLIT_REST")"
+  for production in "$SYSTEM_APPLICATIONS" "$USER_APPLICATIONS"; do
+    if [[ -e "$production" ]]; then
+      id="$(dir_identity "$production")" || return 0
+      [[ -n "$id" ]] || return 0
+      walk="$base"
+      while true; do
+        [[ "$(dir_identity "$walk")" != "$id" ]] || return 0
+        parent="$(dirname "$walk")"
+        [[ "$parent" != "$walk" ]] || break
+        walk="$parent"
+      done
+    else
+      # Not there yet, so there is no inode to compare.  The destination would
+      # become it if it grows from the same existing folder under the same name.
+      split_existing "$production" || return 0
+      missing="$(lowercase "$SPLIT_REST")"
+      id="$(dir_identity "$SPLIT_BASE")" || return 0
+      if [[ "$id" == "$(dir_identity "$base")" && ( "$rest" == "$missing" || "$rest" == "$missing/"* ) ]]; then
+        return 0
+      fi
     fi
   done
   return 1
@@ -126,8 +189,11 @@ fi
 # LaunchServices may open the stale one.
 if [[ "$ADHOC" -ne 1 ]]; then
   for candidate_dir in "$SYSTEM_APPLICATIONS" "$USER_APPLICATIONS"; do
-    # Resolved, so `--dest ~/Applications/` is an update in place, not a second copy.
-    [[ "$(resolved_dir "$candidate_dir")" == "$(resolved_dir "$DEST_DIR")" ]] && continue
+    # By identity, so `--dest ~/Applications/` or `~/applications` is an update in
+    # place, not a second copy.
+    if same_dir "$candidate_dir" "$DEST_DIR"; then
+      continue
+    fi
     for other in "$candidate_dir/Hog Hunter.app" "$candidate_dir/HogHunter.app"; do
       if [[ -d "$other" ]]; then
         if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -141,6 +207,25 @@ if [[ "$ADHOC" -ne 1 ]]; then
     done
   done
 fi
+
+# An interrupted install can leave a folder of ours beside the destination, each
+# holding a validly signed copy of this app that Spotlight can still find.  A later
+# run names them now and retires them only once its own copy is in place and has
+# passed its check, so the one copy left on disk is never the one removed.
+report_leftovers() {
+  local folder
+  for folder in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
+    [[ -d "$folder" && ! -L "$folder" ]] || continue
+    if [[ ! -e "$folder/Hog Hunter.app" ]]; then
+      echo "Warning: an interrupted install left $folder, with no app inside.  A finished install removes it."
+    elif [[ -e "$INSTALLED_PATH" ]]; then
+      echo "Warning: an interrupted install left a copy of this app at $folder/Hog Hunter.app.  A finished install removes it."
+    else
+      echo "Warning: an interrupted install left a copy of this app at $folder/Hog Hunter.app, and nothing is installed at $INSTALLED_PATH.  It may be the only copy.  It stays until a new copy has passed its check."
+    fi
+  done
+}
+report_leftovers
 
 version_of() {
   local short build
@@ -304,12 +389,114 @@ if [[ "$ADHOC" -ne 1 ]]; then
   "$REPO_ROOT/scripts/check-mac-identity.sh" --identity-only "$APP_PATH"
 fi
 
+STAGE_DIR=""
+STAGED_PATH=""
+BACKUP_DIR=""
+SWAP_COMMITTED=0
+SWAP_ABORTED=0
+QUIT_FOR_INSTALL=0
+
+# Puts the previous copy back.  It sits outside STAGE_DIR, so nothing but this moves
+# it, and whatever is at the installed path while it is aside is the new copy.
+restore_previous() {
+  if [[ -e "$INSTALLED_PATH" || -L "$INSTALLED_PATH" ]]; then
+    mv "$INSTALLED_PATH" "$STAGE_DIR/rejected.app" || return 1
+  fi
+  mv "$BACKUP_DIR/Hog Hunter.app" "$INSTALLED_PATH" || return 1
+}
+
+# Says what is actually on disk afterward, naming the backup when it is still there.
+abort_swap() {
+  local previous="$BACKUP_DIR/Hog Hunter.app"
+  trap '' INT TERM HUP
+  SWAP_ABORTED=1
+  echo "error: $1" >&2
+  if [[ -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
+    if restore_previous; then
+      rmdir "$BACKUP_DIR" 2>/dev/null || true
+      echo "The previous copy was restored to $INSTALLED_PATH." >&2
+    else
+      echo "error: could not restore the previous copy.  It is at $previous.  Move it back to $INSTALLED_PATH by hand." >&2
+    fi
+  elif [[ -e "$INSTALLED_PATH" && ! -e "$STAGED_PATH" ]]; then
+    # The new copy did move, and it failed.  There is no previous copy to go back to.
+    if mv "$INSTALLED_PATH" "$STAGE_DIR/rejected.app"; then
+      echo "There was no previous copy to restore, so nothing is installed at $INSTALLED_PATH." >&2
+    else
+      echo "error: the copy that failed is still at $INSTALLED_PATH, and there was no previous copy to restore." >&2
+    fi
+  else
+    echo "There was no previous copy to restore, so nothing is installed at $INSTALLED_PATH." >&2
+  fi
+  if [[ "$QUIT_FOR_INSTALL" -eq 1 ]]; then
+    echo "This install quit the running Hog Hunter and has not reopened it." >&2
+  fi
+}
+
+# Every way out of the swap ends here, a signal included.  Signals are ignored for
+# the length of it, so one cannot land between putting the app back and clearing up.
+finish_install() {
+  local status=$?
+  local previous="$BACKUP_DIR/Hog Hunter.app"
+  trap '' INT TERM HUP
+  if [[ "$SWAP_COMMITTED" -eq 1 ]]; then
+    [[ -z "$BACKUP_DIR" ]] || rm -rf "$BACKUP_DIR" || true
+  elif [[ "$SWAP_ABORTED" -ne 1 && -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
+    abort_swap "the install stopped before the new copy passed its check."
+  fi
+  # Only ever an empty folder: rmdir refuses one that still holds the backup.
+  [[ -z "$BACKUP_DIR" ]] || rmdir "$BACKUP_DIR" 2>/dev/null || true
+  [[ -z "$STAGE_DIR" ]] || rm -rf "$STAGE_DIR" || true
+  exit "$status"
+}
+
+installed_copy_verifies() {
+  codesign --verify --deep --strict "$INSTALLED_PATH" || return 1
+  [[ "$ADHOC" -eq 1 ]] || "$REPO_ROOT/scripts/check-mac-identity.sh" "$INSTALLED_PATH"
+}
+
+# True when this process's executable is the copy in the folder being replaced.
+# Asks lsof for the mapped executable, which never reads the command line.
+running_from_destination() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" == n* ]] || continue
+    if [[ "${line#n}" -ef "$INSTALLED_PATH/Contents/MacOS/HogHunter" || "${line#n}" -ef "$LEGACY_PATH/Contents/MacOS/HogHunter" ]]; then
+      return 0
+    fi
+  done < <(lsof -a -p "$1" -d txt -Fn 2>/dev/null || true)
+  return 1
+}
+
+# Stops only a copy running from the folder being replaced, by pid.  The names the
+# production path quits by would take the owner's real app down too.
+stop_copy_running_from_destination() {
+  local pid
+  for pid in $(pgrep -x HogHunter 2>/dev/null || true); do
+    running_from_destination "$pid" || continue
+    echo "Stopping the copy running from $DEST_DIR (pid $pid)."
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
 # Staged beside the destination and checked before the running app is touched.
 # ditto merges into an existing bundle, so installing straight over one can leave
 # files the signature does not cover, and a broken seal is a broken identity.
 mkdir -p "$DEST_DIR"
+# Asked again now the folder exists and minutes have passed: this answer is exact.
+if [[ "$ADHOC" -eq 1 ]] && is_production_dir "$DEST_DIR"; then
+  echo "error: refusing an ad hoc install to $DEST_DIR, which is now a production location." >&2
+  exit 3
+fi
+trap finish_install EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 STAGE_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-install.XXXXXX")"
-trap 'rm -rf "$STAGE_DIR"' EXIT
 STAGED_PATH="$STAGE_DIR/Hog Hunter.app"
 ditto "$APP_PATH" "$STAGED_PATH"
 xattr -cr "$STAGED_PATH" || true
@@ -317,47 +504,57 @@ if [[ "$ADHOC" -ne 1 ]]; then
   "$REPO_ROOT/scripts/check-mac-identity.sh" "$STAGED_PATH"
 fi
 
-echo "Quitting the running Hog Hunter, if any."
-# Both names: an old copy is still called HogHunter on disk, and AppleScript
-# resolves the app by its installed display name.
-osascript -e 'tell application "Hog Hunter" to quit' >/dev/null 2>&1 || true
-osascript -e 'tell application "HogHunter" to quit' >/dev/null 2>&1 || true
-sleep 5
-if pgrep -x HogHunter >/dev/null 2>&1; then
-  echo "Hog Hunter is still running.  Forcing it to quit."
-  pkill -x HogHunter || true
-  sleep 1
+if [[ "$ADHOC" -eq 1 ]]; then
+  # A throwaway copy is not the running app, and force-quitting by name here would
+  # stop the production app with nothing to reopen it.
+  echo "Leaving the running Hog Hunter alone: this is a throwaway copy."
+  stop_copy_running_from_destination
+else
+  echo "Quitting the running Hog Hunter, if any."
+  QUIT_FOR_INSTALL=1
+  # Both names: an old copy is still called HogHunter on disk, and AppleScript
+  # resolves the app by its installed display name.
+  osascript -e 'tell application "Hog Hunter" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application "HogHunter" to quit' >/dev/null 2>&1 || true
+  sleep 5
   if pgrep -x HogHunter >/dev/null 2>&1; then
-    pkill -9 -x HogHunter || true
+    echo "Hog Hunter is still running.  Forcing it to quit."
+    pkill -x HogHunter || true
+    sleep 1
+    if pgrep -x HogHunter >/dev/null 2>&1; then
+      pkill -9 -x HogHunter || true
+    fi
   fi
 fi
 
 echo "Installing to $INSTALLED_PATH."
 # The previous bundle waits beside the destination, outside STAGE_DIR, so the EXIT
 # trap cannot delete it.  It is removed only once the new bundle is in place and
-# verified; a failed swap puts it back.
-BACKUP_DIR=""
-if [[ -e "$INSTALLED_PATH" ]]; then
+# verified; a failed swap or an interruption puts it back.
+if [[ -e "$INSTALLED_PATH" || -L "$INSTALLED_PATH" ]]; then
   BACKUP_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-previous.XXXXXX")"
   mv "$INSTALLED_PATH" "$BACKUP_DIR/Hog Hunter.app"
 fi
 if ! mv "$STAGED_PATH" "$INSTALLED_PATH"; then
-  if [[ -n "$BACKUP_DIR" ]]; then
-    mv "$BACKUP_DIR/Hog Hunter.app" "$INSTALLED_PATH" || true
-    rmdir "$BACKUP_DIR" 2>/dev/null || true
-  fi
-  echo "error: could not move the new Hog Hunter into place.  The previous copy was restored." >&2
+  abort_swap "could not move the new Hog Hunter into place."
   exit 6
 fi
-if [[ -n "$BACKUP_DIR" ]]; then
-  if codesign --verify --deep --strict "$INSTALLED_PATH" \
-    && { [[ "$ADHOC" -eq 1 ]] || "$REPO_ROOT/scripts/check-mac-identity.sh" "$INSTALLED_PATH"; }; then
-    rm -rf "$BACKUP_DIR"
-  else
-    echo "error: the installed copy failed verification.  The previous copy is kept at $BACKUP_DIR/Hog Hunter.app." >&2
-    exit 6
-  fi
+if ! installed_copy_verifies; then
+  abort_swap "the installed copy failed verification."
+  exit 6
 fi
+SWAP_COMMITTED=1
+if [[ -n "$BACKUP_DIR" ]]; then
+  rm -rf "$BACKUP_DIR"
+  BACKUP_DIR=""
+fi
+
+# The new copy is in place and has passed, so what an earlier run left is now spare.
+for leftover in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
+  [[ -d "$leftover" && ! -L "$leftover" && "$leftover" != "$STAGE_DIR" ]] || continue
+  echo "Removing what an interrupted install left at $leftover."
+  rm -rf "$leftover"
+done
 
 # Retire the pre-rename copy, but only after confirming it is this app and not
 # something else that happens to share the old filename.
