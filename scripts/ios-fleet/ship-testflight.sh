@@ -1105,8 +1105,10 @@ BUNDLE_ID="$(json_get "$APP_KEY" bundleId)"
 PLATFORM="$(json_get "$APP_KEY" platform)"
 # The tester policy for this app (owner, Nov 3 2026):  "public-group" means one
 # external group with its public link on holds the same people, every build is
-# assigned to it, and no internal group exists.  An app that names no policy
-# keeps the internal all-builds group, which is what every other fleet app has.
+# assigned to it, and no internal group exists.  It is the only policy (owner,
+# Nov 4 2026, HH-217), so an app that names no policy gets the public group
+# too.  A legacy "internal-group" value is refused by asc-api.mjs with a
+# readable message, before any App Store Connect call.
 TESTER_POLICY="$(json_get "$APP_KEY" testerPolicy 2>/dev/null || true)"
 SCHEME="$(json_get "$APP_KEY" scheme)"
 PROJECT_REL="$(json_get "$APP_KEY" projectRel)"
@@ -1128,6 +1130,11 @@ DEFAULT_MARKETING="$(json_get "$APP_KEY" marketingVersionDefault)"
 FIXED_MARKETING="$(json_get "$APP_KEY" fixedMarketingVersion)"
 BUILD_NUMBER_POLICY="$(json_get "$APP_KEY" buildNumberPolicy)"
 [[ -z "$BUILD_NUMBER_POLICY" || "$BUILD_NUMBER_POLICY" == "paired-release" ]] || die "unknown buildNumberPolicy for ${APP_KEY}; nothing planned"
+# The public group is the only policy (owner, Nov 4 2026, HH-217).  A legacy
+# "internal-group" value stops the ship HERE, before an upload, so the lane
+# fails closed with a readable message instead of shipping a build that can
+# never reach a group.  asc-api.mjs refuses the same value on its own.
+[[ "$TESTER_POLICY" != "internal-group" ]] || die "testerPolicy 'internal-group' for ${APP_KEY} is not supported (HH-217):  iOS TestFlight uses the public group only.  Set testerPolicy to \"public-group\" in apps.json; nothing was uploaded."
 
 if [[ -z "$PLATFORM" ]]; then
   if [[ "$APP_KEY" == *-mac || "$SCHEME" == *[Mm]ac* ]]; then
@@ -1583,11 +1590,7 @@ ensure_tf_ready() {
     while IFS= read -r line; do log "tf-ready: $line"; done <"${LOG_DIR}/ensure-tf-ready.err"
   fi
   if [[ $rc -eq 0 ]]; then
-    if [[ "$TESTER_POLICY" == "public-group" ]]; then
-      log "TestFlight public group testers can install this build"
-    else
-      log "TestFlight internal testers can install this build"
-    fi
+    log "TestFlight public group testers can install this build"
     return 0
   fi
   if [[ $rc -eq 3 ]]; then
