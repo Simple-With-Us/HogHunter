@@ -625,3 +625,71 @@ final class CompanionServerPresentationTests: XCTestCase {
         XCTAssertEqual(decoded.server, status)
     }
 }
+
+final class CompanionServerStatusReviewTests: XCTestCase {
+    private func reading(_ devices: [String: VPSDevice]) -> VPSStatusSnapshot {
+        VPSStatusSnapshot(generatedAt: iso(Date()), host: "h", devices: devices)
+    }
+
+    private func build(_ snapshot: VPSStatusSnapshot) -> CompanionServerStatus {
+        CompanionServerStatusBuilder.make(
+            configuredHost: "h", snapshot: snapshot, error: nil, fetchedAt: Date(),
+            cpuHistory: [], databaseChange: { _ in nil }, directoryChange: { _ in nil }
+        )
+    }
+
+    func testADeviceTitleNamesTheMountTheServerReported() {
+        let status = build(reading([
+            "extra": VPSDevice(mount: "/mnt/data", freeBytes: 1, note: nil),
+            "tmp": VPSDevice(mount: "/run/scratch", freeBytes: 1, note: nil),
+            "root": VPSDevice(mount: "/", freeBytes: 1, note: nil),
+            "shm": VPSDevice(mount: "", freeBytes: 1, note: nil),
+        ]))
+        let titles = Dictionary(uniqueKeysWithValues: (status.devices ?? []).map { ($0.id, $0.title) })
+        XCTAssertEqual(titles["extra"], "Fleet Extra (/mnt/data)")
+        XCTAssertEqual(titles["tmp"], "Tmpfs (/run/scratch)")
+        XCTAssertEqual(titles["root"], "Disk (/)")
+        XCTAssertEqual(titles["shm"], "Shared Mem")
+    }
+
+    func testTheHeadlineAndTheDeviceListNameTheSameExtraDisk() {
+        let snapshot = reading([
+            "z-disk": VPSDevice(mount: "/mnt/fleet-extra/b", freeBytes: 1, note: nil),
+            "a-disk": VPSDevice(mount: "/mnt/fleet-extra/a", freeBytes: 1, note: nil),
+        ])
+        XCTAssertEqual(snapshot.fleetExtraKey, "a-disk")
+        XCTAssertEqual(snapshot.fleetExtraDevice?.mount, "/mnt/fleet-extra/a")
+        let extra = build(snapshot).devices?.first { $0.title.hasPrefix("Fleet Extra") }
+        XCTAssertEqual(extra?.id, "a-disk")
+    }
+
+    func testADeviceNamedOnceIsListedOnce() {
+        let status = build(reading(["tmp": VPSDevice(mount: "/mnt/fleet-extra", freeBytes: 1, note: nil)]))
+        XCTAssertEqual(status.devices?.map(\.id), ["tmp"])
+        XCTAssertEqual(status.devices?.first?.title, "Fleet Extra (/mnt/fleet-extra)")
+    }
+
+    func testTheMemoRebuildsOnlyWhenItsKeyChanges() {
+        var memo = CompanionServerStatusMemo()
+        var builds = 0
+        let at = Date()
+        func key(_ state: CompanionServerState = .ok, fetchedAt: Date? = nil, error: String? = nil) -> CompanionServerStatusMemo.Key {
+            CompanionServerStatusMemo.Key(host: "h", snapshot: nil, error: error, fetchedAt: fetchedAt ?? at, readingState: state)
+        }
+        func read(_ key: CompanionServerStatusMemo.Key) -> String {
+            memo.status(for: key) {
+                builds += 1
+                return CompanionServerStatus(state: key.readingState.rawValue)
+            }.state
+        }
+        _ = read(key())
+        _ = read(key())
+        XCTAssertEqual(builds, 1)
+        XCTAssertEqual(read(key(.stale)), CompanionServerState.stale.rawValue)
+        XCTAssertEqual(builds, 2)
+        _ = read(key(.stale, fetchedAt: at.addingTimeInterval(60)))
+        XCTAssertEqual(builds, 3)
+        _ = read(key(.stale, fetchedAt: at.addingTimeInterval(60), error: "e"))
+        XCTAssertEqual(builds, 4)
+    }
+}

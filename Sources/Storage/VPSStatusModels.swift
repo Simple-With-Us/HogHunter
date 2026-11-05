@@ -100,10 +100,19 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         devices["root"]
     }
 
+    /// The one rule for which device is the fleet-extra disk, so a summary and
+    /// a device list cannot name two different disks.  Sorted, because a
+    /// dictionary's own order changes from run to run.
+    var fleetExtraKey: String? {
+        ["fleet_extra", "fleet-extra", "extra"].first { devices[$0] != nil }
+            ?? devices.keys.sorted().first {
+                let mount = devices[$0]?.mount ?? ""
+                return mount == "/mnt/fleet-extra" || mount.hasPrefix("/mnt/fleet-extra/")
+            }
+    }
+
     var fleetExtraDevice: VPSDevice? {
-        devices["fleet_extra"] ?? devices["fleet-extra"] ?? devices["extra"] ?? devices.values.first {
-            $0.mount == "/mnt/fleet-extra" || $0.mount.hasPrefix("/mnt/fleet-extra/")
-        }
+        fleetExtraKey.flatMap { devices[$0] }
     }
 
     var tmpDevice: VPSDevice? {

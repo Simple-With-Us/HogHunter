@@ -9,6 +9,30 @@ import Foundation
 /// never a zero.  And every `Double` is checked for being finite, because one
 /// NaN or infinity makes `JSONEncoder` refuse the whole snapshot, which would
 /// freeze the phone on its last reading.
+/// Holds the last server block, so a publish on every Mac sample does not
+/// rebuild one from a reading that arrives once a minute.  The key holds all
+/// the block depends on.  The reading state is part of it because that is the
+/// one field that changes with the clock alone, and the fetch time covers the
+/// history and growth figures, which change only when a fetch lands.
+struct CompanionServerStatusMemo {
+    struct Key: Equatable {
+        let host: String
+        let snapshot: VPSStatusSnapshot?
+        let error: String?
+        let fetchedAt: Date?
+        let readingState: CompanionServerState
+    }
+
+    private var last: (key: Key, status: CompanionServerStatus)?
+
+    mutating func status(for key: Key, build: () -> CompanionServerStatus) -> CompanionServerStatus {
+        if let last, last.key == key { return last.status }
+        let status = build()
+        last = (key, status)
+        return status
+    }
+}
+
 enum CompanionServerStatusBuilder {
     /// As many as the Mac's own card lists.
     static let processLimit = 12
@@ -164,21 +188,28 @@ enum CompanionServerStatusBuilder {
     /// In the Mac card's order: the disks it names first, then anything else
     /// the server reported, so a device the Mac has no title for still shows.
     private static func devices(_ snapshot: VPSStatusSnapshot) -> [CompanionServerDevice] {
-        let extra = ["fleet_extra", "fleet-extra", "extra"].first { snapshot.devices[$0] != nil }
-            ?? snapshot.devices.keys.sorted().first {
-                let mount = snapshot.devices[$0]?.mount ?? ""
-                return mount == "/mnt/fleet-extra" || mount.hasPrefix("/mnt/fleet-extra/")
-            }
-        var titled: [(key: String, title: String)] = [("root", "Disk (/)")]
-        if let extra { titled.append((extra, "Fleet Extra (/mnt/fleet-extra)")) }
-        titled.append(("tmp", "Tmpfs (/tmp)"))
-        titled.append(("shm", "Shared Mem (/dev/shm)"))
-        let named = Set(titled.map(\.key))
+        let extra = snapshot.fleetExtraKey
+        var labelled: [(key: String, label: String)] = [("root", "Disk")]
+        if let extra, extra != "root" { labelled.append((extra, "Fleet Extra")) }
+        if extra != "tmp" { labelled.append(("tmp", "Tmpfs")) }
+        if extra != "shm" { labelled.append(("shm", "Shared Mem")) }
+        let named = Set(labelled.map(\.key))
         let others = snapshot.devices.keys.filter { !named.contains($0) }.sorted()
-        let rows = titled + others.map { (key: $0, title: snapshot.devices[$0]?.mount ?? $0) }
+        let rows: [(key: String, title: String)] = labelled.map { row in
+            (row.key, deviceTitle(row.label, mount: snapshot.devices[row.key]?.mount ?? ""))
+        } + others.map { key in
+            let mount = snapshot.devices[key]?.mount ?? ""
+            return (key, mount.isEmpty ? key : mount)
+        }
         return rows.compactMap { key, title in
             snapshot.devices[key].map { device(key: key, title: title, $0) }
         }
+    }
+
+    /// The path is the one the server reported, because the phone shows the
+    /// title and nothing else about where a disk is mounted.
+    private static func deviceTitle(_ label: String, mount: String) -> String {
+        mount.isEmpty ? label : "\(label) (\(mount))"
     }
 
     private static func device(key: String, title: String, _ device: VPSDevice) -> CompanionServerDevice {
