@@ -161,6 +161,7 @@ final class CompanionServer: @unchecked Sendable {
     private let serverControlFlag = CompanionLocked(false)
     private let serverActionBusyFlag = CompanionLocked(false)
     private let serverStatusFlag = CompanionLocked(false)
+    private let serverConfiguredFlag = CompanionLocked(false)
     /// When the last forced server read was accepted, from any phone.
     private let lastServerRefresh = CompanionLocked<Date?>(nil)
 
@@ -204,6 +205,12 @@ final class CompanionServer: @unchecked Sendable {
     var allowRemoteServerStatus: Bool {
         get { serverStatusFlag.value }
         set { serverStatusFlag.value = newValue }
+    }
+    /// Whether this Mac has a server host set.  The host keeps it current, so a
+    /// refresh with nothing to read is refused instead of answered "started".
+    var serverConfigured: Bool {
+        get { serverConfiguredFlag.value }
+        set { serverConfiguredFlag.value = newValue }
     }
     /// Asks the Mac to read the server again now.  Called on the server queue
     /// with the paired phone's name, for the Mac's log.  It must not wait: the
@@ -693,6 +700,10 @@ final class CompanionServer: @unchecked Sendable {
         guard let handler = onRemoteServerRefresh else {
             return (501, Data("{\"error\": \"Server refresh handler not configured\"}".utf8), nil)
         }
+        // Before the interval, so a refusal here does not hold the next phone off.
+        guard serverConfigured else {
+            return (409, Self.encodeRefreshReply(CompanionServerRefreshResponse(status: "noServer", error: Self.serverRefreshNoServerNote)), nil)
+        }
         let wait: Int? = lastServerRefresh.withLock { last in
             if let previous = last {
                 let elapsed = now.timeIntervalSince(previous)
@@ -711,6 +722,8 @@ final class CompanionServer: @unchecked Sendable {
         let response = CompanionServerRefreshResponse(status: "started", message: "The Mac is reading the server again.\u{00A0} The numbers update when the reading lands.")
         return (200, Self.encodeRefreshReply(response), nil)
     }
+
+    static let serverRefreshNoServerNote = "This Mac has no server set up, so there is nothing to refresh.\u{00A0} Set an SSH host in Hog Hunter Settings > Maintenance on your Mac."
 
     static let serverRefreshOptInNote = "Server status on iPhone is off.\u{00A0} Turn on Allow iPhone to See Server Status in Hog Hunter Settings > iPhone on your Mac."
 

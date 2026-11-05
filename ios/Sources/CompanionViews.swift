@@ -534,7 +534,15 @@ struct DashboardView: View {
         case .clean:
             showCleaner = true
         case .retry:
-            Task { await model.refreshServer() }
+            // The Server tab shows the note under its Refresh button.  Anywhere
+            // else the outcome goes to the alert, so a refusal is not silent.
+            let onServerTab = selectedTab == .server
+            Task {
+                await model.refreshServer()
+                if !onServerTab, let note = model.serverRefreshNote {
+                    model.controlError = note
+                }
+            }
         }
     }
 

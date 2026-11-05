@@ -263,7 +263,12 @@ final class CompanionModel {
             isDemoMode = true
             snapshot = Self.sample
             if ProcessInfo.processInfo.arguments.contains("-HogHunterIssueActions") {
-                snapshot?.flaggedIssues = Self.sampleIssuesWithActions + (snapshot?.flaggedIssues ?? [])
+                // Built from the fixture, not from `snapshot`: reading
+                // `snapshot` on the right of `snapshot?.x =` overlaps the write
+                // access, and a Debug build traps on it (exclusivity checking),
+                // which is what sent this frame to the home screen.
+                let issues = Self.sampleIssuesWithActions + (Self.sample.flaggedIssues ?? [])
+                snapshot?.flaggedIssues = issues
             }
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
@@ -700,25 +705,32 @@ final class CompanionModel {
         }
         guard let saved, let endpoint = activeEndpoint(for: saved), CompanionPeer.isTrustedEndpoint(endpoint) else {
             serverRefreshNote = Self.controlNetworkNote
+            await refresh()
             return
         }
+        let started = ContinuousClock.now
         do {
             let response = try await CompanionConnection.triggerServerRefresh(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
-            guard response.isStarted else {
-                serverRefreshNote = response.displayText
-                return
-            }
+            if !response.isStarted { serverRefreshNote = response.displayText }
         } catch {
             serverRefreshNote = "The Mac did not answer, so the server was not refreshed.\u{00A0} \(Self.describe(error))"
+        }
+        // Whatever the Mac said, the snapshot is read again: a pull still
+        // re-polls.  Only a started read is worth waiting for, and a read over
+        // SSH takes a few seconds, so poll at 3 and 6 seconds from the start.
+        guard serverRefreshNote == nil else {
+            await refresh()
             return
         }
-        // A read over SSH takes a few seconds.  Poll a little sooner than the
-        // usual interval so the new numbers show when they land.
-        for seconds in [3, 6] {
-            try? await Task.sleep(for: .seconds(seconds))
+        for checkpoint in Self.serverRefreshCheckpoints {
+            let remaining = checkpoint - (ContinuousClock.now - started)
+            if remaining > .zero { try? await Task.sleep(for: remaining) }
             await refresh()
         }
     }
+
+    /// When the phone polls after a started refresh, each measured from the tap.
+    static let serverRefreshCheckpoints: [Duration] = [.seconds(3), .seconds(6)]
 
     /// The Flagged Issues the screenshot lane shows with their buttons.  Kept
     /// out of the sample snapshot, so the other frames stay as they were.

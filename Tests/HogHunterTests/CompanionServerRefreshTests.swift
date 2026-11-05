@@ -20,11 +20,12 @@ final class CompanionServerRefreshRouteTests: XCTestCase {
     private let wan = CompanionPeer(key: "203.0.113.9", isTrusted: false)
     private let tailnet = CompanionPeer(key: "100.100.1.2", isTrusted: true, arrivedOverTailscale: true)
 
-    private func server(statusOn: Bool = true, counter: Counter) -> (CompanionServer, String) {
+    private func server(statusOn: Bool = true, configured: Bool = true, counter: Counter) -> (CompanionServer, String) {
         let server = CompanionServer()
         server.updateToken(code)
         let token = server.devices.issue(name: "Test iPhone").token
         server.allowRemoteServerStatus = statusOn
+        server.serverConfigured = configured
         server.onRemoteServerRefresh = { device in counter.add(device) }
         server.syncOnQueue {}
         return (server, token)
@@ -63,6 +64,21 @@ final class CompanionServerRefreshRouteTests: XCTestCase {
 
     func testTheOptInIsOffByDefault() {
         XCTAssertFalse(CompanionServer().allowRemoteServerStatus)
+        XCTAssertFalse(CompanionServer().serverConfigured)
+    }
+
+    func testNoServerIsADistinct409AndDoesNotStartTheInterval() throws {
+        let counter = Counter()
+        let (server, token) = server(configured: false, counter: counter)
+        let start = Date()
+        let answer = try XCTUnwrap(send(server, CompanionHTTP.serverRefreshRequest(token: token), from: lan, at: start))
+        XCTAssertEqual(answer.status, 409)
+        XCTAssertEqual(answer.response?.status, "noServer")
+        XCTAssertFalse(answer.response?.isStarted ?? true)
+        XCTAssertTrue(answer.response?.displayText.contains("no server set up") == true)
+        XCTAssertTrue(counter.calls.isEmpty, "nothing to read, so nothing runs")
+        server.serverConfigured = true
+        XCTAssertEqual(send(server, CompanionHTTP.serverRefreshRequest(token: token), from: lan, at: start.addingTimeInterval(1))?.status, 200)
     }
 
     func testTheSharedCodeIsRefused() {
@@ -157,6 +173,68 @@ final class CompanionServerRefreshRouteTests: XCTestCase {
 }
 
 final class CompanionServerRefreshActionTests: XCTestCase {
+    /// A read that waits until the test lets it finish.
+    private final class Gate: @unchecked Sendable {
+        private let open = CompanionLocked(false)
+        func release() { open.value = true }
+        func wait() async {
+            while !open.value { try? await Task.sleep(nanoseconds: 5_000_000) }
+        }
+    }
+
+    @MainActor
+    func testAForcedReadAskedForDuringAnotherReadRunsAfterIt() async throws {
+        let counter = Counter()
+        let gate = Gate()
+        let reading = VPSStatusSnapshot(generatedAt: ISO8601DateFormatter().string(from: Date()), host: "server-1", devices: [:])
+        let vps = VPSStatusStore(fetcher: { host in
+            counter.add(host)
+            if counter.calls.count == 1 { await gate.wait() }
+            return reading
+        }, history: SizeGrowthHistory(fileURL: nil))
+        addTeardownBlock { await MainActor.run { vps.stopPolling() } }
+        vps.setHost("server.tailnet")
+        for _ in 0..<200 where counter.calls.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(vps.isLoading, "the first read is still out")
+        vps.fetch(force: true)
+        vps.fetch(force: true)
+        XCTAssertTrue(vps.hasQueuedForcedFetch)
+        XCTAssertEqual(counter.calls.count, 1, "nothing starts on top of the read in flight")
+        gate.release()
+        for _ in 0..<400 where counter.calls.count < 2 || vps.isLoading {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(counter.calls.count, 2, "the queued read ran once, after the first")
+        XCTAssertFalse(vps.hasQueuedForcedFetch)
+    }
+
+    @MainActor
+    func testAnUnforcedFetchDuringAReadIsNotQueued() async throws {
+        let counter = Counter()
+        let gate = Gate()
+        let reading = VPSStatusSnapshot(generatedAt: ISO8601DateFormatter().string(from: Date()), host: "server-1", devices: [:])
+        let vps = VPSStatusStore(fetcher: { host in
+            counter.add(host)
+            if counter.calls.count == 1 { await gate.wait() }
+            return reading
+        }, history: SizeGrowthHistory(fileURL: nil))
+        addTeardownBlock { await MainActor.run { vps.stopPolling() } }
+        vps.setHost("server.tailnet")
+        for _ in 0..<200 where counter.calls.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        vps.fetch()
+        XCTAssertFalse(vps.hasQueuedForcedFetch)
+        gate.release()
+        for _ in 0..<200 where vps.isLoading {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(counter.calls.count, 1, "a host change reads once, and a poll during it is not repeated")
+    }
+
     @MainActor
     func testARefreshForcesARead() async throws {
         let counter = Counter()

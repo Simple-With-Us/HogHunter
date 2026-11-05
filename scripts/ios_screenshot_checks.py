@@ -131,6 +131,7 @@ def scene_problem(scene, text):
         "cleaner-quick": ("disk cleaner", "estimated to move or remove", "rescan", "clean selected"),
         "cleaner-partial": ("disk cleaner", "partial scan", "lower bounds", "scan deeper", "clean selected"),
         "cleaner-extreme": ("disk cleaner", "extreme clean", "estimated to move or remove", "rescan"),
+        "issue-actions": ("flagged issues", "runaway cpu hog", "quit", "clean", "retry"),
         "mac-settings": ("sampling display", "active refresh when open", "background refresh when closed", "menu bar shows", "show percentage in menu bar", "cpu rows show"),
     }
     if scene not in required:

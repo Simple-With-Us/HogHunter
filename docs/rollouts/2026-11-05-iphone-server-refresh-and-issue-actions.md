@@ -37,6 +37,14 @@ The refresh is the Mac's existing read of the server's status snapshot, over the
 - A refresh forces a read through `VPSStatusStore`'s injected fetcher, after showing an ordinary fetch inside the minute is skipped.  No test runs SSH.
 - The action kinds map correctly, each is absent when its own opt-in is off, a button on the wrong host does not map, and an unknown kind decodes with no button.
 
+## Review Fixes
+
+- A refresh with no server set up is 409 `noServer` with a readable message, not `started`, and it does not start the 15 second interval.  The router learns whether a host is set from `VPSStatusStore.configuredHost`.
+- `VPSStatusStore.fetch(force: true)` used to return without reading while another read was in flight.  It now queues one forced read that runs when the read in flight ends.  A host change no longer asks for a second forced read on top of the one the polling start makes.
+- The plain snapshot, which the shared code reads, carries no issue actions.  Only the detailed snapshot offers them, and it now exists whenever an action could be offered.
+- Retry on the Activity tab shows its outcome in the alert, and the Server tab shows it under the Refresh button.  Every refresh re-polls the snapshot, and the polls after a started refresh are at 3 and 6 seconds from the tap.
+- The first `issue-actions` frame showed the home screen because the app trapped at launch.  The fixture line read `snapshot` on the right of `snapshot?.flaggedIssues =`, which overlaps the write access, and a Debug build traps on that under exclusivity checking.  It now builds the list from the fixture.  The frame also has an OCR check now, so a home screen is rejected instead of saved.
+
 ## Not Verified
 
 - The phone's button, pull to refresh and the issue buttons have not been tried on a device against a live Mac.  This Mac has no iOS simulator runtime, so the iOS target was only compiled here.

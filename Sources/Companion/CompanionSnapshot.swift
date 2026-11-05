@@ -1508,7 +1508,7 @@ enum CompanionServerRefresh {
 }
 
 /// The Mac's answer to a server refresh.  `status` is `started`, `forbidden`,
-/// `throttled` or `rejected`.  `retryAfter` is in seconds and comes with
+/// `noServer`, `throttled` or `rejected`.  `retryAfter` is in seconds and comes with
 /// `throttled`, beside the `Retry-After` header.
 struct CompanionServerRefreshResponse: Codable, Equatable, Sendable {
     var status: String

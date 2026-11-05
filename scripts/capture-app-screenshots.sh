@@ -95,9 +95,10 @@ def capture_extras(udid, out_dir):
             print(f"  WARN: extra screen {name}: screenshot failed")
             continue
         problem = screenshot_problem(out_file)
-        if not problem and name in ("cleaner", "cleaner-extreme"):
+        if not problem and name in ("cleaner", "cleaner-extreme", "issue-actions"):
+            scene = "issue-actions" if name == "issue-actions" else ("cleaner-extreme" if name.endswith("extreme") else "cleaner-quick")
             try:
-                problem = scene_problem("cleaner-extreme" if name.endswith("extreme") else "cleaner-quick", recognize_text(out_file))
+                problem = scene_problem(scene, recognize_text(out_file))
             except Exception as error:
                 problem = f"OCR unavailable: {error}"
         if problem:
