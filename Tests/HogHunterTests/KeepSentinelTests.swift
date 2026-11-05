@@ -97,6 +97,15 @@ final class KeepSentinelTests: XCTestCase {
         XCTAssertTrue(late, "a walk that ran out of time cannot say the tree is unmarked")
     }
 
+    func testTheWholeTreeWalkStopsAndFailsClosedWhenCancelled() throws {
+        let tree = root.appendingPathComponent("cancelled", isDirectory: true)
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: tree.appendingPathComponent("plain").path, contents: Data())
+        XCTAssertFalse(KeepSentinel.containsMarkerInWholeTree(url: tree, isCancelled: { false }))
+        XCTAssertTrue(KeepSentinel.containsMarkerInWholeTree(url: tree, isCancelled: { true }),
+                      "a cancelled walk cannot say the tree is unmarked")
+    }
+
     func testTheWholeTreeWalkAnswersKeptForAMissingTree() {
         XCTAssertTrue(KeepSentinel.containsMarkerInWholeTree(url: root.appendingPathComponent("missing")))
     }

@@ -1808,6 +1808,67 @@ def test_xcode_artifacts_reads_a_failed_build_probe_as_busy(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _lanes_found_with_open_gates(hh, home, **patches):
+    with mock.patch.object(hh, "HOME", home), \
+         mock.patch.object(hh, "proc_count", return_value=0), \
+         mock.patch.object(hh, "proc_count_exact", return_value=0), \
+         mock.patch.object(hh, "tree_in_use", return_value=False), \
+         mock.patch.object(hh, "touched_since", return_value=False), \
+         mock.patch.object(hh, "dir_bytes", return_value=4 * 1024 ** 3):
+        if patches:
+            with mock.patch.multiple(hh, **patches):
+                return sorted(c.path for c in hh.rule_xcode_artifacts())
+        return sorted(c.path for c in hh.rule_xcode_artifacts())
+
+
+def test_the_sweep_never_walks_a_debug_builds_root_that_is_a_symlink(hh):
+    """Pointed at the external volume, the root would take that volume's lanes with it."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        real = _hoghunter_debug_builds(home)
+        moved = home / "elsewhere"
+        real.rename(moved)
+        real.symlink_to(moved, target_is_directory=True)
+        assert _lanes_found_with_open_gates(hh, home) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_sweep_skips_a_lane_that_is_a_symlink(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        target = home / "elsewhere"
+        target.mkdir()
+        (root / "lane-link").symlink_to(target, target_is_directory=True)
+        found = _lanes_found_with_open_gates(hh, home)
+        assert found == [str(root / "lane-one-aaaa"), str(root / "lane-two-bbbb")]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_sweep_skips_a_forbidden_lane(hh):
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        forbidden = str(root / "lane-one-aaaa")
+        found = _lanes_found_with_open_gates(hh, home, is_forbidden=lambda path: path == forbidden)
+        assert found == [str(root / "lane-two-bbbb")]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_keep_marker_above_the_lanes_keeps_them_all(hh):
+    """holds_keep_sentinel only looks down, so this one rests on has_keep_sentinel."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        root = _hoghunter_debug_builds(home)
+        (root / hh.KEEP_SENTINEL).touch()
+        assert _lanes_found_with_open_gates(hh, home) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_one_busy_hoghunter_checkout_does_not_keep_the_others(hh):
     home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
     try:

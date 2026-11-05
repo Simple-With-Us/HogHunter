@@ -20,9 +20,9 @@
 # refuses to put anything but the production identity in a production location,
 # and refuses to leave two copies there.
 #
-# Exit codes: 1 bad arguments or a failed build, 3 no usable identity, 4 a second
-# copy would exist, 5 signing failed, 6 the new copy could not be put in place or
-# failed its check.
+# Exit codes: 1 bad arguments, a failed build, or a new copy that would not open, 3
+# no usable identity, 4 a second copy would exist, 5 signing failed, 6 the new copy
+# could not be put in place or failed its check, or another install holds the folder.
 set -euo pipefail
 
 ADHOC=0
@@ -208,7 +208,8 @@ fi
 
 # One installed copy.  Two copies with one bundle id fight over the menu bar, and
 # LaunchServices may open the stale one.
-if [[ "$ADHOC" -ne 1 ]]; then
+refuse_second_copy() {
+  local candidate_dir other copy_folder
   for candidate_dir in "$SYSTEM_APPLICATIONS" "$USER_APPLICATIONS"; do
     while IFS= read -r other; do
       # What an interrupted install set aside belongs to the folder it sits in, and
@@ -232,6 +233,9 @@ if [[ "$ADHOC" -ne 1 ]]; then
       fi
     done < <(copies_under "$candidate_dir")
   done
+}
+if [[ "$ADHOC" -ne 1 ]]; then
+  refuse_second_copy
 fi
 
 # An interrupted install can leave a folder of ours beside the destination, each
@@ -436,7 +440,7 @@ SWAP_ABORTED=0
 QUIT_FOR_INSTALL=0
 MOVING_NEW_COPY=0
 LAUNCH_ATTEMPTED=0
-FINAL_STATUS=0
+PREVIOUS_RESTORED=0
 
 # Puts the previous copy back.  It sits outside STAGE_DIR, so nothing but this moves
 # it, and whatever is at the installed path while it is aside is the new copy.
@@ -447,13 +451,29 @@ restore_previous() {
   mv "$BACKUP_DIR/Hog Hunter.app" "$INSTALLED_PATH" || return 1
 }
 
+# Names what an earlier interrupted install left here, one line each, so a closing
+# message never reads as though nothing can be recovered.
+leftover_copy_text() {
+  local folder
+  for folder in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
+    [[ -d "$folder" && ! -L "$folder" && "$folder" != "$STAGE_DIR" && "$folder" != "$BACKUP_DIR" ]] || continue
+    [[ -e "$folder/Hog Hunter.app" ]] || continue
+    echo "An earlier interrupted install left a copy at $folder/Hog Hunter.app.  Move it to $INSTALLED_PATH by hand to get it back."
+  done
+}
+
 # What is left when there is no previous copy to put back.
 nothing_to_restore_text() {
+  local leftovers
+  leftovers="$(leftover_copy_text)"
   if [[ -d "$LEGACY_PATH" ]]; then
     echo "Nothing is installed at $INSTALLED_PATH.  The older copy at $LEGACY_PATH is still there."
+  elif [[ -n "$leftovers" ]]; then
+    echo "Nothing is installed at $INSTALLED_PATH."
   else
     echo "There was no previous copy to restore, so nothing is installed at $INSTALLED_PATH."
   fi
+  [[ -z "$leftovers" ]] || echo "$leftovers"
 }
 
 # Puts things back first and reports after, so a reader that has gone away cannot
@@ -468,6 +488,7 @@ abort_swap() {
   if [[ -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
     if restore_previous; then
       rmdir "$BACKUP_DIR" 2>/dev/null
+      PREVIOUS_RESTORED=1
       outcome="The previous copy was restored to $INSTALLED_PATH."
     else
       outcome="error: could not restore the previous copy.  It is at $previous.  Move it back to $INSTALLED_PATH by hand."
@@ -477,7 +498,11 @@ abort_swap() {
     if mv "$INSTALLED_PATH" "$STAGE_DIR/rejected.app"; then
       outcome="$(nothing_to_restore_text)"
     else
-      outcome="error: the copy that failed is still at $INSTALLED_PATH, and there was no previous copy to restore."
+      outcome="error: the copy that failed is still at $INSTALLED_PATH, and this run had no previous copy to restore."
+      if [[ -n "$(leftover_copy_text)" ]]; then
+        outcome="$outcome
+$(leftover_copy_text)"
+      fi
     fi
   elif [[ -e "$INSTALLED_PATH" || -L "$INSTALLED_PATH" ]]; then
     outcome="The copy at $INSTALLED_PATH was not changed."
@@ -486,7 +511,7 @@ abort_swap() {
   fi
   echo "error: $1" >&2
   echo "$outcome" >&2
-  if [[ "$QUIT_FOR_INSTALL" -eq 1 ]]; then
+  if [[ "$QUIT_FOR_INSTALL" -eq 1 && "$LAUNCH_ATTEMPTED" -ne 1 ]]; then
     echo "This install quit the running Hog Hunter and has not reopened it." >&2
   fi
 }
@@ -500,7 +525,10 @@ finish_install() {
   trap '' INT TERM HUP PIPE
   set +e
   if [[ "$SWAP_COMMITTED" -eq 1 ]]; then
-    [[ -z "$BACKUP_DIR" ]] || rm -rf "$BACKUP_DIR"
+    # Stopped before the new copy was proved to open, so the old one is not spare yet.
+    if [[ -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
+      echo "The install stopped before it finished, so the previous copy is still at $previous.  The next finished install removes it." >&2
+    fi
     if [[ "$status" -ne 0 && "$QUIT_FOR_INSTALL" -eq 1 && "$LAUNCH_ATTEMPTED" -ne 1 ]]; then
       echo "The new copy is installed at $INSTALLED_PATH.  This install quit the running Hog Hunter and has not reopened it." >&2
     fi
@@ -521,13 +549,25 @@ installed_copy_verifies() {
   [[ "$ADHOC" -eq 1 ]] || "$REPO_ROOT/scripts/check-mac-identity.sh" "$INSTALLED_PATH"
 }
 
+# True when this executable is the one inside this bundle.  `-ef` follows symlinks,
+# and a link in a throwaway folder is not a copy that lives there.
+bundle_runs() {
+  [[ ! -L "$1" && "$2" -ef "$1/Contents/MacOS/HogHunter" ]]
+}
+
 # True when this process's executable is the copy in the folder being replaced.
-# Asks lsof for the mapped executable, which never reads the command line.
+# Asks lsof for the mapped executable, which never reads the command line.  An
+# executable that really lives in a production folder is never that copy, however
+# the throwaway folder links to it: this path must not stop the owner's real app.
 running_from_destination() {
-  local line
+  local line executable
   while IFS= read -r line; do
     [[ "$line" == n* ]] || continue
-    if [[ "${line#n}" -ef "$INSTALLED_PATH/Contents/MacOS/HogHunter" || "${line#n}" -ef "$LEGACY_PATH/Contents/MacOS/HogHunter" ]]; then
+    executable="${line#n}"
+    if is_production_dir "$(dirname "$executable")"; then
+      continue
+    fi
+    if bundle_runs "$INSTALLED_PATH" "$executable" || bundle_runs "$LEGACY_PATH" "$executable"; then
       return 0
     fi
   done < <(lsof -a -p "$1" -d txt -Fn 2>/dev/null || true)
@@ -561,6 +601,28 @@ if [[ "$ADHOC" -eq 1 ]] && is_production_dir "$DEST_DIR"; then
   echo "error: refusing an ad hoc install to $DEST_DIR, which is now a production location." >&2
   exit 3
 fi
+
+# One install at a time in a folder, because a finishing run retires every
+# .hoghunter-* folder it finds and those must only ever be a dead run's.  An advisory
+# lock on the folder itself leaves nothing on disk, and the kernel drops it when the
+# holder ends, a SIGKILL included, so it can never go stale.  Fd 9 stays open for the
+# rest of this script; perl only takes the lock on it.
+take_install_lock() {
+  local status=0
+  if exec 9<"$DEST_DIR"; then
+    perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", 9) or exit 4; exit 0 if flock($f, LOCK_EX|LOCK_NB); exit($!{EWOULDBLOCK} ? 3 : 4);' || status=$?
+  else
+    status=4
+  fi
+  if [[ "$status" -eq 3 ]]; then
+    echo "error: another install is running in $DEST_DIR.  Nothing was changed.  Run this again once it has finished." >&2
+    exit 6
+  elif [[ "$status" -ne 0 ]]; then
+    echo "Warning: could not lock $DEST_DIR, so a second install running at this moment would not be caught."
+  fi
+}
+take_install_lock
+
 trap finish_install EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -582,6 +644,9 @@ ditto "$APP_PATH" "$STAGED_PATH" || stage_failed "could not copy the new Hog Hun
 xattr -cr "$STAGED_PATH"
 if [[ "$ADHOC" -ne 1 ]]; then
   "$REPO_ROOT/scripts/check-mac-identity.sh" "$STAGED_PATH" || stage_failed "the staged copy failed its check."
+  # Asked again now minutes have passed: another lane may have installed during the
+  # build.  This is the last moment nothing has been touched.
+  refuse_second_copy
 fi
 
 if [[ "$ADHOC" -eq 1 ]]; then
@@ -637,8 +702,35 @@ if ! installed_copy_verifies; then
 fi
 SWAP_COMMITTED=1
 
-# The new copy has passed.  What remains is tidying and reopening the app, so a
-# failure here is a warning and never keeps a good install closed.
+# The checks read the signature, and they cannot say whether macOS will start the app
+# (HH-160: amfid refused a build that passed them).  So the launch comes before any
+# tidying, and a copy that will not open gives way to the previous one.
+if [[ "$NO_LAUNCH" -eq 0 ]]; then
+  echo "Launching Hog Hunter."
+  LAUNCH_ATTEMPTED=1
+  if ! open "$INSTALLED_PATH"; then
+    if [[ -n "$BACKUP_DIR" ]]; then
+      SWAP_COMMITTED=0
+      abort_swap "the new copy passed its checks, but it could not be opened."
+      if [[ "$PREVIOUS_RESTORED" -eq 1 ]]; then
+        if open "$INSTALLED_PATH"; then
+          echo "The previous copy was reopened." >&2
+        else
+          echo "error: the previous copy could not be opened either.  Hog Hunter is not running." >&2
+        fi
+      fi
+    else
+      echo "error: the new copy is installed, but it could not be opened.  Hog Hunter is not running.  This run had no previous copy to go back to." >&2
+      leftover_copy_text >&2
+    fi
+    exit 1
+  fi
+else
+  echo "Skipping launch (--no-launch)."
+fi
+
+# The new copy has passed and opened.  What remains is tidying, so a failure here is
+# a warning and never fails a good install.
 if [[ -n "$BACKUP_DIR" ]]; then
   if ! rm -rf "$BACKUP_DIR"; then
     echo "Warning: could not remove the previous copy at $BACKUP_DIR.  The next finished install tries again." >&2
@@ -646,7 +738,7 @@ if [[ -n "$BACKUP_DIR" ]]; then
   BACKUP_DIR=""
 fi
 
-# The new copy is in place and has passed, so what an earlier run left is now spare.
+# The new copy is in place and has opened, so what an earlier run left is now spare.
 for leftover in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
   [[ -d "$leftover" && ! -L "$leftover" && "$leftover" != "$STAGE_DIR" ]] || continue
   echo "Removing what an interrupted install left at $leftover."
@@ -670,17 +762,6 @@ if [[ -d "$LEGACY_PATH" && "$LEGACY_PATH" != "$INSTALLED_PATH" ]]; then
   fi
 fi
 
-if [[ "$NO_LAUNCH" -eq 0 ]]; then
-  echo "Launching Hog Hunter."
-  LAUNCH_ATTEMPTED=1
-  if ! open "$INSTALLED_PATH"; then
-    echo "error: the new copy is installed, but it could not be opened.  Hog Hunter is not running." >&2
-    FINAL_STATUS=1
-  fi
-else
-  echo "Skipping launch (--no-launch)."
-fi
-
 # Spotlight still lists a renamed backup as this app, and it can be launched by
 # accident.  Named, not touched: it may be someone's rollback.
 for backup in "$DEST_DIR"/"Hog Hunter.app".* "$DEST_DIR"/HogHunter.app.*; do
@@ -688,4 +769,4 @@ for backup in "$DEST_DIR"/"Hog Hunter.app".* "$DEST_DIR"/HogHunter.app.*; do
 done
 
 echo "Installed Hog Hunter $(version_of "$INSTALLED_PATH") to $INSTALLED_PATH."
-exit "$FINAL_STATUS"
+exit 0

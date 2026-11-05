@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -348,6 +349,9 @@ class InstallerSwapTests(unittest.TestCase):
             f"""\
             echo "check $*" >> "{self.log}"
             if [[ "${{SCENARIO:-}}" == stage_check_fails && "$*" == *.hoghunter-install.* ]]; then exit 2; fi
+            if [[ -n "${{COPY_APPEARS_DURING_CHECK:-}}" && "$*" == *.hoghunter-install.* ]]; then
+              mkdir -p "$COPY_APPEARS_DURING_CHECK/Hog Hunter.app"
+            fi
             exit 0
             """,
         )
@@ -360,6 +364,7 @@ class InstallerSwapTests(unittest.TestCase):
             f"""\
             if [[ "${{SCENARIO:-}}" == build_fails ]]; then exit 42; fi
             if [[ -n "${{DEST_BECOMES_LINK_TO:-}}" ]]; then ln -s "$DEST_BECOMES_LINK_TO" "{self.dest}"; fi
+            if [[ -n "${{COPY_APPEARS_DURING_BUILD:-}}" ]]; then mkdir -p "$COPY_APPEARS_DURING_BUILD/Hog Hunter.app"; fi
             mkdir -p build/Build/Products/Release
             /usr/bin/ditto "{self.built}/Hog Hunter.app" build/Build/Products/Release/HogHunter.app
             """,
@@ -373,6 +378,9 @@ class InstallerSwapTests(unittest.TestCase):
               case "${{SCENARIO:-}}" in
                 verify_fails) exit 1 ;;
                 verify_interrupted) kill -TERM "$PPID" ;;
+                hold_final_check)
+                  : > "$HOLDING"
+                  while [[ ! -e "$RELEASE" ]]; do /bin/sleep 0.05; done ;;
               esac
             fi
             exit 0
@@ -389,7 +397,7 @@ class InstallerSwapTests(unittest.TestCase):
                 [[ "$source" == *.hoghunter-install.* ]] && exit 1 ;;
             esac
             case "${SCENARIO:-}" in
-              swap_and_restore_fail|interrupted_and_restore_fails)
+              swap_and_restore_fail|interrupted_and_restore_fails|open_refuses_new_and_restore_fails)
                 [[ "$source" == *.hoghunter-previous.* ]] && exit 1 ;;
               aside_fails)
                 [[ "$target" == *.hoghunter-previous.* ]] && exit 1 ;;
@@ -415,7 +423,12 @@ class InstallerSwapTests(unittest.TestCase):
             "open",
             f"""\
             echo "open $*" >> "{self.log}"
-            [[ "${{SCENARIO:-}}" != open_fails ]]
+            case "${{SCENARIO:-}}" in
+              open_fails) exit 1 ;;
+              open_refuses_new*) [[ "$(cat "${{@: -1}}/Contents/marker")" != NEW ]]; exit $? ;;
+              interrupted_during_open) kill -TERM "$PPID" ;;
+            esac
+            exit 0
             """,
         )
         write_tool(self.bin, "sleep", '[[ "${SCENARIO:-}" != interrupted_after_quit ]] || kill -TERM "$PPID"\nexit 0\n')
@@ -650,20 +663,168 @@ class InstallerSwapTests(unittest.TestCase):
         self.assertIn(f"open {applications}/Hog Hunter.app", self.calls())
         self.assertIn("Warning: could not remove the pre-rename copy", result.stderr)
 
-    def test_a_copy_that_cannot_be_opened_is_reported_and_stays_installed(self) -> None:
+    def test_a_new_copy_that_will_not_open_gives_way_to_the_previous_one(self) -> None:
+        # A build can pass every signature check and still not start (HH-160).
+        applications = self.production_previous_copy()
+        result = self.run_install(scenario="open_refuses_new", RUNNING_PID="99999")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "OLD")
+        self.assertIn("could not be opened", result.stderr)
+        self.assertIn("The previous copy was restored", result.stderr)
+        self.assertIn("The previous copy was reopened", result.stderr)
+        self.assertNotIn("has not reopened it", result.stderr)
+        self.assertNotIn("Installed Hog Hunter", result.stdout)
+        self.assertEqual(self.calls().count("open "), 2)
+        self.assertEqual(self.hidden_folders(applications), [])
+
+    def test_a_previous_copy_that_will_not_open_either_is_still_put_back(self) -> None:
         applications = self.production_previous_copy()
         result = self.run_install(scenario="open_fails")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
-        self.assertIn("could not be opened", result.stderr)
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "OLD")
+        self.assertIn("could not be opened either", result.stderr)
+        self.assertNotIn("The previous copy was reopened", result.stderr)
 
-    def test_an_interruption_after_the_check_keeps_the_new_copy_and_says_the_app_is_closed(self) -> None:
+    def test_a_failed_way_back_keeps_the_previous_copy_and_names_it(self) -> None:
+        applications = self.production_previous_copy()
+        result = self.run_install(scenario="open_refuses_new_and_restore_fails")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        backups = sorted(applications.glob(".hoghunter-previous.*/Hog Hunter.app"))
+        self.assertEqual(len(backups), 1, result.stderr)
+        self.assertEqual(self.marker(backups[0]), "OLD")
+        self.assertIn(str(backups[0]), result.stderr)
+        self.assertEqual(self.calls().count("open "), 1)
+
+    def test_a_first_install_that_will_not_open_stays_installed_and_says_so(self) -> None:
+        self.use_fake_system_folder()
+        applications = self.home / "Applications"
+        result = self.run_install(scenario="open_fails")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
+        self.assertIn("no previous copy to go back to", result.stderr)
+
+    def test_leftovers_and_a_pre_rename_copy_wait_for_a_launch_that_worked(self) -> None:
+        applications = self.production_previous_copy()
+        leftover = self.previous_copy(applications / ".hoghunter-previous.AAAAAA")
+        legacy = self.dir / "legacy"
+        legacy.mkdir()
+        make_bundle(legacy).rename(applications / "HogHunter.app")
+        result = self.run_install(scenario="open_refuses_new")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.marker(leftover), "OLD")
+        self.assertTrue((applications / "HogHunter.app").exists())
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "OLD")
+
+    def test_a_first_install_that_will_not_open_names_the_leftover_it_kept(self) -> None:
+        self.use_fake_system_folder()
+        applications = self.home / "Applications"
+        leftover = self.previous_copy(applications / ".hoghunter-previous.AAAAAA")
+        result = self.run_install(scenario="open_refuses_new")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.marker(leftover), "OLD")
+        self.assertIn(f"left a copy at {leftover}", result.stderr)
+
+    def test_an_interruption_during_the_launch_keeps_the_previous_copy_and_names_it(self) -> None:
+        applications = self.production_previous_copy()
+        result = self.run_install(scenario="interrupted_during_open")
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
+        backups = sorted(applications.glob(".hoghunter-previous.*/Hog Hunter.app"))
+        self.assertEqual(len(backups), 1, result.stderr)
+        self.assertEqual(self.marker(backups[0]), "OLD")
+        self.assertIn(f"the previous copy is still at {backups[0]}", result.stderr)
+        # And the next finished install retires it.
+        self.assertEqual(self.run_install().returncode, 0)
+        self.assertEqual(self.hidden_folders(applications), [])
+
+    def test_an_interruption_after_the_launch_keeps_the_new_copy(self) -> None:
         applications = self.production_previous_copy()
         result = self.run_install(scenario="interrupted_after_commit", RUNNING_PID="99999")
         self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
         self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
-        self.assertIn("has not reopened it", result.stderr)
-        self.assertNotIn("open ", self.calls())
+        self.assertIn("open ", self.calls())
+        self.assertNotIn("has not reopened it", result.stderr)
+
+    def test_a_copy_that_appears_during_the_build_is_refused_before_the_quit(self) -> None:
+        applications = self.production_previous_copy()
+        system = self.dir / "system"
+        result = self.run_install(RUNNING_PID="99999", COPY_APPEARS_DURING_BUILD=str(system))
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn(f"one already exists at {system}/Hog Hunter.app", result.stderr)
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "OLD")
+        self.assertNotIn("osascript", self.calls())
+        self.assertEqual(self.hidden_folders(applications), [])
+
+    def test_a_copy_that_appears_during_the_staged_check_is_refused_before_the_quit(self) -> None:
+        applications = self.production_previous_copy()
+        system = self.dir / "system"
+        result = self.run_install(RUNNING_PID="99999", COPY_APPEARS_DURING_CHECK=str(system))
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "OLD")
+        self.assertNotIn("osascript", self.calls())
+        self.assertEqual(self.hidden_folders(applications), [])
+
+    def start_held_install(self) -> tuple[subprocess.Popen, Path, Path]:
+        """An install stopped inside its final check, with its folders on disk."""
+        holding, release = self.dir / "holding", self.dir / "release"
+        env = dict(
+            os.environ,
+            HOME=str(self.home),
+            PATH=f"{self.bin}:{os.environ['PATH']}",
+            SCENARIO="hold_final_check",
+            HOLDING=str(holding),
+            RELEASE=str(release),
+        )
+        held = subprocess.Popen(
+            [str(self.script), "--adhoc", "--dest", str(self.dest)],
+            env=env,
+            cwd=self.dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # Cleanups run last first, so a failed test releases the install before waiting.
+        self.addCleanup(held.wait)
+        self.addCleanup(release.touch)
+        deadline = time.monotonic() + 30
+        while not holding.exists():
+            self.assertIsNone(held.poll(), "the held install ended early")
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.02)
+        return held, holding, release
+
+    def test_a_second_install_in_the_folder_leaves_a_running_one_alone(self) -> None:
+        self.previous_copy(self.dest)
+        held, _, release = self.start_held_install()
+        before = self.hidden_folders()
+        self.assertEqual(len(before), 2)
+        second = self.adhoc()
+        self.assertEqual(second.returncode, 6, second.stdout + second.stderr)
+        self.assertIn("another install is running", second.stderr)
+        self.assertEqual(self.hidden_folders(), before)
+        self.assertEqual(self.marker(self.backup_paths()[0]), "OLD")
+        release.touch()
+        self.assertEqual(held.wait(timeout=30), 0)
+        self.assertEqual(self.marker(), "NEW")
+        self.assertEqual(self.hidden_folders(), [])
+
+    def test_an_install_killed_outright_does_not_block_the_next_one(self) -> None:
+        self.previous_copy(self.dest)
+        held, _, _ = self.start_held_install()
+        os.killpg(held.pid, signal.SIGKILL)
+        held.wait(timeout=30)
+        result = self.adhoc()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.marker(), "NEW")
+        self.assertEqual(self.hidden_folders(), [])
+
+    def test_a_failure_with_only_a_leftover_names_it_instead_of_saying_nothing_is_there(self) -> None:
+        leftover = self.previous_copy(self.dest / ".hoghunter-previous.AAAAAA")
+        result = self.adhoc("verify_fails")
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertIn(f"left a copy at {leftover}", result.stderr)
+        self.assertNotIn("no previous copy", result.stderr)
+        self.assertEqual(self.marker(leftover), "OLD")
 
     def test_a_previous_copy_that_will_not_move_aside_is_a_reported_failure(self) -> None:
         applications = self.production_previous_copy()
@@ -860,6 +1021,37 @@ class InstallerSwapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("osascript", self.calls())
         self.assertNotIn("pkill", self.calls())
+        self.assertIsNone(running.poll(), "the production app was stopped")
+
+    def run_adhoc_beside_a_running_copy(self, executable: Path) -> tuple[subprocess.CompletedProcess, subprocess.Popen]:
+        running = subprocess.Popen(["/bin/sleep", "60"])
+        self.addCleanup(running.wait)
+        self.addCleanup(running.kill)
+        return self.adhoc(RUNNING_PID=str(running.pid), RUNNING_FROM=str(executable)), running
+
+    def test_a_link_to_the_production_app_does_not_make_it_a_throwaway_copy(self) -> None:
+        production = self.previous_copy(self.home / "Applications")
+        self.dest.mkdir()
+        self.installed.symlink_to(production)
+        result, running = self.run_adhoc_beside_a_running_copy(production / "Contents" / "MacOS" / "HogHunter")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(running.poll(), "the production app was stopped")
+        self.assertEqual(self.marker(production), "OLD")
+
+    def test_a_link_to_a_copy_elsewhere_does_not_make_it_this_folders_copy(self) -> None:
+        elsewhere = self.previous_copy(self.dir / "elsewhere")
+        self.dest.mkdir()
+        self.installed.symlink_to(elsewhere)
+        result, running = self.run_adhoc_beside_a_running_copy(elsewhere / "Contents" / "MacOS" / "HogHunter")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(running.poll(), "a copy in another folder was stopped")
+
+    def test_a_link_deeper_in_the_bundle_cannot_reach_the_production_app(self) -> None:
+        production = self.previous_copy(self.home / "Applications")
+        self.installed.mkdir(parents=True)
+        (self.installed / "Contents").symlink_to(production / "Contents")
+        result, running = self.run_adhoc_beside_a_running_copy(production / "Contents" / "MacOS" / "HogHunter")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIsNone(running.poll(), "the production app was stopped")
 
     def test_an_ad_hoc_copy_stops_only_a_copy_running_from_its_own_destination(self) -> None:

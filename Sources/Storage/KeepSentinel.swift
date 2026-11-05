@@ -91,13 +91,14 @@ enum KeepSentinel {
     ///
     /// The whole tree, with no bound on entries or depth, because the one bound
     /// here fails closed: a walk that runs out of time, or cannot read part of the
-    /// tree, answers "kept".  `containsMarker` stays bounded for the trees where
+    /// tree, or is cancelled, answers "kept".  `containsMarker` stays bounded for the trees where
     /// that would hide every row.  Use this for a tree whose normal state is far
     /// past that bound and that holds someone's marked work, one tree at a time.
     static func containsMarkerInWholeTree(url: URL,
                                           timeBudget: TimeInterval = 30,
                                           fileManager: FileManager = .default,
-                                          now: () -> Date = Date.init) -> Bool {
+                                          now: () -> Date = Date.init,
+                                          isCancelled: () -> Bool = { Task.isCancelled }) -> Bool {
         var sawError = false
         guard let enumerator = fileManager.enumerator(
             at: url,
@@ -117,7 +118,7 @@ enum KeepSentinel {
                 return true
             }
             visited += 1
-            if visited % 256 == 1, now() > deadline {
+            if visited % 256 == 1, isCancelled() || now() > deadline {
                 return true
             }
         }

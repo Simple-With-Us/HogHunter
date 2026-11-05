@@ -26,6 +26,80 @@ final class DiskCleanerScanBudgetTests: XCTestCase {
         return result
     }
 
+    private func debugBuildsLane(_ name: String) throws -> URL {
+        try write("Library/Caches/HogHunterDerivedData/\(name)/data.bin").deletingLastPathComponent()
+    }
+
+    private func debugBuildsRows(in report: CleanScanReport) -> [CleanItem] {
+        report.categories.flatMap(\.items).filter { $0.title == "Hog Hunter Debug Builds" }
+    }
+
+    /// A partial scan stops the regimen recording a run, and it never selects this row,
+    /// so a lane that cannot be sized exactly would hold the regimen in a retry forever.
+    func testADebugBuildsRowOnlyALowerBoundDoesNotMakeTheScanPartial() async throws {
+        let lane = try debugBuildsLane("lane-a")
+        try FileManager.default.createSymbolicLink(at: lane.appendingPathComponent("link"),
+                                                   withDestinationURL: lane.appendingPathComponent("data.bin"))
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.developer]))
+        let row = try XCTUnwrap(debugBuildsRows(in: report).first)
+        XCTAssertTrue(row.isApproximate, "the row still says its size is a lower bound")
+        XCTAssertFalse(row.isSelected)
+        XCTAssertFalse(report.isPartial)
+        XCTAssertEqual(report.incompleteCategories, [])
+    }
+
+    func testAnyOtherDeveloperRowOnlyALowerBoundStillMakesTheScanPartial() async throws {
+        let cache = try write("Library/Caches/Yarn/data.bin").deletingLastPathComponent()
+        try FileManager.default.createSymbolicLink(at: cache.appendingPathComponent("link"),
+                                                   withDestinationURL: cache.appendingPathComponent("data.bin"))
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.developer]))
+        XCTAssertTrue(report.isPartial)
+        XCTAssertEqual(report.incompleteCategories, [.developer])
+    }
+
+    /// One real lane is past the 25,000 entry cap, against a quick scan's 30,000 in all.
+    func testDebugBuildsRowsDoNotSpendTheScansEntryBudget() async throws {
+        let fm = FileManager.default
+        for (name, count) in [("lane-a", 25_010), ("lane-b", 5_100)] {
+            let lane = try debugBuildsLane(name)
+            for entry in 0..<count {
+                XCTAssertTrue(fm.createFile(atPath: lane.appendingPathComponent("unit-\(entry)").path, contents: Data("x".utf8)))
+            }
+        }
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.developer]))
+        XCTAssertEqual(debugBuildsRows(in: report).count, 2)
+        XCTAssertFalse(report.isPartial)
+    }
+
+    /// The whole-lane walk can take 30 seconds against a quick scan's 8, so it belongs
+    /// to the clean.  A marker the bounded walk cannot see shows the scan did not run it.
+    func testTheScanLeavesTheWholeLaneWalkToTheClean() async throws {
+        let lane = try debugBuildsLane("lane-marked")
+        let deep = lane.appendingPathComponent("a/b/c/d/e/f/g/h", isDirectory: true)
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.createFile(atPath: deep.appendingPathComponent(KeepSentinel.fileName).path, contents: Data()))
+        XCTAssertFalse(KeepSentinel.containsMarker(url: lane))
+
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.developer]))
+        let row = try XCTUnwrap(debugBuildsRows(in: report).first)
+        XCTAssertFalse(report.isPartial)
+        XCTAssertFalse(cleaner.isSafeToDelete(url: lane, category: .developer))
+        _ = await cleaner.clean(items: [row], createSnapshot: false)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lane.path), "the clean still walks the whole lane")
+    }
+
+    func testAMarkerTheBoundedWalkCanSeeStillHidesTheRow() async throws {
+        let lane = try debugBuildsLane("lane-marked")
+        XCTAssertTrue(FileManager.default.createFile(atPath: lane.appendingPathComponent(KeepSentinel.fileName).path, contents: Data()))
+        let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        let report = await cleaner.scan(exclusions: exclusions(keeping: [.developer]))
+        XCTAssertEqual(debugBuildsRows(in: report).count, 0)
+    }
+
     func testDepthLimitRetainsLowerBoundAndCannotProveAge() throws {
         _ = try write("root.bin")
         _ = try write("nested/deeper/data.bin")
