@@ -863,3 +863,34 @@ final class HousekeeperLock {
         try? fileManager.removeItem(at: ownerPath)
     }
 }
+
+// MARK: - Observing without taking
+
+extension HousekeeperLock {
+    /// What a reader sees at the lock path.
+    enum ObservedState: String {
+        case free
+        case held
+        case stale
+        case unknown
+    }
+
+    /// The lock's state, read without taking, changing or removing anything.
+    ///
+    /// Free when nothing is at the path.  Stale when the directory is older than the stale
+    /// window, or when its owner record names a holder that is gone.  Held otherwise.  A path
+    /// that cannot be read, or is not a directory, is unknown.  The owner record's pid and
+    /// host are used to decide and are never returned.
+    func observedState() -> ObservedState {
+        var info = stat()
+        if lstat(path.path, &info) != 0 { return errno == ENOENT ? .free : .unknown }
+        guard (info.st_mode & S_IFMT) == S_IFDIR,
+              let attributes = try? fileManager.attributesOfItem(atPath: path.path),
+              let modified = attributes[.modificationDate] as? Date else {
+            return .unknown
+        }
+        if Date().timeIntervalSince(modified) > staleInterval { return .stale }
+        if isOwnerGone { return .stale }
+        return .held
+    }
+}
