@@ -188,10 +188,35 @@ final class ServerControl: ObservableObject {
 
 /// One SSH command, one result.
 ///
-/// The reading path and the acting path both go through here, so both use the
-/// same host, the same key and the same timeout rules.
+/// The acting path goes through here, and the reading path's fetcher in
+/// `VPSStatusStore` is built the same way: both run over the app's one SSH
+/// connection (see `SSHConnection`), so both use the same host, the same key
+/// and the same timeout rules.
 enum SSHCommand {
+    /// Runs one command exactly once.  This is the acting path — its
+    /// commands stop and restart workloads — so it never re-dispatches:
+    /// when the connection master has died, the remote helper may already
+    /// have applied the action before the channel broke, and running the
+    /// command again could apply it twice.  A dead-socket failure instead
+    /// discards the dead master and propagates, so the action's outcome is
+    /// reported as it stands and the next command the user asks for runs
+    /// over a fresh connection.  The reading path is the one that retries,
+    /// because a read changes nothing (see `VPSStatusStore.sshFetcher`).
+    /// A control-script refusal is an answer, not an error, so it returns
+    /// from the attempt untouched; any other failure propagates exactly as
+    /// produced.
     static func run(host: String, arguments: [String], timeout: TimeInterval) async throws -> String {
+        do {
+            return try await runOnce(host: host, arguments: arguments, timeout: timeout)
+        } catch {
+            if SSHConnection.isDeadSocketFailure(error) {
+                await SSHConnection.invalidate(host: host)
+            }
+            throw error
+        }
+    }
+
+    private static func runOnce(host: String, arguments: [String], timeout: TimeInterval) async throws -> String {
         let errURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("hoghunter-ssh-\(UUID().uuidString).stderr")
         let outURL = FileManager.default.temporaryDirectory
@@ -211,6 +236,7 @@ enum SSHCommand {
             "-o", "ConnectTimeout=5",
             "-o", "ServerAliveInterval=3",
             "-o", "ServerAliveCountMax=2",
+        ] + SSHConnection.connectionOptions(forHost: host) + [
             host,
         ] + arguments.map(Self.shellQuote)
 

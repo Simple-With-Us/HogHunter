@@ -82,6 +82,59 @@ final class FlaggedIssuesTests: XCTestCase {
         XCTAssertEqual(errIssues.first?.host, .server)
     }
 
+    /// With a snapshot in hand and refresh failing, a server issue must say
+    /// its numbers come from the last successful reading: on 2026-11-04 a
+    /// frozen snapshot kept reporting a full fleet-extra for hours after
+    /// the space was freed.
+    func testEvaluatorMarksServerIssuesStaleWhileRefreshFails() {
+        let store = HogStore(
+            historyURL: URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("flagged-stale-\(UUID().uuidString).sqlite")
+        )
+
+        let snap = VPSStatusSnapshot(
+            generatedAt: "2026-11-04T12:00:00Z",
+            host: "fleet-hetzner-nbg1",
+            devices: [
+                "fleet_extra": VPSDevice(mount: "/mnt/fleet-extra", freeBytes: 8 * 1024 * 1024 * 1024, note: "extra volume")
+            ]
+        )
+
+        let stale = FlaggedIssueEvaluator.evaluate(
+            macStore: store,
+            vpsSnapshot: snap,
+            vpsError: "mux_client_request_session: read from master failed: Broken pipe",
+            vpsConfigured: true
+        )
+        let staleExtra = stale.first { $0.id == "server.disk.extra.critical" }
+        XCTAssertTrue(staleExtra?.message.contains("last successful reading") == true,
+                      "got: \(staleExtra?.message ?? "no issue")")
+
+        let fresh = FlaggedIssueEvaluator.evaluate(
+            macStore: store,
+            vpsSnapshot: snap,
+            vpsError: nil,
+            vpsConfigured: true
+        )
+        let freshExtra = fresh.first { $0.id == "server.disk.extra.critical" }
+        XCTAssertFalse(freshExtra?.message.contains("last successful reading") == true)
+
+        // Age-based staleness with no error — polling stalled quietly —
+        // gets the note too, in its shorter form: the numbers are old, but
+        // nothing has said the server is not answering.
+        let aged = FlaggedIssueEvaluator.evaluate(
+            macStore: store,
+            vpsSnapshot: snap,
+            vpsError: nil,
+            vpsConfigured: true,
+            vpsStale: true
+        )
+        let agedExtra = aged.first { $0.id == "server.disk.extra.critical" }
+        XCTAssertTrue(agedExtra?.message.contains("last successful reading") == true,
+                      "got: \(agedExtra?.message ?? "no issue")")
+        XCTAssertFalse(agedExtra?.message.contains("not answering") == true)
+    }
+
     func testEvaluatorPrioritizesIssues() {
         let store = HogStore(
             historyURL: URL(fileURLWithPath: NSTemporaryDirectory())
