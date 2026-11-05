@@ -636,10 +636,16 @@ final class CleanRegimenRunner: ObservableObject {
         case .userCaches: return ["dev-caches", "app-caches"]
         case .logsAndDiagnostics: return ["logs"]
         case .developer: return ["xcode-artifacts"]
-        case .trash: return ["temp-scratch"]
+        case .trash:
+            // No rule, so no regimen can reach it.  `DiskCleaner.clean` removes
+            // a Trash item permanently, and this category used to answer to
+            // temp-scratch, a default rule: an unattended run emptied ~/.Trash
+            // against the policy's neverEmptyTrash.  A person can still select
+            // Trash in the Disk Cleaner.
+            return []
         case .tempFiles:
-            // Own rule: Trash's temp-scratch toggle must not include or
-            // exclude /tmp items, which stay unselected by default.
+            // Own rule: /tmp items stay unselected by default, and turning on
+            // another rule must not include them.
             return ["tmp-files"]
         case .apfsSnapshots:
             // Own rule: an unattended regimen must not thin snapshots just
@@ -673,7 +679,7 @@ final class CleanRegimenRunner: ObservableObject {
     /// `nonisolated` because `ruleName(for:)` is, and a main-actor-isolated
     /// constant read from a nonisolated context is an error in Swift 6.
     nonisolated private static let canonicalRuleNames = [
-        "agent-state", "app-caches", "tmp-files", "temp-scratch", "snapshots",
+        "agent-state", "app-caches", "tmp-files", "snapshots",
         "logs", "xcode-artifacts", "ask-first",
     ]
 
