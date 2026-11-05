@@ -471,6 +471,7 @@ struct DashboardView: View {
     @Bindable var model: CompanionModel
     @State private var selectedTab: CompanionTab = {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterActivity") { return .activity }
         if arguments.contains("-HogHunterStorage") { return .storage }
         if arguments.contains("-HogHunterMaintain") { return .maintain }
         if arguments.contains("-HogHunterNetwork") { return .network }
@@ -1035,13 +1036,11 @@ struct DashboardView: View {
         snapshot.rows.rankedByActivity()
     }
 
-    /// The Mac's Overview tab on the phone (HH-212): the meters, the busiest
-    /// rows and the server's strip.  Each part opens the tab that owns it;
-    /// nothing here is a second place to manage anything.
+    /// The busiest-rows section.  Takes the ranked rows so one sort per body
+    /// pass serves both the emptiness check and the list, instead of the
+    /// computed property sorting the full snapshot twice per pass.
     @ViewBuilder
-    private var overviewContent: some View {
-        Section { metersAndPills }
-
+    private func overviewActivitySection(topRows: [CompanionRow]) -> some View {
         Section {
             HStack {
                 Text("Top Activity")
@@ -1050,12 +1049,12 @@ struct DashboardView: View {
                 Button("Open Activity") { selectedTab = .activity }
                     .font(.caption.weight(.medium))
             }
-            if overviewTopRows.isEmpty {
+            if topRows.isEmpty {
                 Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(Array(overviewTopRows.prefix(6).enumerated()), id: \.element.id) { index, row in
+                ForEach(Array(topRows.prefix(6).enumerated()), id: \.element.id) { index, row in
                     HStack(spacing: 8) {
                         Text("#\(index + 1)")
                             .font(.caption.weight(.bold).monospacedDigit())
@@ -1072,6 +1071,17 @@ struct DashboardView: View {
                 }
             }
         }
+    }
+
+
+    /// The Mac's Overview tab on the phone (HH-212): the meters, the busiest
+    /// rows and the server's strip.  Each part opens the tab that owns it;
+    /// nothing here is a second place to manage anything.
+    @ViewBuilder
+    private var overviewContent: some View {
+        Section { metersAndPills }
+
+        overviewActivitySection(topRows: overviewTopRows)
 
         if let server = snapshot.server {
             Section {

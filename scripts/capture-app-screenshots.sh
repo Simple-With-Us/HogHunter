@@ -66,6 +66,7 @@ def launch_pid(udid):
 # the sample dashboard (see DashboardView).  These are best effort: a missing
 # one is a warning, because the five format frames above are the gate.
 EXTRA_SCREENS = [
+    ("activity", ["-HogHunterActivity"]),
     ("network", ["-HogHunterNetwork"]),
     ("storage", ["-HogHunterStorage"]),
     ("storage-apps", ["-HogHunterStorage", "-HogHunterStorageApps"]),

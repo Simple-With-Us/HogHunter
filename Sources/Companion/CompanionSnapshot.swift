@@ -945,26 +945,58 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     var canTame: Bool? = false
 }
 
+/// Text fallback for ranking rows from a Mac too old to send the numeric
+/// fields, mirroring the phone's `CompanionRow.sortCPU`/`sortMemory`
+/// fallback.  Text without digits means "no reading" (nil), so a genuinely
+/// unnumbered row still ranks after numbered ones instead of sorting as
+/// zero.
+private enum CompanionActivityText {
+    static func cpu(_ text: String) -> Double? {
+        let digits = text.filter { $0.isNumber || $0 == "." }
+        guard !digits.isEmpty else { return nil }
+        return Double(digits)
+    }
+
+    static func memoryBytes(_ text: String) -> UInt64? {
+        let upper = text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let numPart = upper.filter { $0.isNumber || $0 == "." }
+        guard !numPart.isEmpty, let val = Double(numPart) else { return nil }
+        if upper.contains("TB") {
+            return UInt64(val * 1_099_511_627_776)
+        } else if upper.contains("GB") {
+            return UInt64(val * 1_073_741_824)
+        } else if upper.contains("MB") {
+            return UInt64(val * 1_048_576)
+        } else if upper.contains("KB") {
+            return UInt64(val * 1_024)
+        } else {
+            return UInt64(val)
+        }
+    }
+}
+
 extension Array where Element == CompanionRow {
     /// The phone Overview's busiest ranking (HH-212): strictly descending
     /// CPU, then memory, then name, then id.  A total order, so the list is
     /// stable and cannot cycle the way an epsilon comparator can (a within
     /// 0.05 of b and b within 0.05 of c says nothing about a and c).  A row
-    /// from an older Mac carries no numbers and ranks after numbered rows.
+    /// whose Mac sent only text readings is ranked by the parsed text, the
+    /// same fallback `CompanionRow.sortCPU`/`sortMemory` use; a row with no
+    /// reading at all ranks after numbered rows.
     func rankedByActivity() -> [CompanionRow] {
         sorted { a, b in
             // JSON decoding already refuses NaN and infinity, so no snapshot
             // delivers them; a hand-built row still gets them counted as
             // missing, because NaN's unordered comparisons would break the
             // total order.
-            let aCPU = a.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? -1
-            let bCPU = b.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? -1
+            let aCPU = a.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? CompanionActivityText.cpu(a.cpuText) ?? -1
+            let bCPU = b.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? CompanionActivityText.cpu(b.cpuText) ?? -1
             if aCPU != bCPU { return aCPU > bCPU }
-            let aMem = a.memoryBytes ?? 0
-            let bMem = b.memoryBytes ?? 0
+            let aMem = a.memoryBytes ?? CompanionActivityText.memoryBytes(a.memoryText) ?? 0
+            let bMem = b.memoryBytes ?? CompanionActivityText.memoryBytes(b.memoryText) ?? 0
             if aMem != bMem { return aMem > bMem }
-            let byName = a.name.localizedStandardCompare(b.name)
-            if byName != .orderedSame { return byName == .orderedAscending }
+            // Equal names skip the ICU-backed compare entirely.
+            if a.name != b.name { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
             return a.id < b.id
         }
     }

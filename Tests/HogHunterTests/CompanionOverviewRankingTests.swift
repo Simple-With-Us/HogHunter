@@ -7,9 +7,28 @@ import XCTest
 /// memory 2 and CPU 0.08/memory 1 form a cycle.  These tests pin the exact
 /// total order so that shape of bug cannot come back.
 final class CompanionOverviewRankingTests: XCTestCase {
-    private func row(_ id: String, _ name: String, cpu: Double? = nil, memory: UInt64? = nil) -> CompanionRow {
-        CompanionRow(id: id, name: name, detail: "", cpuText: "", memoryText: "",
+    private func row(_ id: String, _ name: String, cpu: Double? = nil, memory: UInt64? = nil,
+                     cpuText: String = "", memoryText: String = "") -> CompanionRow {
+        CompanionRow(id: id, name: name, detail: "", cpuText: cpuText, memoryText: memoryText,
                      severity: "calm", isApp: true, cpuPercent: cpu, memoryBytes: memory)
+    }
+
+    /// Every ordering of the input (Heap's algorithm), so the stability test
+    /// covers all permutations instead of a handful of rotations.
+    private func allPermutations<T>(_ items: [T]) -> [[T]] {
+        guard items.count > 1 else { return [items] }
+        var result: [[T]] = []
+        var a = items
+        func generate(_ k: Int) {
+            if k == 1 { result.append(a); return }
+            generate(k - 1)
+            for i in 0..<(k - 1) {
+                if k % 2 == 0 { a.swapAt(i, k - 1) } else { a.swapAt(0, k - 1) }
+                generate(k - 1)
+            }
+        }
+        generate(a.count)
+        return result
     }
 
     private func ids(_ rows: [CompanionRow]) -> [String] { rows.map(\.id) }
@@ -65,7 +84,24 @@ final class CompanionOverviewRankingTests: XCTestCase {
         XCTAssertEqual(ids(rows.rankedByActivity()), ["real", "inf", "nan", "nil"])
     }
 
+    /// Rows from a Mac too old to send numeric fields still rank by the
+    /// text readings it sent (the same fallback `sortCPU`/`sortMemory`
+    /// use), instead of dropping to name order.  A row with no reading at
+    /// all still ranks last.
+    func testTextFallbackRanksOlderMacRows() {
+        let rows = [
+            row("text-mid", "Text Mid", cpuText: "12%", memoryText: "1 GB"),
+            row("text-high", "Text High", cpuText: "80%", memoryText: "512 MB"),
+            row("numbered", "Numbered", cpu: 50, memory: 1),
+            row("empty", "Empty"),
+        ]
+        XCTAssertEqual(ids(rows.rankedByActivity()), ["text-high", "numbered", "text-mid", "empty"])
+    }
+
     /// A total order gives one answer for every permutation of its input.
+    /// Enumerating all 120 permutations of the five rows pins the
+    /// transitivity the Overview ranking depends on; five rotations cannot
+    /// catch a comparator that only agrees on rotations.
     func testPermutationStability() {
         let base = [
             row("a", "A", cpu: 2, memory: 1), row("b", "B", cpu: 2, memory: 2),
@@ -73,9 +109,9 @@ final class CompanionOverviewRankingTests: XCTestCase {
         ]
         let want = ids(base.rankedByActivity())
         XCTAssertEqual(want, ["d", "b", "a", "c", "e"])
-        var perm = base
-        for i in 0..<base.count {
-            perm.insert(perm.remove(at: i % perm.count), at: 0)
+        let permutations = allPermutations(base)
+        XCTAssertEqual(permutations.count, 120)
+        for perm in permutations {
             XCTAssertEqual(ids(perm.rankedByActivity()), want)
         }
     }
