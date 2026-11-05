@@ -5,7 +5,9 @@
 #   --adhoc      Sign ad hoc, for a throwaway copy only.  Needs an explicit --dest
 #                outside /Applications and ~/Applications, and never launches:
 #                see "Code identity" below.
-#   --no-launch  Install but do not open Hog Hunter afterward.
+#   --no-launch  Install but do not open Hog Hunter afterward.  Nothing then shows the
+#                new copy starts, so the previous copy stays beside it, and leftovers
+#                and a pre-rename copy stay too, until an install that opens Hog Hunter.
 #   --dry-run    Build only.  Print what would happen next.  Never sign,
 #                quit the running app, copy to the destination, or launch.
 #   --dest PATH  Directory to install Hog Hunter.app into.  Default: if
@@ -187,6 +189,18 @@ if [[ "$ADHOC" -eq 1 ]]; then
   fi
 fi
 
+# A launch is the only evidence that the new copy starts, so a production run that
+# skips it retires nothing.  An ad hoc run never launches, so its throwaway folder is
+# exempt: otherwise no run could ever retire what it holds.
+KEEP_UNTIL_LAUNCH=0
+RETIRED_BY="The next finished install"
+if [[ "$ADHOC" -ne 1 ]]; then
+  RETIRED_BY="The next install that opens Hog Hunter"
+  if [[ "$NO_LAUNCH" -eq 1 ]]; then
+    KEEP_UNTIL_LAUNCH=1
+  fi
+fi
+
 # Names the certificate in full, Team ID included, so a second team's identity in
 # the keychain can never be picked up by a partial match.
 SIGNING_IDENTITY=""
@@ -247,11 +261,11 @@ report_leftovers() {
   for folder in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
     [[ -d "$folder" && ! -L "$folder" ]] || continue
     if [[ ! -e "$folder/Hog Hunter.app" ]]; then
-      echo "Warning: an interrupted install left $folder, with no app inside.  A finished install removes it."
+      echo "Warning: an interrupted install left $folder, with no app inside.  $RETIRED_BY removes it."
     elif [[ -e "$INSTALLED_PATH" ]]; then
-      echo "Warning: an interrupted install left a copy of this app at $folder/Hog Hunter.app.  A finished install removes it."
+      echo "Warning: an interrupted install left a copy of this app at $folder/Hog Hunter.app.  $RETIRED_BY removes it."
     else
-      echo "Warning: an interrupted install left a copy of this app at $folder/Hog Hunter.app, and nothing is installed at $INSTALLED_PATH.  It may be the only copy.  It stays until a new copy has passed its check."
+      echo "Warning: an interrupted install left a copy of this app at $folder/Hog Hunter.app, and nothing is installed at $INSTALLED_PATH.  It may be the only copy.  $RETIRED_BY removes it, and only once its own copy is in place."
     fi
   done
 }
@@ -527,7 +541,7 @@ finish_install() {
   if [[ "$SWAP_COMMITTED" -eq 1 ]]; then
     # Stopped before the new copy was proved to open, so the old one is not spare yet.
     if [[ -n "$BACKUP_DIR" && ( -e "$previous" || -L "$previous" ) ]]; then
-      echo "The install stopped before it finished, so the previous copy is still at $previous.  The next finished install removes it." >&2
+      echo "The install stopped before it finished, so the previous copy is still at $previous.  $RETIRED_BY removes it." >&2
     fi
     if [[ "$status" -ne 0 && "$QUIT_FOR_INSTALL" -eq 1 && "$LAUNCH_ATTEMPTED" -ne 1 ]]; then
       echo "The new copy is installed at $INSTALLED_PATH.  This install quit the running Hog Hunter and has not reopened it." >&2
@@ -592,10 +606,26 @@ stop_copy_running_from_destination() {
 # Staged beside the destination and checked before the running app is touched.
 # ditto merges into an existing bundle, so installing straight over one can leave
 # files the signature does not cover, and a broken seal is a broken identity.
+#
+# A `..` below a folder that does not exist yet would have mkdir create that folder,
+# perhaps one named like the app, so it is refused first.
+if ! split_existing "$DEST_DIR"; then
+  echo "error: could not tell which folder $DEST_DIR is.  Nothing was installed." >&2
+  exit 6
+fi
 if ! mkdir -p "$DEST_DIR"; then
   echo "error: could not create $DEST_DIR." >&2
   exit 6
 fi
+# The swap only ever uses the physical folder.  A spelling that runs through the
+# bundle, such as X/Hog Hunter.app/.., stops resolving once that bundle moves aside.
+if ! PHYSICAL_DEST="$(cd -P "$DEST_DIR" 2>/dev/null && pwd -P)"; then
+  echo "error: could not open $DEST_DIR.  Nothing was installed." >&2
+  exit 6
+fi
+DEST_DIR="$PHYSICAL_DEST"
+INSTALLED_PATH="$DEST_DIR/Hog Hunter.app"
+LEGACY_PATH="$DEST_DIR/HogHunter.app"
 # Asked again now the folder exists and minutes have passed: this answer is exact.
 if [[ "$ADHOC" -eq 1 ]] && is_production_dir "$DEST_DIR"; then
   echo "error: refusing an ad hoc install to $DEST_DIR, which is now a production location." >&2
@@ -678,8 +708,9 @@ fi
 
 echo "Installing to $INSTALLED_PATH."
 # The previous bundle waits beside the destination, outside STAGE_DIR, so the EXIT
-# trap cannot delete it.  It is removed only once the new bundle is in place and
-# verified; a failed swap or an interruption puts it back.
+# trap cannot delete it.  It is removed only once the new bundle is in place,
+# verified and, unless this run never launches, opened; a failed swap or an
+# interruption puts it back.
 if [[ -e "$INSTALLED_PATH" || -L "$INSTALLED_PATH" ]]; then
   if ! BACKUP_DIR="$(mktemp -d "$DEST_DIR/.hoghunter-previous.XXXXXX")"; then
     BACKUP_DIR=""
@@ -718,9 +749,25 @@ if [[ "$NO_LAUNCH" -eq 0 ]]; then
         else
           echo "error: the previous copy could not be opened either.  Hog Hunter is not running." >&2
         fi
+      else
+        # The way back failed, and it may have moved the new copy into the folder the
+        # trap deletes.  That copy passed its checks, so it goes back where it was.
+        rejected="$STAGE_DIR/rejected.app"
+        if [[ ! -e "$rejected" ]] || mv "$rejected" "$INSTALLED_PATH"; then
+          echo "The new copy, which would not open, is at $INSTALLED_PATH.  Replace it with the previous copy to go back." >&2
+        else
+          STAGE_DIR=""
+          echo "error: the new copy could not be put back either.  It is at $rejected." >&2
+        fi
+        echo "Hog Hunter is not running." >&2
       fi
     else
-      echo "error: the new copy is installed, but it could not be opened.  Hog Hunter is not running.  This run had no previous copy to go back to." >&2
+      echo "error: the new copy is installed, but it could not be opened.  Hog Hunter is not running." >&2
+      if [[ -d "$LEGACY_PATH" ]]; then
+        echo "The older copy at $LEGACY_PATH is still there." >&2
+      else
+        echo "This run had no previous copy to go back to." >&2
+      fi
       leftover_copy_text >&2
     fi
     exit 1
@@ -729,21 +776,25 @@ else
   echo "Skipping launch (--no-launch)."
 fi
 
-# The new copy has passed and opened.  What remains is tidying, so a failure here is
-# a warning and never fails a good install.
+# The new copy has passed, and it has opened unless this run does not launch.  With
+# no launch the previous copy stays.  What remains is tidying, so a failure here is a
+# warning and never fails a good install.
 if [[ -n "$BACKUP_DIR" ]]; then
-  if ! rm -rf "$BACKUP_DIR"; then
-    echo "Warning: could not remove the previous copy at $BACKUP_DIR.  The next finished install tries again." >&2
+  if [[ "$KEEP_UNTIL_LAUNCH" -eq 1 ]]; then
+    echo "The previous copy is still at $BACKUP_DIR/Hog Hunter.app, because --no-launch never tried to open the new one.  $RETIRED_BY removes it."
+  elif ! rm -rf "$BACKUP_DIR"; then
+    echo "Warning: could not remove the previous copy at $BACKUP_DIR.  $RETIRED_BY tries again." >&2
   fi
   BACKUP_DIR=""
 fi
 
-# The new copy is in place and has opened, so what an earlier run left is now spare.
+# What an earlier run left is spare only once this copy has opened, or in an ad hoc
+# run's throwaway folder, where no copy ever opens.  They were named above if they stay.
 for leftover in "$DEST_DIR"/.hoghunter-previous.* "$DEST_DIR"/.hoghunter-install.*; do
-  [[ -d "$leftover" && ! -L "$leftover" && "$leftover" != "$STAGE_DIR" ]] || continue
+  [[ "$KEEP_UNTIL_LAUNCH" -ne 1 && -d "$leftover" && ! -L "$leftover" && "$leftover" != "$STAGE_DIR" ]] || continue
   echo "Removing what an interrupted install left at $leftover."
   if ! rm -rf "$leftover"; then
-    echo "Warning: could not remove $leftover.  It may still hold a signed copy of this app.  The next finished install tries again." >&2
+    echo "Warning: could not remove $leftover.  It may still hold a signed copy of this app.  $RETIRED_BY tries again." >&2
   fi
 done
 
@@ -752,7 +803,9 @@ done
 if [[ -d "$LEGACY_PATH" && "$LEGACY_PATH" != "$INSTALLED_PATH" ]]; then
   legacy_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$LEGACY_PATH/Contents/Info.plist" 2>/dev/null || echo "")
   new_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INSTALLED_PATH/Contents/Info.plist" 2>/dev/null || echo "")
-  if [[ -n "$legacy_id" && "$legacy_id" == "$new_id" ]]; then
+  if [[ -n "$legacy_id" && "$legacy_id" == "$new_id" && "$KEEP_UNTIL_LAUNCH" -eq 1 ]]; then
+    echo "The pre-rename copy at $LEGACY_PATH is still there, because --no-launch never tried to open the new one.  $RETIRED_BY removes it."
+  elif [[ -n "$legacy_id" && "$legacy_id" == "$new_id" ]]; then
     echo "Removing the pre-rename copy at $LEGACY_PATH (same bundle id)."
     if ! rm -rf "$LEGACY_PATH"; then
       echo "Warning: could not remove the pre-rename copy at $LEGACY_PATH." >&2

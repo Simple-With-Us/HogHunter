@@ -1370,6 +1370,10 @@ final class DiskCleaner: @unchecked Sendable {
     /// hoghunter-clean is the sweep that waits for an idle one.
     private func scanHogHunterDebugBuilds() -> [CleanItem] {
         let root = userHomeURL.appendingPathComponent(Self.hogHunterDebugBuildsPath, isDirectory: true)
+        // hoghunter-clean's two refusals, in the order that never reads through a link
+        // before the gate has seen where it goes.  This folder is one the build makes.
+        guard scanAllows(root),
+              (try? fileManager.destinationOfSymbolicLink(atPath: root.path)) == nil else { return [] }
         let lanes = (try? fileManager.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],

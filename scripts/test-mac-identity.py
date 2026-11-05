@@ -397,11 +397,12 @@ class InstallerSwapTests(unittest.TestCase):
                 [[ "$source" == *.hoghunter-install.* ]] && exit 1 ;;
             esac
             case "${SCENARIO:-}" in
-              swap_and_restore_fail|interrupted_and_restore_fails|open_refuses_new_and_restore_fails)
+              swap_and_restore_fail|interrupted_and_restore_fails|open_refuses_new_and_restore_fails|open_refuses_new_and_all_moves_fail)
                 [[ "$source" == *.hoghunter-previous.* ]] && exit 1 ;;
               aside_fails)
                 [[ "$target" == *.hoghunter-previous.* ]] && exit 1 ;;
             esac
+            if [[ "${SCENARIO:-}" == open_refuses_new_and_all_moves_fail && "$source" == */rejected.app ]]; then exit 1; fi
             /bin/mv "$@" || exit $?
             case "${SCENARIO:-}" in
               interrupted_between_renames|interrupted_and_restore_fails)
@@ -694,6 +695,22 @@ class InstallerSwapTests(unittest.TestCase):
         self.assertEqual(self.marker(backups[0]), "OLD")
         self.assertIn(str(backups[0]), result.stderr)
         self.assertEqual(self.calls().count("open "), 1)
+        # The way back moved the new copy aside, and it must not be lost with the staging folder.
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
+        self.assertEqual(self.hidden_folders(applications), [backups[0].parent.name])
+        self.assertIn(f"would not open, is at {applications}/Hog Hunter.app", result.stderr)
+        self.assertIn("Hog Hunter is not running", result.stderr)
+
+    def test_a_new_copy_that_cannot_be_put_back_either_is_kept_and_named(self) -> None:
+        applications = self.production_previous_copy()
+        result = self.run_install(scenario="open_refuses_new_and_all_moves_fail")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        rejected = sorted(applications.glob(".hoghunter-install.*/rejected.app"))
+        self.assertEqual(len(rejected), 1, result.stderr)
+        self.assertEqual(self.marker(rejected[0]), "NEW")
+        self.assertIn(f"It is at {rejected[0]}", result.stderr)
+        self.assertIn("Hog Hunter is not running", result.stderr)
+        self.assertEqual(len(list(applications.glob(".hoghunter-previous.*/Hog Hunter.app"))), 1)
 
     def test_a_first_install_that_will_not_open_stays_installed_and_says_so(self) -> None:
         self.use_fake_system_folder()
@@ -702,6 +719,84 @@ class InstallerSwapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
         self.assertIn("no previous copy to go back to", result.stderr)
+
+    def test_a_first_install_that_will_not_open_names_the_pre_rename_copy(self) -> None:
+        self.use_fake_system_folder()
+        applications = self.home / "Applications"
+        applications.mkdir()
+        legacy = self.dir / "legacy"
+        legacy.mkdir()
+        make_bundle(legacy).rename(applications / "HogHunter.app")
+        result = self.run_install(scenario="open_fails")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"The older copy at {applications}/HogHunter.app is still there", result.stderr)
+        self.assertNotIn("no previous copy", result.stderr)
+        self.assertTrue((applications / "HogHunter.app").is_dir())
+
+    def no_launch_with_everything_to_retire(self) -> tuple[Path, Path, Path]:
+        applications = self.production_previous_copy()
+        leftover = self.previous_copy(applications / ".hoghunter-previous.AAAAAA")
+        legacy = self.dir / "legacy"
+        legacy.mkdir()
+        make_bundle(legacy).rename(applications / "HogHunter.app")
+        return applications, leftover, applications / "HogHunter.app"
+
+    def test_no_launch_retires_nothing_and_says_where_the_previous_copy_is(self) -> None:
+        applications, leftover, legacy = self.no_launch_with_everything_to_retire()
+        result = self.run_install("--no-launch")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("open ", self.calls())
+        self.assertEqual(self.marker(applications / "Hog Hunter.app"), "NEW")
+        self.assertEqual(self.marker(leftover), "OLD")
+        self.assertTrue(legacy.is_dir())
+        kept = [p for p in applications.glob(".hoghunter-previous.*/Hog Hunter.app") if p != leftover]
+        self.assertEqual(len(kept), 1, result.stdout)
+        self.assertEqual(self.marker(kept[0]), "OLD")
+        self.assertIn(f"The previous copy is still at {kept[0]}", result.stdout)
+        self.assertIn(f"The pre-rename copy at {legacy} is still there", result.stdout)
+        self.assertIn("The next install that opens Hog Hunter removes it", result.stdout)
+        self.assertNotIn("Removing", result.stdout)
+        self.assertNotIn("stopped before it finished", result.stderr)
+
+    def test_the_next_install_that_opens_the_app_retires_what_no_launch_kept(self) -> None:
+        applications, _, legacy = self.no_launch_with_everything_to_retire()
+        self.assertEqual(self.run_install("--no-launch").returncode, 0)
+        self.assertEqual(len(self.hidden_folders(applications)), 2)
+        self.assertEqual(self.run_install("--no-launch").returncode, 0)
+        self.assertEqual(len(self.hidden_folders(applications)), 3, "another run without a launch proves nothing")
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.hidden_folders(applications), [])
+        self.assertFalse(legacy.exists())
+
+    def test_an_ad_hoc_run_never_opens_a_copy_so_its_throwaway_folder_is_still_tidied(self) -> None:
+        self.previous_copy(self.dest)
+        result = self.run_install("--adhoc", "--no-launch", "--dest", str(self.dest))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.hidden_folders(), [])
+
+    def test_a_destination_spelled_through_the_bundle_still_swaps(self) -> None:
+        self.previous_copy(self.dest)
+        result = self.run_install("--adhoc", "--dest", f"{self.installed}/..")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.marker(), "NEW")
+        self.assertEqual(self.hidden_folders(), [])
+
+    def test_a_destination_spelled_through_the_bundle_still_rolls_back(self) -> None:
+        self.previous_copy(self.dest)
+        result = self.run_install("--adhoc", "--dest", f"{self.installed}/..", scenario="verify_fails")
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertEqual(self.marker(), "OLD")
+        self.assertIn("The previous copy was restored", result.stderr)
+        self.assertEqual(self.hidden_folders(), [])
+
+    def test_a_destination_through_a_bundle_that_is_not_there_creates_nothing(self) -> None:
+        self.use_fake_system_folder()
+        self.dest.mkdir()
+        result = self.run_install("--dest", f"{self.installed}/..")
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertIn("could not tell which folder", result.stderr)
+        self.assertFalse(self.installed.exists())
 
     def test_leftovers_and_a_pre_rename_copy_wait_for_a_launch_that_worked(self) -> None:
         applications = self.production_previous_copy()

@@ -1,6 +1,16 @@
 import XCTest
 @testable import HogHunter
 
+private final class ListingRecorder: FileManager {
+    var listed: [String] = []
+
+    override func contentsOfDirectory(at url: URL, includingPropertiesForKeys keys: [URLResourceKey]?,
+                                      options mask: FileManager.DirectoryEnumerationOptions = []) throws -> [URL] {
+        listed.append(url.path)
+        return try super.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
+    }
+}
+
 final class DiskCleanerScanBudgetTests: XCTestCase {
     private var sandbox: URL!
 
@@ -92,12 +102,42 @@ final class DiskCleanerScanBudgetTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: lane.path), "the clean still walks the whole lane")
     }
 
+    /// Below the lane's top level, so only the walk can see it: a marker on the lane
+    /// itself is found by `isKept` and would pass with the walk gone.
     func testAMarkerTheBoundedWalkCanSeeStillHidesTheRow() async throws {
         let lane = try debugBuildsLane("lane-marked")
-        XCTAssertTrue(FileManager.default.createFile(atPath: lane.appendingPathComponent(KeepSentinel.fileName).path, contents: Data()))
+        let nested = lane.appendingPathComponent("a/b", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.createFile(atPath: nested.appendingPathComponent(KeepSentinel.fileName).path, contents: Data()))
+        XCTAssertFalse(KeepSentinel.isKept(url: lane))
+        XCTAssertTrue(KeepSentinel.containsMarker(url: lane))
         let cleaner = DiskCleaner(scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
         let report = await cleaner.scan(exclusions: exclusions(keeping: [.developer]))
         XCTAssertEqual(debugBuildsRows(in: report).count, 0)
+    }
+
+    /// Asked of the listing and not only the rows, because a listing through the link
+    /// can come back empty on its own, and the refusal must not rest on that.
+    func testASymlinkedDebugBuildsRootIsNeverListed() throws {
+        let elsewhere = try write("elsewhere/lane-a/data.bin").deletingLastPathComponent().deletingLastPathComponent()
+        let caches = sandbox.appendingPathComponent("Library/Caches", isDirectory: true)
+        try FileManager.default.createDirectory(at: caches, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: caches.appendingPathComponent("HogHunterDerivedData"), withDestinationURL: elsewhere)
+        let recorder = ListingRecorder()
+        let cleaner = DiskCleaner(fileManager: recorder, scanUptime: { 0 }, mountPathsProvider: { [] }, homeDirectory: sandbox)
+        XCTAssertFalse(cleaner.scanDeveloper().contains { $0.title == "Hog Hunter Debug Builds" })
+        XCTAssertFalse(recorder.listed.contains { $0.hasSuffix("/HogHunterDerivedData") }, "listed \(recorder.listed)")
+    }
+
+    /// The rows alone cannot tell: each lane's own measurement would refuse too, but
+    /// only after the listing had already read the mounted folder.
+    func testADebugBuildsRootTheScanGateRefusesIsNeverListed() throws {
+        let root = try debugBuildsLane("lane-a").deletingLastPathComponent()
+        let mount = try XCTUnwrap(DirectorySizeWalker.canonicalPath(root.path))
+        let recorder = ListingRecorder()
+        let cleaner = DiskCleaner(fileManager: recorder, scanUptime: { 0 }, mountPathsProvider: { [mount] }, homeDirectory: sandbox)
+        XCTAssertFalse(cleaner.scanDeveloper().contains { $0.title == "Hog Hunter Debug Builds" })
+        XCTAssertFalse(recorder.listed.contains { $0.hasSuffix("/HogHunterDerivedData") }, "listed \(recorder.listed)")
     }
 
     func testDepthLimitRetainsLowerBoundAndCannotProveAge() throws {
