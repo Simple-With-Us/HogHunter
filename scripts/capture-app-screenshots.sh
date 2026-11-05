@@ -70,6 +70,8 @@ EXTRA_SCREENS = [
     ("storage", ["-HogHunterStorage"]),
     ("server", ["-HogHunterServer"]),
     ("server-confirm", ["-HogHunterServer", "-HogHunterServerConfirm"]),
+    ("server-details", ["-HogHunterServer", "-HogHunterServerDetails"]),
+    ("server-controls", ["-HogHunterServer", "-HogHunterServerControls"]),
     ("mac-settings", ["-HogHunterMacSettings"]),
     ("sample-result", ["-HogHunterSampleResult"]),
     ("vacuum", ["-HogHunterVacuum"]),
