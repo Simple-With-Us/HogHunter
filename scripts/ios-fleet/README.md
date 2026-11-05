@@ -27,17 +27,20 @@ When the canonical copy changes, re-copy the unchanged files and re-apply the th
 
 ## Tester Policy
 
-Owner ruling, Nov 3 2026:  the iPhone companion has exactly one beta group, a public one whose link is on, and the same people in it.  No internal group.  Every build whose version is not 0.1.0 is deleted or expired, so the group's build list is the 0.1.0 line and nothing else.
+Owner ruling, Nov 3 2026:  the iPhone companion has exactly one beta group, a public one whose link is on, and the same people in it.  No internal group.  Every build whose version is not 0.1.0 is deleted or expired, so the group's build list is the 0.1.0 line and nothing else.
 
-apps.json carries the policy per app, and the default keeps the behaviour every other fleet app has:
+Owner ruling, Nov 4 2026 (HH-217):  there is ONE policy.  The public group is it.
 
 | Policy | Groups | Who installs the build | How a build reaches them | Tester list |
 |---|---|---|---|---|
-| internal-group (default) | one internal all-builds group | App Store Connect users | the internal group carries every build | required (ASC_STANDING_TESTERS) |
-| public-group | one external group with the public link on | the standing people, through the public link | the build is assigned to the group and submitted for Beta App Review | optional; the group already holds them |
+| public-group (the only one) | one external group with the public link on | the standing people, through the public link | the build is assigned to the group and submitted for Beta App Review | optional; the group already holds them |
+
+apps.json names the policy per app, and an app that names nothing gets the public group.  A legacy "internal-group" value is REFUSED:  asc-api.mjs stops before any App Store Connect call with a readable message, and ship-testflight.sh stops before an upload.  It is never read as the public policy instead, because a silent swap would hide the very request the owner ruled out.
+
+The internal all-builds group is gone from the code:  nothing creates it, nothing requires it, and nothing waits for it.  An app record that still carries one keeps it -- the lane does not delete it, does not use it and does not fail because it exists.
 
 tester-policy.mjs holds the rules as pure functions and tester-policy.test.mjs tests them (node --test scripts/ios-fleet/tester-policy.test.mjs).  asc-api.mjs reads the policy from --policy <name>, a flag that is stripped from the positional arguments before they are read, so an omitted optional argument can never swallow it.
 
-Three consequences are worth naming.  The readiness check counts the testers who can actually install the build under the app's policy:  counting the internal group for a public-policy app reported zero for an app that was set up correctly.  And under the public policy the sync keeps exactly one external group with its public link on:  the group whose link is already on is the one it keeps, because that is the group that distributes the build, and any other external group with its link on has it turned off.  And the exit-5 message names those testers:  it used to say the build may be stuck on export compliance, which sent the reader after the wrong thing, because export compliance is declared in phase B, before the readiness wait, and a build that reached the wait was never stuck on it.
+Three consequences are worth naming.  The readiness check counts the testers who can actually install the build, which are the people in the public group:  counting the internal group for a public-policy app reported zero for an app that was set up correctly.  And the sync keeps exactly one external group with its public link on:  the group whose link is already on is the one it keeps, because that is the group that distributes the build, and any other external group with its link on has it turned off.  And the exit-5 message names those testers:  it used to say the build may be stuck on export compliance, which sent the reader after the wrong thing, because export compliance is declared in phase B, before the readiness wait, and a build that reached the wait was never stuck on it.
 
 This is a Hog Hunter port:  re-copying the canonical asc-api.mjs or ship-testflight.sh over these drops the policy, so re-apply it from tester-policy.mjs.

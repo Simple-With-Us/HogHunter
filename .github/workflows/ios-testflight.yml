@@ -434,12 +434,13 @@ jobs:
         # Export-only runs archive without touching remote state: no group or
         # tester mutations either (Sentry review on #184).
         #
-        # The policy comes from scripts/ios-fleet/apps.json, so the app that
-        # owns the group decides what the sync does:  "public-group" reuses the
-        # one external group with its public link on, keeps its people, assigns
-        # this build to it and submits it for Beta App Review; the default
-        # keeps the internal all-builds group and the standing email list
-        # (owner, Nov 3 2026).
+        # The policy comes from scripts/ios-fleet/apps.json.  There is one
+        # policy (owner, Nov 4 2026, HH-217):  "public-group" reuses the one
+        # external group with its public link on, keeps its people, assigns
+        # this build to it and submits it for Beta App Review.  A legacy
+        # "internal-group" value is refused by asc-api.mjs with a readable
+        # message, and this step is a warning either way, so the TestFlight
+        # upload itself still succeeds.
         if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
         continue-on-error: true
         env:

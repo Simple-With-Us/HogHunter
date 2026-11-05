@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -13,11 +14,9 @@ import {
   isExternalGroup,
   otherLinkOnGroups,
   planTesterList,
-  policyNeedsBuildAssignment,
-  policyRequiresTesterList,
-  policyUsesInternalGroup,
   resolveTesterPolicy,
-  selectPublicGroup
+  selectPublicGroup,
+  testerPolicyRefusal
 } from "./tester-policy.mjs";
 
 const group = (attrs) => ({ id: attrs.id || "g", attributes: attrs });
@@ -25,13 +24,13 @@ const group = (attrs) => ({ id: attrs.id || "g", attributes: attrs });
 // The same shape the ship script uses: an address with one @, a host and a dot.
 const isEmail = (value) => /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(String(value || ""));
 
-test("an app that says nothing keeps the internal group policy", () => {
+test("an app that says nothing gets the public group", () => {
   assert.equal(resolveTesterPolicy(undefined), DEFAULT_TESTER_POLICY);
   assert.equal(resolveTesterPolicy(""), DEFAULT_TESTER_POLICY);
   assert.equal(resolveTesterPolicy(null), DEFAULT_TESTER_POLICY);
   assert.equal(resolveTesterPolicy("public"), DEFAULT_TESTER_POLICY);
   assert.equal(resolveTesterPolicy("nonsense"), DEFAULT_TESTER_POLICY);
-  assert.equal(DEFAULT_TESTER_POLICY, TESTER_POLICY_INTERNAL);
+  assert.equal(DEFAULT_TESTER_POLICY, TESTER_POLICY_PUBLIC);
 });
 
 test("the public policy is named exactly", () => {
@@ -40,22 +39,41 @@ test("the public policy is named exactly", () => {
   assert.equal(resolveTesterPolicy(TESTER_POLICY_PUBLIC), TESTER_POLICY_PUBLIC);
 });
 
-test("the internal group exists only under the internal policy", () => {
-  assert.equal(policyUsesInternalGroup(undefined), true);
-  assert.equal(policyUsesInternalGroup(TESTER_POLICY_INTERNAL), true);
-  assert.equal(policyUsesInternalGroup(TESTER_POLICY_PUBLIC), false);
+test("the internal group policy is refused, never honoured", () => {
+  // HH-217 (Nov 4 2026):  the internal group is gone.  A request for it does
+  // not resolve to the public policy either:  a silent swap would hide the
+  // very request the owner ruled out.
+  assert.equal(resolveTesterPolicy(TESTER_POLICY_INTERNAL), null);
+  assert.equal(resolveTesterPolicy("internal-group"), null);
+  assert.equal(resolveTesterPolicy("  Internal-Group  "), null);
 });
 
-test("only the public policy needs the build assigned to a group", () => {
-  assert.equal(policyNeedsBuildAssignment(TESTER_POLICY_PUBLIC), true);
-  assert.equal(policyNeedsBuildAssignment(TESTER_POLICY_INTERNAL), false);
-  assert.equal(policyNeedsBuildAssignment(undefined), false);
+test("a refused policy carries a readable reason", () => {
+  const why = testerPolicyRefusal(TESTER_POLICY_INTERNAL);
+  assert.notEqual(why, "");
+  assert.match(why, /internal-group/);
+  assert.match(why, /public-group/);
 });
 
-test("only the internal policy needs a tester list", () => {
-  assert.equal(policyRequiresTesterList(TESTER_POLICY_INTERNAL), true);
-  assert.equal(policyRequiresTesterList(TESTER_POLICY_PUBLIC), false);
-  assert.equal(policyRequiresTesterList(undefined), true);
+test("a supported request is not refused", () => {
+  assert.equal(testerPolicyRefusal(undefined), "");
+  assert.equal(testerPolicyRefusal(""), "");
+  assert.equal(testerPolicyRefusal(TESTER_POLICY_PUBLIC), "");
+  assert.equal(testerPolicyRefusal("nonsense"), "");
+});
+
+test("the lane's own apps.json names the public group", () => {
+  const apps = JSON.parse(readFileSync(new URL("./apps.json", import.meta.url), "utf8"));
+  const policy = apps.apps?.hoghunter?.testerPolicy;
+  assert.equal(resolveTesterPolicy(policy), TESTER_POLICY_PUBLIC);
+  assert.equal(testerPolicyRefusal(policy), "");
+});
+
+test("a legacy internal-group in apps.json is refused, not honoured", () => {
+  // The lane must not crash on a legacy registry, and it must not read it as
+  // the public group either:  it stops with a message.
+  assert.equal(resolveTesterPolicy(TESTER_POLICY_INTERNAL), null);
+  assert.notEqual(testerPolicyRefusal(TESTER_POLICY_INTERNAL), "");
 });
 
 test("group kind is read from the flag, not the name", () => {
@@ -66,6 +84,18 @@ test("group kind is read from the flag, not the name", () => {
   assert.equal(hasPublicLink(group({ publicLinkEnabled: true })), true);
   assert.equal(hasPublicLink(group({ publicLinkEnabled: false })), false);
   assert.equal(hasPublicLink(group({})), false);
+});
+
+test("the standing-tester sync targets the public group", () => {
+  // The one group the sync touches is the external group whose public link
+  // is on.  An internal group is never it, whatever it is called.
+  const internal = group({ id: "internal", name: "Internal Testers", isInternalGroup: true, hasAccessToAllBuilds: true });
+  const linked = group({ id: "linked", name: "Beta", isInternalGroup: false, publicLinkEnabled: true });
+  assert.equal(selectPublicGroup([internal, linked]).id, "linked");
+  assert.equal(selectPublicGroup([internal]), null);
+  // The other link-on groups are the ones the sync turns off; an internal
+  // group is never among them.
+  assert.deepEqual(otherLinkOnGroups([internal, linked], linked), []);
 });
 
 test("the group whose public link is on wins over the named group", () => {
@@ -150,52 +180,33 @@ test("email testers and link testers are counted together", () => {
   assert.equal(countInstallableTesters(undefined), 0);
 });
 
-test("a malformed list refuses the internal policy outright", () => {
-  const plan = planTesterList(TESTER_POLICY_INTERNAL, ["a@b.test", "not-an-email"], isEmail);
-  assert.equal(plan.ok, false);
-  assert.equal(plan.reason, "malformed");
-  assert.equal(plan.malformed, 1);
-  assert.deepEqual(plan.add, []);
-});
-
-test("an oversized list refuses the internal policy outright", () => {
-  const many = Array.from({ length: TESTER_LIST_MAX + 1 }, (_, i) => `p${i}@b.test`);
-  const plan = planTesterList(TESTER_POLICY_INTERNAL, many, isEmail);
-  assert.equal(plan.ok, false);
-  assert.equal(plan.reason, "too-many");
-  assert.equal(plan.count, TESTER_LIST_MAX + 1);
-  assert.deepEqual(plan.add, []);
-});
-
-test("a good list passes the internal policy and is added whole", () => {
-  const plan = planTesterList(TESTER_POLICY_INTERNAL, ["a@b.test", "c@d.test"], isEmail);
-  assert.equal(plan.ok, true);
+test("a good list is added whole", () => {
+  const plan = planTesterList(["a@b.test", "c@d.test"], isEmail);
   assert.equal(plan.reason, "");
+  assert.equal(plan.malformed, 0);
+  assert.equal(plan.count, 2);
   assert.deepEqual(plan.add, ["a@b.test", "c@d.test"]);
 });
 
-test("a malformed list only warns under the public policy", () => {
+test("a malformed list only warns", () => {
   // The people are already in the public group, so a wrong list is a note
   // about the list and never a reason to stop the build reaching the group.
-  const plan = planTesterList(TESTER_POLICY_PUBLIC, ["a@b.test", "not-an-email"], isEmail);
-  assert.equal(plan.ok, true);
+  const plan = planTesterList(["a@b.test", "not-an-email"], isEmail);
   assert.equal(plan.reason, "malformed");
   assert.equal(plan.malformed, 1);
   assert.deepEqual(plan.add, ["a@b.test"]);
 });
 
-test("an oversized list only warns under the public policy", () => {
+test("an oversized list only warns", () => {
   const many = Array.from({ length: TESTER_LIST_MAX + 1 }, (_, i) => `p${i}@b.test`);
-  const plan = planTesterList(TESTER_POLICY_PUBLIC, many, isEmail);
-  assert.equal(plan.ok, true);
+  const plan = planTesterList(many, isEmail);
   assert.equal(plan.reason, "too-many");
   assert.equal(plan.count, TESTER_LIST_MAX + 1);
   assert.equal(plan.add.length, TESTER_LIST_MAX);
 });
 
-test("an empty list is fine under the public policy", () => {
-  const plan = planTesterList(TESTER_POLICY_PUBLIC, [], isEmail);
-  assert.equal(plan.ok, true);
+test("an empty list is fine", () => {
+  const plan = planTesterList([], isEmail);
   assert.equal(plan.reason, "");
   assert.equal(plan.count, 0);
   assert.deepEqual(plan.add, []);
