@@ -132,12 +132,16 @@ final class CompanionOverviewRankingTests: XCTestCase {
         // behind it stays as defensive totality; what this test can pin is
         // the behavior the tie-break protects: distinct names, however
         // close, order deterministically under every input permutation.
+        // Which direction the collation forces for a case-only pair is
+        // locale- and ICU-version-dependent, so the pin is the determinism,
+        // not the direction.
         let caseRows = [
             row("c-row", "casesame", cpu: 1),
             row("d-row", "CaseSame", cpu: 1),
         ]
+        let wantCaseRows = ids(caseRows.rankedByActivity())
         for permutation in allPermutations(caseRows) {
-            XCTAssertEqual(ids(permutation.rankedByActivity()), ["c-row", "d-row"])
+            XCTAssertEqual(ids(permutation.rankedByActivity()), wantCaseRows)
         }
     }
 
