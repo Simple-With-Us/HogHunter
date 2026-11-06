@@ -122,7 +122,7 @@ jobs:
           fi
 
       - name: Require server maintenance render
-        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png"
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png" && test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-incomplete-inventory.png"
 
       - name: Build iOS companion
         run: |
