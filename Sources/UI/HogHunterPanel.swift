@@ -775,8 +775,18 @@ struct HogHunterPanel: View {
                 Spacer()
             }
 
-            // Mac RAM
-            VStack(alignment: .leading, spacing: 3) {
+            // Mac on the left half, server on the right half.
+            HStack(alignment: .top, spacing: 6) {
+                macRAMColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverRAMColumn
+                }
+            }
+        }
+    }
+
+    private var macRAMColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Image(systemName: "laptopcomputer")
                         .font(.system(size: 9))
@@ -817,10 +827,12 @@ struct HogHunterPanel: View {
             }
             .padding(5)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
 
-            // Server RAM (if configured)
-            if !store.maintain.vpsStore.configuredHost.isEmpty,
-               let mem = store.maintain.vpsStore.snapshot?.memory {
+    private var serverRAMColumn: some View {
+        Group {
+            if let mem = store.maintain.vpsStore.snapshot?.memory {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Image(systemName: "server.rack")
@@ -859,8 +871,26 @@ struct HogHunterPanel: View {
                 }
                 .padding(5)
                 .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            } else {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text("Server")
+                            .font(.system(size: 9.5, weight: .medium))
+                        Spacer()
+                        Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    }
+                    Text(store.maintain.vpsStore.isLoading ? "Connecting to server…" : "No reading yet")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(5)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Storage Section (Mac Internal/External & Server Root/Fleet-Extra)
@@ -876,52 +906,77 @@ struct HogHunterPanel: View {
                 Spacer()
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                // Mac Internal Boot Drive
-                if let disk = store.diskSpace {
-                    quickStorageRow(
-                        name: "Mac (Internal /)",
-                        icon: "laptopcomputer",
-                        freeBytes: disk.freeBytes,
-                        usedFraction: disk.usedFraction
-                    )
-                }
-
-                // Every mounted Mac drive, whatever it is named
-                ForEach(pagedMountedDrives) { drive in
-                    quickStorageRow(
-                        name: "Mac (\(drive.name))",
-                        icon: "externaldrive",
-                        freeBytes: UInt64(max(0, drive.availableBytes ?? 0)),
-                        usedFraction: (drive.usedPercent ?? 0) / 100.0
-                    )
-                }
-
-                mountedDrivePageControls
-
-                // Server Root /
-                if let root = store.maintain.vpsStore.snapshot?.rootDevice {
-                    quickStorageRow(
-                        name: store.maintain.vpsStore.isStale ? "Server (Root /) · Stale" : "Server (Root /)",
-                        icon: "server.rack",
-                        freeBytes: UInt64(max(0, root.freeBytes)),
-                        usedFraction: root.usedFraction
-                    )
-                }
-
-                // Server Fleet Extra /mnt/fleet-extra
-                if let extra = store.maintain.vpsStore.snapshot?.fleetExtraDevice {
-                    quickStorageRow(
-                        name: store.maintain.vpsStore.isStale ? "Server (/mnt/fleet-extra) · Stale" : "Server (/mnt/fleet-extra)",
-                        icon: "externaldrive.connected.to.line.below",
-                        freeBytes: UInt64(max(0, extra.freeBytes)),
-                        usedFraction: extra.usedFraction
-                    )
+            // Mac on the left half, server on the right half.
+            HStack(alignment: .top, spacing: 6) {
+                macStorageColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverStorageColumn
                 }
             }
-            .padding(5)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
         }
+    }
+
+    private var macStorageColumn: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Mac Internal Boot Drive
+            if let disk = store.diskSpace {
+                quickStorageRow(
+                    name: "Mac (Internal /)",
+                    icon: "laptopcomputer",
+                    freeBytes: disk.freeBytes,
+                    usedFraction: disk.usedFraction
+                )
+            }
+
+            // Every mounted Mac drive, whatever it is named
+            ForEach(pagedMountedDrives) { drive in
+                quickStorageRow(
+                    name: "Mac (\(drive.name))",
+                    icon: "externaldrive",
+                    freeBytes: UInt64(max(0, drive.availableBytes ?? 0)),
+                    usedFraction: (drive.usedPercent ?? 0) / 100.0
+                )
+            }
+
+            mountedDrivePageControls
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var serverStorageColumn: some View {
+        let vps = store.maintain.vpsStore
+        return VStack(alignment: .leading, spacing: 4) {
+            // Server Root /
+            if let root = vps.snapshot?.rootDevice {
+                quickStorageRow(
+                    name: vps.isStale ? "Server (Root /) · Stale" : "Server (Root /)",
+                    icon: "server.rack",
+                    freeBytes: UInt64(max(0, root.freeBytes)),
+                    usedFraction: root.usedFraction
+                )
+            }
+
+            // Server Fleet Extra /mnt/fleet-extra
+            if let extra = vps.snapshot?.fleetExtraDevice {
+                quickStorageRow(
+                    name: vps.isStale ? "Server (/mnt/fleet-extra) · Stale" : "Server (/mnt/fleet-extra)",
+                    icon: "externaldrive.connected.to.line.below",
+                    freeBytes: UInt64(max(0, extra.freeBytes)),
+                    usedFraction: extra.usedFraction
+                )
+            }
+
+            if vps.snapshot?.rootDevice == nil, vps.snapshot?.fleetExtraDevice == nil {
+                Text(vps.isLoading ? "Connecting to server…" : "No server disk reading yet")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func quickStorageRow(name: String, icon: String, freeBytes: UInt64, usedFraction: Double?) -> some View {
@@ -961,15 +1016,6 @@ struct HogHunterPanel: View {
 
     // MARK: - Activity Section
 
-    /// Which machine's activity the drop-down lists.
-    enum ActivityScope: String, CaseIterable, Identifiable {
-        case mac = "This Mac"
-        case server = "Server"
-
-        var id: String { rawValue }
-    }
-
-    @State private var activityScope: ActivityScope = .mac
     @StateObject private var serverActivityControl = ServerControl()
 
     /// The server's processes, as its own collector saw them.
@@ -983,98 +1029,108 @@ struct HogHunterPanel: View {
                 Text("Top Activity")
                     .font(.system(size: 10.5, weight: .semibold))
                 Spacer()
-                Text(activityScope == .mac
-                     ? "\(store.rows.count) processes"
-                     : "\(serverProcesses.count) processes")
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                if activityScope == .mac {
-                    ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
-                        HStack(spacing: 6) {
-                            Text(row.name)
-                                .font(.system(size: 9.5, weight: .medium))
-                                .lineLimit(1)
-                            Spacer()
-                            Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
-                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
-                            Text(HogFormat.memory(row.memoryBytes))
-                                .font(.system(size: 9).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if store.rows.isEmpty {
-                        Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(serverProcesses.prefix(activityRowLimit)) { process in
-                        HStack(spacing: 6) {
-                            Text(process.name)
-                                .font(.system(size: 9.5, weight: .medium))
-                                .lineLimit(1)
-                            if let container = process.container, !container.isEmpty {
-                                Text(container)
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Text(String(format: "%.0f%%", process.cpuPercent))
-                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(process.cpuPercent >= 100 ? .orange : .primary)
-                            Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
-                                .font(.system(size: 9).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
-                                                 control: serverActivityControl)
-                        }
-                    }
-                    if serverProcesses.isEmpty {
-                        Text(store.maintain.vpsStore.configuredHost.isEmpty
-                             ? "No server configured."
-                             : "No processes in the server's latest reading.")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                    }
+            // Mac on the left half, server on the right half, so the two
+            // lists read against each other with no toggle in between.
+            HStack(alignment: .top, spacing: 6) {
+                macActivityColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverActivityColumn
                 }
             }
-            .padding(5)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             .onHover { inside in
                 withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
             }
 
-            if activityScope == .server, let outcome = serverActivityControl.lastOutcome {
+            if let outcome = serverActivityControl.lastOutcome {
                 Text(outcome.message).font(.system(size: 9)).foregroundStyle(.secondary)
             }
+        }
+    }
 
-            // The toggle sits at the bottom of the list it belongs to: the same
-            // reading, taken from the other machine.
-            HStack(spacing: 4) {
-                ForEach(ActivityScope.allCases) { scope in
-                    Button {
-                        activityScope = scope
-                    } label: {
-                        Text(scope.rawValue)
-                            .font(.system(size: 9, weight: activityScope == scope ? .semibold : .regular))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 3)
-                            .background(activityScope == scope ? Color.accentColor.opacity(0.16) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 5))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(activityScope == scope ? [.isSelected] : [])
-                    .accessibilityLabel(scope.rawValue)
+    private var macActivityColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Image(systemName: "laptopcomputer")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Mac")
+                    .font(.system(size: 9.5, weight: .medium))
+                Spacer()
+                Text("\(store.rows.count) processes")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
+                HStack(spacing: 6) {
+                    Text(row.name)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
+                    Text(HogFormat.memory(row.memoryBytes))
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(2)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            if store.rows.isEmpty {
+                Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
         }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var serverActivityColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Server")
+                    .font(.system(size: 9.5, weight: .medium))
+                Spacer()
+                Text("\(serverProcesses.count) processes")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(serverProcesses.prefix(activityRowLimit)) { process in
+                HStack(spacing: 6) {
+                    Text(process.name)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .lineLimit(1)
+                    if let container = process.container, !container.isEmpty {
+                        Text(container)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Text(String(format: "%.0f%%", process.cpuPercent))
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(process.cpuPercent >= 100 ? .orange : .primary)
+                    Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
+                                         control: serverActivityControl)
+                }
+            }
+            if serverProcesses.isEmpty {
+                Text("No processes in the server's latest reading.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var activityRowLimit: Int {
@@ -1300,8 +1356,8 @@ struct HogHunterPanel: View {
 
     // MARK: - Metrics
 
-    /// The menu-bar quick view has a fixed width and a content-fitting height.
-    static let panelWidth: CGFloat = 360
+    /// The menu-bar quick view has a fixed width and a content-fitting height.  It is twice as wide as it once was so the Mac sits on the left half and the server on the right half of every section.
+    static let panelWidth: CGFloat = 720
     /// The maximum expected quick-view height for the consolidated menu bar
     /// window with graphical CPU meters, RAM, storage of all kinds and alerts.
     static let panelHeight: CGFloat = 640
