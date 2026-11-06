@@ -43,10 +43,14 @@ numbers as current, and a jump to the Server tab.  Flagged Issues show on
 Overview too, as they already did on Activity and Server.
 
 The meters render from the existing pulse and CPU history, so an older Mac
-needs no update.  Its rows carry no numeric CPU, and they rank after numbered
-rows rather than falling back to parsing the display text the way Activity's
-sort can: that is a deliberate choice, because a row with no number is not
-evidence of being busiest and the text is already rounded for display.
+needs no update.  A Mac too old to send the numeric fields still gets its
+rows ranked by the same display-text fallback the phone's
+`CompanionRow.sortCPU`/`sortMemory` use (`CompanionActivityText` in
+Sources/Companion/CompanionSnapshot.swift): text with digits parses into a
+ranking value, so those rows can rank among numbered ones, and only text
+without digits - a genuinely unnumbered row - ranks after numbered rows,
+because no number is not evidence of being busiest and the text is already
+rounded for display.  `testTextFallbackRanksOlderMacRows` pins this.
 
 ## Storage panes
 
@@ -79,8 +83,8 @@ required scenes (widget-preview, clean-confirmation, cleaner-quick,
 cleaner-partial) OCR for widget, clean-confirmation and cleaner text only
 (scripts/ios_screenshot_checks.py `scene_problem`), and none of it lives on
 the dashboard, so they are expected to pass unchanged - an expectation from
-reading the lane's source, to be confirmed by actually running it.  Three
-best-effort extras join the lane: storage-apps, storage-cleaner and maintain.
+reading the lane's source, to be confirmed by actually running it.  Four
+best-effort extras join the lane: activity, storage-apps, storage-cleaner and maintain.
 
 ## Not verified here
 

@@ -961,17 +961,25 @@ private enum CompanionActivityText {
         let upper = text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let numPart = upper.filter { $0.isNumber || $0 == "." }
         guard !numPart.isEmpty, let val = Double(numPart) else { return nil }
+        let scale: Double
         if upper.contains("TB") {
-            return UInt64(val * 1_099_511_627_776)
+            scale = 1_099_511_627_776
         } else if upper.contains("GB") {
-            return UInt64(val * 1_073_741_824)
+            scale = 1_073_741_824
         } else if upper.contains("MB") {
-            return UInt64(val * 1_048_576)
+            scale = 1_048_576
         } else if upper.contains("KB") {
-            return UInt64(val * 1_024)
+            scale = 1_024
         } else {
-            return UInt64(val)
+            scale = 1
         }
+        // Display text is untrusted: a reading at or beyond 2^64 (or one
+        // whose scaling overflows to infinity) must not trap the trapping
+        // initializer while ranking.  Reject those, keep truncating the
+        // ordinary fractional cases the way the trapping init did.
+        let scaled = val * scale
+        guard scaled.isFinite, scaled >= 0, scaled < 0x1p64 else { return nil }
+        return UInt64(scaled)
     }
 }
 
@@ -984,21 +992,36 @@ extension Array where Element == CompanionRow {
     /// same fallback `CompanionRow.sortCPU`/`sortMemory` use; a row with no
     /// reading at all ranks after numbered rows.
     func rankedByActivity() -> [CompanionRow] {
-        sorted { a, b in
+        // Parse each row's text fallback once, not once per comparison: the
+        // fallback allocates, and the comparator runs O(N log N) times per
+        // snapshot update.
+        let enriched = map { row -> (row: CompanionRow, cpu: Double, mem: UInt64) in
             // JSON decoding already refuses NaN and infinity, so no snapshot
             // delivers them; a hand-built row still gets them counted as
             // missing, because NaN's unordered comparisons would break the
             // total order.
-            let aCPU = a.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? CompanionActivityText.cpu(a.cpuText) ?? -1
-            let bCPU = b.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? CompanionActivityText.cpu(b.cpuText) ?? -1
-            if aCPU != bCPU { return aCPU > bCPU }
-            let aMem = a.memoryBytes ?? CompanionActivityText.memoryBytes(a.memoryText) ?? 0
-            let bMem = b.memoryBytes ?? CompanionActivityText.memoryBytes(b.memoryText) ?? 0
-            if aMem != bMem { return aMem > bMem }
-            // Equal names skip the ICU-backed compare entirely.
-            if a.name != b.name { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
-            return a.id < b.id
+            let cpu = row.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? CompanionActivityText.cpu(row.cpuText) ?? -1
+            let mem = row.memoryBytes ?? CompanionActivityText.memoryBytes(row.memoryText) ?? 0
+            return (row, cpu, mem)
         }
+        return enriched.sorted { a, b in
+            if a.cpu != b.cpu { return a.cpu > b.cpu }
+            if a.mem != b.mem { return a.mem > b.mem }
+            // Equal names skip the ICU-backed compare entirely.
+            let aName = a.row.name, bName = b.row.name
+            if aName != bName {
+                switch aName.localizedStandardCompare(bName) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame:
+                    // Distinct strings the collation calls equivalent still
+                    // need the id tiebreaker, or two different rows compare
+                    // equal both ways and the order is no longer total.
+                    break
+                }
+            }
+            return a.row.id < b.row.id
+        }.map { $0.row }
     }
 }
 

@@ -98,6 +98,30 @@ final class CompanionOverviewRankingTests: XCTestCase {
         XCTAssertEqual(ids(rows.rankedByActivity()), ["text-high", "numbered", "text-mid", "empty"])
     }
 
+    /// Display text is untrusted: a reading that scales to or beyond 2^64
+    /// must not trap the ranking; it counts as no reading instead.
+    func testOutOfRangeMemoryTextDoesNotTrap() {
+        let rows = [
+            row("huge", "Huge", cpu: 1, memoryText: "16777216 TB"),
+            row("overflow", "Overflow", cpu: 1, memoryText: "99999999999999999999999 TB"),
+            row("small", "Small", cpu: 1, memory: 5),
+        ]
+        XCTAssertEqual(ids(rows.rankedByActivity()), ["small", "huge", "overflow"])
+    }
+
+    /// Distinct strings the collation calls equivalent (here a precomposed
+    /// versus decomposed e-acute) must still fall through to the id
+    /// tiebreaker, or two different rows compare equal both ways.
+    func testCollationEquivalentNamesBreakTieOnID() {
+        let rows = [
+            row("b-row", "Caf\u{0301}e", cpu: 1),
+            row("a-row", "Caf\u{00E9}", cpu: 1),
+        ]
+        for permutation in allPermutations(rows) {
+            XCTAssertEqual(ids(permutation.rankedByActivity()), ["a-row", "b-row"])
+        }
+    }
+
     /// A total order gives one answer for every permutation of its input.
     /// Enumerating all 120 permutations of the five rows pins the
     /// transitivity the Overview ranking depends on; five rotations cannot
