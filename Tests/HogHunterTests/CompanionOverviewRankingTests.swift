@@ -124,14 +124,14 @@ final class CompanionOverviewRankingTests: XCTestCase {
             XCTAssertEqual(ids(permutation.rankedByActivity()), ["a-row", "b-row"])
         }
         // A case-only difference looked like the surest `.orderedSame`
-        // coverage, but the assumption is false: the Finder-style collation
-        // applies forced ordering and decides even case-only differences
-        // ("casesame" vs "CaseSame" is .orderedAscending, measured on macOS
-        // CI run 42178487100), so `.orderedSame` has no reachable test input
-        // through localizedStandardCompare and the id tie-break behind it is
-        // defensive.  What can be pinned is the behavior the tie-break
-        // protects: distinct names, however close, order deterministically
-        // under every input permutation.
+        // coverage, but the assumption fails for this pair: "casesame" vs
+        // "CaseSame" collates .orderedAscending, not .orderedSame (measured
+        // on macOS CI run 42178487100) - the Finder-style collation applied
+        // its forced ordering here.  That one observation does not prove
+        // `.orderedSame` unreachable for every input, so the id tie-break
+        // behind it stays as defensive totality; what this test can pin is
+        // the behavior the tie-break protects: distinct names, however
+        // close, order deterministically under every input permutation.
         let caseRows = [
             row("c-row", "casesame", cpu: 1),
             row("d-row", "CaseSame", cpu: 1),
