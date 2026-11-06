@@ -132,11 +132,18 @@ final class PanelServerStatusTests: XCTestCase {
                 .appendingPathComponent("panel-server-\(UUID().uuidString).sqlite"),
             maintain: maintain
         )
+        // Two samples so the Mac's graphs and rows have something to draw.
+        _ = hogStore.tick()
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        _ = hogStore.tick()
+        try await Task.sleep(nanoseconds: 600_000_000)
         let wholePanel = bitmap(of: HogHunterPanel(isQuickView: true).environmentObject(hogStore)
             .frame(width: size.width, height: size.height)
             .background(Color(nsColor: .windowBackgroundColor)), size: size)
         XCTAssertNotNil(wholePanel)
         try savePNG(wholePanel, named: "panel-with-server-strip")
+        // The glance view is two columns wide: Mac on the left half, server on the right.
+        XCTAssertGreaterThanOrEqual(HogHunterPanel.panelWidth, 700)
     }
 
     private func bitmap<V: View>(of view: V, size: CGSize) -> NSBitmapImageRep? {

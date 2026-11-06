@@ -951,6 +951,89 @@ struct CompanionRow: Codable, Equatable, Identifiable {
     var canTame: Bool? = false
 }
 
+/// Text fallback for ranking rows from a Mac too old to send the numeric
+/// fields, mirroring the phone's `CompanionRow.sortCPU`/`sortMemory`
+/// fallback.  Text without digits means "no reading" (nil), so a genuinely
+/// unnumbered row still ranks after numbered ones instead of sorting as
+/// zero.
+private enum CompanionActivityText {
+    static func cpu(_ text: String) -> Double? {
+        let digits = text.filter { $0.isNumber || $0 == "." }
+        guard !digits.isEmpty else { return nil }
+        return Double(digits)
+    }
+
+    static func memoryBytes(_ text: String) -> UInt64? {
+        let upper = text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let numPart = upper.filter { $0.isNumber || $0 == "." }
+        guard !numPart.isEmpty, let val = Double(numPart) else { return nil }
+        let scale: Double
+        if upper.contains("TB") {
+            scale = 1_099_511_627_776
+        } else if upper.contains("GB") {
+            scale = 1_073_741_824
+        } else if upper.contains("MB") {
+            scale = 1_048_576
+        } else if upper.contains("KB") {
+            scale = 1_024
+        } else {
+            scale = 1
+        }
+        // Display text is untrusted: a reading at or beyond 2^64 (or one
+        // whose scaling overflows to infinity) must not trap the trapping
+        // initializer while ranking.  Reject those, keep truncating the
+        // ordinary fractional cases the way the trapping init did.
+        let scaled = val * scale
+        guard scaled.isFinite, scaled >= 0, scaled < 0x1p64 else { return nil }
+        return UInt64(scaled)
+    }
+}
+
+extension Array where Element == CompanionRow {
+    /// The phone Overview's busiest ranking (HH-212): strictly descending
+    /// CPU, then memory, then name, then id.  A total order, so the list is
+    /// stable and cannot cycle the way an epsilon comparator can (a within
+    /// 0.05 of b and b within 0.05 of c says nothing about a and c).  A row
+    /// whose Mac sent only text readings is ranked by the parsed text, the
+    /// same kind of display-text fallback the phone's
+    /// `CompanionRow.sortCPU`/`sortMemory` apply through `UsageParser`;
+    /// unlike `UsageParser.parseMemoryBytes`, `CompanionActivityText` rejects
+    /// a reading at or beyond 2^64 as no reading instead of trapping.  A row
+    /// with no reading at all ranks after numbered rows.
+    func rankedByActivity() -> [CompanionRow] {
+        // Parse each row's text fallback once, not once per comparison: the
+        // fallback allocates, and the comparator runs O(N log N) times per
+        // snapshot update.
+        let enriched = map { row -> (row: CompanionRow, cpu: Double, mem: UInt64) in
+            // JSON decoding already refuses NaN and infinity, so no snapshot
+            // delivers them; a hand-built row still gets them counted as
+            // missing, because NaN's unordered comparisons would break the
+            // total order.
+            let cpu = row.cpuPercent.flatMap { $0.isFinite ? $0 : nil } ?? CompanionActivityText.cpu(row.cpuText) ?? -1
+            let mem = row.memoryBytes ?? CompanionActivityText.memoryBytes(row.memoryText) ?? 0
+            return (row, cpu, mem)
+        }
+        return enriched.sorted { a, b in
+            if a.cpu != b.cpu { return a.cpu > b.cpu }
+            if a.mem != b.mem { return a.mem > b.mem }
+            // Equal names skip the ICU-backed compare entirely.
+            let aName = a.row.name, bName = b.row.name
+            if aName != bName {
+                switch aName.localizedStandardCompare(bName) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame:
+                    // Distinct strings the collation calls equivalent still
+                    // need the id tiebreaker, or two different rows compare
+                    // equal both ways and the order is no longer total.
+                    break
+                }
+            }
+            return a.row.id < b.row.id
+        }.map { $0.row }
+    }
+}
+
 struct CompanionStorageCategorySummary: Codable, Equatable, Identifiable, Sendable {
     var id: String
     var title: String
