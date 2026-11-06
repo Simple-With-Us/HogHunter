@@ -82,6 +82,23 @@ final class CompanionServerActions {
         return result.reply
     }
 
+    // MARK: - Refresh
+
+    /// A phone's Refresh: the same forced read the Mac card's Refresh button
+    /// does.  It changes nothing on the server, and the router has already
+    /// applied the opt-in and the interval.  False when no server is set up.
+    @discardableResult
+    func refresh(device: String) -> Bool {
+        let host = vps.configuredHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else {
+            audit(AuditEntry(device: device, action: "refresh", row: "", outcome: "no server"))
+            return false
+        }
+        vps.fetch(force: true)
+        audit(AuditEntry(device: device, action: "refresh", row: "", outcome: "started"))
+        return true
+    }
+
     // MARK: - Processes
 
     private func performProcess(rowId: String, action: String) async -> Answer {

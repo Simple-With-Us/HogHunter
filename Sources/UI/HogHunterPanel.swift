@@ -635,7 +635,7 @@ struct HogHunterPanel: View {
         case "Retry":
             store.maintain.vpsStore.fetch(force: true)
         case "Quit":
-            if let hog = store.rows.first(where: { "mac.cpu.hog.\($0.id)" == issue.id }) {
+            if let hog = store.rows.first(where: { CompanionFlaggedIssue.quitIssueID(forRow: $0.id) == issue.id }) {
                 pendingQuit = hog
             }
         default:

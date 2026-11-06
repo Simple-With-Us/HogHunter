@@ -95,6 +95,10 @@ final class CompanionModel {
     var isRunningServerAction = false
     /// The answer to the last server action, shown in a sheet.
     var serverActionOutcome: ServerActionOutcome?
+    /// True while a server refresh request is out.
+    var isRefreshingServer = false
+    /// Why the last server refresh did not start, or nil.
+    var serverRefreshNote: String?
     var showCleanDialogRequested = false
     /// When the current Clean request arrived.  The root view only builds the
     /// dashboard when the phase is `.live`, so a link that lands while the Mac
@@ -258,6 +262,14 @@ final class CompanionModel {
             // An explicitly requested fixture never sends control traffic.
             isDemoMode = true
             snapshot = Self.sample
+            if ProcessInfo.processInfo.arguments.contains("-HogHunterIssueActions") {
+                // Built from the fixture, not from `snapshot`: reading
+                // `snapshot` on the right of `snapshot?.x =` overlaps the write
+                // access, and a Debug build traps on it (exclusivity checking),
+                // which is what sent this frame to the home screen.
+                let issues = Self.sampleIssuesWithActions + (Self.sample.flaggedIssues ?? [])
+                snapshot?.flaggedIssues = issues
+            }
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
             seedScreenshotCleaner()
@@ -679,6 +691,81 @@ final class CompanionModel {
         }
         await refresh()
     }
+
+    /// Asks the Mac to read the server again, then re-polls the snapshot while
+    /// the read lands.  Needs no confirmation: it changes nothing anywhere.
+    func refreshServer() async {
+        guard !isRefreshingServer else { return }
+        isRefreshingServer = true
+        defer { isRefreshingServer = false }
+        serverRefreshNote = nil
+        if isDemoMode {
+            try? await Task.sleep(for: .seconds(1))
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved), CompanionPeer.isTrustedEndpoint(endpoint) else {
+            serverRefreshNote = Self.controlNetworkNote
+            await refresh()
+            return
+        }
+        let started = ContinuousClock.now
+        do {
+            let response = try await CompanionConnection.triggerServerRefresh(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
+            if !response.isStarted { serverRefreshNote = response.displayText }
+        } catch {
+            serverRefreshNote = "The Mac did not answer, so the server was not refreshed.\u{00A0} \(Self.describe(error))"
+        }
+        // Whatever the Mac said, the snapshot is read again: a pull still
+        // re-polls.  Only a started read is worth waiting for, and a read over
+        // SSH takes a few seconds, so poll at 3 and 6 seconds from the start.
+        guard serverRefreshNote == nil else {
+            await refresh()
+            return
+        }
+        for checkpoint in Self.serverRefreshCheckpoints {
+            let remaining = checkpoint - (ContinuousClock.now - started)
+            if remaining > .zero { try? await Task.sleep(for: remaining) }
+            await refresh()
+        }
+    }
+
+    /// When the phone polls after a started refresh, each measured from the tap.
+    static let serverRefreshCheckpoints: [Duration] = [.seconds(3), .seconds(6)]
+
+    /// The Flagged Issues the screenshot lane shows with their buttons.  Kept
+    /// out of the sample snapshot, so the other frames stay as they were.
+    static let sampleIssuesWithActions: [CompanionFlaggedIssue] = [
+        CompanionFlaggedIssue(
+            id: CompanionFlaggedIssue.quitIssueID(forRow: "node"),
+            title: "Runaway CPU Hog: node",
+            message: "Using 310% of one core.",
+            priority: 0,
+            priorityText: "Critical",
+            host: "Mac",
+            category: "CPU",
+            action: CompanionIssueAction.quit.rawValue
+        ),
+        CompanionFlaggedIssue(
+            id: "mac.disk.low",
+            title: "Mac Boot Drive Space Low",
+            message: "21.4 GB remaining (91% used).",
+            priority: 1,
+            priorityText: "High",
+            host: "Mac",
+            category: "Storage",
+            action: CompanionIssueAction.clean.rawValue
+        ),
+        CompanionFlaggedIssue(
+            id: "server.unreachable",
+            title: "Remote Server Unreadable",
+            message: "The connection timed out.",
+            priority: 1,
+            priorityText: "High",
+            host: CompanionFlaggedIssue.serverHost,
+            category: "Service",
+            action: CompanionIssueAction.retry.rawValue
+        ),
+    ]
 
     /// What finished server actions look like in demo mode and the screenshot lane.
     static func sampleServerAnswer(_ action: CompanionServerActionRequest, rowName: String) -> CompanionServerActionResponse {

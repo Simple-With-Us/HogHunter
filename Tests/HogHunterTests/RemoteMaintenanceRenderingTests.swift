@@ -25,6 +25,39 @@ private final class ScreenshotDisconnectedInfisical: InfisicalServing {
 @MainActor
 final class RemoteMaintenanceRenderingTests: XCTestCase {
     func testRenderConfiguredServerMaintenanceWithScheduleOff() throws {
+        try renderServerMaintenance(filename: "hh207-server-maintenance-schedule-off.png")
+    }
+
+    func testRenderServerMaintenanceWithIncompleteInventory() async throws {
+        let request = try PendingMaintenanceRequest(host: "maintenance.example.invalid", mode: .scan,
+                                                    strategies: ServerMaintenanceStrategy.defaults)
+        let object: [String: Any] = [
+            "schema_version": 1, "tool": "hoghunter-server-maintenance", "mode": "scan", "manual": true,
+            "dry_run": false, "pressure": false, "status": "partial",
+            "before": ["free_bytes": 70000, "total_bytes": 100000, "used_percent": 30],
+            "after": ["free_bytes": 70000, "total_bytes": 100000, "used_percent": 30],
+            "reclaimed_bytes": 0, "observed_free_delta_bytes": 0, "removed_file_bytes": 0,
+            "candidate_count": 0, "duration_seconds": 0.1,
+            "lock": ["acquired": false], "cancellation": ["requested": false],
+            "strategies": request.strategies.map {
+                ["id": $0.rawValue, "status": "partial", "inventory_complete": false,
+                 "candidate_count": 0, "removed_count": 0, "attempted_count": 0] as [String: Any]
+            }
+        ]
+        let output = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        let controller = ServerMaintenanceControl(runner: { host, arguments in
+            XCTAssertEqual(host, request.host)
+            XCTAssertEqual(arguments, request.arguments)
+            return .init(exitCode: 1, output: output)
+        })
+        await controller.perform(request)
+        let result = try XCTUnwrap(controller.result)
+        XCTAssertEqual(result.strategies.count, request.strategies.count)
+        XCTAssertTrue(result.strategies.allSatisfy { !$0.eligibilityIsKnown(in: result.status) })
+        try renderServerMaintenance(control: controller, filename: "hh207-server-maintenance-incomplete-inventory.png")
+    }
+
+    private func renderServerMaintenance(control: ServerMaintenanceControl? = nil, filename: String) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hh207-render-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -48,7 +81,7 @@ final class RemoteMaintenanceRenderingTests: XCTestCase {
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
         let width = HogHunterPanel.dashboardWidth - 154 - 24 - 36
-        let host = NSHostingView(rootView: RemoteMaintenanceCard(maintain: maintain)
+        let host = NSHostingView(rootView: RemoteMaintenanceCard(maintain: maintain, control: control)
             .padding(12).frame(width: width, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
             .defaultAppStorage(preferences))
@@ -72,7 +105,7 @@ final class RemoteMaintenanceRenderingTests: XCTestCase {
         if let folder = environment["HOGHUNTER_RENDER_DIR"] ?? environment["TEST_RUNNER_HOGHUNTER_RENDER_DIR"], !folder.isEmpty {
             let output = URL(fileURLWithPath: folder)
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-            try data.write(to: output.appendingPathComponent("hh207-server-maintenance-schedule-off.png"))
+            try data.write(to: output.appendingPathComponent(filename))
         }
     }
 }

@@ -56,6 +56,6 @@ action, and the Mac accepts them only from its local network or Tailscale.  A
 reviewer who wants to see them without a Mac can use Demo Mode in the app.  The
 review notes must not describe the app as read-only.
 
-Tracking: [HogHunter #22](https://github.com/jaywedgeworth22/HogHunter/issues/22),
-fleet release [#296](https://github.com/jaywedgeworth22/AI-Fleet-Coordinator/issues/296),
+Tracking: [HogHunter #22](https://github.com/Simple-With-Us/HogHunter/issues/22),
+fleet release [#296](https://github.com/Simple-With-Us/AI-Fleet-Coordinator/issues/296),
 effort board `1dd567c8c0054e708882ee69e91c2652`.

@@ -192,6 +192,12 @@ class SceneChecks(unittest.TestCase):
                 self.assertIn("missing intended text", checks.scene_problem("clean-confirmation", CONFIRMATION.replace(missing, "")))
         self.assertIn("unexpected alert", checks.scene_problem("clean-confirmation", CONFIRMATION + " Open in Hog Hunter?"))
 
+    def test_issue_actions_frame_needs_the_buttons_not_the_home_screen(self):
+        frame = "Flagged Issues (4) Runaway CPU Hog: node Quit Mac Boot Drive Space Low Clean Remote Server Unreadable Retry"
+        self.assertIsNone(checks.scene_problem("issue-actions", frame))
+        self.assertIn("missing intended text", checks.scene_problem("issue-actions", "Fitness Watch Contacts Files Preview Utilities Hog Hunter Search"))
+        self.assertIn("missing intended text", checks.scene_problem("issue-actions", frame.replace("Retry", "")))
+
     def test_clipped_mac_labels_do_not_pass(self):
         full = "Sampling & Display Active Refresh (When Open) Background Refresh (When Closed) Menu Bar Shows Show Percentage in Menu Bar CPU Rows Show"
         self.assertIsNone(checks.scene_problem("mac-settings", full))
@@ -342,6 +348,7 @@ class SceneChecks(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         command = ci.split("- name: Require server maintenance render\n        run: ")[1].splitlines()[0]
         self.assertIn("hh207-server-maintenance-schedule-off.png", command)
+        self.assertIn("hh207-server-maintenance-incomplete-inventory.png", command)
         self.assertIn("HOGHUNTER_RENDER_DIR:", ci)
         self.assertIn("TEST_RUNNER_HOGHUNTER_RENDER_DIR:", ci)
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,7 +360,14 @@ class SceneChecks(unittest.TestCase):
             image.touch()
             self.assertNotEqual(gate(), 0)
             image.write_bytes(png(400, 800, os.urandom(8000)))
+            self.assertNotEqual(gate(), 0)
+            incomplete = Path(tmp) / "hh207-server-maintenance-incomplete-inventory.png"
+            incomplete.touch()
+            self.assertNotEqual(gate(), 0)
+            incomplete.write_bytes(png(400, 800, os.urandom(8000)))
             self.assertEqual(gate(), 0)
+            image.unlink()
+            self.assertNotEqual(gate(), 0)
 
     def test_sample_safety_and_shared_mac_size_contract(self):
         model = (ROOT / "ios/Sources/CompanionModel.swift").read_text()
