@@ -125,10 +125,15 @@ final class CompanionOverviewRankingTests: XCTestCase {
         }
         // A case-only difference is the surest `.orderedSame` coverage:
         // Swift's `==` is case-sensitive while the Finder-style collation
-        // folds case.  The lowercase row holds the smaller id so the
-        // expectation also matches a case-sensitive ordering; the assertion
-        // fails only through a real ordering bug, not a collation option
-        // change.
+        // folds case.  Pin that collation assumption directly: if it ever
+        // stops holding, the `.orderedSame` tie-break coverage claim - not
+        // just the expected order - needs re-examination.
+        XCTAssertEqual("casesame".localizedStandardCompare("CaseSame"), .orderedSame)
+        // The lowercase row holds the smaller id so the expected order also
+        // matches a case-sensitive collation; with the pin above green, the
+        // rows provably reach the `.orderedSame` tie-break and the assertion
+        // fails if the tie-break is weakened (a "both directions false"
+        // revert keeps the [d-row, c-row] input order instead of sorting).
         let caseRows = [
             row("c-row", "casesame", cpu: 1),
             row("d-row", "CaseSame", cpu: 1),
