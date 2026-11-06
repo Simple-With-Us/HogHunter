@@ -35,6 +35,10 @@ final class VPSStatusStore: ObservableObject {
     private var timer: Timer?
     private var stalenessTimer: Timer?
     private var activeFetchTask: Task<Void, Never>?
+    /// A forced read asked for while another was in flight.  It runs once
+    /// that read ends, so a Refresh never lands on a read that started before
+    /// it and is silently dropped.  Several asks while busy make one read.
+    private(set) var hasQueuedForcedFetch = false
 
     init(initialHost: String = "", fetcher: Fetcher? = nil, history: SizeGrowthHistory = .shared) {
         self.history = history
@@ -61,9 +65,11 @@ final class VPSStatusStore: ObservableObject {
         cancelStalenessTimer()
         cpuHistory = CpuMinuteHistory()
         if !configuredHost.isEmpty {
+            // A new host wants fresh readings now, not in a minute.  The
+            // polling start reads at once, because the last fetch time was
+            // just cleared; a second, forced fetch here would only be queued
+            // behind it and read the host twice.
             startPolling()
-            // A new host wants fresh readings now, not in a minute.
-            fetch(force: true)
         } else {
             stopPolling()
         }
@@ -104,6 +110,7 @@ final class VPSStatusStore: ObservableObject {
     }
 
     func stopPolling() {
+        hasQueuedForcedFetch = false
         timer?.invalidate()
         timer = nil
         cancelStalenessTimer()
@@ -144,7 +151,10 @@ final class VPSStatusStore: ObservableObject {
             return
         }
 
-        if isLoading { return }
+        if isLoading {
+            if force { hasQueuedForcedFetch = true }
+            return
+        }
 
         if !force, let last = lastFetchDate, Date().timeIntervalSince(last) < 60 {
             return
@@ -191,6 +201,10 @@ final class VPSStatusStore: ObservableObject {
                 self.lastReadError = err.localizedDescription
             }
             self.isLoading = false
+            if self.hasQueuedForcedFetch {
+                self.hasQueuedForcedFetch = false
+                self.fetch(force: true)
+            }
         }
     }
 

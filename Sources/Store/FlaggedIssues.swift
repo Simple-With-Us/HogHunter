@@ -226,7 +226,7 @@ enum FlaggedIssueEvaluator {
         let topHogs = macStore.rows.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(3)
         for hog in topHogs where hog.cpuPercent >= 200.0 {
             issues.append(FlaggedIssue(
-                id: "mac.cpu.hog.\(hog.id)",
+                id: CompanionFlaggedIssue.quitIssueID(forRow: hog.id),
                 title: "Runaway CPU Hog: \(hog.name)",
                 message: "Using \(HogFormat.cpu(hog.cpuPercent)) of one core.",
                 priority: hog.cpuPercent >= 300.0 ? .critical : .high,

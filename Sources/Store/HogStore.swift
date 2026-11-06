@@ -209,6 +209,7 @@ final class HogStore: ObservableObject {
     @Published var allowRemoteServerStatus = false {
         didSet {
             persist()
+            companionServer.allowRemoteServerStatus = allowRemoteServerStatus
             companionServer.allowRemoteServerControl = serverControlEffective
             if !loadingSettings { publishCompanion() }
         }
@@ -226,6 +227,8 @@ final class HogStore: ObservableObject {
     private var serverControlEffective: Bool { allowRemoteServerControl && allowRemoteServerStatus }
     /// What the router was last told, for the tests of the opt-in.
     var serverControlAllowedOnRouter: Bool { companionServer.allowRemoteServerControl }
+    /// Whether the router knows a server is set up, for the refresh tests.
+    var serverConfiguredOnRouter: Bool { companionServer.serverConfigured }
     @Published private(set) var companionCode = ""
     @Published private(set) var companionStatus = "Off"
     /// Current or recently completed disk clean progress, streamed to the iOS companion.
@@ -1629,6 +1632,15 @@ final class HogStore: ObservableObject {
         companionServer.allowRemoteEdit = allowRemoteEdit
         companionServer.allowRemoteMaintain = allowRemoteMaintain
         companionServer.allowRemoteServerControl = serverControlEffective
+        companionServer.allowRemoteServerStatus = allowRemoteServerStatus
+        maintain.vpsStore.$configuredHost
+            .sink { [companionServer] host in
+                companionServer.serverConfigured = !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            .store(in: &maintainObservers)
+        companionServer.onRemoteServerRefresh = { [weak self] device in
+            Task { @MainActor [weak self] in self?.serverActions.refresh(device: device) }
+        }
         companionServer.onRemoteServerAction = { [weak self] request, device, completion in
             Task { @MainActor [weak self] in
                 guard let self else { return completion((500, Data("{\"error\": \"Store unavailable\"}".utf8))) }
@@ -2781,14 +2793,20 @@ final class HogStore: ObservableObject {
         // `errorMessage`, so a failing server does not read as calm while a
         // retry is running.
         let vps = maintain.vpsStore
-        let issues = CompanionServerStatusBuilder.issues(FlaggedIssueEvaluator.evaluate(
+        let evaluated = FlaggedIssueEvaluator.evaluate(
             macStore: self,
             vpsSnapshot: vps.snapshot,
             vpsError: vps.lastReadError,
             vpsConfigured: !vps.configuredHost.isEmpty,
             vpsStale: vps.isStale,
             externalDrives: MountedDriveStore.shared.rows
-        ))
+        )
+        // The plain snapshot is what the shared code reads, and the shared code
+        // cannot act, so its issues carry no actions.  Only the detailed one,
+        // which goes to a phone's own token on a trusted link, offers them.
+        let plainIssues = CompanionServerStatusBuilder.issues(evaluated)
+        let actionIssues = CompanionServerStatusBuilder.issues(evaluated, allowed: .init(quit: allowRemoteQuit, clean: allowRemoteClean, refresh: allowRemoteServerStatus))
+        let hasActions = actionIssues.contains { $0.action != nil }
         var plain = snapshot
         if plain.storage != nil {
             plain.storage?.tempFileMinimumHours = remoteTempPolicy().minimumUntouchedHours
@@ -2798,17 +2816,18 @@ final class HogStore: ObservableObject {
             }
         }
         plain.remoteServerStatusAllowed = allowRemoteServerStatus
-        plain.flaggedIssues = issues.filter { !$0.isServer }
+        plain.flaggedIssues = plainIssues.filter { !$0.isServer }
         plain.flaggedIssuesCoverServer = false
-        guard allowRemoteMaintain || allowRemoteServerStatus else { return (plain, nil) }
+        guard allowRemoteMaintain || allowRemoteServerStatus || hasActions else { return (plain, nil) }
         var detailed = plain
+        detailed.flaggedIssues = actionIssues.filter { !$0.isServer }
         if allowRemoteMaintain {
             detailed.maintain = maintainStatusForPhone(detailed: true)
         }
         if allowRemoteServerStatus {
             detailed.server = serverStatusForPhone(now: now)
             detailed.remoteServerControlAllowed = serverControlEffective
-            detailed.flaggedIssues = issues
+            detailed.flaggedIssues = actionIssues
             detailed.flaggedIssuesCoverServer = true
         }
         return (plain, detailed)

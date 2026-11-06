@@ -38,6 +38,12 @@ enum CompanionService {
     static let serverWorkloadPath = "/v1/server/workload"
     /// Scans or runs server maintenance.
     static let serverMaintainPath = "/v1/server/maintain"
+    /// Asks the Mac to read the server again now, like the Refresh button on the
+    /// Mac's server card.  Read only, so it sits behind Allow iPhone to See
+    /// Server Status, not the server-controls opt-in, and like every route but
+    /// the snapshot it takes a phone's own token from the local network or
+    /// Tailscale.  At most one every `CompanionServerRefresh.minimumInterval`.
+    static let serverRefreshPath = "/v1/server/refresh"
     /// The only run the phone may start.  The Mac's script also knows
     /// cheaper cadences and a pressure run; none of them is reachable from here.
     static let maintainRunKinds = ["full"]
@@ -1459,8 +1465,77 @@ struct CompanionFlaggedIssue: Codable, Equatable, Identifiable, Sendable {
     /// `Mac` or `Server`.
     var host: String
     var category: String? = nil
+    /// What the phone may do about it, by the Mac's word: `clean`, `quit` or
+    /// `retry`.  A plain string rather than the enum, so a kind a later Mac adds
+    /// leaves an older phone decoding the snapshot and simply showing no button.
+    /// The Mac sends it only while the opt-in the action needs is on.
+    var action: String? = nil
 
     var isServer: Bool { host == Self.serverHost }
+
+    /// The action, when this phone knows it.
+    var actionKind: CompanionIssueAction? { action.flatMap(CompanionIssueAction.init(rawValue:)) }
+
+    /// The id the Mac gives a runaway-process issue.  The phone finds the row to
+    /// quit from it, so a Quit button needs no new field: the row id is the one
+    /// the snapshot's rows already carry, and the quit route re-checks it.
+    static func quitIssueID(forRow rowId: String) -> String { "mac.cpu.hog.\(rowId)" }
+}
+
+/// What a Flagged Issue's button does on the phone.  Each maps to something the
+/// phone already has: the server refresh, the quit flow with its confirmation,
+/// or the Disk Cleaner screen.  None is a new way to change the Mac.
+enum CompanionIssueAction: String, Codable, CaseIterable, Sendable {
+    case clean
+    case quit
+    case retry
+
+    /// The button's words, the same as the Mac panel's.
+    var title: String {
+        switch self {
+        case .clean: return "Clean"
+        case .quit: return "Quit"
+        case .retry: return "Retry"
+        }
+    }
+}
+
+/// The server refresh route's rules, shared by the Mac and the phone.
+enum CompanionServerRefresh {
+    /// One forced read of the server per this many seconds, from every phone
+    /// together.  The Mac's own poll is once a minute.
+    static let minimumInterval: TimeInterval = 15
+}
+
+/// The Mac's answer to a server refresh.  `status` is `started`, `forbidden`,
+/// `noServer`, `throttled` or `rejected`.  `retryAfter` is in seconds and comes with
+/// `throttled`, beside the `Retry-After` header.
+struct CompanionServerRefreshResponse: Codable, Equatable, Sendable {
+    var status: String
+    var message: String? = nil
+    var error: String? = nil
+    var retryAfter: Int? = nil
+
+    var isStarted: Bool { status == "started" }
+    var displayText: String { error ?? message ?? "The Mac did not say what happened." }
+
+    /// What the phone makes of the reply, whatever its status.  A typed body
+    /// wins, because that is where a refusal says why.
+    static func answer(status: Int, body: Data) -> CompanionServerRefreshResponse {
+        if let typed = try? JSONDecoder().decode(CompanionServerRefreshResponse.self, from: body) {
+            return typed
+        }
+        switch status {
+        case 401:
+            return CompanionServerRefreshResponse(status: "forbidden", error: "This iPhone is no longer paired with the Mac.\u{00A0} Pair it again.")
+        case 404:
+            return CompanionServerRefreshResponse(status: "rejected", error: "This Mac's copy of Hog Hunter is older than this app and cannot refresh the server from iPhone.\u{00A0} Update it on the Mac.")
+        case 429:
+            return CompanionServerRefreshResponse(status: "throttled", error: "The server was just refreshed.\u{00A0} Wait a moment, then try again.")
+        default:
+            return CompanionServerRefreshResponse(status: "rejected", error: "The Mac did not refresh the server.")
+        }
+    }
 }
 
 /// What the phone can say about server status on this link.

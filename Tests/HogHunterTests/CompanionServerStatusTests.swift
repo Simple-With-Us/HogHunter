@@ -457,6 +457,28 @@ final class CompanionServerOptInTests: XCTestCase {
         XCTAssertFalse(plain.flaggedIssues?.contains { $0.isServer } == true)
     }
 
+    func testIssueActionsReachOnlyTheDetailedSnapshot() async throws {
+        let store = try makeStore(reading: nil)
+        try await read(store)
+        store.allowRemoteServerStatus = true
+        store.allowRemoteQuit = true
+        store.allowRemoteClean = true
+        let (plain, detailed) = store.companionSnapshots()
+        XCTAssertTrue(plain.flaggedIssues?.allSatisfy { $0.action == nil } ?? true, "the shared code reads the plain snapshot and cannot act")
+        XCTAssertFalse(try json(plain).contains("\"action\""))
+        let detail = try XCTUnwrap(detailed)
+        XCTAssertEqual(detail.flaggedIssues?.first { $0.id == "server.unreachable" }?.actionKind, .retry)
+    }
+
+    func testTheRouterKnowsWhetherAServerIsSetUp() async throws {
+        let store = try makeStore(reading: nil)
+        XCTAssertFalse(store.serverConfiguredOnRouter)
+        try await read(store)
+        XCTAssertTrue(store.serverConfiguredOnRouter)
+        store.maintain.vpsStore.setHost("")
+        XCTAssertFalse(store.serverConfiguredOnRouter)
+    }
+
     func testAFailedReadsErrorTextStaysOutOfThePlainSnapshot() async throws {
         let store = try makeStore(reading: nil)
         try await read(store)

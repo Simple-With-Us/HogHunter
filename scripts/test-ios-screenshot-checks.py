@@ -192,6 +192,12 @@ class SceneChecks(unittest.TestCase):
                 self.assertIn("missing intended text", checks.scene_problem("clean-confirmation", CONFIRMATION.replace(missing, "")))
         self.assertIn("unexpected alert", checks.scene_problem("clean-confirmation", CONFIRMATION + " Open in Hog Hunter?"))
 
+    def test_issue_actions_frame_needs_the_buttons_not_the_home_screen(self):
+        frame = "Flagged Issues (4) Runaway CPU Hog: node Quit Mac Boot Drive Space Low Clean Remote Server Unreadable Retry"
+        self.assertIsNone(checks.scene_problem("issue-actions", frame))
+        self.assertIn("missing intended text", checks.scene_problem("issue-actions", "Fitness Watch Contacts Files Preview Utilities Hog Hunter Search"))
+        self.assertIn("missing intended text", checks.scene_problem("issue-actions", frame.replace("Retry", "")))
+
     def test_clipped_mac_labels_do_not_pass(self):
         full = "Sampling & Display Active Refresh (When Open) Background Refresh (When Closed) Menu Bar Shows Show Percentage in Menu Bar CPU Rows Show"
         self.assertIsNone(checks.scene_problem("mac-settings", full))

@@ -27,6 +27,10 @@ private enum ServerFormat {
 /// Mac's calm alone.
 struct FlaggedIssuesSection: View {
     let snapshot: CompanionSnapshot
+    /// Whether this phone may offer an action now: its opt-in is on and this
+    /// link is one the Mac takes controls on.  Off unless the caller says so.
+    var canAct: (CompanionIssueAction) -> Bool = { _ in false }
+    var onAction: (CompanionFlaggedIssue, CompanionIssueAction) -> Void = { _, _ in }
 
     var body: some View {
         let summary = snapshot.flaggedSummary()
@@ -37,7 +41,11 @@ struct FlaggedIssuesSection: View {
                     EmptyView()
                 case .issues(_, let serverIncluded):
                     ForEach(snapshot.flaggedIssues ?? []) { issue in
-                        FlaggedIssueRow(issue: issue)
+                        FlaggedIssueRow(
+                            issue: issue,
+                            action: issue.actionKind.flatMap { canAct($0) ? $0 : nil },
+                            onAction: { onAction(issue, $0) }
+                        )
                     }
                     if !serverIncluded {
                         Text(Self.macOnlyNote)
@@ -84,6 +92,9 @@ struct FlaggedIssuesSection: View {
 
 private struct FlaggedIssueRow: View {
     let issue: CompanionFlaggedIssue
+    /// The button to show, already checked against the opt-ins and the link.
+    let action: CompanionIssueAction?
+    let onAction: (CompanionIssueAction) -> Void
 
     private var tint: Color {
         switch issue.priority {
@@ -120,8 +131,16 @@ private struct FlaggedIssueRow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
+            if let action {
+                Spacer(minLength: 4)
+                // Bordered, so only the button takes the tap, not the whole row.
+                Button(action.title) { onAction(action) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityLabel("\(action.title): \(issue.title)")
+            }
         }
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -157,6 +176,9 @@ struct ServerTabContent: View {
             if ServerScreenshotFrame.current == .top {
                 machinesSection(server: server)
                 stateSection(server)
+                if server.resolvedState() != .notConfigured {
+                    refreshSection
+                }
             }
             if server.hasReading {
                 ServerControlNote(snapshot: snapshot, model: model)
@@ -206,6 +228,32 @@ struct ServerTabContent: View {
             }
         } header: {
             Text("Mac and Server")
+        }
+    }
+
+    /// The Mac card's Refresh button.  No confirmation: it reads the server
+    /// again and changes nothing there.  Pull to refresh does the same.
+    private var refreshSection: some View {
+        Section {
+            Button {
+                Task { await model.refreshServer() }
+            } label: {
+                HStack {
+                    Label("Refresh Server Reading", systemImage: "arrow.clockwise")
+                    Spacer()
+                    if model.isRefreshingServer {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(model.isRefreshingServer || !model.controlsReachable)
+            if let note = model.serverRefreshNote {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } footer: {
+            Text("Asks the Mac to read the server now instead of at its next minute.\u{00A0} Nothing on the server changes.")
         }
     }
 

@@ -23,6 +23,7 @@ enum CompanionHTTP {
         cleanSettingsHandler: ((CompanionCleanSettingsRequest) -> (status: Int, body: Data))? = nil,
         serverControlGate: (() -> (status: Int, body: Data)?)? = nil,
         serverActionHandler: ((CompanionServerActionRequest) -> (status: Int, body: Data))? = nil,
+        serverRefreshHandler: (() -> (status: Int, body: Data, retryAfter: Int?))? = nil,
         peerTrusted: Bool = true,
         deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
@@ -53,6 +54,7 @@ enum CompanionHTTP {
             || path == CompanionService.maintainRunPath
             || path == CompanionService.maintainSettingsPath
             || path == CompanionService.cleanSettingsPath
+            || path == CompanionService.serverRefreshPath
             || CompanionHTTP.isServerControlPath(path) else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
@@ -304,6 +306,22 @@ enum CompanionHTTP {
             }
             let (code, resBody) = serverActionHandler(action)
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.serverRefreshPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let serverRefreshHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Server Refresh Not Configured".utf8))
+            }
+            // The route takes nothing: no query and no body, so there is no
+            // field through which a request could name a host or a command.
+            guard !fullPath.contains("?"), bodyData(of: request).isEmpty else {
+                let body = (try? JSONEncoder().encode(CompanionServerRefreshResponse(status: "rejected", error: "A server refresh takes no details, so nothing was done."))) ?? Data()
+                return message(status: 400, reason: "Bad Request", body: body, type: "application/json; charset=utf-8")
+            }
+            let answer = serverRefreshHandler()
+            let headers = answer.retryAfter.map { ["Retry-After: \($0)"] } ?? []
+            return message(status: answer.status, reason: reason(for: answer.status), body: answer.body, type: "application/json; charset=utf-8", extraHeaders: headers)
         } else if path == CompanionService.maintainSettingsPath {
             guard method == "POST" else {
                 return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
@@ -1052,6 +1070,20 @@ enum CompanionHTTP {
 
     static func serverActionRequest(token: String, action: CompanionServerActionRequest, host: String? = nil) -> Data {
         jsonPostRequest(path: action.path, token: token, body: action.body, host: host)
+    }
+
+    /// A server refresh: a bare POST, because the route takes nothing.
+    static func serverRefreshRequest(token: String, host: String? = nil) -> Data {
+        let lines = [
+            "POST \(CompanionService.serverRefreshPath) HTTP/1.1",
+            hostHeaderLine(host),
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Content-Length: 0",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
     static func maintainRunRequest(token: String, kind: String = "full", host: String? = nil) -> Data {

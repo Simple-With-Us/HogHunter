@@ -505,6 +505,47 @@ struct DashboardView: View {
         showQuitConfirm = true
     }
 
+    /// Whether a Flagged Issue may show its button: the opt-in its action needs
+    /// is on, and this link is one the Mac takes controls on.  The Mac also
+    /// leaves the action off while the opt-in is off; this is the phone's half.
+    private func issueActionAllowed(_ action: CompanionIssueAction) -> Bool {
+        guard model.controlsReachable else { return false }
+        switch action {
+        case .quit: return snapshot.remoteQuitAllowed == true
+        case .clean: return snapshot.remoteCleanAllowed == true
+        case .retry:
+            if case .available = snapshot.serverAccess { return true }
+            return false
+        }
+    }
+
+    /// Each button goes where the phone already goes for that action.  Quit
+    /// takes the row the issue names to the usual confirmation, by row id,
+    /// and the Mac's quit route checks it again.
+    private func performIssueAction(_ issue: CompanionFlaggedIssue, _ action: CompanionIssueAction) {
+        guard issueActionAllowed(action) else { return }
+        switch action {
+        case .quit:
+            guard let row = snapshot.rows.first(where: { CompanionFlaggedIssue.quitIssueID(forRow: $0.id) == issue.id }), row.canQuit else {
+                model.controlError = "That process is no longer in the list.\u{00A0} Wait for the list to refresh, then try again."
+                return
+            }
+            confirmQuit(row: row, force: false)
+        case .clean:
+            showCleaner = true
+        case .retry:
+            // The Server tab shows the note under its Refresh button.  Anywhere
+            // else the outcome goes to the alert, so a refusal is not silent.
+            let onServerTab = selectedTab == .server
+            Task {
+                await model.refreshServer()
+                if !onServerTab, let note = model.serverRefreshNote {
+                    model.controlError = note
+                }
+            }
+        }
+    }
+
     private func confirmTame(row: CompanionRow, action: String) {
         pendingTameRow = row
         pendingTameAction = action
@@ -708,7 +749,7 @@ struct DashboardView: View {
                 // The first tab a person sees and the tab about the server: the
                 // two places "is anything wrong?" gets asked.
                 if selectedTab == .activity || selectedTab == .server {
-                    FlaggedIssuesSection(snapshot: snapshot)
+                    FlaggedIssuesSection(snapshot: snapshot, canAct: issueActionAllowed, onAction: performIssueAction)
                 }
 
                 switch selectedTab {
@@ -723,6 +764,15 @@ struct DashboardView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .refreshable {
+                // On the Server tab a pull asks the Mac to read the server too,
+                // when this phone may see it.  Anywhere else it re-polls.
+                if selectedTab == .server, issueActionAllowed(.retry) {
+                    await model.refreshServer()
+                } else {
+                    await model.refresh()
+                }
+            }
             .sheet(item: $model.serverActionOutcome) { outcome in
                 ServerActionResultView(outcome: outcome)
             }

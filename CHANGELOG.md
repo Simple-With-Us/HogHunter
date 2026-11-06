@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+The iPhone can refresh the server and act on Flagged Issues (HH-218):
+
+- The Server tab has a Refresh Server Reading button, and pull to refresh does the same: the Mac reads the server now instead of at its next minute.  The new route, `POST /v1/server/refresh`, is read only, so it sits behind Allow iPhone to See Server Status, takes a phone's own token on the local network or Tailscale, and allows one refresh per 15 seconds.
+- Flagged Issues show the Mac's Clean, Quit and Retry buttons when the matching opt-in is on.  Clean opens the Disk Cleaner screen, Quit goes through the usual quit confirmation by row id, and Retry is the server refresh.  No new route changes anything.  Full context in `docs/rollouts/2026-11-05-iphone-server-refresh-and-issue-actions.md`.
+
 The iPhone closes the small gaps with the Mac (HH-215, batch 3):
 
 - The Storage tab shows what a Standard clean could free and the space by kind of data.  The Maintain screen lists the custom scripts by name and state, turns the built-in steps on or off, and sets the disk threshold, worktree retention and PM2 log cap.  The Disk Cleaner screen sets the temp file minimum untouched hours.  Settings can open Hog Hunter at login.
