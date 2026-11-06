@@ -61,14 +61,25 @@ Automatic mode never removes a lane that is dirty, open, fresh, beyond its merge
 | A duplicate simulator runtime image | `duplicate-sim-runtimes`, deleted with `xcrun simctl runtime delete <id>`, never a directory delete | Two or more Ready images of one runtime and version.  Only a Disk Image, never the image `simctl runtime match list` chooses, never an image used more recently than the rest, only one reported `deletable`.  Skipped unless exactly one Xcode is installed, while any device is not Shutdown, or while xcodebuild, Simulator or Bitrig runs.  Asks simctl only when CoreSimulatorService is already alive, so it never closes `simulator-runtimes`.  Output that does not read true gives no candidate, and an absent `lastUsedAt` is that |
 
 
+### Disk Upkeep (HH-219)
+
+The owner decided on Nov 5 to widen automatic deletes modestly ("train Hog Hunter to do a better job maintaining its disk space").  Each delete below identifies what it takes by what is there, never by a list of what to refuse.  Both pass a recheck on a fresh open-file listing right before the delete.
+
+| What | Rule | Gate |
+|---|---|---|
+| An Xcode DerivedData root left by `-derivedDataPath` | `xcode-scratch`: direct children of `/private/tmp` and `~/.clutch/derived-data`, deleted only at 60 GB free or less, so always at 25 GB | `info.plist` names a `WorkspacePath`, the top holds only Xcode's entries and no link, `Build/` holds only Products and Intermediates.noindex, `Logs/` or `Index.noindex/` sits beside it, and it is on the home folder's volume.  No repository inside but a clean SwiftPM clone.  Nothing in its top two levels changed in 24 hours.  No keep marker, no open handle, no process running from it or naming its path or folder name.  df is read again before the delete |
+| A superseded BotFleet release | `botfleet-releases`: `~/.botfleet/releases` and `~/.botfleet-companion/releases` | The store reads true: a real `releases` folder holding only commit-named folders, and a `current` link that resolves to one of them.  Keeps that one, the newest 2 others and any a link, wrapper or LaunchAgent names.  Idle 7 days, no open handle, no process running from it or naming it, no keep marker.  Releases are read-only, so the delete grants write permission first, after every guard |
+
+**The early warning.**  Under 40 GB free a run sizes the ask-first trees, and when the report-only rows add up to more than 10 GB the JSON report carries `top_report_only`: the 8 biggest rows with path, bytes and rule, a row inside another listed row not counted twice.  The key is absent otherwise.
+
 ### What Is Only Reported
 
-`stale-build-output` and `xcode-scratch` never delete, whatever the disk level.  A `--scan` lists each tree with what the checks found, and a clean run skips the walks because nobody reads the rows.
+`stale-build-output` never deletes, whatever the disk level.  `xcode-scratch` lists every Xcode-shaped tree it may not delete, with the first gate that stopped it.  A `--scan` lists each tree, and a clean run skips the stale build walks because nobody reads the rows.
 
 | What | Rule | What a row says |
 |---|---|---|
 | Ignored build output in main checkouts | `stale-build-output`: `.build`, `.next`, `build`, `target` directly in `~/Code/<repo>`, or a path named per repo | Whether git ignores it and tracks nothing in it, whether it changed in 14 days, whether a process holds it or works in the repo, a keep marker, nested repositories, and keys, notes or project files inside.  `node_modules` and `dist` get the idle row only |
-| Xcode-shaped scratch | `xcode-scratch`: direct children of `/private/tmp` that look like `-derivedDataPath` output | Whether it was used in 24 hours, a build running, an open handle, a keep marker, and anything inside that Xcode does not write |
+| Xcode-shaped scratch it may not delete | `xcode-scratch`: direct children of `/private/tmp` and `~/.clutch/derived-data` | The first gate that stopped it: the shape, `info.plist`, use in 24 hours, a keep marker, a nested repository, an open handle, or a process running from it or naming it |
 
 **The owner's Nov 4 narrowing was not used for automatic deletes.**  The owner allowed deleting stale build output ("teach HH wherever possible").  Two adversarial review rounds on Nov 4 kept finding what the checks miss: a `.p8` key and a dSYM past the refuse-list, a CLI symlinked into `target/release`, a server started from the parent folder.  With every gate in place the rules reclaimed almost nothing, because real SwiftPM clones fail the proof below.  So a person decides, and `Never Touch` stands as written.
 

@@ -2924,15 +2924,37 @@ def test_tool_versions_refuses_at_apply_when_the_path_was_replaced(hh):
 
 # --- xcode-scratch --------------------------------------------------------
 
-def xcode_tree(home, name="seat-build", days=3):
-    tree = home / "private-tmp" / name
+INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LastAccessedDate</key>
+	<date>2026-11-01T10:00:00Z</date>
+	<key>WorkspacePath</key>
+	<string>/Users/someone/Code/App/App.xcodeproj</string>
+</dict>
+</plist>
+"""
+
+
+def xcode_tree(home, name="seat-build", days=3, root=None):
+    """A DerivedData root the way `xcodebuild -derivedDataPath` leaves it,
+    everything in it last changed `days` ago."""
+    tree = (root or home / "private-tmp") / name
     blob(tree / "Build" / "Products" / "Debug" / "App.app" / "App", days)
-    (tree / "Build" / "Intermediates.noindex").mkdir(parents=True)
+    (tree / "Build" / "Intermediates.noindex" / "XCBuildData").mkdir(parents=True)
     (tree / "CompilationCache.noindex").mkdir()
     (tree / "ModuleCache.noindex").mkdir()
-    (tree / "info.plist").write_text("<plist/>\n", encoding="utf-8")
-    age(tree / "info.plist", days)
+    (tree / "Logs" / "Build").mkdir(parents=True)
+    (tree / "info.plist").write_text(INFO_PLIST, encoding="utf-8")
+    settle(tree, days)
     return tree
+
+
+def settle(tree, days=3):
+    """Everything in the tree, and the tree itself, as if untouched for days."""
+    age_all(tree, days)
+    age(tree, days)
 
 
 def test_xcode_scratch_refuses_anything_that_looks_like_source(hh):
@@ -2949,6 +2971,7 @@ def test_xcode_scratch_refuses_anything_that_looks_like_source(hh):
             (tree / name).mkdir()
             assert hh._xcode_scratch_refusal(tree) is not None, name
             (tree / name).rmdir()
+        settle(tree)
         assert hh._xcode_scratch_refusal(tree) is None, "and the clean tree still passes"
 
 
@@ -2972,9 +2995,9 @@ def test_xcode_scratch_refuses_links_and_other_owners(hh):
         link = home / "private-tmp" / "link-to-it"
         link.symlink_to(tree)
         assert rule_paths(hh.rule_xcode_scratch()) == {str(tree)}, "a symlink is not followed"
-        (tree / "Logs").symlink_to(home)
+        (tree / "TestResults").symlink_to(home)
         assert hh._xcode_scratch_refusal(tree) is not None, "a link inside at the top"
-        (tree / "Logs").unlink()
+        (tree / "TestResults").unlink()
         with mock.patch.object(hh.os, "getuid", return_value=os.getuid() + 1):
             assert hh._xcode_scratch_refusal(tree) is not None, "another user's tree"
 
@@ -2992,11 +3015,13 @@ def test_xcode_scratch_per_tree_findings(hh):
             assert "names it" in str(hh._xcode_scratch_refusal(tree))
         with mock.patch.object(hh, "changed_age_min", return_value=60.0):
             assert "24 hours" in str(hh._xcode_scratch_refusal(tree))
-        with mock.patch.object(hh, "_build_running", return_value=True):
-            assert "a build is running" in hh.rule_xcode_scratch()[0].reason
+        with mock.patch.object(hh, "repo_has_process_cwd", return_value=True):
+            assert "runs from it" in str(hh._xcode_scratch_refusal(tree))
+        with mock.patch.object(hh, "process_names_path", side_effect=lambda p: p == tree.name):
+            assert "names it" in str(hh._xcode_scratch_refusal(tree)), "a relative -derivedDataPath"
         deep = tree / "Build" / "Products" / hh.KEEP_SENTINEL
         deep.write_text("", encoding="utf-8")
-        age_all(tree, 3)
+        settle(tree)
         assert "marker" in str(hh._xcode_scratch_refusal(tree))
         deep.unlink()
         (tree / "Build" / "Products" / "Debug" / "App.app" / "App").unlink()
@@ -3011,7 +3036,7 @@ def test_xcode_scratch_nested_repositories(hh):
         assert hh._xcode_scratch_refusal(tree) is not None, "a repository outside SwiftPM's folder"
         shutil.rmtree(tree / "Build" / "Products" / "clone")
         clone = upstream_clone(home, tree / "SourcePackages" / "checkouts" / "dep")
-        age_all(tree, 3)
+        settle(tree)
         assert hh._xcode_scratch_refusal(tree) is None, "a clean SwiftPM clone of its upstream rebuilds"
         (clone / "edit.swift").write_text("x", encoding="utf-8")
         age(clone / "edit.swift", 3)
@@ -3019,7 +3044,7 @@ def test_xcode_scratch_nested_repositories(hh):
         (clone / "edit.swift").unlink()
         shutil.rmtree(clone / ".git")
         (clone / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
-        age_all(tree, 3)
+        settle(tree)
         assert hh._xcode_scratch_refusal(tree) is not None, "a linked worktree at SwiftPM's path"
 
 
@@ -3344,7 +3369,8 @@ def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulab
     for name, tier, op in (("duplicate-sim-runtimes", "semi-safe", "simctl-runtime-delete"),
                            ("stale-build-output", "ask-first", "report"),
                            ("tool-versions", "safe", "delete"),
-                           ("xcode-scratch", "ask-first", "report")):
+                           ("xcode-scratch", "safe", "delete"),
+                           ("botfleet-releases", "safe", "delete")):
         assert rules[name]["tier"] == tier, name
         assert rules[name]["op"] == op, name
         assert f'"{name}"' not in block, f"the regimen cannot run {name}, so it must not offer it"
@@ -3545,32 +3571,37 @@ def test_f5_a_folder_in_a_swiftpm_store_that_is_not_a_clone_keeps_the_tree(hh):
         assert hh.stale_build_refusal(repo, ".build") is not None
 
 
-def test_f6_xcode_scratch_inspects_the_whole_tree_for_source(hh):
+def test_f6_xcode_scratch_identifies_the_structure_xcode_writes(hh):
+    """Since Nov 5 (HH-219) the rule identifies a DerivedData root by what Xcode
+    writes, not by hunting for what it should not hold.  Build and
+    SourcePackages hold only Xcode's and SwiftPM's own folders; deeper down
+    the tree is Xcode's output and is not judged file by file."""
     with fake_home(hh) as home, gates_open(hh):
         tree = xcode_tree(home)
-        (tree / "Logs").mkdir()
         (tree / "SourcePackages").mkdir()
+        settle(tree)
         assert hh._xcode_scratch_refusal(tree) is None, "the control"
-        for rel in ("Build/Package.swift", "Build/main.swift", "Logs/notes.md",
-                    "SourcePackages/mine/App.xcodeproj/project.pbxproj",
-                    "Build/Products/Debug/stray.swift", "Build/Products/Debug/App.xcworkspace/contents",
-                    "Build/Intermediates.noindex/Package.swift", "Build/Intermediates.noindex/x.py",
-                    "ModuleCache.noindex/draft.m", "Logs/deep/down/key.p12"):
+        for rel in ("Build/Package.swift", "Build/main.swift", "Build/Sources/x.swift",
+                    "SourcePackages/mine/App.xcodeproj/project.pbxproj", "SourcePackages/notes.md"):
             path = tree / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("x", encoding="utf-8")
-            age_all(tree, 3)
+            settle(tree)
             assert hh._xcode_scratch_refusal(tree) is not None, rel
-            first = Path(rel).parts
-            if first[0] == "Logs" and len(first) > 2:
-                shutil.rmtree(tree / "Logs" / first[1])
-            elif first[0] == "SourcePackages":
-                shutil.rmtree(tree / "SourcePackages" / first[1])
-            elif "xcworkspace" in rel:
-                shutil.rmtree(path.parent)
-            else:
-                path.unlink()
+            top = tree / Path(rel).parts[0] / Path(rel).parts[1]
+            shutil.rmtree(top) if top.is_dir() else top.unlink()
+        settle(tree)
         assert hh._xcode_scratch_refusal(tree) is None, "and the clean tree still passes"
+        for missing in ("Logs", "info.plist"):
+            moved = tree.parent / f"aside-{missing}"
+            (tree / missing).rename(moved)
+            settle(tree)
+            assert hh._xcode_scratch_refusal(tree) is not None, f"no {missing}"
+            moved.rename(tree / missing)
+        for body in ("<plist/>\n", "not a plist", INFO_PLIST.replace("WorkspacePath", "Other")):
+            (tree / "info.plist").write_text(body, encoding="utf-8")
+            settle(tree)
+            assert "info.plist" in str(hh._xcode_scratch_refusal(tree)), body
 
 
 def test_f6_xcode_scratch_allows_what_xcode_generates(hh):
@@ -3585,15 +3616,13 @@ def test_f6_xcode_scratch_allows_what_xcode_generates(hh):
             path = tree / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("x", encoding="utf-8")
-        age_all(tree, 3)
+        settle(tree)
         assert hh._xcode_scratch_refusal(tree) is None, hh._xcode_scratch_refusal(tree)
 
 
 def test_f6_a_walk_that_cannot_finish_fails_closed(hh):
     with fake_home(hh) as home, gates_open(hh):
         tree = xcode_tree(home)
-        with mock.patch.object(hh, "_MAX_WALK_ENTRIES", 2, create=True):
-            assert hh._xcode_scratch_refusal(tree) is not None, "too many entries to inspect"
         with mock.patch.object(hh, "probe_timeout", return_value=-1.0):
             assert hh._xcode_scratch_refusal(tree) is not None, "out of time"
         assert tree.is_dir()
@@ -3826,6 +3855,7 @@ def test_f16_a_recheck_refusal_is_not_a_failure_in_the_report(hh):
     with fake_time(hh, clock), \
             mock.patch.object(hh, "scan", return_value=[c]), \
             mock.patch.object(hh, "read_band", return_value=band), \
+            mock.patch.object(hh, "read_disk_free", return_value=20.0), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         assert hh.main(["--clean", "--json"]) == 0
     report = json.loads(out.getvalue())
@@ -3949,17 +3979,16 @@ def test_report_rules_can_never_produce_a_deletable_candidate(hh):
     with fake_home(hh) as home, gates_open(hh):
         repo = git_repo(home / "Code" / "App")
         targets = [old_tree(repo / n) for n in (".build", ".next", "build", "target")]
-        tree = xcode_tree(home)
 
-        rows = hh.rule_stale_build_output() + hh.rule_xcode_scratch()
-        assert rule_paths(rows) == {str(t) for t in targets} | {str(tree)}, rows
+        rows = hh.rule_stale_build_output()
+        assert rule_paths(rows) == {str(t) for t in targets}, rows
         for c in rows:
             assert (c.tier, c.op) == ("ask-first", "report"), c
             assert c.recheck is None, c
             assert "report only" in c.reason, c.reason
             hh.apply_candidate(c)
             assert not c.applied, c.path
-        assert tree.is_dir() and all(t.is_dir() for t in targets)
+        assert all(t.is_dir() for t in targets)
 
         band = hh.Band(1.0, 99.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
         for argv in (["--clean", "--json", "--band=full"], ["--scan", "--json", "--band=full"]):
@@ -3967,23 +3996,31 @@ def test_report_rules_can_never_produce_a_deletable_candidate(hh):
             with mock.patch.object(hh, "read_band", return_value=band), \
                     mock.patch.object(hh, "apply_delete", side_effect=AssertionError("deleted")), \
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                assert hh.main(argv + ["--categories=stale-build-output,xcode-scratch"]) == 0
+                assert hh.main(argv + ["--categories=stale-build-output"]) == 0
             report = json.loads(out.getvalue())
             assert report["actionable_count"] == 0 and report["applied_count"] == 0, report
-        assert tree.is_dir() and all(t.is_dir() for t in targets)
+        assert all(t.is_dir() for t in targets)
 
 
 def test_report_rules_have_no_way_to_build_a_deleting_candidate(hh):
     tree = ast.parse(ENGINE.read_text())
     funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-    for name in ("rule_stale_build_output", "rule_xcode_scratch"):
-        calls = [n for n in ast.walk(funcs[name])
-                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Candidate"]
-        assert calls, name
-        for call in calls:
-            kw = {k.arg: k.value for k in call.keywords}
-            assert kw["tier"].value == "ask-first" and kw["op"].value == "report", name
-            assert "recheck" not in kw, name
+    calls = [n for n in ast.walk(funcs["rule_stale_build_output"])
+             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Candidate"]
+    assert calls
+    for call in calls:
+        kw = {k.arg: k.value for k in call.keywords}
+        assert kw["tier"].value == "ask-first" and kw["op"].value == "report"
+        assert "recheck" not in kw
+    # xcode-scratch deletes since HH-219, and every delete it builds is asked
+    # again right before it happens; every other row it builds is a report.
+    for call in (n for n in ast.walk(funcs["rule_xcode_scratch"])
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Candidate"):
+        kw = {k.arg: k.value for k in call.keywords}
+        if kw["op"].value == "delete":
+            assert kw["tier"].value == "safe" and "recheck" in kw
+        else:
+            assert (kw["tier"].value, kw["op"].value) == ("ask-first", "report")
     assert not hh.PRESSURE_ONLY_RULES & hh.REPORT_ONLY_WALK_RULES
 
 
@@ -4003,9 +4040,10 @@ def test_xcode_scratch_lists_what_it_found_and_ignores_what_is_not_xcode(hh):
         old_tree(other, 30)
         found = {c.path: c for c in hh.rule_xcode_scratch()}
         assert list(found) == [str(tree)], found
-        assert "nothing the checks can see" in found[str(tree)].reason
+        assert (found[str(tree)].tier, found[str(tree)].op) == ("safe", "delete")
         with mock.patch.object(hh, "tree_in_use", return_value=True):
-            assert "held open" in hh.rule_xcode_scratch()[0].reason
+            row = hh.rule_xcode_scratch()[0]
+        assert (row.tier, row.op) == ("ask-first", "report") and "held open" in row.reason
 
 
 def test_a_clean_run_does_not_walk_for_report_rows_or_a_closed_pressure_rule(hh):
@@ -4024,17 +4062,21 @@ def test_a_clean_run_does_not_walk_for_report_rows_or_a_closed_pressure_rule(hh)
             assert hh.main(argv) == 0
         return set(ran)
 
-    report = {"stale-build-output", "xcode-scratch"}
-    dup = "duplicate-sim-runtimes"
-    assert not (report | {dup}) & rules_scanned(["--clean", "--json"], 10.0), "cheap band"
-    assert not (report | {dup}) & rules_scanned(["--clean", "--json", "--band=full"], 80.0), "above the line"
+    report = {"stale-build-output"}
+    dup, scratch = "duplicate-sim-runtimes", "xcode-scratch"
+    cheap = rules_scanned(["--clean", "--json"], 10.0)
+    assert not (report | {dup}) & cheap and scratch in cheap, "cheap band: the safe 60 GB rule runs"
+    assert not (report | {dup, scratch}) & rules_scanned(["--clean", "--json", "--band=full"], 80.0), "above both lines"
+    between = rules_scanned(["--clean", "--json", "--band=full"], 40.0)
+    assert scratch in between and dup not in between, "under 60 GB, above 25 GB"
+    assert scratch not in rules_scanned(["--clean", "--json"], 60.01), "just above the 60 GB line"
     at_line = rules_scanned(["--clean", "--json", "--band=full"], 10.0)
-    assert dup in at_line and not report & at_line, "at the line"
+    assert {dup, scratch} <= at_line and not report & at_line, "at the line"
     for argv in (["--scan", "--json"], ["--scan", "--json", "--band=full"]):
-        assert report | {dup} <= rules_scanned(argv, 80.0), "a read-only scan shows what they see"
+        assert report | {dup, scratch} <= rules_scanned(argv, 80.0), "a read-only scan shows what they see"
     assert "snapshots" in rules_scanned(["--clean", "--json"], 80.0), "older rules are not skipped"
     order = list(hh.RULES)
-    for name in report:
+    for name in report | {scratch}:
         assert order.index(name) > order.index("brew"), "report rows cost nothing the safe rules need"
 
 
@@ -4078,8 +4120,14 @@ def test_the_policy_and_docs_state_the_line_and_the_report_rules(hh):
     policy = json.loads(hh.POLICY_PATH.read_text())
     rules = {r["name"]: r for r in policy["rules"]}
     assert hh.PRESSURE_RULE_FREE_GB == 25.0
-    assert set(hh.PRESSURE_ONLY_RULES) == {"duplicate-sim-runtimes"}
-    assert rules["duplicate-sim-runtimes"]["maxFreeGb"] == hh.PRESSURE_RULE_FREE_GB
+    assert hh.XCODE_SCRATCH_DELETE_FREE_GB == 60.0
+    assert set(hh.PRESSURE_ONLY_RULES) == {"duplicate-sim-runtimes", "xcode-scratch"}
+    for name, (tier, line) in hh.PRESSURE_RULES.items():
+        assert rules[name]["maxFreeGb"] == line, name
+        assert rules[name]["tier"] == tier, name
+    early = policy["earlyWarning"]
+    assert (early["freeGbBelow"], early["reportOnlyGbAbove"], early["top"]) == (
+        hh.EARLY_WARNING_FREE_GB, hh.EARLY_WARNING_REPORT_BYTES / 1024 ** 3, hh.TOP_REPORT_ONLY_COUNT)
     for name in hh.REPORT_ONLY_WALK_RULES:
         assert (rules[name]["tier"], rules[name]["op"]) == ("ask-first", "report"), name
         assert "maxFreeGb" not in rules[name], name
@@ -4183,6 +4231,372 @@ def test_git_answers_for_the_repo_it_was_asked_about(hh):
     assert ENGINE.read_text().count('"/usr/bin/git"') == 1, "every git call goes through _git"
 
 
+# --------------------------------------------------------------------------
+# HH-219: disk upkeep.  xcode-scratch deletes a positively identified
+# DerivedData root at 60 GB free or less, superseded BotFleet releases go, and
+# the report carries an early warning.  Owner decision of Nov 5.
+# --------------------------------------------------------------------------
+
+def clean_main(hh, argv, free, apply_free=None):
+    """Run main() for real against a fake home, with the band at `free` GB and
+    df at the delete reading `apply_free`.  Returns the parsed JSON."""
+    band = hh.Band(free, 90.0, 0.0, 1.0, False, cpu_idle_pct=50.0)
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(hh, "read_band", return_value=band), \
+            mock.patch.object(hh, "read_disk_free", return_value=free if apply_free is None else apply_free), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        assert hh.main(argv) == 0, err.getvalue()
+    return json.loads(out.getvalue())
+
+
+def test_hh219_a_derived_data_root_is_deleted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tmp_tree = xcode_tree(home, "hh-push-dd")
+        clutch_tree = xcode_tree(home, "Clutch-abc", root=home / ".clutch" / "derived-data")
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 2, report
+        assert not tmp_tree.exists() and not clutch_tree.exists()
+        assert (home / ".clutch" / "derived-data").is_dir(), "only the child goes"
+        assert report["pressure_rules_open_by_rule"] == ["xcode-scratch"]
+
+
+def test_hh219_a_git_checkout_in_tmp_is_never_deleted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        checkout = git_repo(home / "private-tmp" / "hh-verify-1")
+        inner = xcode_tree(home, "build-ios", root=checkout)
+        settle(checkout, 3)
+        shaped = xcode_tree(home, "hh212-candidate-x")
+        (shaped / "Build" / "Products" / "clone" / ".git").mkdir(parents=True)
+        settle(shaped, 3)
+        found = {c.path: c for c in hh.rule_xcode_scratch()}
+        assert str(checkout) not in found, "a checkout is not Xcode's shape at all"
+        assert (found[str(shaped)].tier, found[str(shaped)].op) == ("ask-first", "report"), found
+        assert "nested repository" in found[str(shaped)].reason
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 10.0)
+        assert report["applied_count"] == 0, report
+        assert inner.is_dir() and (checkout / ".git").is_dir() and shaped.is_dir()
+
+
+def test_hh219_a_symlink_is_never_followed_or_deleted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        outside = xcode_tree(home, "dd", root=home / "elsewhere")
+        (home / "private-tmp" / "link-dd").symlink_to(outside)
+        (home / ".clutch").mkdir()
+        (home / ".clutch" / "derived-data").symlink_to(home / "elsewhere")
+        assert hh.rule_xcode_scratch() == [], "neither a linked child nor a linked root is walked"
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 10.0)
+        assert report["applied_count"] == 0
+        assert outside.is_dir() and (home / "private-tmp" / "link-dd").is_symlink()
+
+
+def test_hh219_a_recently_touched_root_is_not_deleted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        # Xcode writes each build's log into Logs/Build, which moves that
+        # folder, two levels down.
+        (tree / "Logs" / "Build" / "today.xcactivitylog").write_text("x", encoding="utf-8")
+        assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "a log written today"
+        settle(tree)
+        (tree / "Logs" / "today.txt").write_text("x", encoding="utf-8")
+        age(tree / "Logs", 3)
+        age(tree, 3)
+        assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "a file two levels down"
+        settle(tree)
+        age(tree / "Build" / "Intermediates.noindex", 0.5)
+        assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "a folder two levels down"
+        settle(tree)
+        with mock.patch.object(hh, "changed_age_min", return_value=60.0):
+            assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "moved in an hour ago"
+        age(tree / "Logs" / "Build", 0.5)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 10.0)
+        assert report["applied_count"] == 0 and tree.is_dir()
+        row = report["candidates"][0]
+        assert row["op"] == "report" and "24 hours" in row["reason"], row
+
+
+def test_hh219_an_open_file_at_delete_time_blocks_the_delete(hh):
+    real_tree_in_use = hh.tree_in_use
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        [c] = hh.rule_xcode_scratch()
+        assert c.op == "delete" and c.recheck is not None
+        held = str(tree / "Build" / "Products" / "Debug" / "App.app" / "App")
+        listings = []
+
+        def fresh_listing():
+            listings.append(1)
+            hh._OPEN_SNAPSHOT = {"/unrelated/path", held}
+            hh._OPEN_INDEX = hh._build_open_index(hh._OPEN_SNAPSHOT)
+            hh._OPEN_CWDS = set()
+            return hh._OPEN_SNAPSHOT
+
+        with mock.patch.object(hh, "tree_in_use", real_tree_in_use), \
+                mock.patch.object(hh, "_load_open_snapshot", side_effect=fresh_listing):
+            hh.apply_candidate(c)
+        assert listings, "the recheck asked for a listing"
+        assert not c.applied and c.refused == "held open" and not c.error, (c.refused, c.error)
+        assert tree.is_dir()
+
+
+def test_hh219_above_60_gb_free_xcode_scratch_deletes_nothing(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        for free in (60.01, 80.0, 200.0):
+            report = clean_main(hh, ["--clean", "--json", "--band=full", "--categories=xcode-scratch"], free)
+            assert report["applied_count"] == 0 and report["candidates"] == [], (free, report)
+            assert "xcode-scratch" not in report["pressure_rules_open_by_rule"]
+        scan = clean_main(hh, ["--scan", "--json", "--categories=xcode-scratch"], 80.0)
+        assert [c["op"] for c in scan["candidates"]] == ["delete"], "a scan still lists what it would take"
+        assert scan["actionable_count"] == 0
+        [c] = hh.rule_xcode_scratch()
+        with mock.patch.object(hh, "read_disk_free", return_value=61.0):
+            hh.apply_candidate(c)
+        assert not c.applied and "60 GB line" in c.refused, c.refused
+        with mock.patch.object(hh, "read_disk_free", return_value=None):
+            [c] = hh.rule_xcode_scratch()
+            hh.apply_candidate(c)
+        assert not c.applied and "df" in c.refused, "a df that failed is not pressure"
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0, apply_free=70.0)
+        assert report["applied_count"] == 0 and report["refused_count"] == 1, "df is read again at the delete"
+        assert tree.is_dir()
+
+
+def test_hh219_at_25_gb_or_less_xcode_scratch_always_runs(hh):
+    for free, argv in ((25.0, ["--clean", "--json"]), (10.0, ["--clean", "--json"]),
+                       (25.0, ["--clean", "--json", "--band=full"]), (59.9, ["--clean", "--json"])):
+        with fake_home(hh) as home, gates_open(hh):
+            tree = xcode_tree(home)
+            report = clean_main(hh, argv + ["--categories=xcode-scratch"], free)
+            assert report["applied_count"] == 1, (free, argv, report)
+            assert not tree.exists()
+
+
+def release_home(home, store=".botfleet", names=None, current=1):
+    """Five read-only releases, oldest first, `current` pointing at one."""
+    names = names or [f"{i:x}" * 40 for i in range(10, 15)]
+    releases = home / store / "releases"
+    for days, name in zip((50, 40, 30, 20, 10), names):
+        blob(releases / name / "server.js", days, 16 * 1024 * 1024)
+        age(releases / name, days)
+        os.chmod(releases / name, 0o555)
+    (home / store / "current").symlink_to(releases / names[current])
+    return releases, names
+
+
+def unlock_all(path):
+    for root, dirs, _files in os.walk(path):
+        for d in dirs:
+            full = os.path.join(root, d)
+            if not os.path.islink(full):
+                os.chmod(full, 0o755)
+
+
+def test_hh219_release_store_keeps_current_and_newest_two(hh):
+    for store in hh._RELEASE_STORES:
+        with fake_home(hh) as home, gates_open(hh):
+            releases, names = release_home(home, store)
+            try:
+                victims = [p.name for p in hh.release_victims(home / store)]
+                assert victims == [names[0], names[2]], (store, victims)
+                found = hh.rule_botfleet_releases()
+                assert rule_paths(found) == {str(releases / names[0]), str(releases / names[2])}, found
+                for c in found:
+                    assert (c.tier, c.op) == ("safe", "delete") and c.recheck is not None
+                    hh.apply_candidate(c)
+                    assert c.applied, (c.path, c.error, c.refused)
+                left = sorted(p.name for p in releases.iterdir())
+                assert left == sorted([names[1], names[3], names[4]]), left
+                report = {c.path for c in hh.rule_ask_first_inventory()}
+                assert str(releases / names[1]) not in report, "the current release"
+                assert str(releases / names[3]) in report, "a kept release stays on the report"
+            finally:
+                unlock_all(home)
+
+
+def test_hh219_release_store_must_read_true(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        releases, names = release_home(home)
+        try:
+            (releases / "notes.txt").write_text("x", encoding="utf-8")
+            assert hh.release_victims(home / ".botfleet") == [], "a stray file"
+            (releases / "notes.txt").unlink()
+            (releases / "not-a-sha").mkdir()
+            assert hh.release_victims(home / ".botfleet") == [], "a folder that is not a release"
+            (releases / "not-a-sha").rmdir()
+            (home / ".botfleet" / "current").unlink()
+            assert hh.release_victims(home / ".botfleet") == [], "no current link"
+            (home / ".botfleet" / "current").symlink_to(home)
+            assert hh.release_victims(home / ".botfleet") == [], "current points outside the store"
+            (home / ".botfleet" / "current").unlink()
+            (home / ".botfleet" / "current").symlink_to(releases / names[1])
+            (home / ".local" / "bin").mkdir(parents=True)
+            (home / ".local" / "bin" / "bf-pinned").symlink_to(releases / names[0])
+            assert [p.name for p in hh.release_victims(home / ".botfleet")] == [names[2]], "a link pins one"
+            (home / ".local" / "bin" / "bf-pinned").unlink()
+            assert len(hh.release_victims(home / ".botfleet")) == 2, "the control"
+            age(releases / names[0], 3)
+            with mock.patch.object(hh, "changed_age_min", return_value=60.0):
+                assert hh.rule_botfleet_releases() == [], "changed in the last 7 days"
+            with mock.patch.object(hh, "tree_in_use", return_value=True):
+                assert hh.rule_botfleet_releases() == [], "held open"
+            [c] = [c for c in hh.rule_botfleet_releases() if c.path.endswith(names[2])]
+            with mock.patch.object(hh, "process_names_path", return_value=True):
+                hh.apply_candidate(c)
+            assert not c.applied and "names it" in c.refused and (releases / names[2]).is_dir()
+        finally:
+            unlock_all(home)
+
+
+def big_row(hh, path, gib, rule="ask-first"):
+    return hh.Candidate(rule, path, int(gib * GIB), "x", tier="ask-first", op="report")
+
+
+def test_hh219_top_report_only_appears_only_under_its_conditions(hh):
+    rows = [big_row(hh, f"/r/{i}", 1.5) for i in range(9)]
+    rows.append(big_row(hh, "/r/0/inside", 1.4))
+    rows.append(hh.Candidate("tool-versions", "/v", 50 * GIB, "x"))
+    low = hh.Band(30.0, 95.0, 0.0, 1.0, False)
+    top = hh.top_report_only(rows, low)
+    assert top is not None and len(top) == 8, top
+    assert all(r["rule"] == "ask-first" for r in top), "deletable rows are not report rows"
+    assert "/r/0/inside" not in {r["path"] for r in top}, "a row inside another is not counted twice"
+    assert [r["bytes"] for r in top] == sorted((r["bytes"] for r in top), reverse=True)
+    assert set(top[0]) == {"path", "bytes", "rule"}
+    assert hh.top_report_only(rows, hh.Band(40.0, 95.0, 0.0, 1.0, False)) is None, "at 40 GB free"
+    assert hh.top_report_only(rows, hh.Band(30.0, 95.0, 0.0, 1.0, False, disk_free_known=False)) is None
+    small = [big_row(hh, f"/s/{i}", 1.0) for i in range(10)]
+    assert hh.top_report_only(small, low) is None, "10 GB is not more than 10 GB"
+
+    clock = FakeClock()
+    _code, quiet, _err = run_main(hh, ["--scan", "--json"], rows, hh.Band(80.0, 50.0, 0.0, 1.0, False), clock)
+    assert "top_report_only" not in quiet, "additive: absent when there is nothing to warn about"
+    _code, loud, _err = run_main(hh, ["--clean", "--json"], rows, low, clock)
+    assert len(loud["top_report_only"]) == 8 and "candidates" in loud and "applied_count" in loud
+
+
+def test_hh219_the_early_warning_sizes_the_ask_first_trees(hh):
+    with fake_home(hh) as home:
+        peer_work_home(home)
+        blob(home / "BotFleet-migration-backups" / "big.bin", 30)
+        backups = str(home / "BotFleet-migration-backups")
+        for free, sized in ((80.0, False), (30.0, True)):
+            hh.SIZE_ASK_FIRST = False
+            with mock.patch.object(hh, "open_handles", return_value=0):
+                report = clean_main(hh, ["--scan", "--json", "--categories=ask-first"], free)
+            row = next(c for c in report["candidates"] if c["path"] == backups)
+            assert (row["bytes"] > 0) == sized, (free, row)
+        hh.SIZE_ASK_FIRST = False
+
+
+# --- review of PR 274 -----------------------------------------------------
+
+def test_pr274_precious_files_deep_in_the_build_output_keep_the_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        assert hh._xcode_scratch_refusal(tree) is None, "the control"
+        products = tree / "Build" / "Products" / "Release"
+        cases = ("AuthKey_TEST.p8", "Shipped.xcarchive/Info.plist", "Shipped.xcarchive/notes.md",
+                 "Sub/Dir/cert.p12", "notes.md")
+        for rel in cases:
+            path = products / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None, f"fresh {rel}"
+            settle(tree)
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None and "Products" in refusal, f"old {rel}: {refusal}"
+            top = products / Path(rel).parts[0]
+            shutil.rmtree(top) if top.is_dir() else top.unlink()
+        note = tree / "SourcePackages" / "artifacts" / "dep" / "README.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("x", encoding="utf-8")
+        settle(tree)
+        assert "artifacts" in str(hh._xcode_scratch_refusal(tree)), "a note in SwiftPM's artifacts"
+        shutil.rmtree(tree / "SourcePackages")
+        settle(tree)
+        assert hh._xcode_scratch_refusal(tree) is None, "and the clean tree still passes"
+
+
+def test_pr274_a_fresh_file_anywhere_in_the_tree_keeps_the_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        deep = tree / "Build" / "Intermediates.noindex" / "App.build" / "Release" / "obj.o"
+        deep.parent.mkdir(parents=True)
+        deep.write_text("x", encoding="utf-8")
+        settle(tree)
+        os.utime(deep, None)
+        assert hh._shallow_newest_age_min(tree) > hh.IDLE_MIN_XCODE_SCRATCH, "the shallow look cannot see it"
+        assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "a file written now at depth 5"
+
+
+def test_pr274_an_old_fully_idle_root_with_deep_output_is_still_deleted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        for rel in ("Build/Products/Release/App.app/Contents/MacOS/App",
+                    "Build/Intermediates.noindex/App.build/Release/obj.o",
+                    "SourcePackages/artifacts/dep/Dep.xcframework/Info.plist"):
+            blob(tree / rel, 30, 1024)
+        settle(tree, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists()
+
+
+def test_pr274_deletes_and_unlocks_stay_on_the_trees_own_volume(hh):
+    with fake_home(hh) as home:
+        tree = old_tree(home / "tree")
+        calls = []
+        real = subprocess.run
+
+        def spy(cmd, *a, **kw):
+            calls.append(list(cmd))
+            return real(cmd, *a, **kw)
+
+        with mock.patch.object(hh.subprocess, "run", side_effect=spy), \
+                mock.patch.object(hh, "holds_keep_sentinel", return_value=hh.MarkerVerdict(False, True)):
+            freed, err = hh.apply_delete(str(tree), known_bytes=1, unlock=True)
+        assert (freed, err) == (1, ""), err
+        finds = [c for c in calls if c[0] == "/usr/bin/find"]
+        assert len(finds) == 2 and all("-xdev" in c for c in finds), finds
+        unlock = finds[0]
+        assert unlock[unlock.index("-type") + 1] == "d", "only directories are made writable"
+        assert not any(c[0] == "/bin/chmod" for c in calls), "no recursive chmod of files"
+
+
+def test_pr274_unlocking_a_release_leaves_a_hardlinked_file_alone(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        releases, names = release_home(home)
+        try:
+            outside = home / "pnpm-store" / "shared.js"
+            outside.parent.mkdir()
+            outside.write_text("x", encoding="utf-8")
+            os.chmod(outside, 0o444)
+            victim = releases / names[0]
+            os.chmod(victim, 0o755)
+            os.link(outside, victim / "shared.js")
+            age(victim / "shared.js", 50)
+            age(victim, 50)
+            os.chmod(victim, 0o555)
+            [c] = [c for c in hh.rule_botfleet_releases() if c.path == str(victim)]
+            hh.apply_candidate(c)
+            assert c.applied, (c.error, c.refused)
+            assert not victim.exists()
+            assert outside.exists() and (os.stat(outside).st_mode & 0o777) == 0o444, oct(os.stat(outside).st_mode)
+        finally:
+            unlock_all(home)
+
+
+def test_pr274_the_same_path_from_two_rules_is_counted_once(hh):
+    low = hh.Band(30.0, 95.0, 0.0, 1.0, False)
+    rows = [big_row(hh, "/same", 6.0, rule="ask-first"), big_row(hh, "/same", 6.5, rule="xcode-scratch")]
+    assert hh.top_report_only(rows, low) is None, "12.5 GB counted is really 6.5 GB"
+    rows.append(big_row(hh, "/other", 4.0))
+    top = hh.top_report_only(rows, low)
+    assert top is not None and [r["path"] for r in top] == ["/same", "/other"], top
+    assert top[0]["bytes"] == int(6.5 * GIB) and top[0]["rule"] == "xcode-scratch", "the larger row is kept"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
@@ -4192,6 +4606,9 @@ def main() -> int:
             # The engine keeps one lsof snapshot per process.  Reset it so a
             # test never inherits an earlier test's answer.
             _reset_open_snapshot(hh)
+            # main() sets these per run; a direct rule call must not inherit them.
+            hh.SIZE_ASK_FIRST = False
+            hh._REPORT_DEPENDENCY_TREES = True
             t(hh)
             print(f"  ok   {t.__name__}")
         except AssertionError as e:
