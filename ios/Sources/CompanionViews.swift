@@ -1031,7 +1031,7 @@ struct DashboardView: View {
         Section {
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("Lookback")
+                    Text("Timing")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 68, alignment: .leading)
