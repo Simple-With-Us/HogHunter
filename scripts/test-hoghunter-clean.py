@@ -4488,6 +4488,115 @@ def test_hh219_the_early_warning_sizes_the_ask_first_trees(hh):
         hh.SIZE_ASK_FIRST = False
 
 
+# --- review of PR 274 -----------------------------------------------------
+
+def test_pr274_precious_files_deep_in_the_build_output_keep_the_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        assert hh._xcode_scratch_refusal(tree) is None, "the control"
+        products = tree / "Build" / "Products" / "Release"
+        cases = ("AuthKey_TEST.p8", "Shipped.xcarchive/Info.plist", "Shipped.xcarchive/notes.md",
+                 "Sub/Dir/cert.p12", "notes.md")
+        for rel in cases:
+            path = products / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None, f"fresh {rel}"
+            settle(tree)
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None and "Products" in refusal, f"old {rel}: {refusal}"
+            top = products / Path(rel).parts[0]
+            shutil.rmtree(top) if top.is_dir() else top.unlink()
+        note = tree / "SourcePackages" / "artifacts" / "dep" / "README.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("x", encoding="utf-8")
+        settle(tree)
+        assert "artifacts" in str(hh._xcode_scratch_refusal(tree)), "a note in SwiftPM's artifacts"
+        shutil.rmtree(tree / "SourcePackages")
+        settle(tree)
+        assert hh._xcode_scratch_refusal(tree) is None, "and the clean tree still passes"
+
+
+def test_pr274_a_fresh_file_anywhere_in_the_tree_keeps_the_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        deep = tree / "Build" / "Intermediates.noindex" / "App.build" / "Release" / "obj.o"
+        deep.parent.mkdir(parents=True)
+        deep.write_text("x", encoding="utf-8")
+        settle(tree)
+        os.utime(deep, None)
+        assert hh._shallow_newest_age_min(tree) > hh.IDLE_MIN_XCODE_SCRATCH, "the shallow look cannot see it"
+        assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "a file written now at depth 5"
+
+
+def test_pr274_an_old_fully_idle_root_with_deep_output_is_still_deleted(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        for rel in ("Build/Products/Release/App.app/Contents/MacOS/App",
+                    "Build/Intermediates.noindex/App.build/Release/obj.o",
+                    "SourcePackages/artifacts/dep/Dep.xcframework/Info.plist"):
+            blob(tree / rel, 30, 1024)
+        settle(tree, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists()
+
+
+def test_pr274_deletes_and_unlocks_stay_on_the_trees_own_volume(hh):
+    with fake_home(hh) as home:
+        tree = old_tree(home / "tree")
+        calls = []
+        real = subprocess.run
+
+        def spy(cmd, *a, **kw):
+            calls.append(list(cmd))
+            return real(cmd, *a, **kw)
+
+        with mock.patch.object(hh.subprocess, "run", side_effect=spy), \
+                mock.patch.object(hh, "holds_keep_sentinel", return_value=hh.MarkerVerdict(False, True)):
+            freed, err = hh.apply_delete(str(tree), known_bytes=1, unlock=True)
+        assert (freed, err) == (1, ""), err
+        finds = [c for c in calls if c[0] == "/usr/bin/find"]
+        assert len(finds) == 2 and all("-xdev" in c for c in finds), finds
+        unlock = finds[0]
+        assert unlock[unlock.index("-type") + 1] == "d", "only directories are made writable"
+        assert not any(c[0] == "/bin/chmod" for c in calls), "no recursive chmod of files"
+
+
+def test_pr274_unlocking_a_release_leaves_a_hardlinked_file_alone(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        releases, names = release_home(home)
+        try:
+            outside = home / "pnpm-store" / "shared.js"
+            outside.parent.mkdir()
+            outside.write_text("x", encoding="utf-8")
+            os.chmod(outside, 0o444)
+            victim = releases / names[0]
+            os.chmod(victim, 0o755)
+            os.link(outside, victim / "shared.js")
+            age(victim / "shared.js", 50)
+            age(victim, 50)
+            os.chmod(victim, 0o555)
+            [c] = [c for c in hh.rule_botfleet_releases() if c.path == str(victim)]
+            hh.apply_candidate(c)
+            assert c.applied, (c.error, c.refused)
+            assert not victim.exists()
+            assert outside.exists() and (os.stat(outside).st_mode & 0o777) == 0o444, oct(os.stat(outside).st_mode)
+        finally:
+            unlock_all(home)
+
+
+def test_pr274_the_same_path_from_two_rules_is_counted_once(hh):
+    low = hh.Band(30.0, 95.0, 0.0, 1.0, False)
+    rows = [big_row(hh, "/same", 6.0, rule="ask-first"), big_row(hh, "/same", 6.5, rule="xcode-scratch")]
+    assert hh.top_report_only(rows, low) is None, "12.5 GB counted is really 6.5 GB"
+    rows.append(big_row(hh, "/other", 4.0))
+    top = hh.top_report_only(rows, low)
+    assert top is not None and [r["path"] for r in top] == ["/same", "/other"], top
+    assert top[0]["bytes"] == int(6.5 * GIB) and top[0]["rule"] == "xcode-scratch", "the larger row is kept"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

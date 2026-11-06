@@ -1163,10 +1163,12 @@ def apply_delete(path: str, known_bytes: int | None = None,
     through, with a timeout capped to a tenth of what is left of the budget
     so the guard cannot eat the delete reserve.
 
-    unlock gives the owner write permission on the tree first, after every
-    guard above has passed.  A BotFleet release is installed read-only, and
-    `find -delete` cannot empty a folder it may not write.  `-P` never follows
-    a link out of the tree."""
+    unlock gives the owner write permission on the tree's directories first,
+    after every guard above has passed.  A BotFleet release is installed
+    read-only, and `find -delete` cannot empty a folder it may not write.
+    Files are left as they are, because a hardlinked inode is shared with
+    whatever else links it.  Both walks stay on the tree's own volume
+    (`-xdev`), so a disk image or share mounted inside is never emptied."""
     p = Path(path)
     if is_forbidden(path):
         return 0, "forbidden path"
@@ -1193,12 +1195,17 @@ def apply_delete(path: str, known_bytes: int | None = None,
     try:
         if p.is_dir() and not p.is_symlink():
             if unlock:
-                subprocess.run(["/bin/chmod", "-R", "-P", "u+w", str(p)],
+                # Directories only: unlinking needs write on the folder, not
+                # the file, and a file's inode can be a hardlink shared with
+                # something outside the tree (a pnpm store).  -xdev keeps it
+                # off any volume mounted inside.
+                subprocess.run(["/usr/bin/find", str(p), "-xdev", "-type", "d",
+                                "-exec", "/bin/chmod", "u+w", "{}", "+"],
                                capture_output=True, timeout=op_timeout(120))
             # -depth so children go before parents; -delete removes empty
             # dirs.  Do NOT use `rm -rf` -- mavis-trash swallows it.
             subprocess.run(
-                ["/usr/bin/find", str(p), "-depth", "-delete"],
+                ["/usr/bin/find", str(p), "-xdev", "-depth", "-delete"],
                 capture_output=True, timeout=op_timeout(600),
             )
         else:
@@ -2619,7 +2626,7 @@ _MAX_WALK_ENTRIES = 500_000
 # No build writes these, whatever the folder is called.  Keys and archives do
 # not come back from a rebuild; an xcarchive holds the symbols of what shipped.
 _PRECIOUS_SUFFIXES = frozenset({
-    ".xcarchive", ".p12", ".pfx", ".pem", ".key", ".keystore", ".jks", ".provisionprofile",
+    ".xcarchive", ".p8", ".p12", ".pfx", ".pem", ".key", ".keystore", ".jks", ".provisionprofile",
     ".sqlite", ".sqlite3",
 })
 _OTHER_REPO_NAMES = frozenset({".hg", ".jj", ".svn", ".bzr"})
@@ -3100,6 +3107,37 @@ def _shallow_newest_age_min(tree: Path, levels: int = 2) -> float:
     return (time.time() - newest) / 60.0
 
 
+def _derived_data_output_entry_refusal(path: str, rel: str, name: str, is_dir: bool) -> str | None:
+    """Inside Products and SwiftPM's artifacts: a key, an archive, a project or a
+    note is something a person put there or a rebuild does not bring back."""
+    reason = _precious_entry(path, name, is_dir)
+    if reason:
+        return reason
+    if os.path.splitext(name)[1].lower() in _NOTE_SUFFIXES:
+        return f"holds a note, {rel}"
+    return None
+
+
+# The parts of a DerivedData root that hold what a build produced, and so the
+# parts where a person drops an export, a key or a note (review of PR 274).
+_DERIVED_DATA_OUTPUTS = (("Build", "Products"), ("SourcePackages", "artifacts"))
+
+
+def _derived_data_precious_refusal(tree: Path) -> str | None:
+    """Why something precious inside the build output keeps this root, or None.
+    The whole of each output folder is walked; a walk that cannot finish keeps it."""
+    for parts in _DERIVED_DATA_OUTPUTS:
+        sub = tree.joinpath(*parts)
+        if not os.path.lexists(sub):
+            continue
+        if not stat.S_ISDIR(os.lstat(sub).st_mode):
+            return f"{'/'.join(parts)} is not a directory"
+        found = tree_content_refusal(sub, _derived_data_output_entry_refusal)
+        if found:
+            return f"{'/'.join(parts)}: {found}"
+    return None
+
+
 def _xcode_scratch_refusal(tree: Path) -> str | None:
     """Why this tree may not be deleted, or None when every gate holds.
 
@@ -3116,8 +3154,13 @@ def _xcode_scratch_refusal(tree: Path) -> str | None:
         return identity
     if is_forbidden(s) or has_keep_sentinel(s):
         return "protected"
-    if changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH or _shallow_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH:
+    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
+            or _shallow_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH
+            or newest_file_age_min(s) < IDLE_MIN_XCODE_SCRATCH):
         return "used in the last 24 hours"
+    precious = _derived_data_precious_refusal(tree)
+    if precious:
+        return precious
     marker = holds_keep_sentinel(s, probe_timeout(60.0))
     if marker.found or not marker.known:
         return "holds a keep marker, or the look failed"
@@ -3784,8 +3827,13 @@ def top_report_only(cands: Sequence[Candidate], band: Band) -> list[dict] | None
     """
     if not band.disk_free_known or band.disk_free_gb >= EARLY_WARNING_FREE_GB:
         return None
-    rows = [c for c in cands if (c.tier == "ask-first" or c.op == "report") and c.bytes > 0]
-    paths = {c.path for c in rows}
+    largest: dict[str, Candidate] = {}
+    for c in cands:
+        if (c.tier == "ask-first" or c.op == "report") and c.bytes > 0:
+            if c.path not in largest or c.bytes > largest[c.path].bytes:
+                largest[c.path] = c
+    rows = list(largest.values())
+    paths = set(largest)
     rows = [c for c in rows if not _under_another(c.path, paths)]
     if sum(c.bytes for c in rows) <= EARLY_WARNING_REPORT_BYTES:
         return None

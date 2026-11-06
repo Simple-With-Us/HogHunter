@@ -200,10 +200,11 @@
         "its top holds only Xcode's own entries, none a link, with Build/ and an Xcode cache beside it, and Logs/ or Index.noindex/",
         "info.plist is a small plain file whose WorkspacePath is set",
         "Build/ holds only Products and Intermediates.noindex, and SourcePackages/ only SwiftPM's stores",
-        "no repository anywhere inside but a clean SwiftPM clone that a remote holds in full"
+        "no repository anywhere inside but a clean SwiftPM clone that a remote holds in full",
+        "nothing under Build/Products or SourcePackages/artifacts, at any depth, is a key, an archive, a project or a note; a walk that cannot finish keeps it"
       ],
       "skipWhenAny": [
-        "the root or anything in its first two levels changed in the last 24 hours, or the root's ctime is that recent",
+        "the root or anything in its first two levels changed in the last 24 hours, any file in the tree is that recent, or the root's ctime is",
         "a .janitor-keep marker on it, above it or inside it, or the marker walk could not answer",
         "any process holds it open, on a fresh open-file listing taken again right before the delete",
         "a process runs from inside it",
@@ -232,7 +233,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Superseded BotFleet and companion releases",
-      "$rationale": "~/.botfleet/releases and ~/.botfleet-companion/releases held 4.4 GB each on 2026-11-05, and only the release the current link names runs.  HH-219.  The store is identified positively: a real releases folder holding nothing but commit-named folders, and a current symlink that resolves to one of them.  Anything else leaves the store alone.  Releases are installed read-only, so the delete gives the owner write permission first, after every guard has passed.",
+      "$rationale": "~/.botfleet/releases and ~/.botfleet-companion/releases held 4.4 GB each on 2026-11-05, and only the release the current link names runs.  HH-219.  The store is identified positively: a real releases folder holding nothing but commit-named folders, and a current symlink that resolves to one of them.  Anything else leaves the store alone.  Releases are installed read-only, so the delete makes the release's directories writable first, after every guard has passed, and never changes a file's mode, because a file can be a hardlink shared outside the release.  Every engine delete runs with -xdev.",
       "keep": [
         "the release current resolves to",
         "the newest 2 others by mtime",
