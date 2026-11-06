@@ -190,6 +190,55 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
     }
 
+    /// The glance view puts the Mac on the left half and the server on the
+    /// right half of every section.  This draws it with a server attached and
+    /// checks that the panel keeps its fixed width and height ceiling.
+    func testQuickViewSplitsMacLeftAndServerRight() async throws {
+        let json = """
+        {"generated_at": "2026-10-18T19:15:03Z", "host": "fleet-hetzner-nbg1",
+         "devices": {"root": {"mount": "/", "free_bytes": 61000000000, "note": "301GB disk: OS"},
+                     "fleet_extra": {"mount": "/mnt/fleet-extra", "free_bytes": 62000000000, "note": "246GB disk"}},
+         "cpu": {"pct": 24.8, "load1": 3.07, "cores": 16},
+         "memory": {"total_bytes": 32853925888, "used_bytes": 9095159808, "available_bytes": 23758766080},
+         "processes": [
+           {"pid": 11, "name": "node", "cpu_percent": 88.0, "memory_bytes": 2100000000, "container": "botfleet"},
+           {"pid": 12, "name": "postgres", "cpu_percent": 41.0, "memory_bytes": 900000000},
+           {"pid": 13, "name": "dockerd", "cpu_percent": 6.0, "memory_bytes": 300000000}]}
+        """.data(using: .utf8)!
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: json)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hoghunter-split-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        try Data(#"{"coolify_ssh_host": "fleet-hetzner-nbg1"}"#.utf8)
+            .write(to: directory.appendingPathComponent("config.json"))
+        let maintain = MaintainStore(supportDirectory: directory, repoRoot: directory,
+                                     launcher: { _ in XCTFail("no launch"); return true },
+                                     vpsFetcher: { _ in snapshot })
+        maintain.vpsStore.fetch(force: true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNotNil(maintain.vpsStore.snapshot)
+
+        let drives = MountedDriveStore(probe: {
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 1_000_000_000_000, availableBytes: 622_000_000_000)]
+        })
+        await drives.refresh()
+        let suite = "hh219-split-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = populatedStore(preferences, maintain: maintain)
+
+        let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences))
+        quick.appearance = NSAppearance(named: .aqua)
+        let size = quick.fittingSize
+        XCTAssertEqual(size.width, HogHunterPanel.panelWidth, accuracy: 1)
+        XCTAssertLessThanOrEqual(size.height, HogHunterPanel.panelHeight)
+        try render(quick, size: size, name: "hh219-quick-split")
+    }
+
     func testQuickViewAndInitialStorageRenderWithMountedDrives() async throws {
         let drives = MountedDriveStore(probe: {
             [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
@@ -264,10 +313,10 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
     }
 
-    private func populatedStore(_ preferences: UserDefaults) -> HogStore {
+    private func populatedStore(_ preferences: UserDefaults, maintain: MaintainStore? = nil) -> HogStore {
         let store = HogStore(historyURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("hh174-populated-layout-\(UUID().uuidString).sqlite"),
-            defaults: preferences, startImmediately: false)
+            defaults: preferences, maintain: maintain, startImmediately: false)
         XCTAssertFalse(store.tick(), "the layout test host must never start the real sampler")
         var pulse = MachinePulse.empty
         pulse.cpuPercent = 68
