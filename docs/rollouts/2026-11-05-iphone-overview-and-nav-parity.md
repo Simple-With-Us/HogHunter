@@ -44,13 +44,20 @@ Overview too, as they already did on Activity and Server.
 
 The meters render from the existing pulse and CPU history, so an older Mac
 needs no update.  A Mac too old to send the numeric fields still gets its
-rows ranked by the same display-text fallback the phone's
-`CompanionRow.sortCPU`/`sortMemory` use (`CompanionActivityText` in
-Sources/Companion/CompanionSnapshot.swift): text with digits parses into a
-ranking value, so those rows can rank among numbered ones, and only text
-without digits - a genuinely unnumbered row - ranks after numbered rows,
-because no number is not evidence of being busiest and the text is already
-rounded for display.  `testTextFallbackRanksOlderMacRows` pins this.
+rows ranked from its display text, the same kind of fallback the phone's
+`CompanionRow.sortCPU`/`sortMemory` apply through `UsageParser`
+(ios/Sources/CompanionViews.swift).  The companion side parses with its own
+private `CompanionActivityText` (Sources/Companion/CompanionSnapshot.swift),
+whose rules match `UsageParser` on ordinary readings with one deliberate
+difference: a reading that scales to or past 2^64 bytes (for example
+"16777216 TB") is rejected as unparseable instead of trapping the way
+`UsageParser.parseMemoryBytes` would, so it counts as no reading.  Text with
+in-range digits parses into a ranking value, so those rows can rank among
+numbered ones, and only text without digits or out of range - a genuinely
+unnumbered row - ranks after numbered rows, because no number is not
+evidence of being busiest and the text is already rounded for display.
+`testTextFallbackRanksOlderMacRows` pins the ordinary case and
+`testOutOfRangeMemoryTextDoesNotTrap` pins the rejection.
 
 ## Storage panes
 

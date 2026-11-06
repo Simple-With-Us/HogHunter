@@ -109,8 +109,11 @@ final class CompanionOverviewRankingTests: XCTestCase {
         XCTAssertEqual(ids(rows.rankedByActivity()), ["small", "huge", "overflow"])
     }
 
-    /// Distinct strings the collation calls equivalent (here a precomposed
-    /// versus decomposed e-acute) must still fall through to the id
+    /// Two spellings Swift keeps distinct (the combining acute sits on f in
+    /// one and inside \u{00E9} in the other, so the pair is not canonically
+    /// equivalent) must not confuse the ranking: whether the collation folds
+    /// the accent difference to `.orderedSame` or orders the plain f first,
+    /// a-row sorts before b-row, and a folded pair still needs the id
     /// tiebreaker, or two different rows compare equal both ways.
     func testCollationEquivalentNamesBreakTieOnID() {
         let rows = [
@@ -119,6 +122,19 @@ final class CompanionOverviewRankingTests: XCTestCase {
         ]
         for permutation in allPermutations(rows) {
             XCTAssertEqual(ids(permutation.rankedByActivity()), ["a-row", "b-row"])
+        }
+        // A case-only difference is the surest `.orderedSame` coverage:
+        // Swift's `==` is case-sensitive while the Finder-style collation
+        // folds case.  The lowercase row holds the smaller id so the
+        // expectation also matches a case-sensitive ordering; the assertion
+        // fails only through a real ordering bug, not a collation option
+        // change.
+        let caseRows = [
+            row("c-row", "casesame", cpu: 1),
+            row("d-row", "CaseSame", cpu: 1),
+        ]
+        for permutation in allPermutations(caseRows) {
+            XCTAssertEqual(ids(permutation.rankedByActivity()), ["c-row", "d-row"])
         }
     }
 

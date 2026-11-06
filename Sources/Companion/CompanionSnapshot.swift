@@ -995,8 +995,11 @@ extension Array where Element == CompanionRow {
     /// stable and cannot cycle the way an epsilon comparator can (a within
     /// 0.05 of b and b within 0.05 of c says nothing about a and c).  A row
     /// whose Mac sent only text readings is ranked by the parsed text, the
-    /// same fallback `CompanionRow.sortCPU`/`sortMemory` use; a row with no
-    /// reading at all ranks after numbered rows.
+    /// same kind of display-text fallback the phone's
+    /// `CompanionRow.sortCPU`/`sortMemory` apply through `UsageParser`;
+    /// unlike `UsageParser.parseMemoryBytes`, `CompanionActivityText` rejects
+    /// a reading at or beyond 2^64 as no reading instead of trapping.  A row
+    /// with no reading at all ranks after numbered rows.
     func rankedByActivity() -> [CompanionRow] {
         // Parse each row's text fallback once, not once per comparison: the
         // fallback allocates, and the comparator runs O(N log N) times per
