@@ -1234,16 +1234,31 @@ private struct AdvancedSettingsTab: View {
                             TextField("Token Project ID", text: $entry.projectId)
                             TextField("Token Folder", text: $entry.secretPath)
                             SecureField("Service Token", text: $entry.token)
-                            // One grouped row per toggle: label at the leading edge, its own
-                            // switch at the trailing edge.  Two bare Toggles sharing one HStack
-                            // each spread label-left/switch-right across half the row, which put
-                            // Read's switch next to the Write label; fixedSize was worse, because
-                            // a Form Toggle's ideal width is the full row - the HStack then
-                            // overflowed the window and clipped the whole tab.  Separate rows
-                            // keep the full-row tap target and standard VoiceOver labelling.
-                            Toggle("Read Settings", isOn: $entry.reads)
-                            Toggle("Write Settings", isOn: $entry.writes)
-                            HStack {
+                            // Compact label+switch pairs, each switch immediately beside its
+                            // own label.  The Toggle keeps its title for VoiceOver but renders
+                            // only the switch (labelsHidden: a labeled Toggle in a grouped Form
+                            // takes the full row as its ideal width - spreading the switch away
+                            // from its label, or overflowing the window under fixedSize).  The
+                            // Text is the visible label, hidden from VoiceOver to avoid a double
+                            // read, and taps through to the same binding so the tap target spans
+                            // label + switch.
+                            HStack(spacing: 16) {
+                                HStack(spacing: 6) {
+                                    Text("Read Settings")
+                                        .accessibilityHidden(true)
+                                        .onTapGesture { $entry.reads.wrappedValue.toggle() }
+                                    Toggle("Read Settings", isOn: $entry.reads)
+                                        .labelsHidden()
+                                }
+                                .contentShape(Rectangle())
+                                HStack(spacing: 6) {
+                                    Text("Write Settings")
+                                        .accessibilityHidden(true)
+                                        .onTapGesture { $entry.writes.wrappedValue.toggle() }
+                                    Toggle("Write Settings", isOn: $entry.writes)
+                                        .labelsHidden()
+                                }
+                                .contentShape(Rectangle())
                                 Spacer(minLength: 8)
                                 Button("Remove") { serviceTokens.removeAll { $0.id == entry.id } }
                             }
