@@ -1235,18 +1235,13 @@ private struct AdvancedSettingsTab: View {
                             TextField("Token Folder", text: $entry.secretPath)
                             SecureField("Service Token", text: $entry.token)
                             HStack(spacing: 16) {
-                                // Each switch sits right after its own label.  A bare Toggle in a
-                                // grouped Form pushes its switch to the row's trailing edge, which
-                                // put Read's switch next to the Write label.  labelsHidden keeps
-                                // the title as the accessibility label.
-                                HStack(spacing: 6) {
-                                    Text("Read Settings")
-                                    Toggle("Read Settings", isOn: $entry.reads).labelsHidden()
-                                }
-                                HStack(spacing: 6) {
-                                    Text("Write Settings")
-                                    Toggle("Write Settings", isOn: $entry.writes).labelsHidden()
-                                }
+                                // fixedSize keeps each switch right after its own label: a bare
+                                // Toggle in a grouped Form spreads label-left/switch-right across
+                                // the row, which put Read's switch next to the Write label.  The
+                                // label stays inside the Toggle, so tap target and VoiceOver are
+                                // unchanged.
+                                Toggle("Read Settings", isOn: $entry.reads).fixedSize()
+                                Toggle("Write Settings", isOn: $entry.writes).fixedSize()
                                 Spacer(minLength: 8)
                                 Button("Remove") { serviceTokens.removeAll { $0.id == entry.id } }
                             }
