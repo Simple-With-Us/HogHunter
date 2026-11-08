@@ -7,17 +7,17 @@
     "tier assignment is a lesson from the BF-HOUSEKEEPER wake log -- do not",
     "relax a tier without a measured reason."
   ],
-  "version": "1.0.0",
-  "updated": "2026-11-04",
+  "version": "1.1.0",
+  "updated": "2026-11-05",
   "replaces": {
     "cleanmymac": "Uninstalled 2026-09-30. A stale `brew list` entry survives (cleanmymac-cli) with no Cellar dir and `command -v` returns 1, so every cleanmymac call was a silent no-op. All callers now use hoghunter-clean."
   },
   "tiers": {
     "$comment": "What each tier means to scripts/hoghunter-clean, and when the run may touch it.",
-    "safe": "Every run, including the watch's cheap band.",
+    "safe": "Every run, including the watch's cheap band.  A rule with maxFreeGb (xcode-scratch) also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
     "semi-safe": "Only --band=full, which the pressure triggers take on any hit: 25 GB free or less, a 15 GB drop in free space at any level, swap, or load.  A rule with maxFreeGb (duplicate-sim-runtimes) also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
     "expensive": "Only --band=full while the disk is acute or critical (under 40 GB free).  Bulk deletes that are the biggest wins and the biggest I/O bursts.",
-    "ask-first": "Reported, never applied.  The stale-build-output, xcode-scratch and tmp-build-trees walks run on a scan and not on a clean run."
+    "ask-first": "Reported, never applied.  The stale-build-output and tmp-build-trees walks run on a scan and not on a clean run.  xcode-scratch rows that fail its positive identification are reported here too."
   },
   "bands": {
     "$comment": "OWNER RULING 2026-10-02 (Jay): pressure changes the SHAPE of the work (2-4 bounded chunks), never its SCOPE. The previous rule -- 'swap >= 90 OR load1 > 40 => do less' -- was a guard whose threshold sat INSIDE this host's normal operating band: load1 runs 15-30 here continuously from real fleet build work, so it was true almost always, and wedded to a near-permanent swap reading it meant cleaning almost never ran. A guard whose threshold equals the normal state is an outage, not a guard. Deleting caches never reduces swap, and that still holds -- but it constrains what fixes swap, NOT how much regenerable waste may be cleared.",
@@ -49,6 +49,12 @@
       "acuteFreeGb": 40,
       "healthyFreeGb": 80
     }
+  },
+  "earlyWarning": {
+    "$comment": "HH-219.  Under freeGbBelow, a run sizes the ask-first trees, and when the report-only rows add up to more than reportOnlyGbAbove the JSON carries top_report_only: the biggest rows (path, bytes, rule), a row inside another listed row not counted twice.  The key is absent otherwise.",
+    "freeGbBelow": 40,
+    "reportOnlyGbAbove": 10,
+    "top": 8
   },
   "idlenessGates": {
     "$comment": "No file touched in N minutes proves nothing is mid-write.",
@@ -184,10 +190,28 @@
     },
     {
       "name": "xcode-scratch",
-      "tier": "ask-first",
-      "op": "report",
-      "title": "Xcode-shaped build scratch in /private/tmp (report only)",
-      "$rationale": "What xcodebuild -derivedDataPath leaves behind (3.69 GB measured 2026-11-04).  Report only, whatever the disk level: each tree is listed with what the checks found, and a person decides.  It was a deleting rule until two adversarial review rounds on 2026-11-04 kept finding what a refuse-list misses."
+      "tier": "safe",
+      "op": "delete",
+      "title": "Xcode DerivedData roots left in /private/tmp and ~/.clutch/derived-data",
+      "maxFreeGb": 60,
+      "$rationale": "What xcodebuild -derivedDataPath leaves behind: four 3.7 GB roots in /private/tmp and 3.4 GB under ~/.clutch/derived-data, measured 2026-11-05 at 24 GB free.  Owner decision 2026-11-05 (HH-219, 'train Hog Hunter to do a better job maintaining its disk space') widened it from report-only to a delete, on positive identification rather than the refuse-list that failed two reviews on 2026-11-04.  It deletes only at 60 GB free or less, so always at the 25 GB line.  ~/Library/Developer/Xcode/DerivedData stays xcode-artifacts' job.",
+      "positiveIdentification": [
+        "a direct child of /private/tmp or ~/.clutch/derived-data, a real directory owned by this user, not a symlink or a mount point, on the home folder's volume and never under /Volumes",
+        "its top holds only Xcode's own entries, none a link, with Build/ and an Xcode cache beside it, and Logs/ or Index.noindex/",
+        "info.plist is a small plain file whose WorkspacePath is set",
+        "Build/ holds only Products and Intermediates.noindex, and SourcePackages/ only SwiftPM's stores",
+        "no repository anywhere inside but a clean SwiftPM clone that a remote holds in full",
+        "nothing under Build/Products or SourcePackages/artifacts, at any depth, is a key, an archive, a project or a note; a walk that cannot finish keeps it"
+      ],
+      "skipWhenAny": [
+        "the root or anything in its first two levels changed in the last 24 hours, any file in the tree is that recent, or the root's ctime is",
+        "a .janitor-keep marker on it, above it or inside it, or the marker walk could not answer",
+        "any process holds it open, on a fresh open-file listing taken again right before the delete",
+        "a process runs from inside it",
+        "a running process names its path or its folder name",
+        "more than 60 GB free, read again from df right before the delete"
+      ],
+      "reportOnly": "Any other Xcode-shaped child, such as a git checkout with a build folder inside, stays a report row with what stopped it."
     },
     {
       "name": "tmp-build-trees",
@@ -210,6 +234,26 @@
       "title": "Abandoned BotFleet update/rollback copies",
       "$rationale": "An update moves the running tree aside and installs a fresh copy.  The rollback rebuilds with a reinstall; the first day is a grace period for a manual rollback.  Listed here on 2026-11-04, where it was missing.",
       "idleHours": 24
+    },
+    {
+      "name": "botfleet-releases",
+      "tier": "safe",
+      "op": "delete",
+      "title": "Superseded BotFleet and companion releases",
+      "$rationale": "~/.botfleet/releases and ~/.botfleet-companion/releases held 4.4 GB each on 2026-11-05, and only the release the current link names runs.  HH-219.  The store is identified positively: a real releases folder holding nothing but commit-named folders, and a current symlink that resolves to one of them.  Anything else leaves the store alone.  Releases are installed read-only, so the delete makes the release's directories writable first, after every guard has passed, and never changes a file's mode, because a file can be a hardlink shared outside the release.  Every engine delete runs with -xdev.",
+      "keep": [
+        "the release current resolves to",
+        "the newest 2 others by mtime",
+        "any release a symlink, wrapper or LaunchAgent names"
+      ],
+      "idleDays": 7,
+      "skipWhenAny": [
+        "changed or used in the last 7 days",
+        "any process holds it open, on a fresh listing right before the delete",
+        "a process runs from inside it",
+        "a running process names it",
+        "a keep marker"
+      ]
     },
     {
       "name": "logs",
@@ -251,7 +295,7 @@
         "in-session ~/.grok/worktrees",
         "BotFleet update generations (non-newest)",
         "~/BotFleet-migration-backups",
-        "~/.botfleet/releases other than the current one",
+        "BotFleet and companion releases other than the current one that botfleet-releases keeps (the newest two, or ones not yet idle a week)",
         "~/apps/botfleet-* trees (may hold a seat's uncommitted work)",
         "~/Code/*/.muse/worktrees (seat worktrees, live work)",
         "~/.minimax/v2/sqlite/backups",

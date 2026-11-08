@@ -1,5 +1,7 @@
 # Internal Disk Rules
 
+**Update, Nov 5 (HH-219).**  The owner decided to widen automatic deletes modestly.  `xcode-scratch` now deletes a positively identified DerivedData root at 60 GB free or less, and `botfleet-releases` takes superseded BotFleet releases.  See `docs/rollouts/2026-11-05-disk-upkeep-rules.md`.  Everything else below stands.
+
 Fixes HH-213.  Measured on Nov 4 with 59 GB free: the safe tier of `scripts/hoghunter-clean` found about 0 GB, because the caches were already handled and the rest of the space sat outside its rules.  This adds the rules that can act safely, closes a path that could empty the Trash, and puts everything else on the report.
 
 Nothing here was run in apply mode on the Mac.  No launchd job, installed app or live setting changed.  A rule starts deleting only once this lands and the job picks it up.
