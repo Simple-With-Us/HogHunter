@@ -58,8 +58,13 @@ implemented (2026-10-21).
 - No metrics history database, no alerting pipeline.  One daemon, one host,
   current state — the Mac app's Devices view aggregates the per-device
   lists; the daemon never does.
-- No automatic killing or pruning.  Every destructive action is
+- No automatic killing.  Every process/container action is
   user-initiated (UI, CLI, or explicit API call) and audit-logged.
+  Automatic *disk* cleanup is the one exception, added by Jay's
+  2026-11-07 directive after the Coolify host's root disk refilled to
+  92% twice in a week: §14's threshold-triggered autoclean, safe
+  categories only, opt-in, audit-logged and history-recorded like
+  every other destructive action.
 
 ## 3. Language: Go
 
@@ -148,6 +153,7 @@ This is not a limitation to work around; it is the design.  Consequences:
 | `POST /v1/processes/{pid}/kill`, `POST /v1/containers/{id}/stop|kill` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/containers/{id}/limit` | a device's own token | Allow Remote Process Control | tailnet |
 | `POST /v1/prune` | a device's own token | Allow Remote Disk Pruning | tailnet |
+| `GET /v1/autoclean`, `POST /v1/autoclean`, `GET /v1/autoclean/history` | a device's own token | Allow Remote Disk Pruning (the loop itself additionally requires `HH_AGENT_AUTOCLEAN=1`) | tailnet |
 | `POST /v1/pair-request` (new device asks to pair) | none — tailnet only, rate-limited | none | tailnet |
 | `GET /v1/pair-requests` (list pending) | any valid device token | none | tailnet |
 | `GET /v1/health`, `GET /v1/version` | none — unauthenticated, minimal | none | tailnet or loopback |
@@ -455,3 +461,59 @@ monitors anything else: it polls one cheap endpoint per device.
 - Explicitly not this slice: full `GET /v1/snapshot` polling with a
   device token (Muster would need its own paired token per device) —
   a later slice, if wanted.  This one is running/not-running only.
+
+## 14. Automatic root-disk cleanup (2026-11-07)
+
+Jay's directive, the night the Coolify host's root disk hit 92% used
+(25 GB free) for the second time in a week: HogHunter should do this
+cleanup automatically in the future, instead of an agent pruning by
+hand each time the guardrail fires.
+
+Design, implemented in `internal/autoclean`:
+
+- **Threshold-triggered, not calendar-driven.**  The daemon checks the
+  root filesystem every 15 minutes (configurable).  A cleanup run
+  happens only when root is at or over 80% used or under 30 GiB free —
+  the fleet guardrail lines.  A 6-hour cooldown separates applied runs,
+  so a disk that stays over the line is not pruned on every check.
+- **Opt-in, off by default.**  `HH_AGENT_AUTOCLEAN=1` enables the loop
+  in `hh-agent serve`.  This mirrors the Mac app's automatic clean
+  regimen (`CleanRegimen.isEnabled`, also off by default): an unattended
+  delete is something the owner turns on, not something an upgrade
+  grants.  Every category can be disabled individually
+  (`HH_AGENT_AUTOCLEAN_DISABLE=<category,...>`).
+- **Safe categories only.**  Docker build cache; dangling Docker images
+  (never all-unused, never volumes); superseded local backups, keeping
+  exactly the newest complete dump per app (the fleet keep-1 rule — B2
+  holds the off-host replica); the systemd journal vacuumed to a
+  500 MiB target with a hard 200 MiB retention floor; stale temp files
+  (regular files at least 7 days old, not open in any process, never
+  directories or symlinks).  Backup roots are validated before scanning:
+  `/`, Docker's data root, lane trees, and `.git` paths are refused.
+  An in-flight backup dump (no completion sidecar, younger than the
+  2-hour grace) is never deleted, and a group with no complete dump
+  loses nothing.
+- **Never touched:** live app data, Docker volumes, running containers,
+  tagged images, lanes and working trees, user files, the sole local
+  backup copy of any app.
+- **Accountability.**  Every check and every category outcome goes to
+  the audit log.  Every applied run that reclaims something appends one
+  record to `cleanup-history.jsonl` — the same append-only JSONL schema
+  as the Mac app's `CleanupHistoryStore`, plus per-category results and
+  the trigger text — readable via `hh-agent autoclean --history` and
+  `GET /v1/autoclean/history`.  Dry runs are audit-logged only, never
+  history-recorded, matching the Mac rule that history mirrors
+  reclaimed space only.
+- **Surfaces.**  The daemon loop (automatic); `POST /v1/autoclean`
+  (device token, dry-run by default, `force` bypasses trigger and
+  cooldown) and `GET /v1/autoclean` (status: enabled, would-trigger,
+  live disk measurement) for the Devices view; `hh-agent autoclean
+  [--dry-run] [--yes] [--force]` on the host itself, which runs
+  in-process with no daemon needed; and a systemd timer pair under
+  `deploy/` for hosts that prefer oneshot runs over the daemon loop.
+- **Relationship to the host guardrail scripts.**  The fleet's
+  `fleet-disk-guardrail.sh` (alerts) and `fleet-extra-autoprune.sh`
+  (fleet-extra volume only) stay as they are.  Autoclean is the
+  root-disk counterpart that lives in HogHunter, so the policy, the
+  categories, and the history travel with the app instead of with one
+  host's cron files.

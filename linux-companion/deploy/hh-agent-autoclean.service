@@ -1,0 +1,17 @@
+[Unit]
+Description=HogHunter hh-agent automatic root-disk cleanup (oneshot)
+After=docker.service
+Requires=docker.service
+
+# Oneshot alternative to the daemon's built-in autoclean loop, for hosts
+# that run hh-agent without HH_AGENT_AUTOCLEAN=1.  The command applies
+# the same trigger, categories, safety rules, audit log, and cleanup
+# history as the loop: below the trigger it exits 0 having done nothing.
+# Install with hh-agent-autoclean.timer (see that file).
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hh-agent autoclean --yes
+Environment=HH_AGENT_AUTOCLEAN=1
+# State (audit log + cleanup-history.jsonl) lands in the state dir.
+Environment=HH_AGENT_STATE_DIR=/var/lib/hh-agent

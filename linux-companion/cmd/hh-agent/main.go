@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/autoclean"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/daemon"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/docker"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/host"
@@ -153,6 +154,8 @@ func usage() {
   hh-agent top [--json]
   hh-agent containers [--json]
   hh-agent prune [--images] [--volumes] [--cache] [--stopped-containers] [--dry-run] [--yes] [--json]
+  hh-agent autoclean [--dry-run] [--yes] [--force] [--json]
+  hh-agent autoclean --history [--json]
   hh-agent stop <container|pid> [--timeout 10] [--yes] [--json]
   hh-agent kill <container|pid> [--yes] [--json]
   hh-agent limit <container> [--memory 2g] [--cpus 1.5] [--json]
@@ -184,6 +187,8 @@ func main() {
 		code = cmdContainers(os.Args[2:])
 	case "prune":
 		code = cmdPrune(os.Args[2:])
+	case "autoclean":
+		code = cmdAutoclean(os.Args[2:])
 	case "stop":
 		code = cmdStopKill(os.Args[2:], "stop")
 	case "kill":
@@ -217,6 +222,7 @@ func cmdServe(args []string) int {
 		DockerSock: docker.SocketPath(),
 		LaneRoots:  roots,
 		StateDir:   os.Getenv("HH_AGENT_STATE_DIR"),
+		Autoclean:  autoclean.ConfigFromEnv(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
@@ -389,6 +395,89 @@ func cmdPrune(args []string) int {
 		fmt.Printf("%-18s reclaimed %s\n", t, humanBytes(int64(r.ReclaimedBytes)))
 	}
 	fmt.Printf("total reclaimed: %s\n", humanBytes(int64(resp.Total)))
+	return exitOK
+}
+
+// cmdAutoclean is the local control surface for the automatic root-disk
+// cleanup mode.  It runs in-process (no daemon needed — SSH and scripts
+// are the point), under the env-derived config, with one deliberate
+// difference from the daemon loop: invoking the command at all is the
+// operator's opt-in for this run, so the runner is enabled here even
+// when HH_AGENT_AUTOCLEAN is unset.  The trigger still applies unless
+// --force is given, and applying still requires --yes.
+func cmdAutoclean(args []string) int {
+	fs := flag.NewFlagSet("autoclean", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "report only (default unless --yes)")
+	yes := fs.Bool("yes", false, "apply the cleanup")
+	force := fs.Bool("force", false, "bypass the disk trigger and the cooldown")
+	history := fs.Bool("history", false, "print the cleanup history instead of running")
+	asJSON := fs.Bool("json", false, "JSON output")
+	_ = fs.Parse(args)
+
+	if *history {
+		recs, err := autoclean.ReadHistory(autoclean.HistoryPath())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "autoclean history:", err)
+			return exitError
+		}
+		if *asJSON {
+			printJSON(map[string]any{"ok": true, "history": recs})
+			return exitOK
+		}
+		if len(recs) == 0 {
+			fmt.Println("no automatic cleanups recorded yet")
+			return exitOK
+		}
+		for _, r := range recs {
+			fmt.Printf("%s  freed %-9s %3d items  [%s]\n",
+				r.CleanedAt.Format("2006-01-02 15:04"), humanBytes(int64(r.BytesReclaimed)),
+				r.ItemsRemoved, strings.Join(r.CategoryIDs, ", "))
+		}
+		return exitOK
+	}
+
+	cfg := autoclean.ConfigFromEnv()
+	cfg.Enabled = true // an explicit invocation is the opt-in for this run
+	cfg.Actor = "local"
+	runner := autoclean.NewRunner(cfg, autoclean.Deps{})
+	apply := *yes
+	if !apply {
+		*dryRun = true
+	}
+	sum, err := runner.RunOnceAs("local", *dryRun, *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "autoclean:", err)
+		return exitError
+	}
+	if *asJSON {
+		printJSON(map[string]any{"ok": true, "autoclean": sum})
+		return exitOK
+	}
+	fmt.Printf("root %s: %.1f%% used, %s free — triggered: %v\n",
+		sum.DiskBefore.Path, sum.DiskBefore.UsedPercent, humanBytes(int64(sum.DiskBefore.FreeBytes)), sum.Triggered)
+	if sum.InCooldown {
+		fmt.Println("skipped: inside the cooldown since the last applied run (use --force to override)")
+		return exitOK
+	}
+	if !sum.Triggered && !*force && !*dryRun {
+		fmt.Println("not triggered — nothing cleaned.  Use --force to run anyway, or --dry-run to see the plan.")
+		return exitOK
+	}
+	for _, c := range sum.Categories {
+		switch {
+		case c.Error != "":
+			fmt.Printf("%-24s error: %s\n", c.Category, c.Error)
+		case c.Skipped != "":
+			fmt.Printf("%-24s skipped: %s\n", c.Category, c.Skipped)
+		default:
+			fmt.Printf("%-24s reclaimed %-9s %d items\n", c.Category, humanBytes(int64(c.BytesReclaimed)), c.ItemsRemoved)
+		}
+	}
+	if sum.DryRun {
+		fmt.Println("dry-run — nothing deleted.  Re-run with --yes to apply.")
+	} else {
+		fmt.Printf("total reclaimed: %s\n", humanBytes(int64(sum.BytesReclaimed)))
+	}
 	return exitOK
 }
 
