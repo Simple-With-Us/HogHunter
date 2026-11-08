@@ -154,7 +154,15 @@ func ConfigFromEnv() Config {
 		c.Cooldown = time.Duration(v) * time.Hour
 	}
 	if v := os.Getenv("HH_AGENT_AUTOCLEAN_BACKUP_DIRS"); v != "" {
-		c.BackupDirs = strings.Split(v, ",")
+		var dirs []string
+		for _, d := range strings.Split(v, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				dirs = append(dirs, d)
+			}
+		}
+		if len(dirs) > 0 {
+			c.BackupDirs = dirs
+		}
 	}
 	if v, err := strconv.Atoi(os.Getenv("HH_AGENT_AUTOCLEAN_JOURNAL_MAX_MB")); err == nil && v > 0 {
 		c.JournalTargetBytes = uint64(v) << 20
