@@ -2922,6 +2922,70 @@ def test_tool_versions_refuses_at_apply_when_the_path_was_replaced(hh):
         assert (store / "2.1.301").exists()
 
 
+# --- tmp-build-trees ------------------------------------------------------
+
+def tmp_tree(home, name="hh212-candidate-3", days=3):
+    tree = home / "private-tmp" / name
+    blob(tree / "out.o", days)
+    age(tree, days)
+    return tree
+
+
+def test_tmp_build_trees_only_looks_at_candidate_and_rebase_names(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        want = {str(tmp_tree(home, n)) for n in ("hh212-candidate-3", "feature-rebase", "x-rebase-2")}
+        tmp_tree(home, "something-else")
+        tmp_tree(home, "candidate")
+        (home / "private-tmp" / "link-candidate-1").symlink_to(home)
+        assert rule_paths(hh.rule_tmp_build_trees()) == want
+
+
+def test_tmp_build_trees_never_deletes_and_is_report_only(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tmp_tree(home)
+        found = hh.rule_tmp_build_trees()
+        assert found and all(c.op == "report" and c.tier == "ask-first" for c in found)
+        assert "tmp-build-trees" in hh.REPORT_ONLY_WALK_RULES
+        assert "nothing the checks can see keeps it" in found[0].reason
+
+
+def test_tmp_build_trees_reports_what_keeps_a_tree(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = tmp_tree(home)
+        assert hh._tmp_build_tree_refusal(tree) is None, "the control"
+        with mock.patch.object(hh, "tree_in_use", return_value=True):
+            assert "held open" in str(hh._tmp_build_tree_refusal(tree))
+        with mock.patch.object(hh, "process_names_path", return_value=True):
+            assert "names it" in str(hh._tmp_build_tree_refusal(tree))
+        with mock.patch.object(hh, "changed_age_min", return_value=5.0):
+            assert "last hour" in str(hh._tmp_build_tree_refusal(tree))
+        keep = tree / hh.KEEP_SENTINEL
+        keep.write_text("", encoding="utf-8")
+        age_all(tree, 3)
+        assert "protected" in str(hh._tmp_build_tree_refusal(tree)), "a keep marker"
+        keep.unlink()
+        assert hh.rule_tmp_build_trees()[0].path == str(tree)
+
+
+def test_tmp_build_trees_git_checkouts(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = home / "private-tmp" / "fix-rebase"
+        git_repo(tree, ignore="out.o\n")
+        blob(tree / "out.o", 3)
+        age_all(tree, 3)
+        assert "no remote" in str(hh._tmp_build_tree_refusal(tree)), "a commit no remote holds"
+        (tree / "dirty.txt").write_text("x", encoding="utf-8")
+        age_all(tree, 3)
+        assert "uncommitted" in str(hh._tmp_build_tree_refusal(tree))
+        wt = home / "private-tmp" / "wt-candidate-1"
+        wt.mkdir()
+        (wt / ".git").write_text("gitdir: /nowhere\n", encoding="utf-8")
+        blob(wt / "out.o", 3)
+        age_all(wt, 3)
+        assert "worktree" in str(hh._tmp_build_tree_refusal(wt))
+
+
+
 # --- xcode-scratch --------------------------------------------------------
 
 def xcode_tree(home, name="seat-build", days=3):
@@ -3344,6 +3408,7 @@ def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulab
     for name, tier, op in (("duplicate-sim-runtimes", "semi-safe", "simctl-runtime-delete"),
                            ("stale-build-output", "ask-first", "report"),
                            ("tool-versions", "safe", "delete"),
+                           ("tmp-build-trees", "ask-first", "report"),
                            ("xcode-scratch", "ask-first", "report")):
         assert rules[name]["tier"] == tier, name
         assert rules[name]["op"] == op, name
@@ -4024,7 +4089,7 @@ def test_a_clean_run_does_not_walk_for_report_rows_or_a_closed_pressure_rule(hh)
             assert hh.main(argv) == 0
         return set(ran)
 
-    report = {"stale-build-output", "xcode-scratch"}
+    report = {"stale-build-output", "xcode-scratch", "tmp-build-trees"}
     dup = "duplicate-sim-runtimes"
     assert not (report | {dup}) & rules_scanned(["--clean", "--json"], 10.0), "cheap band"
     assert not (report | {dup}) & rules_scanned(["--clean", "--json", "--band=full"], 80.0), "above the line"
