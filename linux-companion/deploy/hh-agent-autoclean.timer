@@ -1,0 +1,17 @@
+[Unit]
+Description=Run hh-agent automatic root-disk cleanup every 15 minutes
+
+# The check itself is cheap (one statfs) and the run only happens when
+# the root disk crosses the autoclean trigger, so a short interval is
+# safe.  Enable with:
+#   systemctl enable --now hh-agent-autoclean.timer
+# Do not enable this on a host whose daemon already runs with
+# HH_AGENT_AUTOCLEAN=1 — one automatic path per host is enough.
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

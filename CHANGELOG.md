@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+The Linux companion can now clean a server's root disk by itself:
+
+- Jay directed this on 2026-11-07, the night the Coolify host's root disk hit 92% used for the second time in a week.  The new `internal/autoclean` mode in `linux-companion` checks the root filesystem every 15 minutes and runs only when it is at or over 80% used or under 30 GiB free, with a 6-hour cooldown between applied runs.  It is opt-in (`HH_AGENT_AUTOCLEAN=1`) and off by default, like the Mac app's automatic clean regimen.
+- The categories are the safe ones only: Docker build cache, dangling Docker images (never all-unused, never volumes), superseded local backups with exactly the newest complete dump per app kept, the systemd journal vacuumed to a 500 MiB target with a hard 200 MiB floor, and stale temp files that are at least 7 days old and not open anywhere.  Live app data, Docker volumes, tagged images, lanes, working trees, and the sole local backup copy of any app are never touched; an in-flight backup dump is never mistaken for a finished one.
+- Every run is audit-logged per category, and every applied run that reclaims something appends a record to `cleanup-history.jsonl` in the Mac app's history schema, readable with `hh-agent autoclean --history` or `GET /v1/autoclean/history`.  The same runner backs the daemon loop, `POST /v1/autoclean`, the `hh-agent autoclean` CLI, and a systemd timer pair in `linux-companion/deploy/`.  Design: `linux-companion/SPEC.md` §14.
+
 One failed PR lookup no longer throws away the whole doctor report (HH-168):
 
 - The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.

@@ -22,6 +22,7 @@ import (
 
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/audit"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/auth"
+	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/autoclean"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/docker"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/host"
 	"github.com/Simple-With-Us/HogHunter/linux-companion/internal/lanes"
@@ -40,6 +41,10 @@ type Config struct {
 	// StateDir holds the token store (devices.json, pair-requests.json).
 	// Empty means auth.DefaultDir() (/var/lib/hh-agent, or HH_AGENT_STATE_DIR).
 	StateDir string
+	// Autoclean is the automatic root-disk cleanup mode.  The zero value
+	// is disabled (the shipped default); Serve starts the check loop
+	// only when Autoclean.Enabled is set.
+	Autoclean autoclean.Config
 }
 
 // Server holds daemon state.
@@ -50,6 +55,7 @@ type Server struct {
 	tokens      *auth.Store
 	startedAt   time.Time
 	pairLimiter *auth.RateLimiter
+	autoclean   *autoclean.Runner
 }
 
 // New builds the server.  It opens (or creates) the token store; raw tokens
@@ -65,6 +71,7 @@ func New(cfg Config) (*Server, error) {
 		tokens:      tokens,
 		startedAt:   time.Now(),
 		pairLimiter: auth.NewRateLimiter(5, time.Hour),
+		autoclean:   autoclean.NewRunner(cfg.Autoclean, autoclean.Deps{}),
 	}
 	if cfg.DockerSock != "" {
 		s.docker = docker.New(cfg.DockerSock)
@@ -138,6 +145,8 @@ func (s *Server) routes() {
 	m.HandleFunc("/v1/containers/", s.requireAuth(s.handleContainerAction))
 	m.HandleFunc("/v1/storage", s.requireAuth(s.handleStorage))
 	m.HandleFunc("/v1/prune", s.requireAuth(s.handlePrune))
+	m.HandleFunc("/v1/autoclean", s.requireAuth(s.handleAutoclean))
+	m.HandleFunc("/v1/autoclean/history", s.requireAuth(s.handleAutocleanHistory))
 	m.HandleFunc("/v1/lanes", s.requireAuth(s.handleLanes))
 	// Pairing: request is tailnet-only, unauthenticated, rate-limited.
 	m.HandleFunc("/v1/pair-request", s.handlePairRequest)
@@ -611,6 +620,65 @@ func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request, actor strin
 	writeJSON(w, 200, map[string]any{"ok": true, "dry_run": false, "results": results, "total_reclaimed_bytes": total})
 }
 
+// handleAutoclean serves the automatic root-disk cleanup mode.
+// POST /v1/autoclean runs one pass on demand: {"dry_run": true} is the
+// default, exactly like /v1/prune; {"dry_run": false} applies, and
+// {"force": true} additionally bypasses the trigger and the cooldown.
+// The daemon's own loop (Serve, when the mode is enabled) is what makes
+// cleanup automatic — this route is the manual trigger and the status
+// surface for the same runner, so the two can never disagree.
+func (s *Server) handleAutoclean(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method == "GET" {
+		u, triggered, err := s.autoclean.Check()
+		if err != nil {
+			errJSON(w, 500, err.Error())
+			return
+		}
+		cfg := s.autoclean.Config()
+		writeJSON(w, 200, map[string]any{
+			"ok": true, "enabled": cfg.Enabled, "would_trigger": triggered,
+			"disk": u, "categories": autoclean.AllCategories(),
+		})
+		return
+	}
+	if r.Method != "POST" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	var body struct {
+		DryRun *bool `json:"dry_run"`
+		Force  bool  `json:"force"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	dryRun := true
+	if body.DryRun != nil {
+		dryRun = *body.DryRun
+	}
+	sum, err := s.autoclean.RunOnceAs(actor, dryRun, body.Force)
+	if err != nil {
+		errJSON(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "autoclean": sum})
+}
+
+// handleAutocleanHistory returns the cleanup history, newest first —
+// the same cleanup-history.jsonl schema the Mac app writes.
+func (s *Server) handleAutocleanHistory(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != "GET" {
+		errJSON(w, 405, "method not allowed")
+		return
+	}
+	recs, err := autoclean.ReadHistory(autoclean.HistoryPath())
+	if err != nil {
+		errJSON(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "history": recs})
+}
+
 func (s *Server) handleLanes(w http.ResponseWriter, r *http.Request, _ string) {
 	if r.Method != "GET" {
 		errJSON(w, 405, "method not allowed")
@@ -660,6 +728,14 @@ func (s *Server) withTrust(trusted bool, h http.Handler) http.Handler {
 
 // Serve starts the HTTP listener and the Unix-socket listener.
 func (s *Server) Serve() error {
+	if s.cfg.Autoclean.Enabled {
+		// The automatic mode: check on the interval, clean only when
+		// the root disk crosses the trigger.  The loop lives and dies
+		// with the process.
+		go s.autoclean.Loop(context.Background())
+		_ = audit.Log("autoclean", "autoclean-loop", s.cfg.Autoclean.RootPath,
+			"enabled: threshold-triggered automatic root-disk cleanup", "ok")
+	}
 	errCh := make(chan error, 2)
 	go func() {
 		srv := &http.Server{Addr: s.cfg.HTTPAddr, Handler: s.withTrust(false, s.mux)}
