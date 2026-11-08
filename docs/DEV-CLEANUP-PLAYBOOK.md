@@ -74,12 +74,12 @@ The owner decided on Nov 5 to widen automatic deletes modestly ("train Hog Hunte
 
 ### What Is Only Reported
 
-`stale-build-output` never deletes, whatever the disk level.  `xcode-scratch` lists every Xcode-shaped tree it may not delete, with the first gate that stopped it.  A `--scan` lists each tree, and a clean run skips the stale build walks because nobody reads the rows.
+`stale-build-output` never deletes, whatever the disk level.  `xcode-scratch` lists every Xcode-shaped tree it may not delete, with the first gate that stopped it.  A `--scan` lists each tree.  A clean run skips the stale build walks because nobody reads the rows, except under 40 GB free, where the early warning reads them.
 
 | What | Rule | What a row says |
 |---|---|---|
 | Ignored build output in main checkouts | `stale-build-output`: `.build`, `.next`, `build`, `target` directly in `~/Code/<repo>`, or a path named per repo | Whether git ignores it and tracks nothing in it, whether it changed in 14 days, whether a process holds it or works in the repo, a keep marker, nested repositories, and keys, notes or project files inside.  `node_modules` and `dist` get the idle row only |
-| Xcode-shaped scratch it may not delete | `xcode-scratch`: direct children of `/private/tmp` and `~/.clutch/derived-data` | The first gate that stopped it: the shape, `info.plist`, use in 24 hours, a keep marker, a nested repository, an open handle, or a process running from it or naming it |
+| Xcode-shaped scratch it may not delete | `xcode-scratch`: direct children of `/private/tmp` and `~/.clutch/derived-data` | The first gate that stopped it: Xcode's layout (the volume, what `Build/` and `SourcePackages/` hold, `Logs/` or `Index.noindex/` beside `Build/`), `info.plist`, use in 24 hours, a key, archive, project or note anywhere inside, a keep marker, a nested repository, an open handle, or a process running from it or naming it.  A child that is not Xcode-shaped at all gets no row |
 
 **The owner's Nov 4 narrowing was not used for automatic deletes.**  The owner allowed deleting stale build output ("teach HH wherever possible").  Two adversarial review rounds on Nov 4 kept finding what the checks miss: a `.p8` key and a dSYM past the refuse-list, a CLI symlinked into `target/release`, a server started from the parent folder.  With every gate in place the rules reclaimed almost nothing, because real SwiftPM clones fail the proof below.  So a person decides, and `Never Touch` stands as written.
 

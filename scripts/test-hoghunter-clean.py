@@ -4065,13 +4065,17 @@ def test_a_clean_run_does_not_walk_for_report_rows_or_a_closed_pressure_rule(hh)
     report = {"stale-build-output"}
     dup, scratch = "duplicate-sim-runtimes", "xcode-scratch"
     cheap = rules_scanned(["--clean", "--json"], 10.0)
-    assert not (report | {dup}) & cheap and scratch in cheap, "cheap band: the safe 60 GB rule runs"
+    # Under the 40 GB early-warning line the report walk runs on a clean run
+    # too, because top_report_only reads its rows (review of PR 274).
+    assert dup not in cheap and scratch in cheap, "cheap band: the safe 60 GB rule runs"
+    assert report <= cheap, "under 40 GB free the early warning needs the report rows"
     assert not (report | {dup, scratch}) & rules_scanned(["--clean", "--json", "--band=full"], 80.0), "above both lines"
     between = rules_scanned(["--clean", "--json", "--band=full"], 40.0)
     assert scratch in between and dup not in between, "under 60 GB, above 25 GB"
+    assert not report & between, "at 40 GB the early warning is off, so the report walk is skipped"
     assert scratch not in rules_scanned(["--clean", "--json"], 60.01), "just above the 60 GB line"
     at_line = rules_scanned(["--clean", "--json", "--band=full"], 10.0)
-    assert {dup, scratch} <= at_line and not report & at_line, "at the line"
+    assert report | {dup, scratch} <= at_line, "at the line"
     for argv in (["--scan", "--json"], ["--scan", "--json", "--band=full"]):
         assert report | {dup, scratch} <= rules_scanned(argv, 80.0), "a read-only scan shows what they see"
     assert "snapshots" in rules_scanned(["--clean", "--json"], 80.0), "older rules are not skipped"
@@ -4595,6 +4599,72 @@ def test_pr274_the_same_path_from_two_rules_is_counted_once(hh):
     top = hh.top_report_only(rows, low)
     assert top is not None and [r["path"] for r in top] == ["/same", "/other"], top
     assert top[0]["bytes"] == int(6.5 * GIB) and top[0]["rule"] == "xcode-scratch", "the larger row is kept"
+
+
+# --- second review of PR 274 ----------------------------------------------
+
+def test_pr274_a_precious_file_anywhere_in_the_root_keeps_it(hh):
+    """Logs, Intermediates, the indexes and the caches are walked too, not only
+    the build output, because the rule deletes on this answer."""
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        assert hh._xcode_scratch_refusal(tree) is None, "the control"
+        secret_name = "." + "env"
+        for rel in ("Logs/deep/down/key.p12", "Build/Intermediates.noindex/App.build/signing.pem",
+                    "ModuleCache.noindex/notes.md", f"CompilationCache.noindex/{secret_name}",
+                    "Logs/Build/AuthKey_TEST.p8"):
+            path = tree / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+            settle(tree)
+            assert hh._xcode_scratch_refusal(tree) is not None, rel
+            path.unlink()
+        settle(tree)
+        assert hh._xcode_scratch_refusal(tree) is None, "and the clean tree still passes"
+
+
+def test_pr274_the_idle_gate_sees_past_4000_files_and_fails_closed(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        many = tree / "Build" / "Intermediates.noindex" / "App.build" / "Objects"
+        many.mkdir(parents=True)
+        for i in range(4100):
+            (many / f"f{i}.o").write_bytes(b"")
+        fresh = tree / "Build" / "Intermediates.noindex" / "App.build" / "Release" / "deep" / "obj.o"
+        fresh.parent.mkdir(parents=True)
+        fresh.write_text("x", encoding="utf-8")
+        settle(tree)
+        assert hh._xcode_scratch_refusal(tree) is None, "the control, all old"
+        os.utime(fresh, None)
+        assert hh._shallow_newest_age_min(tree) > hh.IDLE_MIN_XCODE_SCRATCH
+        assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "one fresh file among 4100"
+        settle(tree)
+        with mock.patch.object(hh, "_MAX_WALK_ENTRIES", 50):
+            assert hh._deep_newest_age_min(tree) == 0.0, "a capped walk reads as just now"
+        with mock.patch.object(hh, "probe_timeout", return_value=-1.0):
+            assert hh._deep_newest_age_min(tree) == 0.0, "no time left reads as just now"
+
+
+def test_pr274_a_truncated_xml_info_plist_is_a_refusal_not_a_crash(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        (tree / "info.plist").write_text(INFO_PLIST[:len(INFO_PLIST) // 2], encoding="utf-8")
+        settle(tree)
+        assert "info.plist" in str(hh._xcode_scratch_refusal(tree))
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 0 and tree.is_dir(), report
+
+
+def test_pr274_a_clean_run_under_the_warning_line_walks_the_report_rules(hh):
+    """top_report_only reads the stale-build-output rows, so a clean run under
+    40 GB free must not skip that walk."""
+    with fake_home(hh):
+        for free, skipped in ((80.0, True), (30.0, False)):
+            with mock.patch.object(hh, "scan", return_value=[]) as scan:
+                clean_main(hh, ["--clean", "--json"], free)
+            skip = scan.call_args.kwargs["skip"]
+            assert bool(hh.REPORT_ONLY_WALK_RULES & skip) == skipped, (free, skip)
+        hh.SIZE_ASK_FIRST = False
 
 
 def main() -> int:
