@@ -2977,6 +2977,18 @@ def test_tmp_build_trees_git_checkouts(hh):
         (tree / "dirty.txt").write_text("x", encoding="utf-8")
         age_all(tree, 3)
         assert "uncommitted" in str(hh._tmp_build_tree_refusal(tree))
+        (tree / "dirty.txt").unlink()
+        run_git(tree, "update-index", "--skip-worktree", "main.swift")
+        (tree / "main.swift").write_text("print(2)\n", encoding="utf-8")
+        age_all(tree, 3)
+        assert "skip-worktree" in str(hh._tmp_build_tree_refusal(tree)), "edits hidden from git status"
+        run_git(tree, "update-index", "--no-skip-worktree", "main.swift")
+        run_git(tree, "update-index", "--assume-unchanged", "main.swift")
+        age_all(tree, 3)
+        assert "assume-unchanged" in str(hh._tmp_build_tree_refusal(tree))
+        run_git(tree, "update-index", "--no-assume-unchanged", "main.swift")
+        run_git(tree, "checkout", "--", "main.swift")
+        (tree / "dirty.txt").write_text("x", encoding="utf-8")
         wt = home / "private-tmp" / "wt-candidate-1"
         wt.mkdir()
         (wt / ".git").write_text("gitdir: /nowhere\n", encoding="utf-8")

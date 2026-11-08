@@ -2964,6 +2964,13 @@ def _tmp_tree_git_finding(tree: Path) -> str | None:
         return "could not read its git status"
     if status.stdout.strip():
         return "has uncommitted changes"
+    # skip-worktree and assume-unchanged entries hide edits from git status;
+    # ls-files -v marks them with S or a lowercase tag.
+    flags = _git(tree, "ls-files", "-v")
+    if flags is None or flags.returncode != 0:
+        return "could not read its git index flags"
+    if any(line[:1] == "S" or line[:1].islower() for line in flags.stdout.splitlines()):
+        return "has files git is told to ignore changes in (skip-worktree or assume-unchanged)"
     stash = _git(tree, "rev-list", "--max-count=1", "--walk-reflogs", "refs/stash")
     if stash is not None and stash.returncode == 0 and stash.stdout.strip():
         return "has a stash"
