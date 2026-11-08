@@ -151,6 +151,12 @@ type TmpEntry struct {
 	ModTime time.Time
 	IsDir   bool
 	Symlink bool
+	// Regular is true only for a plain file.  Anything else — a Unix
+	// socket, a FIFO, a device node — is never selected: a daemon's
+	// stale-looking socket in /tmp is still its rendezvous point, and a
+	// socket's /proc fd does not resolve to its path, so the Open check
+	// below cannot protect it.
+	Regular bool
 	// Open is true when some process holds the file open (checked via
 	// /proc/*/fd by the walker).  An open temp file is in use by
 	// definition, however old it looks.
@@ -164,7 +170,7 @@ type TmpEntry struct {
 func SelectStaleTmp(entries []TmpEntry, now time.Time, minAge time.Duration) []string {
 	var out []string
 	for _, e := range entries {
-		if e.IsDir || e.Symlink || e.Open {
+		if e.IsDir || e.Symlink || e.Open || !e.Regular {
 			continue
 		}
 		if now.Sub(e.ModTime) < minAge {

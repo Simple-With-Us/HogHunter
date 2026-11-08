@@ -3,6 +3,7 @@ package autoclean
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -64,7 +65,9 @@ func AppendHistory(path string, rec CleanupHistoryRecord) error {
 
 // ReadHistory reads every record, newest first.  A missing file reads as
 // empty, and a line that fails to decode is skipped — a half-written row
-// must never brick the reader (the Mac store's rule).
+// must never brick the reader (the Mac store's rule).  Lines are read
+// with an unbounded reader, not a capped scanner: a single oversized
+// legacy line must not fail every later read.
 func ReadHistory(path string) ([]CleanupHistoryRecord, error) {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
@@ -75,17 +78,24 @@ func ReadHistory(path string) ([]CleanupHistoryRecord, error) {
 	}
 	defer f.Close()
 	var out []CleanupHistoryRecord
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	for sc.Scan() {
-		var rec CleanupHistoryRecord
-		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
-			continue
+	rd := bufio.NewReader(f)
+	for {
+		line, err := rd.ReadBytes('\n')
+		if len(line) > 0 {
+			var rec CleanupHistoryRecord
+			if jerr := json.Unmarshal(line, &rec); jerr == nil {
+				out = append(out, rec)
+			}
 		}
-		out = append(out, rec)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
-	return out, sc.Err()
+	return out, nil
 }

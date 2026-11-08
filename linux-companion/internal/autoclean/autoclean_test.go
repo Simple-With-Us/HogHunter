@@ -123,19 +123,21 @@ func TestSelectStaleTmp(t *testing.T) {
 	old := now.Add(-8 * 24 * time.Hour)
 	young := now.Add(-24 * time.Hour)
 	entries := []TmpEntry{
-		{Path: "/tmp/old.log", ModTime: old},                                  // delete
-		{Path: "/tmp/young.log", ModTime: young},                              // too young
-		{Path: "/tmp/open.log", ModTime: old, Open: true},                     // open
-		{Path: "/tmp/link", ModTime: old, Symlink: true},                      // symlink
-		{Path: "/tmp/dir", ModTime: old, IsDir: true},                         // directory
-		{Path: filepath.Join("/var/tmp", "stale.bin"), ModTime: old, Size: 5}, // delete
+		{Path: "/tmp/old.log", ModTime: old, Regular: true},                                  // delete
+		{Path: "/tmp/young.log", ModTime: young, Regular: true},                              // too young
+		{Path: "/tmp/open.log", ModTime: old, Open: true, Regular: true},                     // open
+		{Path: "/tmp/link", ModTime: old, Symlink: true},                                     // symlink
+		{Path: "/tmp/dir", ModTime: old, IsDir: true},                                        // directory
+		{Path: "/tmp/tmux.sock", ModTime: old},                                               // socket: not regular, never delete
+		{Path: "/tmp/daemon.fifo", ModTime: old},                                             // FIFO: not regular, never delete
+		{Path: filepath.Join("/var/tmp", "stale.bin"), ModTime: old, Size: 5, Regular: true}, // delete
 	}
 	got := SelectStaleTmp(entries, now, 7*24*time.Hour)
 	if len(got) != 2 || got[0] != "/tmp/old.log" || got[1] != "/var/tmp/stale.bin" {
 		t.Fatalf("SelectStaleTmp=%v", got)
 	}
 	// Exactly at the age floor counts as stale.
-	edge := []TmpEntry{{Path: "/tmp/edge", ModTime: now.Add(-7 * 24 * time.Hour)}}
+	edge := []TmpEntry{{Path: "/tmp/edge", ModTime: now.Add(-7 * 24 * time.Hour), Regular: true}}
 	if got := SelectStaleTmp(edge, now, 7*24*time.Hour); len(got) != 1 {
 		t.Fatalf("edge age must be selected, got %v", got)
 	}

@@ -39,6 +39,12 @@ type Deps struct {
 	AuditLog func(actor, action, target, detail, result string) error
 	// HistoryPath overrides the history file location (tests).
 	HistoryPath string
+	// LastRunPath overrides the persisted last-run timestamp file
+	// (tests).  The cooldown clock must survive process restarts: the
+	// systemd oneshot path builds a fresh Runner every timer tick, and
+	// an in-memory-only clock would let it re-run every 15 minutes
+	// whenever the disk stays over the trigger.
+	LastRunPath string
 }
 
 func (d *Deps) fillDefaults(cfg Config) {
@@ -78,6 +84,31 @@ func (d *Deps) fillDefaults(cfg Config) {
 	if d.HistoryPath == "" {
 		d.HistoryPath = HistoryPath()
 	}
+	if d.LastRunPath == "" {
+		d.LastRunPath = filepath.Join(filepath.Dir(d.HistoryPath), "autoclean-lastrun.txt")
+	}
+}
+
+// loadLastRun reads the persisted cooldown clock.  A missing or
+// unparseable file reads as the zero time (no run on record).
+func loadLastRun(path string) time.Time {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// saveLastRun persists the cooldown clock next to the history file.
+func saveLastRun(path string, t time.Time) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(t.Format(time.RFC3339Nano)+"\n"), 0600)
 }
 
 // CategoryResult is one category's outcome in a run.
@@ -117,9 +148,14 @@ type Runner struct {
 }
 
 // NewRunner builds a runner; unset deps get their real implementations.
+// The cooldown clock is seeded from the persisted last-run timestamp, so
+// the cooldown holds across process restarts (systemd oneshot ticks, CLI
+// invocations, daemon restarts alike).
 func NewRunner(cfg Config, deps Deps) *Runner {
 	deps.fillDefaults(cfg)
-	return &Runner{cfg: cfg, deps: deps}
+	r := &Runner{cfg: cfg, deps: deps}
+	r.lastRun = loadLastRun(deps.LastRunPath)
+	return r
 }
 
 // Config returns the runner's config.
@@ -208,9 +244,28 @@ func (r *Runner) RunOnceAs(actor string, dryRun bool, force bool) (RunSummary, e
 		r.mu.Lock()
 		r.lastRun = now
 		r.mu.Unlock()
+		// Persist the cooldown clock so the next process (the next
+		// systemd oneshot tick, a CLI call, a restarted daemon) honors
+		// it too.  Best-effort: a failed write is audited, never fatal.
+		if err := saveLastRun(r.deps.LastRunPath, now); err != nil {
+			_ = r.deps.AuditLog(actor, "autoclean", "cooldown", "persist last-run failed", "error: "+err.Error())
+		}
 		// History mirrors reclaimed space only: a run that removed
 		// nothing leaves no row (the Mac store's rule).
 		if sum.ItemsRemoved > 0 || sum.BytesReclaimed > 0 {
+			// The persisted record caps each category's item list at
+			// 50, like ItemTitles below: a run can delete tens of
+			// thousands of stale temp files, and an unbounded list
+			// would bloat the append-only history with megabyte lines.
+			// The in-memory summary keeps the full list; only the
+			// record is capped.
+			recCats := make([]CategoryResult, len(sum.Categories))
+			for i, c := range sum.Categories {
+				recCats[i] = c
+				if len(recCats[i].Items) > 50 {
+					recCats[i].Items = recCats[i].Items[:50]
+				}
+			}
 			rec := CleanupHistoryRecord{
 				CleanedAt:      now,
 				BytesReclaimed: sum.BytesReclaimed,
@@ -218,7 +273,7 @@ func (r *Runner) RunOnceAs(actor string, dryRun bool, force bool) (RunSummary, e
 				Tier:           "automatic",
 				Source:         actor,
 				Trigger:        sum.Trigger,
-				Categories:     sum.Categories,
+				Categories:     recCats,
 			}
 			for _, c := range sum.Categories {
 				if c.ItemsRemoved > 0 || c.BytesReclaimed > 0 {
@@ -478,6 +533,7 @@ func scanTmpDir(root string, open map[string]bool) ([]TmpEntry, error) {
 			Size:    info.Size(),
 			ModTime: info.ModTime(),
 			Symlink: d.Type()&os.ModeSymlink != 0,
+			Regular: info.Mode().IsRegular(),
 			Open:    open[path],
 		})
 		return nil

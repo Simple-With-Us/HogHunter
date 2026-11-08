@@ -1,8 +1,10 @@
 package autoclean
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +121,17 @@ func TestRunnerAppliedRunEndToEnd(t *testing.T) {
 	writeFile(t, filepath.Join(cfg.BackupDirs[0], "um", "b.db.sha256"), 10, now.Add(-time.Hour))
 	writeFile(t, filepath.Join(cfg.TmpDirs[0], "stale.log"), 100, now.Add(-8*24*time.Hour))
 	writeFile(t, filepath.Join(cfg.TmpDirs[0], "fresh.log"), 100, now.Add(-time.Hour))
+	// A live daemon socket with a stale mtime must survive: it is not a
+	// regular file, and its fd does not resolve to its path.
+	sockPath := filepath.Join(cfg.TmpDirs[0], "daemon.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := os.Chtimes(sockPath, now.Add(-8*24*time.Hour), now.Add(-8*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	d := w.deps()
 	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
 	r := NewRunner(cfg, d)
@@ -147,6 +160,9 @@ func TestRunnerAppliedRunEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.TmpDirs[0], "fresh.log")); err != nil {
 		t.Errorf("fresh tmp file must survive: %v", err)
+	}
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Errorf("daemon socket must survive: %v", err)
 	}
 	goneOld := filepath.Join(cfg.BackupDirs[0], "um", "a.db")
 	goneStale := filepath.Join(cfg.TmpDirs[0], "stale.log")
@@ -257,6 +273,72 @@ func TestRunnerCooldownSuppressesSecondRun(t *testing.T) {
 	}
 	if len(w.pruned) <= prunedAfterFirst {
 		t.Error("a forced run must bypass the cooldown")
+	}
+}
+
+func TestRunnerCooldownSurvivesRestart(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	cfg.Cooldown = 6 * time.Hour
+	hist := filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	d1 := w.deps()
+	d1.HistoryPath = hist
+	r1 := NewRunner(cfg, d1)
+	if _, err := r1.RunOnce(false, false); err != nil {
+		t.Fatal(err)
+	}
+	prunedAfterFirst := len(w.pruned)
+	// A brand-new Runner over the same state dir — the systemd oneshot
+	// case — must still honor the cooldown from the persisted clock.
+	d2 := w.deps()
+	d2.HistoryPath = hist
+	r2 := NewRunner(cfg, d2)
+	sum, err := r2.RunOnce(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.InCooldown {
+		t.Error("cooldown must survive a process restart via the persisted last-run clock")
+	}
+	if len(w.pruned) != prunedAfterFirst {
+		t.Error("a cooldown-suppressed run after restart must not prune again")
+	}
+}
+
+func TestReadHistoryToleratesOversizedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	big := CleanupHistoryRecord{
+		CleanedAt:      time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC),
+		BytesReclaimed: 7,
+		ItemsRemoved:   1,
+		Tier:           "automatic",
+		Categories: []CategoryResult{{
+			Category:     CategoryStaleTmp,
+			ItemsRemoved: 1,
+			Items:        []string{strings.Repeat("x", 5<<20)},
+		}},
+	}
+	if err := AppendHistory(path, big); err != nil {
+		t.Fatal(err)
+	}
+	small := CleanupHistoryRecord{
+		CleanedAt:      time.Date(2026, 11, 7, 1, 0, 0, 0, time.UTC),
+		BytesReclaimed: 9,
+		Tier:           "automatic",
+	}
+	if err := AppendHistory(path, small); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := ReadHistory(path)
+	if err != nil {
+		t.Fatalf("an oversized line must not break ReadHistory: %v", err)
+	}
+	if len(recs) != 2 || recs[0].BytesReclaimed != 9 || recs[1].BytesReclaimed != 7 {
+		t.Fatalf("recs=%v", recs)
 	}
 }
 
