@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+In Settings, each Advanced switch sits next to its own label (HH-220):
+
+- The Read Settings switch in a service-token row now appears right after its label instead of at the far right of the row beside the Write Settings label, and the Write Settings switch sits by its own label too. Same toggles, same saved settings, no behavior change.
+
 The iPhone can refresh the server and act on Flagged Issues (HH-218):
 
 - The Server tab has a Refresh Server Reading button, and pull to refresh does the same: the Mac reads the server now instead of at its next minute.  The new route, `POST /v1/server/refresh`, is read only, so it sits behind Allow iPhone to See Server Status, takes a phone's own token on the local network or Tailscale, and allows one refresh per 15 seconds.
