@@ -129,17 +129,40 @@ func isIncompleteName(name string) bool {
 // data), and anything that looks like a fleet lane or working tree.
 func ValidateBackupRoot(path string) (ok bool, reason string) {
 	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return false, "refusing backup root " + clean + ": path must be absolute"
+	}
+	lower := strings.ToLower(clean)
 	switch clean {
 	case "/", "/var", "/var/lib", "/var/lib/docker", "/root", "/home":
 		return false, "refusing backup root " + clean + ": too broad"
 	}
-	lower := strings.ToLower(clean)
 	for _, frag := range []string{"/lanes/", "/apps/lanes", "/.git", "/var/lib/docker/"} {
 		if strings.Contains(lower, frag) {
 			return false, "refusing backup root " + clean + ": looks like live data or a working tree"
 		}
 	}
-	return true, ""
+	// System and live-data subtrees are never backup roots, however the
+	// operator spells them.  An exact-path denylist alone would let
+	// /var/lib/<app>/data or /usr/share/doc through, and the keep-1
+	// planner would then delete live files there.
+	for _, prefix := range []string{
+		"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
+		"/opt", "/proc", "/run", "/sbin", "/srv", "/sys", "/usr",
+		"/var/lib", "/var/www", "/root", "/home",
+	} {
+		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			return false, "refusing backup root " + clean + ": system or live-data path"
+		}
+	}
+	// A backup root must look like one: some path component names it a
+	// backup location (/backups, /data/backups, /mnt/fleet-extra/backups).
+	for _, comp := range strings.Split(strings.Trim(clean, "/"), "/") {
+		if strings.Contains(strings.ToLower(comp), "backup") {
+			return true, ""
+		}
+	}
+	return false, "refusing backup root " + clean + ": does not look like a dedicated backup location"
 }
 
 // --- Stale temp files -----------------------------------------------------
