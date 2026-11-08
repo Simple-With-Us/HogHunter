@@ -656,12 +656,25 @@ func (s *Server) handleAutoclean(w http.ResponseWriter, r *http.Request, actor s
 	if body.DryRun != nil {
 		dryRun = *body.DryRun
 	}
+	// Applying is destructive, so it additionally requires the
+	// daemon-side opt-in (HH_AGENT_AUTOCLEAN=1): an authenticated
+	// device alone must not be able to delete files, with or without
+	// force.  Dry runs stay available to any authenticated device —
+	// they delete nothing and are the status surface's plan view.
+	enabled := s.autoclean.Config().Enabled
+	if !dryRun && !enabled {
+		errJSON(w, 403, "autoclean apply is not enabled on this daemon (HH_AGENT_AUTOCLEAN=1 is not set); dry_run remains available")
+		return
+	}
 	sum, err := s.autoclean.RunOnceAs(actor, dryRun, body.Force)
 	if err != nil {
 		errJSON(w, 409, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "autoclean": sum})
+	// "enabled" rides along so a client can tell "the mode is off"
+	// apart from "the disk is below the trigger" — the summary alone
+	// reads the same for both.
+	writeJSON(w, 200, map[string]any{"ok": true, "enabled": enabled, "autoclean": sum})
 }
 
 // handleAutocleanHistory returns the cleanup history, newest first —

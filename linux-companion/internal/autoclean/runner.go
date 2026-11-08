@@ -63,7 +63,11 @@ func (d *Deps) fillDefaults(cfg Config) {
 	}
 	if d.Vacuum == nil {
 		d.Vacuum = func(to uint64) error {
-			return exec.Command("journalctl", fmt.Sprintf("--vacuum-size=%d", to)).Run()
+			// Bounded: a wedged journalctl must not hold the
+			// single-run guard and wedge every later run.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			return exec.CommandContext(ctx, "journalctl", fmt.Sprintf("--vacuum-size=%d", to)).Run()
 		}
 	}
 	if d.DirSize == nil {
@@ -335,42 +339,51 @@ func (r *Runner) pruneDocker(id, target string, dryRun bool) CategoryResult {
 
 func (r *Runner) cleanBackups(dryRun bool, now time.Time) CategoryResult {
 	res := CategoryResult{Category: CategoryBackups}
-	var dumps []BackupDump
+	var failures []string
+	scanned := 0
+	// Roots are planned independently, and one bad root never aborts
+	// the category: a dump's app key is relative to its own root, so
+	// planning across roots would conflate same-named apps and could
+	// delete one root's only dump because another root holds a newer
+	// one; and a refused or unreadable root says nothing about the
+	// roots that follow it.
 	for _, root := range r.cfg.BackupDirs {
 		if ok, reason := ValidateBackupRoot(root); !ok {
-			res.Skipped = reason
-			return res
+			failures = append(failures, reason)
+			continue
 		}
-		found, err := scanBackupDir(root, now, r.cfg.BackupInFlightGrace)
+		dumps, err := scanBackupDir(root, now, r.cfg.BackupInFlightGrace)
 		if err != nil {
 			// A missing backup dir is a fact to note, not a failure:
 			// hosts without local backups simply skip the category.
-			res.Skipped = "scan: " + err.Error()
-			return res
+			failures = append(failures, "scan "+root+": "+err.Error())
+			continue
 		}
-		dumps = append(dumps, found...)
-	}
-	sizes := map[string]int64{}
-	for _, d := range dumps {
-		sizes[d.Path] = d.Size
-		for _, s := range d.Sidecars {
-			sizes[s.Path] = s.Size
+		scanned++
+		sizes := map[string]int64{}
+		for _, d := range dumps {
+			sizes[d.Path] = d.Size
+			for _, s := range d.Sidecars {
+				sizes[s.Path] = s.Size
+			}
 		}
-	}
-	for _, path := range PlanBackupCleanup(dumps) {
-		if dryRun {
+		for _, path := range PlanBackupCleanup(dumps) {
+			if !dryRun {
+				if err := r.deps.Remove(path); err != nil {
+					failures = append(failures, "remove "+path+": "+err.Error())
+					continue
+				}
+			}
 			res.Items = append(res.Items, path)
 			res.ItemsRemoved++
 			res.BytesReclaimed += uint64(sizes[path])
-			continue
 		}
-		if err := r.deps.Remove(path); err != nil {
-			res.Error = err.Error()
-			return res
-		}
-		res.Items = append(res.Items, path)
-		res.ItemsRemoved++
-		res.BytesReclaimed += uint64(sizes[path])
+	}
+	switch {
+	case scanned == 0 && len(failures) > 0:
+		res.Skipped = strings.Join(failures, "; ")
+	case len(failures) > 0:
+		res.Error = strings.Join(failures, "; ")
 	}
 	return res
 }
@@ -398,9 +411,16 @@ func (r *Runner) vacuumJournal(dryRun bool) CategoryResult {
 		return res
 	}
 	after, err := r.deps.DirSize(r.cfg.JournalDir)
-	if err == nil && after < before {
+	switch {
+	case err == nil && after < before:
 		res.BytesReclaimed = before - after
-	} else {
+	case err == nil:
+		// Measured, and the journal did not shrink: report zero, not
+		// the plan's estimate — history must not record bytes that
+		// were never freed.
+		res.BytesReclaimed = 0
+	default:
+		// Unmeasurable afterwards: fall back to the plan estimate.
 		res.BytesReclaimed = before - to
 	}
 	res.ItemsRemoved = 1
@@ -422,16 +442,22 @@ func (r *Runner) cleanTmp(dryRun bool, now time.Time) CategoryResult {
 	for _, e := range entries {
 		sizes[e.Path] = e.Size
 	}
+	// One unremovable file (sticky /tmp, another user's file) must not
+	// abort the sweep: record the failures and keep cleaning.
+	var failures []string
 	for _, path := range SelectStaleTmp(entries, now, r.cfg.TmpMinAge) {
 		if !dryRun {
 			if err := r.deps.Remove(path); err != nil {
-				res.Error = err.Error()
-				return res
+				failures = append(failures, path+": "+err.Error())
+				continue
 			}
 		}
 		res.Items = append(res.Items, path)
 		res.ItemsRemoved++
 		res.BytesReclaimed += uint64(sizes[path])
+	}
+	if len(failures) > 0 {
+		res.Error = fmt.Sprintf("%d removal(s) failed: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return res
 }
@@ -440,8 +466,43 @@ func (r *Runner) cleanTmp(dryRun bool, now time.Time) CategoryResult {
 // triggered, until the context ends.  Each check and run is audit-logged
 // by RunOnce; a failed check is logged and the loop carries on, because a
 // disk watcher that dies on its first error protects nothing.
+// containerMarkerPaths are the marker files container runtimes leave
+// in a container's root filesystem (Docker, Podman).  A variable so
+// tests can point it at fixtures.
+var containerMarkerPaths = []string{"/.dockerenv", "/run/.containerenv"}
+
+// looksContainerized reports whether this process runs inside a
+// container.  Autoclean's defaults name host paths (/backups, /tmp,
+// the journal); inside the scratch container image those are the
+// container's own filesystems, the Docker categories still work, but
+// the host's disk — the thing autoclean exists to reclaim — would
+// never be touched, and the journal category could only error.  The
+// unattended loop therefore refuses to start in a container; the
+// supported automatic deployment is host-native (the systemd timer in
+// deploy/).  An explicit CLI run stays the operator's call.
+func looksContainerized() bool {
+	for _, p := range containerMarkerPaths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Runner) Loop(ctx context.Context) {
-	t := time.NewTicker(r.cfg.CheckInterval)
+	if looksContainerized() {
+		_ = r.deps.AuditLog(r.cfg.Actor, "autoclean-loop", r.cfg.RootPath,
+			"refusing to start in a container: autoclean targets the host filesystem; use the systemd timer on a host-native install",
+			"skipped")
+		return
+	}
+	interval := r.cfg.CheckInterval
+	if interval <= 0 {
+		// A zero-value Config with Enabled flipped on must not panic
+		// the daemon on time.NewTicker.
+		interval = DefaultConfig().CheckInterval
+	}
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
@@ -458,6 +519,18 @@ func (r *Runner) Loop(ctx context.Context) {
 // itself), which matches the fleet layout of one directory per app.
 func scanBackupDir(root string, now time.Time, grace time.Duration) ([]BackupDump, error) {
 	var dumps []BackupDump
+	// Directory listings are cached per directory: sidecar discovery
+	// needs the dump's siblings, and re-listing the directory for
+	// every dump makes the scan quadratic in the number of dumps.
+	listings := map[string][]os.DirEntry{}
+	siblings := func(dir string) []os.DirEntry {
+		if l, ok := listings[dir]; ok {
+			return l
+		}
+		l, _ := os.ReadDir(dir)
+		listings[dir] = l
+		return l
+	}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -484,8 +557,7 @@ func scanBackupDir(root string, now time.Time, grace time.Duration) ([]BackupDum
 		rel, _ := filepath.Rel(root, filepath.Dir(path))
 		dump.App = rel
 		// Sidecars: same directory, dump name plus a sidecar suffix.
-		sibs, _ := os.ReadDir(filepath.Dir(path))
-		for _, sib := range sibs {
+		for _, sib := range siblings(filepath.Dir(path)) {
 			if sib.IsDir() {
 				continue
 			}
@@ -522,6 +594,12 @@ func scanTmpDir(root string, open map[string]bool) ([]TmpEntry, error) {
 			if strings.Count(rel, string(filepath.Separator)) >= 2 && path != root {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if strings.Count(rel, string(filepath.Separator)) >= 2 {
+			// Beyond the two-level boundary even though the parent
+			// directory was entered: an application's own layout,
+			// never inventoried for deletion.
 			return nil
 		}
 		info, err := d.Info()

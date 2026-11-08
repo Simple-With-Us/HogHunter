@@ -73,6 +73,12 @@ func TestConfigFromEnv(t *testing.T) {
 	if got := ConfigFromEnv().UsedPercentTrigger; got != 80 {
 		t.Errorf("garbage pct override must fall back to the 80 default, got %v", got)
 	}
+	// Backup dir lists are trimmed element by element, like DISABLE.
+	t.Setenv("HH_AGENT_AUTOCLEAN_BACKUP_DIRS", "/backups, /mnt/fleet-extra/backups ,")
+	dirs := ConfigFromEnv().BackupDirs
+	if len(dirs) != 2 || dirs[0] != "/backups" || dirs[1] != "/mnt/fleet-extra/backups" {
+		t.Errorf("BackupDirs=%q, want trimmed pair", dirs)
+	}
 }
 
 func TestPlanBackupCleanupKeepsNewestCompletePerApp(t *testing.T) {
@@ -106,7 +112,9 @@ func TestPlanBackupCleanupKeepsNewestCompletePerApp(t *testing.T) {
 }
 
 func TestValidateBackupRoot(t *testing.T) {
-	for _, bad := range []string{"/", "/var/lib/docker", "/var/lib/docker/volumes", "/mnt/fleet-extra/apps/lanes/x", "/home/u/.git"} {
+	for _, bad := range []string{"/", "/var/lib/docker", "/var/lib/docker/volumes", "/mnt/fleet-extra/apps/lanes/x", "/home/u/.git",
+		"/etc", "/usr/share/doc", "/opt/app/data", "/srv/data", "/var/www", "/var/lib/postgresql", "/var/lib/mysql/data",
+		"/data", "relative/backups", "/mnt/fleet-extra/snapshots"} {
 		if ok, _ := ValidateBackupRoot(bad); ok {
 			t.Errorf("ValidateBackupRoot(%q) must refuse", bad)
 		}

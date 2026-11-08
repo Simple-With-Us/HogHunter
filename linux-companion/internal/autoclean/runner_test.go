@@ -1,6 +1,8 @@
 package autoclean
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -132,6 +134,10 @@ func TestRunnerAppliedRunEndToEnd(t *testing.T) {
 	if err := os.Chtimes(sockPath, now.Add(-8*24*time.Hour), now.Add(-8*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	// A stale file below the two-level scan boundary is an app's own
+	// layout and must survive too.
+	deepPath := filepath.Join(cfg.TmpDirs[0], "app", "sub", "deep.log")
+	writeFile(t, deepPath, 100, now.Add(-8*24*time.Hour))
 	d := w.deps()
 	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
 	r := NewRunner(cfg, d)
@@ -163,6 +169,9 @@ func TestRunnerAppliedRunEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(sockPath); err != nil {
 		t.Errorf("daemon socket must survive: %v", err)
+	}
+	if _, err := os.Stat(deepPath); err != nil {
+		t.Errorf("file below the scan depth boundary must survive: %v", err)
 	}
 	goneOld := filepath.Join(cfg.BackupDirs[0], "um", "a.db")
 	goneStale := filepath.Join(cfg.TmpDirs[0], "stale.log")
@@ -339,6 +348,158 @@ func TestReadHistoryToleratesOversizedLine(t *testing.T) {
 	}
 	if len(recs) != 2 || recs[0].BytesReclaimed != 9 || recs[1].BytesReclaimed != 7 {
 		t.Fatalf("recs=%v", recs)
+	}
+}
+
+func TestLoopZeroIntervalDoesNotPanic(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	cfg.CheckInterval = 0 // a zero-value config with Enabled on must not panic NewTicker
+	r := NewRunner(cfg, w.deps())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Loop(ctx); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop must return when its context is cancelled")
+	}
+}
+
+func TestLoopRefusesToStartInContainer(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), ".dockerenv")
+	if err := os.WriteFile(marker, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := containerMarkerPaths
+	containerMarkerPaths = []string{marker}
+	defer func() { containerMarkerPaths = old }()
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	r := NewRunner(testConfig(t, w), w.deps())
+	done := make(chan struct{})
+	go func() { r.Loop(context.Background()); close(done) }()
+	select {
+	case <-done:
+		// Returned promptly despite the live context: the guard fired.
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop must refuse to start inside a container")
+	}
+	if len(w.pruned) != 0 {
+		t.Error("a container-refused loop must not prune anything")
+	}
+}
+
+func TestRunnerBackupsPlannedPerRoot(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	rootA := filepath.Join(t.TempDir(), "backups")
+	rootB := filepath.Join(t.TempDir(), "backups")
+	old := now.Add(-72 * time.Hour)
+	// Root A: two generations of app "um" — the older is superseded.
+	writeFile(t, filepath.Join(rootA, "um", "a.db"), 500, old)
+	writeFile(t, filepath.Join(rootA, "um", "a.db.sha256"), 10, old)
+	writeFile(t, filepath.Join(rootA, "um", "b.db"), 500, now.Add(-time.Hour))
+	writeFile(t, filepath.Join(rootA, "um", "b.db.sha256"), 10, now.Add(-time.Hour))
+	// Root B: the same app name, but its only dump.  Planning across
+	// roots would delete it because root A's b.db is newer.
+	writeFile(t, filepath.Join(rootB, "um", "only.db"), 500, old)
+	writeFile(t, filepath.Join(rootB, "um", "only.db.sha256"), 10, old)
+	// An invalid root first in the list must not abort the others.
+	cfg.BackupDirs = []string{"/etc", rootA, rootB}
+	d := w.deps()
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(rootA, "um", "a.db")); !os.IsNotExist(err) {
+		t.Error("root A's superseded dump must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(rootB, "um", "only.db")); err != nil {
+		t.Errorf("root B's only dump must survive per-root planning: %v", err)
+	}
+	for _, c := range sum.Categories {
+		if c.Category == CategoryBackups && c.Error == "" {
+			t.Error("the refused /etc root must be surfaced in the category error")
+		}
+	}
+}
+
+func TestRunnerTmpRemovalFailureDoesNotAbortSweep(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	stale := now.Add(-8 * 24 * time.Hour)
+	bad := filepath.Join(cfg.TmpDirs[0], "a-bad.log")
+	good := filepath.Join(cfg.TmpDirs[0], "b-good.log")
+	writeFile(t, bad, 100, stale)
+	writeFile(t, good, 100, stale)
+	d := w.deps()
+	realRemove := d.Remove
+	d.Remove = func(p string) error {
+		if p == bad {
+			return errors.New("permission denied")
+		}
+		return realRemove(p)
+	}
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(good); !os.IsNotExist(err) {
+		t.Error("the removable stale file must still be removed after a sibling failure")
+	}
+	for _, c := range sum.Categories {
+		if c.Category == CategoryStaleTmp {
+			if c.ItemsRemoved != 1 {
+				t.Errorf("stale-tmp ItemsRemoved=%d, want 1", c.ItemsRemoved)
+			}
+			if c.Error == "" {
+				t.Error("the failed removal must be recorded in the category error")
+			}
+		}
+	}
+}
+
+func TestRunnerJournalNoShrinkReportsZero(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage:     DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:       now,
+		journalSz: 3 << 30,
+	}
+	cfg := testConfig(t, w)
+	d := w.deps()
+	d.Vacuum = func(uint64) error { return nil } // succeeds, frees nothing
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range sum.Categories {
+		if c.Category == CategoryJournal && c.BytesReclaimed != 0 {
+			t.Errorf("journal BytesReclaimed=%d, want measured 0 when nothing shrank", c.BytesReclaimed)
+		}
 	}
 }
 

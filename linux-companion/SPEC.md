@@ -481,7 +481,19 @@ Design, implemented in `internal/autoclean`:
   regimen (`CleanRegimen.isEnabled`, also off by default): an unattended
   delete is something the owner turns on, not something an upgrade
   grants.  Every category can be disabled individually
-  (`HH_AGENT_AUTOCLEAN_DISABLE=<category,...>`).
+  (`HH_AGENT_AUTOCLEAN_DISABLE=<category,...>`).  The daemon-side
+  opt-in is also the gate for destructive API calls: a `POST
+  /v1/autoclean` that would apply (dry_run=false) is refused with 403
+  unless the daemon itself runs with the mode enabled — an
+  authenticated device alone cannot delete files.  Dry runs stay
+  available to any authenticated device.
+- **Host-native automatic deployment.**  The loop refuses to start
+  inside a container (Docker/Podman marker files): the defaults name
+  host paths, and in the scratch container image those are the
+  container's own filesystems, so the host's disk would never be
+  reclaimed.  Automatic deployment is the host-native systemd timer
+  in `deploy/` (or a host-native daemon); an explicit CLI run inside
+  any environment remains the operator's call.
 - **Safe categories only.**  Docker build cache; dangling Docker images
   (never all-unused, never volumes); superseded local backups, keeping
   exactly the newest complete dump per app (the fleet keep-1 rule — B2
