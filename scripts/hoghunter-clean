@@ -114,6 +114,7 @@ IDLE_MIN_ROLLBACK = 1440  # 24h for abandoned update/rollback copies
 IDLE_MIN_BUILD_OUTPUT = 7 * 24 * 60  # 7d before idle build output is reported at all
 IDLE_MIN_STALE_BUILD = 14 * 24 * 60  # 14d before ignored build output reads as stale
 IDLE_MIN_TOOL_VERSION = 7 * 24 * 60  # 7d for superseded tool versions
+IDLE_MIN_TMP_BUILD_TREE = 60          # a throwaway agent checkout idle for an hour reads as left over
 IDLE_MIN_XCODE_SCRATCH = 24 * 60     # 24h before Xcode-shaped scratch reads as idle
 IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release may go
 
@@ -147,7 +148,7 @@ PRESSURE_ONLY_RULES = frozenset(PRESSURE_RULES)
 # folder), and they reclaim almost nothing once every gate holds.  A clean run
 # has no reader for the report and does not pay for the walks.  xcode-scratch
 # left this set on Nov 5 (HH-219): it deletes what it can positively identify.
-REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output"})
+REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output", "tmp-build-trees"})
 
 # The early warning (HH-219).  Under this much free space, the ask-first trees
 # are sized, and when the report-only rows add up to more than the floor, the
@@ -3257,6 +3258,112 @@ def rule_xcode_scratch() -> list[Candidate]:
             ))
     return cands
 
+# --------------------------------------------------------------------------
+# tmp-build-trees
+# --------------------------------------------------------------------------
+
+# Names agents give a throwaway build or rebase checkout in /private/tmp, for
+# example `hh212-candidate-3` or `feature-rebase`.  Only these names are looked
+# at; any other folder in /private/tmp is none of this rule's business.
+_TMP_BUILD_TREE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:-candidate-[A-Za-z0-9._-]+|-rebase(?:-[A-Za-z0-9._-]+)?)")
+
+
+def _tmp_tree_git_finding(tree: Path) -> str | None:
+    """What git says keeps this checkout, or None when it holds nothing unique."""
+    dot_git = tree / ".git"
+    try:
+        mode = os.lstat(dot_git).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"could not read .git ({type(exc).__name__})"
+    if stat.S_ISLNK(mode):
+        return "its .git is a link"
+    if not stat.S_ISDIR(mode):
+        return "a linked git worktree, its branch may hold unpushed work"
+    status = _git(tree, "status", "--porcelain", "--untracked-files=all")
+    if status is None or status.returncode != 0:
+        return "could not read its git status"
+    if status.stdout.strip():
+        return "has uncommitted changes"
+    # skip-worktree and assume-unchanged entries hide edits from git status;
+    # ls-files -v marks them with S or a lowercase tag.
+    flags = _git(tree, "ls-files", "-v")
+    if flags is None or flags.returncode != 0:
+        return "could not read its git index flags"
+    if any(line[:1] == "S" or line[:1].islower() for line in flags.stdout.splitlines()):
+        return "has files git is told to ignore changes in (skip-worktree or assume-unchanged)"
+    stash = _git(tree, "rev-list", "--max-count=1", "--walk-reflogs", "refs/stash")
+    if stash is not None and stash.returncode == 0 and stash.stdout.strip():
+        return "has a stash"
+    local = _git(tree, "rev-list", "--max-count=1", "HEAD", "--all", "--not", "--remotes")
+    if local is None or local.returncode != 0:
+        return "could not read its git history"
+    if local.stdout.strip():
+        return "has commits no remote holds"
+    return None
+
+
+def _tmp_build_tree_refusal(tree: Path) -> str | None:
+    """What keeps this /private/tmp folder from reading as disposable, or None."""
+    s = str(tree)
+    try:
+        st = os.lstat(s)
+        if not stat.S_ISDIR(st.st_mode):
+            return "not a real directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != os.lstat(tree.parent).st_dev:
+            return "a mount point"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    if not idle_for(s, IDLE_MIN_TMP_BUILD_TREE):
+        return "written to in the last hour"
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    if tree_in_use(s):
+        return "held open"
+    if process_names_path(s):
+        return "a running process names it"
+    return _tmp_tree_git_finding(tree)
+
+
+def rule_tmp_build_trees() -> list[Candidate]:
+    """Agent build and rebase checkouts left in /private/tmp.
+
+    Report only, whatever the disk level, for the reason stale-build-output and
+    xcode-scratch are: a refuse-list around a tree that may be a git checkout
+    keeps finding what it misses, and a person decides.  Direct children whose
+    name says candidate or rebase, each with what the checks found.
+    """
+    if not XCODE_SCRATCH_ROOT.is_dir():
+        return []
+    try:
+        children = sorted(XCODE_SCRATCH_ROOT.iterdir())
+    except OSError:
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for tree in children:
+        if rule_out_of_time(deadline):
+            return cands
+        if not _TMP_BUILD_TREE_RE.fullmatch(tree.name) or tree.is_symlink() or not tree.is_dir():
+            continue
+        size = dir_bytes(str(tree))
+        if size < MIN_CANDIDATE_BYTES:
+            continue
+        finding = _tmp_build_tree_refusal(tree) or "nothing the checks can see keeps it"
+        cands.append(Candidate(
+            category="tmp-build-trees", path=str(tree), bytes=size,
+            reason=f"Agent build or rebase checkout in /private/tmp (report only; {finding})",
+            tier="ask-first", op="report",
+        ))
+    return cands
+
+
 
 # --------------------------------------------------------------------------
 # duplicate-sim-runtimes
@@ -3636,6 +3743,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "sqlite-wal": (rule_sqlite_wals, "Oversized SQLite WAL (checkpointed)"),
     "brew": (rule_brew, "Homebrew obsolete versions"),
     "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
+    "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
     "stale-build-output": (rule_stale_build_output, "Stale ignored build output in main checkouts (report only)"),
     "ask-first": (rule_ask_first_inventory, "Ask-first inventory (report only)"),
 }

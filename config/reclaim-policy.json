@@ -17,7 +17,7 @@
     "safe": "Every run, including the watch's cheap band.  A rule with maxFreeGb (xcode-scratch) also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
     "semi-safe": "Only --band=full, which the pressure triggers take on any hit: 25 GB free or less, a 15 GB drop in free space at any level, swap, or load.  A rule with maxFreeGb (duplicate-sim-runtimes) also needs the disk at or under that line, enforced per rule in the code and read again from df before each delete.",
     "expensive": "Only --band=full while the disk is acute or critical (under 40 GB free).  Bulk deletes that are the biggest wins and the biggest I/O bursts.",
-    "ask-first": "Reported, never applied.  The stale-build-output walks run on a scan and not on a clean run.  xcode-scratch rows that fail its positive identification are reported here too."
+    "ask-first": "Reported, never applied.  The stale-build-output and tmp-build-trees walks run on a scan and not on a clean run.  xcode-scratch rows that fail its positive identification are reported here too."
   },
   "bands": {
     "$comment": "OWNER RULING 2026-10-02 (Jay): pressure changes the SHAPE of the work (2-4 bounded chunks), never its SCOPE. The previous rule -- 'swap >= 90 OR load1 > 40 => do less' -- was a guard whose threshold sat INSIDE this host's normal operating band: load1 runs 15-30 here continuously from real fleet build work, so it was true almost always, and wedded to a near-permanent swap reading it meant cleaning almost never ran. A guard whose threshold equals the normal state is an outage, not a guard. Deleting caches never reduces swap, and that still holds -- but it constrains what fixes swap, NOT how much regenerable waste may be cleared.",
@@ -212,6 +212,13 @@
         "more than 60 GB free, read again from df right before the delete"
       ],
       "reportOnly": "Any other Xcode-shaped child, such as a git checkout with a build folder inside, stays a report row with what stopped it."
+    },
+    {
+      "name": "tmp-build-trees",
+      "tier": "ask-first",
+      "op": "report",
+      "title": "Agent build and rebase checkouts in /private/tmp (report only)",
+      "$rationale": "Throwaway checkouts agents leave in /private/tmp (names like hh212-candidate-3 or feature-rebase).  Report only, whatever the disk level, like xcode-scratch and stale-build-output: a tree that may be a git checkout can hold the only copy of unpushed work, and a refuse-list kept missing things in the two rules before it.  Each row says what the checks found: open handles, writes in the last hour, a keep marker, a linked worktree, uncommitted changes, a stash, commits no remote holds."
     },
     {
       "name": "stale-build-output",
