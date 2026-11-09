@@ -391,6 +391,47 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios\n", project)
         self.assertIn("HogHunterIOS:", project)
 
+    def test_ops1052_ship_helpers_avoid_mapfile_and_bash4_readarray(self):
+        """Hosted ios-testflight uses macOS /bin/bash 3.2; post-sync helpers must stay portable."""
+        paths = (
+            ROOT / "scripts/ios-observe-ship.mjs",
+            ROOT / "scripts/ios-report-post-sync-tf-ready.mjs",
+            WORKFLOW,
+        )
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for forbidden in ("mapfile ", "mapfile\t", "readarray ", "readarray\t"):
+                self.assertNotIn(forbidden, text, f"{path.name} must not use {forbidden.strip()}")
+        # If a bash recheck wrapper is added later, pin it here too.
+        recheck = ROOT / "scripts/ios-recheck-tf-ready.sh"
+        if recheck.is_file():
+            recheck_text = recheck.read_text(encoding="utf-8")
+            for forbidden in ("mapfile ", "mapfile\t", "readarray ", "readarray\t"):
+                self.assertNotIn(forbidden, recheck_text, "ios-recheck-tf-ready.sh must stay bash-3.2-safe")
+
+    def test_standing_tester_sync_is_followed_by_post_sync_tf_ready_recheck(self):
+        sync_at = self.code.index("name: Sync standing TestFlight testers")
+        post_at = self.code.index("name: Re-verify TestFlight readiness after tester sync")
+        self.assertGreater(post_at, sync_at)
+        sync_step = self.code[sync_at:].split("\n      - name:")[0]
+        post_step = self.code[post_at:].split("\n      - name:")[0]
+        self.assertNotIn("steps.ship.outputs.uploaded", sync_step)
+        self.assertIn("steps.ship.outputs.uploaded == 'true'", post_step)
+        self.assertIn("ios-report-post-sync-tf-ready.mjs", post_step)
+        self.assertIn("continue-on-error: true", post_step)
+        self.assertIn('IOS_TF_READY_TIMEOUT_SEC: "300"', post_step)
+        self.assertIn("id: recheck_tf", post_step)
+        self.assertRegex(
+            self.code,
+            r"ios-observe-ship\.mjs bash scripts/ios-ship-testflight\.sh",
+        )
+        summary_at = self.code.index("name: TestFlight readiness summary (after tester sync)")
+        self.assertGreater(summary_at, post_at)
+        summary_step = self.code[summary_at:].split("\n      - name:")[0]
+        self.assertIn("recheck_tf.outputs.tf_ready_summary", summary_step)
+        self.assertIn('uploaded }}" = "unknown"', summary_step)
+        self.assertNotIn("ios-report-post-sync-tf-ready.mjs", summary_step)
+
     def test_export_compliance_is_declared_in_the_iphone_plist(self):
         text = (ROOT / "ios/Info.plist").read_text(encoding="utf-8")
         self.assertRegex(text, r"<key>ITSAppUsesNonExemptEncryption</key>\s*<false/>")
@@ -410,6 +451,216 @@ class ReleaseContractTests(unittest.TestCase):
                                 capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 1)
         self.assertIn("local upload is disabled", result.stderr)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class PostSyncTfReadyTests(unittest.TestCase):
+    """Offline checks for post-sync ensure-tf-ready summary labels (OPS-1052)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mjs = (ROOT / "scripts/ios-report-post-sync-tf-ready.mjs").read_text(encoding="utf-8")
+        cls.ship = (FLEET / "ship-testflight.sh").read_text(encoding="utf-8")
+
+    def test_mjs_exports_distinct_outcome_lines_per_rc(self):
+        mod = ROOT / "scripts/ios-report-post-sync-tf-ready.mjs"
+        script = (
+            f"import {{ tfReadyOutcomeLine }} from {json.dumps(mod.as_uri())};\n"
+            "const ctx = { bundleId: 'com.example.app', buildNum: '202611091200' };\n"
+            "const lines = [0, 2, 3, 4, 5, 6].map((rc) => tfReadyOutcomeLine(rc, ctx));\n"
+            "process.stdout.write(JSON.stringify(lines));\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.mjs"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                ["node", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = json.loads(result.stdout)
+        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(set(lines)), 6)
+        self.assertIn("beta group has no tester who can install it", lines[4])
+        self.assertIn("installability is unverified", lines[5])
+        self.assertNotIn("export compliance not declared", lines[4])
+
+    def test_rc5_and_rc6_branches_precede_export_compliance_catch_all(self):
+        start = self.ship.index("ensure_tf_ready() {")
+        end = self.ship.index("\nacquire_archive_lock", start)
+        block = self.ship[start:end]
+        five = block.index("if [[ $rc -eq 5 ]]")
+        six = block.index("if [[ $rc -eq 6 ]]")
+        catch = block.index("build may be stuck on export compliance")
+        self.assertLess(five, six)
+        self.assertLess(six, catch)
+
+    def test_post_sync_script_does_not_write_github_step_summary(self):
+        self.assertNotIn("GITHUB_STEP_SUMMARY", self.mjs)
+
+    def test_observe_upload_regexes_match_prefixed_ship_log_lines(self):
+        """ship-testflight.sh log() emits "[ios-ship] …"; markers require that prefix."""
+        bundle = "com.example.hoghunter.ios"
+        cases = (
+            "[ios-ship] upload path succeeded via xcodebuild export (destination=upload)",
+            f"[ios-ship] build 0.1.0 (202611091200) submitted for {bundle}",
+            f"[ios-ship] upload submitted; watch TestFlight processing for {bundle} build 202611091200",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            for index, line in enumerate(cases):
+                fake = Path(tmp) / f"fake-upload-{index}.sh"
+                fake.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' '{line}'\n", encoding="utf-8")
+                fake.chmod(0o755)
+                result = subprocess.run(
+                    ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                )
+                self.assertEqual(result.returncode, 0, (index, result.stderr))
+                out = output.read_text(encoding="utf-8")
+                self.assertIn("uploaded=true", out, line)
+                self.assertIn("ship_observed=uploaded", out, line)
+                output.write_text("", encoding="utf-8")
+
+    def test_observe_ship_ignores_bare_upload_markers_without_ios_ship_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'upload path succeeded via xcodebuild export (destination=upload)'\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=unknown", out)
+            self.assertNotIn("uploaded=true", out)
+
+    def test_observe_ship_preserves_child_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text("#!/usr/bin/env bash\nexit 17\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 17, result.stderr)
+
+    def test_observe_ship_marks_rate_gate_skip_as_not_uploaded(self):
+        observe = (ROOT / "scripts/ios-observe-ship.mjs").read_text(encoding="utf-8")
+        self.assertIn("ship-gate: exiting 0 before any version is resolved", observe)
+        self.assertNotIn("stdoutBuf", observe)
+        self.assertNotIn("readFileSync", observe)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "[ios-ship] ship-gate: exiting 0 before any version is resolved (nothing consumed)"\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=false", out)
+            self.assertIn("ship_observed=skipped", out)
+
+    def test_observe_ship_does_not_stitch_stdout_stderr_for_false_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'build 123'\n"
+                "printf ' submitted for com.example.ios' >&2\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=unknown", out)
+            self.assertNotIn("uploaded=true", out)
+
+    def test_observe_ship_marks_unknown_success_without_disabling_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text("#!/usr/bin/env bash\necho 'ship finished with no upload markers'\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=unknown", out)
+            self.assertIn("ship_observed=unknown_success", out)
+
+    def test_observe_ship_writes_outputs_on_spawn_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            missing = Path(tmp) / "definitely-missing-ship-cmd"
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), str(missing), "x"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=false", out)
+            self.assertIn("ship_observed=spawn_error", out)
+
+    def test_parse_apps_hoghunter_rejects_missing_bundle_id(self):
+        mod = ROOT / "scripts/ios-report-post-sync-tf-ready.mjs"
+        script = (
+            f"import {{ parseAppsHoghunter }} from {json.dumps(mod.as_uri())};\n"
+            "const bad = { apps: { hoghunter: { fixedMarketingVersion: '0.1.0', appleId: 1 } } };\n"
+            "process.stdout.write(JSON.stringify(parseAppsHoghunter(bad)));\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.mjs"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("bundleId", payload["error"])
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
