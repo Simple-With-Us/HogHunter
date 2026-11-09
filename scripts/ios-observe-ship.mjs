@@ -5,15 +5,34 @@
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const shipTs = fs.readFileSync(path.join(__dirname, "ios-fleet/ship-testflight.sh"), "utf8");
 const uploadedRe =
   /upload path succeeded via xcodebuild export \(destination=upload\)|build .+ submitted for |upload submitted; watch TestFlight processing/;
 const skippedRe =
   /ship-gate: exiting 0 before any version is resolved \(nothing consumed\)/;
+
+const TAIL_MAX = 65536;
+const OVERLAP = 8192;
+
+function observeChunk(text, state) {
+  const window = state.tail.slice(-OVERLAP) + text;
+  if (!state.uploadedFound && uploadedRe.test(window)) {
+    state.uploadedFound = true;
+  }
+  if (!state.skippedFound && skippedRe.test(window)) {
+    state.skippedFound = true;
+  }
+  state.tail = (state.tail + text).slice(-TAIL_MAX);
+}
+
+function writeOutputs(outputs, uploadedToken, observed, extra = {}) {
+  if (!outputs) return;
+  const lines = [`uploaded=${uploadedToken}`, `ship_observed=${observed}`];
+  for (const [key, value] of Object.entries(extra)) {
+    lines.push(`${key}=${value}`);
+  }
+  fs.appendFileSync(outputs, `${lines.join("\n")}\n`);
+}
 
 const cmd = process.argv.slice(2);
 if (cmd.length === 0) {
@@ -22,25 +41,30 @@ if (cmd.length === 0) {
 }
 
 const outputs = process.env.GITHUB_OUTPUT?.trim();
+const state = { tail: "", uploadedFound: false, skippedFound: false };
+let spawnErr = "";
+
 const child = spawn(cmd[0], cmd.slice(1), {
   stdio: ["inherit", "pipe", "pipe"],
   shell: false,
 });
 
-let stdoutBuf = "";
-let stderrBuf = "";
 child.stdout.on("data", (chunk) => {
   const text = chunk.toString();
-  stdoutBuf += text;
+  observeChunk(text, state);
   process.stdout.write(chunk);
 });
 child.stderr.on("data", (chunk) => {
   const text = chunk.toString();
-  stderrBuf += text;
+  observeChunk(text, state);
   process.stderr.write(chunk);
 });
 
 const exitPromise = new Promise((resolve) => {
+  child.on("error", (err) => {
+    spawnErr = String(err?.message ?? err);
+    resolve({ code: 1, signal: null });
+  });
   child.on("close", (code, signal) => {
     resolve({ code: code ?? (signal ? 1 : 0), signal });
   });
@@ -48,22 +72,29 @@ const exitPromise = new Promise((resolve) => {
 
 const { code } = await exitPromise;
 
-const combined = stdoutBuf + stderrBuf;
-const uploaded = uploadedRe.test(combined);
-const skipped = skippedRe.test(combined);
+if (spawnErr) {
+  writeOutputs(outputs, "false", "spawn_error", { ship_spawn_error: spawnErr.replace(/\n/g, " ") });
+  process.exit(1);
+}
+
+const uploaded = state.uploadedFound;
+const skipped = state.skippedFound;
 
 let observed = "none";
+let uploadedToken = "false";
 if (uploaded) {
   observed = "uploaded";
+  uploadedToken = "true";
 } else if (skipped) {
   observed = "skipped";
+  uploadedToken = "false";
 } else if (code === 0) {
   observed = "unknown_success";
+  uploadedToken = "unknown";
+} else {
+  observed = "failed";
+  uploadedToken = "false";
 }
 
-if (outputs) {
-  fs.appendFileSync(outputs, `uploaded=${uploaded ? "true" : "false"}\n`);
-  fs.appendFileSync(outputs, `ship_observed=${observed}\n`);
-}
-
+writeOutputs(outputs, uploadedToken, observed);
 process.exit(code);

@@ -397,11 +397,11 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertGreater(post_at, sync_at)
         sync_step = self.code[sync_at:].split("\n      - name:")[0]
         post_step = self.code[post_at:].split("\n      - name:")[0]
-        self.assertIn("steps.ship.outputs.uploaded == 'true'", sync_step)
+        self.assertNotIn("steps.ship.outputs.uploaded", sync_step)
+        self.assertIn("steps.ship.outputs.uploaded == 'true'", post_step)
         self.assertIn("ios-report-post-sync-tf-ready.mjs", post_step)
         self.assertIn("continue-on-error: true", post_step)
         self.assertIn('IOS_TF_READY_TIMEOUT_SEC: "300"', post_step)
-        self.assertIn("steps.ship.outputs.uploaded == 'true'", post_step)
         self.assertIn("id: recheck_tf", post_step)
         self.assertRegex(
             self.code,
@@ -411,6 +411,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertGreater(summary_at, post_at)
         summary_step = self.code[summary_at:].split("\n      - name:")[0]
         self.assertIn("recheck_tf.outputs.tf_ready_summary", summary_step)
+        self.assertIn('uploaded }}" = "unknown"', summary_step)
         self.assertNotIn("ios-report-post-sync-tf-ready.mjs", summary_step)
 
     def test_export_compliance_is_declared_in_the_iphone_plist(self):
@@ -483,6 +484,8 @@ class PostSyncTfReadyTests(unittest.TestCase):
     def test_observe_ship_marks_rate_gate_skip_as_not_uploaded(self):
         observe = (ROOT / "scripts/ios-observe-ship.mjs").read_text(encoding="utf-8")
         self.assertIn("ship-gate: exiting 0 before any version is resolved", observe)
+        self.assertNotIn("stdoutBuf", observe)
+        self.assertNotIn("readFileSync", observe)
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "github-output"
             output.touch()
@@ -503,6 +506,56 @@ class PostSyncTfReadyTests(unittest.TestCase):
             out = output.read_text(encoding="utf-8")
             self.assertIn("uploaded=false", out)
             self.assertIn("ship_observed=skipped", out)
+
+    def test_observe_ship_marks_unknown_success_without_disabling_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text("#!/usr/bin/env bash\necho 'ship finished with no upload markers'\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=unknown", out)
+            self.assertIn("ship_observed=unknown_success", out)
+
+    def test_observe_ship_writes_outputs_on_spawn_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            missing = Path(tmp) / "definitely-missing-ship-cmd"
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), str(missing), "x"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=false", out)
+            self.assertIn("ship_observed=spawn_error", out)
+
+    def test_parse_apps_hoghunter_rejects_missing_bundle_id(self):
+        mod = ROOT / "scripts/ios-report-post-sync-tf-ready.mjs"
+        script = (
+            f"import {{ parseAppsHoghunter }} from {json.dumps(mod.as_uri())};\n"
+            "const bad = { apps: { hoghunter: { fixedMarketingVersion: '0.1.0', appleId: 1 } } };\n"
+            "process.stdout.write(JSON.stringify(parseAppsHoghunter(bad)));\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.mjs"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("bundleId", payload["error"])
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")

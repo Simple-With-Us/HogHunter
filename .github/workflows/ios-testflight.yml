@@ -441,7 +441,7 @@ jobs:
         # "internal-group" value is refused by asc-api.mjs with a readable
         # message, and this step is a warning either way, so the TestFlight
         # upload itself still succeeds.
-        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1' && steps.ship.outputs.uploaded == 'true'
+        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
         continue-on-error: true
         env:
           ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
@@ -489,8 +489,10 @@ jobs:
           set -euo pipefail
           {
             echo "## TestFlight readiness (after standing-tester sync)"
-            if [ "${{ steps.ship.outputs.uploaded }}" != "true" ]; then
-              echo "- Hog Hunter: no upload this run (rate/same-HEAD skip or export-only); post-sync readiness not applicable."
+            if [ "${{ steps.ship.outputs.uploaded }}" = "unknown" ]; then
+              echo "- Hog Hunter: ship exited 0 but upload was not confirmed from logs; standing-tester sync ran, post-sync readiness skipped."
+            elif [ "${{ steps.ship.outputs.uploaded }}" != "true" ]; then
+              echo "- Hog Hunter: no upload this run (rate/same-HEAD skip or failed ship); post-sync readiness not applicable."
             elif [ -n "${{ steps.recheck_tf.outputs.tf_ready_summary }}" ]; then
               echo "- Hog Hunter (${{ steps.recheck_tf.outputs.tf_ready_bundle }} build ${{ steps.recheck_tf.outputs.tf_ready_build }}): rc=${{ steps.recheck_tf.outputs.tf_ready_rc }} — ${{ steps.recheck_tf.outputs.tf_ready_summary }}"
             else

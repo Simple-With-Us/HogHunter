@@ -9,8 +9,56 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("..", import.meta.url));
 
+/** Validate apps.json for the Hog Hunter post-sync readiness caller. */
+export function parseAppsHoghunter(registry) {
+  if (!registry || typeof registry !== "object") {
+    return { ok: false, error: "apps.json root must be an object" };
+  }
+  const apps = registry.apps;
+  if (!apps || typeof apps !== "object") {
+    return { ok: false, error: "apps.json must contain an apps object" };
+  }
+  const app = apps.hoghunter;
+  if (!app || typeof app !== "object") {
+    return { ok: false, error: "apps.json missing apps.hoghunter" };
+  }
+  const bundleId = app.bundleId;
+  const marketing = app.fixedMarketingVersion;
+  const appleId = app.appleId;
+  if (typeof bundleId !== "string" || !bundleId.trim()) {
+    return { ok: false, error: "apps.hoghunter.bundleId must be a non-empty string" };
+  }
+  if (typeof marketing !== "string" || !marketing.trim()) {
+    return { ok: false, error: "apps.hoghunter.fixedMarketingVersion must be a non-empty string" };
+  }
+  if (
+    !(
+      typeof appleId === "number" ||
+      (typeof appleId === "string" && String(appleId).trim() !== "")
+    )
+  ) {
+    return { ok: false, error: "apps.hoghunter.appleId must be set" };
+  }
+  const policyRaw = app.testerPolicy;
+  const policy =
+    typeof policyRaw === "string" && policyRaw.trim() ? policyRaw.trim() : "public-group";
+  return {
+    ok: true,
+    value: {
+      bundleId: bundleId.trim(),
+      fixedMarketingVersion: marketing.trim(),
+      appleId,
+      policy,
+    },
+  };
+}
+
 function appsHoghunter() {
-  return require("./ios-fleet/apps.json").apps.hoghunter;
+  const parsed = parseAppsHoghunter(require("./ios-fleet/apps.json"));
+  if (!parsed.ok) {
+    throw new Error(parsed.error);
+  }
+  return parsed.value;
 }
 
 /** Short label for workflow job summary (second readiness check). */
@@ -73,9 +121,15 @@ function main() {
     console.error("PLAN_BUILD must be a 12-digit merge-timestamp build");
     process.exit(2);
   }
-  const app = appsHoghunter();
-  const { bundleId, fixedMarketingVersion: marketing, appleId, testerPolicy } = app;
-  const policy = String(testerPolicy || "public-group").trim() || "public-group";
+  let app;
+  try {
+    app = appsHoghunter();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`apps.json: ${message}`);
+    process.exit(2);
+  }
+  const { bundleId, fixedMarketingVersion: marketing, appleId, policy } = app;
   const logDir = process.env.RUNNER_TEMP || "/tmp";
   const out = `${logDir}/ensure-tf-ready-post-sync.json`;
   const err = `${logDir}/ensure-tf-ready-post-sync.err`;
