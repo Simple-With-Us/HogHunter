@@ -426,7 +426,7 @@ jobs:
           if [ "$EXPORT_ONLY" = "1" ]; then
             args+=(--export-only)
           fi
-          bash scripts/ios-ship-testflight.sh --build "$PLANNED_BUILD" ${args[@]+"${args[@]}"}
+          node scripts/ios-observe-ship.mjs bash scripts/ios-ship-testflight.sh --build "$PLANNED_BUILD" ${args[@]+"${args[@]}"}
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.
@@ -441,7 +441,7 @@ jobs:
         # "internal-group" value is refused by asc-api.mjs with a readable
         # message, and this step is a warning either way, so the TestFlight
         # upload itself still succeeds.
-        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
+        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1' && steps.ship.outputs.uploaded == 'true'
         continue-on-error: true
         env:
           ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
@@ -475,12 +475,28 @@ jobs:
       # it can falsely warn that nobody can install the build.  This read-only
       # pass is what the job summary reports (OPS-1052).
       - name: Re-verify TestFlight readiness after tester sync
-        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
+        id: recheck_tf
+        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1' && steps.ship.outputs.uploaded == 'true'
         continue-on-error: true
         env:
           PLAN_BUILD: ${{ needs.plan-build.outputs.build }}
           IOS_TF_READY_TIMEOUT_SEC: "300"
         run: node scripts/ios-report-post-sync-tf-ready.mjs
+
+      - name: TestFlight readiness summary (after tester sync)
+        if: ${{ always() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## TestFlight readiness (after standing-tester sync)"
+            if [ "${{ steps.ship.outputs.uploaded }}" != "true" ]; then
+              echo "- Hog Hunter: no upload this run (rate/same-HEAD skip or export-only); post-sync readiness not applicable."
+            elif [ -n "${{ steps.recheck_tf.outputs.tf_ready_summary }}" ]; then
+              echo "- Hog Hunter (${{ steps.recheck_tf.outputs.tf_ready_bundle }} build ${{ steps.recheck_tf.outputs.tf_ready_build }}): rc=${{ steps.recheck_tf.outputs.tf_ready_rc }} — ${{ steps.recheck_tf.outputs.tf_ready_summary }}"
+            else
+              echo "- Hog Hunter: post-sync readiness check did not run or produced no summary"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
 
       # Saved even when the ship failed or was cancelled, but only on a run that
       # tried to ship (a no-op tick changes no state) and never for an

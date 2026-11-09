@@ -13,6 +13,26 @@ function appsHoghunter() {
   return require("./ios-fleet/apps.json").apps.hoghunter;
 }
 
+/** Short label for workflow job summary (second readiness check). */
+export function tfReadySummaryLabel(rc) {
+  switch (rc) {
+    case 0:
+      return "public group testers can install this build";
+    case 5:
+      return "processed but no beta-group tester can install yet";
+    case 6:
+      return "processed but beta group installability is unverified";
+    case 3:
+      return "upload ok; ASC not IN_BETA_TESTING yet";
+    case 4:
+      return "build not surfaced; export compliance not declared";
+    case 2:
+      return "ensure-tf-ready API/usage error; export compliance not declared";
+    default:
+      return `ensure-tf-ready unexpected rc=${rc}`;
+  }
+}
+
 /** Distinct summary lines per asc-api ensure-tf-ready exit code (public group). */
 export function tfReadyOutcomeLine(rc, { bundleId, buildNum }) {
   switch (rc) {
@@ -78,11 +98,18 @@ function main() {
   const rc = result.status ?? 1;
   const ctx = { bundleId, buildNum };
   const line = tfReadyOutcomeLine(rc, ctx);
+  const summary = tfReadySummaryLabel(rc);
   console.log(line);
   const annotation = tfReadyGithubAnnotation(rc, ctx);
   if (annotation) console.log(annotation);
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${line}\n`);
+  if (process.env.GITHUB_OUTPUT) {
+    appendFileSync(
+      process.env.GITHUB_OUTPUT,
+      `tf_ready_rc=${rc}\n` +
+        `tf_ready_summary=${summary}\n` +
+        `tf_ready_bundle=${bundleId}\n` +
+        `tf_ready_build=${buildNum}\n`,
+    );
   }
   // Loud warnings only; the upload already succeeded.
   process.exit(0);

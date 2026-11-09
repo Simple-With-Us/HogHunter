@@ -395,14 +395,23 @@ class ReleaseContractTests(unittest.TestCase):
         sync_at = self.code.index("name: Sync standing TestFlight testers")
         post_at = self.code.index("name: Re-verify TestFlight readiness after tester sync")
         self.assertGreater(post_at, sync_at)
+        sync_step = self.code[sync_at:].split("\n      - name:")[0]
         post_step = self.code[post_at:].split("\n      - name:")[0]
+        self.assertIn("steps.ship.outputs.uploaded == 'true'", sync_step)
         self.assertIn("ios-report-post-sync-tf-ready.mjs", post_step)
         self.assertIn("continue-on-error: true", post_step)
         self.assertIn('IOS_TF_READY_TIMEOUT_SEC: "300"', post_step)
+        self.assertIn("steps.ship.outputs.uploaded == 'true'", post_step)
+        self.assertIn("id: recheck_tf", post_step)
         self.assertRegex(
-            post_step,
-            r"if: success\(\) && steps\.gate\.outputs\.should_ship == '1' && steps\.mode\.outputs\.export_only != '1'",
+            self.code,
+            r"ios-observe-ship\.mjs bash scripts/ios-ship-testflight\.sh",
         )
+        summary_at = self.code.index("name: TestFlight readiness summary (after tester sync)")
+        self.assertGreater(summary_at, post_at)
+        summary_step = self.code[summary_at:].split("\n      - name:")[0]
+        self.assertIn("recheck_tf.outputs.tf_ready_summary", summary_step)
+        self.assertNotIn("ios-report-post-sync-tf-ready.mjs", summary_step)
 
     def test_export_compliance_is_declared_in_the_iphone_plist(self):
         text = (ROOT / "ios/Info.plist").read_text(encoding="utf-8")
@@ -467,6 +476,33 @@ class PostSyncTfReadyTests(unittest.TestCase):
         catch = block.index("build may be stuck on export compliance")
         self.assertLess(five, six)
         self.assertLess(six, catch)
+
+    def test_post_sync_script_does_not_write_github_step_summary(self):
+        self.assertNotIn("GITHUB_STEP_SUMMARY", self.mjs)
+
+    def test_observe_ship_marks_rate_gate_skip_as_not_uploaded(self):
+        observe = (ROOT / "scripts/ios-observe-ship.mjs").read_text(encoding="utf-8")
+        self.assertIn("ship-gate: exiting 0 before any version is resolved", observe)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "ship-gate: exiting 0 before any version is resolved (nothing consumed)"\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=false", out)
+            self.assertIn("ship_observed=skipped", out)
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
