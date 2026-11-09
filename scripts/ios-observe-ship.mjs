@@ -6,11 +6,11 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 
-// Substring matchers (not line-anchored): ship-testflight.sh log() prefixes every line with "[ios-ship] ".
+// Require the ship script's log() prefix immediately before each marker (not ^-anchored).
 const uploadedRe =
-  /upload path succeeded via xcodebuild export \(destination=upload\)|build .+ submitted for |upload submitted; watch TestFlight processing/;
+  /\[ios-ship\] (?:upload path succeeded via xcodebuild export \(destination=upload\)|build .+ submitted for |upload submitted; watch TestFlight processing)/;
 const skippedRe =
-  /ship-gate: exiting 0 before any version is resolved \(nothing consumed\)/;
+  /\[ios-ship\] ship-gate: exiting 0 before any version is resolved \(nothing consumed\)/;
 
 const TAIL_MAX = 65536;
 const OVERLAP = 8192;

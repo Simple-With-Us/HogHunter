@@ -500,7 +500,7 @@ class PostSyncTfReadyTests(unittest.TestCase):
         self.assertNotIn("GITHUB_STEP_SUMMARY", self.mjs)
 
     def test_observe_upload_regexes_match_prefixed_ship_log_lines(self):
-        """ship-testflight.sh log() emits "[ios-ship] …"; patterns must not be line-anchored."""
+        """ship-testflight.sh log() emits "[ios-ship] …"; markers require that prefix."""
         bundle = "com.example.hoghunter.ios"
         cases = (
             "[ios-ship] upload path succeeded via xcodebuild export (destination=upload)",
@@ -525,6 +525,43 @@ class PostSyncTfReadyTests(unittest.TestCase):
                 self.assertIn("uploaded=true", out, line)
                 self.assertIn("ship_observed=uploaded", out, line)
                 output.write_text("", encoding="utf-8")
+
+    def test_observe_ship_ignores_bare_upload_markers_without_ios_ship_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'upload path succeeded via xcodebuild export (destination=upload)'\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=unknown", out)
+            self.assertNotIn("uploaded=true", out)
+
+    def test_observe_ship_preserves_child_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text("#!/usr/bin/env bash\nexit 17\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 17, result.stderr)
 
     def test_observe_ship_marks_rate_gate_skip_as_not_uploaded(self):
         observe = (ROOT / "scripts/ios-observe-ship.mjs").read_text(encoding="utf-8")
