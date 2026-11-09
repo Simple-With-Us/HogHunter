@@ -391,6 +391,24 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios\n", project)
         self.assertIn("HogHunterIOS:", project)
 
+    def test_ops1052_ship_helpers_avoid_mapfile_and_bash4_readarray(self):
+        """Hosted ios-testflight uses macOS /bin/bash 3.2; post-sync helpers must stay portable."""
+        paths = (
+            ROOT / "scripts/ios-observe-ship.mjs",
+            ROOT / "scripts/ios-report-post-sync-tf-ready.mjs",
+            WORKFLOW,
+        )
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for forbidden in ("mapfile ", "mapfile\t", "readarray ", "readarray\t"):
+                self.assertNotIn(forbidden, text, f"{path.name} must not use {forbidden.strip()}")
+        # If a bash recheck wrapper is added later, pin it here too.
+        recheck = ROOT / "scripts/ios-recheck-tf-ready.sh"
+        if recheck.is_file():
+            recheck_text = recheck.read_text(encoding="utf-8")
+            for forbidden in ("mapfile ", "mapfile\t", "readarray ", "readarray\t"):
+                self.assertNotIn(forbidden, recheck_text, "ios-recheck-tf-ready.sh must stay bash-3.2-safe")
+
     def test_standing_tester_sync_is_followed_by_post_sync_tf_ready_recheck(self):
         sync_at = self.code.index("name: Sync standing TestFlight testers")
         post_at = self.code.index("name: Re-verify TestFlight readiness after tester sync")
