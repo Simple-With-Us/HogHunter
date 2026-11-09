@@ -525,6 +525,29 @@ class PostSyncTfReadyTests(unittest.TestCase):
             self.assertIn("uploaded=false", out)
             self.assertIn("ship_observed=skipped", out)
 
+    def test_observe_ship_does_not_stitch_stdout_stderr_for_false_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            fake = Path(tmp) / "fake-ship.sh"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'build 123'\n"
+                "printf ' submitted for com.example.ios' >&2\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = output.read_text(encoding="utf-8")
+            self.assertIn("uploaded=unknown", out)
+            self.assertNotIn("uploaded=true", out)
+
     def test_observe_ship_marks_unknown_success_without_disabling_sync(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "github-output"

@@ -41,7 +41,8 @@ if (cmd.length === 0) {
 }
 
 const outputs = process.env.GITHUB_OUTPUT?.trim();
-const state = { tail: "", uploadedFound: false, skippedFound: false };
+const stdoutState = { tail: "", uploadedFound: false, skippedFound: false };
+const stderrState = { tail: "", uploadedFound: false, skippedFound: false };
 let spawnErr = "";
 
 const child = spawn(cmd[0], cmd.slice(1), {
@@ -51,12 +52,12 @@ const child = spawn(cmd[0], cmd.slice(1), {
 
 child.stdout.on("data", (chunk) => {
   const text = chunk.toString();
-  observeChunk(text, state);
+  observeChunk(text, stdoutState);
   process.stdout.write(chunk);
 });
 child.stderr.on("data", (chunk) => {
   const text = chunk.toString();
-  observeChunk(text, state);
+  observeChunk(text, stderrState);
   process.stderr.write(chunk);
 });
 
@@ -77,8 +78,8 @@ if (spawnErr) {
   process.exit(1);
 }
 
-const uploaded = state.uploadedFound;
-const skipped = state.skippedFound;
+const uploaded = stdoutState.uploadedFound || stderrState.uploadedFound;
+const skipped = stdoutState.skippedFound || stderrState.skippedFound;
 
 let observed = "none";
 let uploadedToken = "false";
