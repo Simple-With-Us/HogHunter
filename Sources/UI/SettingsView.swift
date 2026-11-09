@@ -845,7 +845,7 @@ private struct IPhoneSettingsTab: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Toggle("Allow iPhone to Change Exclusions & View", isOn: $store.allowRemoteEdit)
-                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, switch this panel's lookback, grouping, and CPU scale, and change the refresh interval, alerts, and webhook.\u{00A0} The webhook URL can be replaced or cleared from the phone but never read back.")
+                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, switch this panel's timing, grouping, and CPU scale, and change the refresh interval, alerts, and webhook.\u{00A0} The webhook URL can be replaced or cleared from the phone but never read back.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
