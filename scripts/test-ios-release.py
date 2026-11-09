@@ -391,6 +391,19 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios\n", project)
         self.assertIn("HogHunterIOS:", project)
 
+    def test_standing_tester_sync_is_followed_by_post_sync_tf_ready_recheck(self):
+        sync_at = self.code.index("name: Sync standing TestFlight testers")
+        post_at = self.code.index("name: Re-verify TestFlight readiness after tester sync")
+        self.assertGreater(post_at, sync_at)
+        post_step = self.code[post_at:].split("\n      - name:")[0]
+        self.assertIn("ios-report-post-sync-tf-ready.mjs", post_step)
+        self.assertIn("continue-on-error: true", post_step)
+        self.assertIn('IOS_TF_READY_TIMEOUT_SEC: "300"', post_step)
+        self.assertRegex(
+            post_step,
+            r"if: success\(\) && steps\.gate\.outputs\.should_ship == '1' && steps\.mode\.outputs\.export_only != '1'",
+        )
+
     def test_export_compliance_is_declared_in_the_iphone_plist(self):
         text = (ROOT / "ios/Info.plist").read_text(encoding="utf-8")
         self.assertRegex(text, r"<key>ITSAppUsesNonExemptEncryption</key>\s*<false/>")
@@ -410,6 +423,50 @@ class ReleaseContractTests(unittest.TestCase):
                                 capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 1)
         self.assertIn("local upload is disabled", result.stderr)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class PostSyncTfReadyTests(unittest.TestCase):
+    """Offline checks for post-sync ensure-tf-ready summary labels (OPS-1052)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mjs = (ROOT / "scripts/ios-report-post-sync-tf-ready.mjs").read_text(encoding="utf-8")
+        cls.ship = (FLEET / "ship-testflight.sh").read_text(encoding="utf-8")
+
+    def test_mjs_exports_distinct_outcome_lines_per_rc(self):
+        mod = ROOT / "scripts/ios-report-post-sync-tf-ready.mjs"
+        script = (
+            f"import {{ tfReadyOutcomeLine }} from {json.dumps(mod.as_uri())};\n"
+            "const ctx = { bundleId: 'com.example.app', buildNum: '202611091200' };\n"
+            "const lines = [0, 2, 3, 4, 5, 6].map((rc) => tfReadyOutcomeLine(rc, ctx));\n"
+            "process.stdout.write(JSON.stringify(lines));\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.mjs"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                ["node", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = json.loads(result.stdout)
+        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(set(lines)), 6)
+        self.assertIn("beta group has no tester who can install it", lines[4])
+        self.assertIn("installability is unverified", lines[5])
+        self.assertNotIn("export compliance not declared", lines[4])
+
+    def test_rc5_and_rc6_branches_precede_export_compliance_catch_all(self):
+        start = self.ship.index("ensure_tf_ready() {")
+        end = self.ship.index("\nacquire_archive_lock", start)
+        block = self.ship[start:end]
+        five = block.index("if [[ $rc -eq 5 ]]")
+        six = block.index("if [[ $rc -eq 6 ]]")
+        catch = block.index("build may be stuck on export compliance")
+        self.assertLess(five, six)
+        self.assertLess(six, catch)
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
