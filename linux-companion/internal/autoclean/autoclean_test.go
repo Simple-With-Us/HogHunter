@@ -47,6 +47,82 @@ func TestShouldRunThresholds(t *testing.T) {
 	}
 }
 
+func TestUsageFromStatfsMatchesDf(t *testing.T) {
+	// Every expectation below is the `df` Use% for the same statfs
+	// counts, worked out by hand from df's formula:
+	// used = blocks - bfree; avail = bavail;
+	// pct = ceil(100 * used / (used + avail)).
+	// The cases with bfree != bavail are the reserved-blocks cases: the
+	// old code divided used by the total block count instead, which
+	// understates usage by roughly the reserve fraction.
+	const bsize = 4096
+	cases := []struct {
+		name         string
+		blocks       uint64
+		bfree        uint64
+		bavail       uint64
+		wantPercent  float64
+		wantUsed     uint64 // in blocks
+		wantFreeByte uint64 // bavail * bsize
+	}{
+		// The live Coolify-host shape: used/total is exactly 77.3%, so
+		// the old calculation sat under the 80% trigger, while df's
+		// 773000/(773000+190000) = 80.27% rounds up to 81% and fires.
+		{"host reserved blocks", 1_000_000, 227_000, 190_000, 81, 773_000, 190_000 * bsize},
+		// A textbook 5% ext4 reserve: 1500/(1500+400) = 78.95% -> 79,
+		// where used/total would read 75%.
+		{"five percent reserve", 2000, 500, 400, 79, 1500, 400 * bsize},
+		// No reserve at all: bfree == bavail, denominator is the total.
+		{"no reserve exact", 1000, 200, 200, 80, 800, 200 * bsize},
+		// No reserve, fractional: df rounds 79.1% up to 80.
+		{"no reserve rounds up", 1000, 209, 209, 80, 791, 209 * bsize},
+		// Empty filesystem with a reserve: nothing used, 0%.
+		{"empty with reserve", 1000, 1000, 950, 0, 0, 950 * bsize},
+		// Only reserved blocks remain free: avail is 0, so df reads
+		// 100% even though bfree is not 0.
+		{"only reserve free", 1000, 50, 0, 100, 950, 0},
+		// Degenerate zero-block filesystem: 0, never NaN.
+		{"zero blocks", 0, 0, 0, 0, 0, 0},
+	}
+	for _, c := range cases {
+		u := usageFromStatfs("/", c.blocks, c.bfree, c.bavail, bsize)
+		if u.UsedPercent != c.wantPercent {
+			t.Errorf("%s: UsedPercent=%v, want df value %v", c.name, u.UsedPercent, c.wantPercent)
+		}
+		if u.UsedBytes != c.wantUsed*bsize {
+			t.Errorf("%s: UsedBytes=%d, want %d", c.name, u.UsedBytes, c.wantUsed*bsize)
+		}
+		if u.FreeBytes != c.wantFreeByte {
+			t.Errorf("%s: FreeBytes=%d, want %d (bavail, not bfree)", c.name, u.FreeBytes, c.wantFreeByte)
+		}
+		if u.TotalBytes != c.blocks*bsize {
+			t.Errorf("%s: TotalBytes=%d, want %d", c.name, u.TotalBytes, c.blocks*bsize)
+		}
+	}
+	// The host-shaped measurement must cross the default 80% trigger on
+	// the percent rule alone: this is the regression the fix exists for.
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.MinFreeBytes = 0 // isolate the percent rule from the free floor
+	u := usageFromStatfs("/", 1_000_000, 227_000, 190_000, bsize)
+	if !cfg.ShouldRun(u) {
+		t.Errorf("df 81%% measurement must trigger at the 80%% line, got %v%%", u.UsedPercent)
+	}
+}
+
+func TestDfUsedPercent(t *testing.T) {
+	if got := dfUsedPercent(0, 0); got != 0 {
+		t.Errorf("dfUsedPercent(0,0)=%v, want 0", got)
+	}
+	if got := dfUsedPercent(1, 3); got != 25 {
+		t.Errorf("dfUsedPercent(1,3)=%v, want 25", got)
+	}
+	// 1/3 is 33.33..%: df rounds up to 34.
+	if got := dfUsedPercent(1, 2); got != 34 {
+		t.Errorf("dfUsedPercent(1,2)=%v, want 34 (ceil)", got)
+	}
+}
+
 func TestConfigFromEnv(t *testing.T) {
 	t.Setenv("HH_AGENT_AUTOCLEAN", "1")
 	t.Setenv("HH_AGENT_AUTOCLEAN_USED_PCT", "85")

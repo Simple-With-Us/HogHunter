@@ -24,6 +24,7 @@
 package autoclean
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -193,14 +194,48 @@ func StatDisk(path string) (DiskUsage, error) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return DiskUsage{}, err
 	}
-	total := st.Blocks * uint64(st.Bsize)
-	free := st.Bavail * uint64(st.Bsize)
-	used := total - st.Bfree*uint64(st.Bsize)
-	u := DiskUsage{Path: path, TotalBytes: total, UsedBytes: used, FreeBytes: free}
-	if total > 0 {
-		u.UsedPercent = float64(used) / float64(total) * 100
+	return usageFromStatfs(path, st.Blocks, st.Bfree, st.Bavail, uint64(st.Bsize)), nil
+}
+
+// usageFromStatfs converts raw statfs block counts into a DiskUsage, on
+// exactly the basis `df` uses for its Use% column.  Used is blocks minus
+// bfree (every block that is not free, reserved blocks included), avail
+// is bavail (the blocks an unprivileged process may still allocate), and
+// the percentage is ceil(100 * used / (used + avail)).
+//
+// The denominator is used + avail, NOT the total block count: the blocks
+// a filesystem reserves for root (bfree - bavail, typically 5% on ext4)
+// are in neither term, so dividing by the total understates usage
+// whenever a reserve exists.  That was the live defect on the Coolify
+// host: this code read about 77.3% (used / total) where `df` read 81%
+// (used / (used + avail)), so the 80% autoclean trigger never fired on
+// the percent rule.  `df` also rounds its percentage up, and the ceil
+// here keeps the trigger in step with the number an operator sees.
+func usageFromStatfs(path string, blocks, bfree, bavail, bsize uint64) DiskUsage {
+	total := blocks * bsize
+	free := bavail * bsize
+	// Used is blocks - bfree, clamped at zero: a free count at or over
+	// the total (the empty-filesystem case, or a count statfs should
+	// never report) means nothing is used, and must not underflow.
+	var usedBlocks uint64
+	if bfree < blocks {
+		usedBlocks = blocks - bfree
 	}
-	return u, nil
+	used := usedBlocks * bsize
+	u := DiskUsage{Path: path, TotalBytes: total, UsedBytes: used, FreeBytes: free}
+	u.UsedPercent = dfUsedPercent(usedBlocks, bavail)
+	return u
+}
+
+// dfUsedPercent is the `df` Use% calculation: ceil(100 * used /
+// (used + avail)), in blocks.  A denominator of zero (an empty or
+// degenerate filesystem) reports 0, never NaN or +Inf.
+func dfUsedPercent(usedBlocks, availBlocks uint64) float64 {
+	denominator := usedBlocks + availBlocks
+	if denominator == 0 {
+		return 0
+	}
+	return math.Ceil(float64(usedBlocks) * 100 / float64(denominator))
 }
 
 // ShouldRun is the trigger decision, kept pure so tests can pin it: a run
