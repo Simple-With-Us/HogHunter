@@ -499,6 +499,33 @@ class PostSyncTfReadyTests(unittest.TestCase):
     def test_post_sync_script_does_not_write_github_step_summary(self):
         self.assertNotIn("GITHUB_STEP_SUMMARY", self.mjs)
 
+    def test_observe_upload_regexes_match_prefixed_ship_log_lines(self):
+        """ship-testflight.sh log() emits "[ios-ship] …"; patterns must not be line-anchored."""
+        bundle = "com.example.hoghunter.ios"
+        cases = (
+            "[ios-ship] upload path succeeded via xcodebuild export (destination=upload)",
+            f"[ios-ship] build 0.1.0 (202611091200) submitted for {bundle}",
+            f"[ios-ship] upload submitted; watch TestFlight processing for {bundle} build 202611091200",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output"
+            output.touch()
+            for index, line in enumerate(cases):
+                fake = Path(tmp) / f"fake-upload-{index}.sh"
+                fake.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' '{line}'\n", encoding="utf-8")
+                fake.chmod(0o755)
+                result = subprocess.run(
+                    ["node", str(ROOT / "scripts/ios-observe-ship.mjs"), "bash", str(fake)],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                )
+                self.assertEqual(result.returncode, 0, (index, result.stderr))
+                out = output.read_text(encoding="utf-8")
+                self.assertIn("uploaded=true", out, line)
+                self.assertIn("ship_observed=uploaded", out, line)
+                output.write_text("", encoding="utf-8")
+
     def test_observe_ship_marks_rate_gate_skip_as_not_uploaded(self):
         observe = (ROOT / "scripts/ios-observe-ship.mjs").read_text(encoding="utf-8")
         self.assertIn("ship-gate: exiting 0 before any version is resolved", observe)
@@ -510,7 +537,7 @@ class PostSyncTfReadyTests(unittest.TestCase):
             fake = Path(tmp) / "fake-ship.sh"
             fake.write_text(
                 "#!/usr/bin/env bash\n"
-                'echo "ship-gate: exiting 0 before any version is resolved (nothing consumed)"\n',
+                'echo "[ios-ship] ship-gate: exiting 0 before any version is resolved (nothing consumed)"\n',
                 encoding="utf-8",
             )
             fake.chmod(0o755)
