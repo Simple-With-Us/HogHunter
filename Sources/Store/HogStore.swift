@@ -85,7 +85,9 @@ final class HogStore: ObservableObject {
     // MARK: - Persisted choices
 
     @Published var window: TimeWindow = .now { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
-    @Published var grouping: HogGrouping = .apps { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
+    @Published var grouping: HogGrouping = .apps {
+        didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror(); refreshMenuBarIfReady() }
+    }
     @Published var sort: HogSort = .cpu {
         didSet {
             if sort != oldValue {
@@ -97,10 +99,13 @@ final class HogStore: ObservableObject {
         }
     }
     @Published var sortAscending: Bool = false { didSet { persist(); scheduleChoiceChanged(); syncViewStateMirror() } }
-    @Published var cpuScale: CpuScale = .perCore { didSet { persist(); syncViewStateMirror() } }
-    @Published var menuBarLabelMode: MenuBarLabelMode = .historyBars { didSet { persist() } }
-    @Published var showMenuBarIcon: Bool = false { didSet { persist() } }
-    @Published var showMenuBarPercent: Bool = true { didSet { persist() } }
+    @Published var cpuScale: CpuScale = .perCore { didSet { persist(); syncViewStateMirror(); refreshMenuBarIfReady() } }
+    @Published var menuBarLabelMode: MenuBarLabelMode = .historyBars { didSet { persist(); refreshMenuBarIfReady() } }
+    @Published var showMenuBarIcon: Bool = false { didSet { persist(); refreshMenuBarIfReady() } }
+    @Published var showMenuBarPercent: Bool = true { didSet { persist(); refreshMenuBarIfReady() } }
+    /// Picture behind the status item.  Published store changes do not rebuild
+    /// it; `refreshMenuBar()` does, and only when the drawing changed.
+    let menuBarStatus = MenuBarStatus()
     @Published var refreshInterval: TimeInterval = 5 {
         didSet {
             persist()
@@ -437,6 +442,7 @@ final class HogStore: ObservableObject {
     /// so the apply does not write the same values back to Infisical.
     private var applyingInfisical = false
     private var lastTickAt = Date.distantPast
+    private var menuBarAppearanceObserver: NSKeyValueObservation?
 
     private var samples: [ProcessKey: ProcessSample] = [:]
     private var liveRows: [HogRow] = []
@@ -508,10 +514,12 @@ final class HogStore: ObservableObject {
             object: infisical
         )
         applyInfisicalOverrides()
+        observeMenuBarAppearance()
         if startImmediately && ApplicationRunMode.current.allowsLiveProbes { start() }
     }
 
     deinit {
+        menuBarAppearanceObserver?.invalidate()
         directoryIdleTask?.cancel()
         timer?.invalidate()
         pressureSource?.cancel()
@@ -700,6 +708,7 @@ final class HogStore: ObservableObject {
         }
         if window != .now { refreshHistory() }
         publishCompanion()
+        refreshMenuBar()
     }
 
     private func record(_ processes: [ProcessSample], groupKeys: [ProcessKey: String], coreCount: Int) {
@@ -1227,6 +1236,43 @@ final class HogStore: ObservableObject {
         }
     }
 
+    /// Publishes the status-item picture.  Called from a sample and from the
+    /// settings that change the label, not from the store's other publishes.
+    func refreshMenuBar(now: Date = Date()) {
+        let sampledAt = pulse.sampledAt == .distantPast ? now : pulse.sampledAt
+        menuBarStatus.submit(
+            MenuBarPicture.capture(
+                mode: menuBarLabelMode,
+                showIcon: showMenuBarIcon,
+                showPercent: showMenuBarPercent,
+                cpuPercent: pulse.cpuPercent,
+                history: cpuMinuteHistory,
+                samples: recentCpuPercents,
+                label: menuBarLabel,
+                help: menuBarHelp,
+                accessibility: menuBarAccessibilityValue,
+                at: sampledAt,
+                appearance: .current
+            ),
+            now: now
+        )
+    }
+
+    private func refreshMenuBarIfReady() {
+        guard !loadingSettings, !applyingInfisical else { return }
+        refreshMenuBar()
+    }
+
+    private func observeMenuBarAppearance() {
+        // AppKit exposes effectiveAppearance through KVO, not a notification.
+        // Retain the observation so a theme change refreshes a static label.
+        menuBarAppearanceObserver = NSApplication.shared.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor in
+                self?.refreshMenuBar()
+            }
+        }
+    }
+
     /// Keeps the menu bar from growing without limit when an app has a long
     /// name.  About fourteen characters is as much as the bar can spare.
     static func truncated(_ name: String, limit: Int = 14) -> String {
@@ -1321,6 +1367,7 @@ final class HogStore: ObservableObject {
             // The mirror is told what the Mac starts in, so the first reply
             // to a phone describes the Mac's own state.
             syncViewStateMirror()
+            refreshMenuBar()
         }
         if let raw = defaults.string(forKey: Key.window), let value = TimeWindow(rawValue: raw) { window = value }
         if let raw = defaults.string(forKey: Key.grouping), let value = HogGrouping(rawValue: raw) { grouping = value }
@@ -1511,6 +1558,7 @@ final class HogStore: ObservableObject {
         }
         cpuMinuteHistory = history
         recentCpuPercents = values
+        refreshMenuBar()
     }
     #endif
 
@@ -1528,7 +1576,10 @@ final class HogStore: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self, !self.loadingSettings else { return }
             self.loadingSettings = true
-            defer { self.loadingSettings = false }
+            defer {
+                self.loadingSettings = false
+                self.refreshMenuBar()
+            }
             if let raw = self.defaults.string(forKey: Key.window),
                let value = TimeWindow(rawValue: raw), value != self.window {
                 self.window = value
