@@ -25,8 +25,8 @@ struct DiskCleanerView: View {
                 extremeDisclaimerBanner
             }
             heroHeader
-            Text("Temp files appear after at least \(store.tempFilePolicy.hoursLabel) untouched hours · Settings > Cleaner")
-                .font(.system(size: 10))
+            Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             regimenSection
@@ -194,15 +194,10 @@ struct DiskCleanerView: View {
 
             Spacer()
 
-            Text(store.selectedTier.badge)
-                .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(store.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
-                )
-                .foregroundStyle(store.selectedTier == .extreme ? Color.orange : Color.blue)
+            ContrastChip(
+                text: store.selectedTier.badge,
+                tone: store.selectedTier == .extreme ? .caution : .neutral
+            )
         }
         .padding(.horizontal, 2)
     }
@@ -302,8 +297,8 @@ struct DiskCleanerView: View {
 
                 if report.isPartial {
                     HStack {
-                        Text("Partial scan — discovered sizes are lower bounds; some locations remain unmeasured.")
-                            .font(.system(size: 11)).foregroundStyle(.orange)
+                        Text("Partial scan.\u{00A0} Some folders were not measured, so these sizes are a minimum.")
+                            .font(.system(size: 12)).foregroundStyle(.primary)
                         Spacer()
                         Button("Scan Deeper") { store.scan(depth: .deeper) }
                     }
@@ -311,9 +306,9 @@ struct DiskCleanerView: View {
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 if let last = store.lastCleanup {
-                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)) — moved or removed \(last.formattedBytesReclaimed) (estimated)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)).\u{00A0} Moved or removed \(last.formattedBytesReclaimed), estimated.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -322,12 +317,12 @@ struct DiskCleanerView: View {
 
         case .cleaning(let progress, let currentItem):
             VStack(spacing: 8) {
-                if currentItem.contains("snapshot") {
+                if DiskCleaner.isSafetyCopyProgress(currentItem) {
                     HStack(spacing: 8) {
                         ProgressView()
                             .scaleEffect(0.7)
-                        Text("Creating APFS safety snapshot (this can take 15–30s)…")
-                            .font(.system(size: 11, weight: .medium))
+                        Text("Saving a safety copy.\u{00A0} This can take 15 to 30 seconds.")
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -343,7 +338,7 @@ struct DiskCleanerView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    if currentItem.contains("snapshot") {
+                    if DiskCleaner.isSafetyCopyProgress(currentItem) {
                         Text("Working…")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
@@ -372,8 +367,8 @@ struct DiskCleanerView: View {
 
                     Text(freeSpaceObservation(result))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
-                    Text("Trash and APFS snapshots can retain blocks; available space also changes with other activity.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("The Trash and local snapshots can still hold space.\u{00A0} Other apps change free space too.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
                     if !result.errors.isEmpty {
                         Text("\(result.errors.count) cleanup issues reported.")
                             .font(.system(size: 10))

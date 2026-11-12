@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A headline number: a labeled bar, tinted by severity, with a caption under
@@ -139,6 +140,46 @@ struct WrappingHStack: Layout {
                 anchor: .topLeading,
                 proposal: .unspecified
             )
+        }
+    }
+}
+
+/// A short status label.  System orange and green fail WCAG AA as text, so
+/// the ink and the fill are chosen to stay above 4.5:1 in light and dark.
+struct ContrastChip: View {
+    enum Tone { case neutral, caution, notice }
+
+    let text: String
+    var tone: Tone = .neutral
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Self.ink(tone))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Self.wash(tone)))
+    }
+
+    private static func ink(_ tone: Tone) -> Color { color(tone, text: true) }
+    private static func wash(_ tone: Tone) -> Color { color(tone, text: false) }
+
+    private static func color(_ tone: Tone, text: Bool) -> Color {
+        let pair = pairs(tone, text: text)
+        return Color(nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            let rgb = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? pair.dark : pair.light
+            return NSColor(srgbRed: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1)
+        }))
+    }
+
+    private static func pairs(_ tone: Tone, text: Bool) -> (light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat)) {
+        switch (tone, text) {
+        case (.neutral, true): return ((0.04, 0.24, 0.51), (0.77, 0.87, 1.0))
+        case (.neutral, false): return ((0.89, 0.93, 0.98), (0.06, 0.14, 0.24))
+        case (.caution, true): return ((0.45, 0.24, 0.0), (1.0, 0.86, 0.62))
+        case (.caution, false): return ((1.0, 0.93, 0.82), (0.28, 0.18, 0.08))
+        case (.notice, true): return ((0.0, 0.36, 0.16), (0.72, 0.94, 0.78))
+        case (.notice, false): return ((0.85, 0.95, 0.89), (0.05, 0.16, 0.09))
         }
     }
 }

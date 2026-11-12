@@ -28,19 +28,14 @@ struct HogRowView: View {
                         .lineLimit(1)
                     if row.isSleepBlocker {
                         Image(systemName: "moon.fill")
-                            .font(.system(size: 8.5))
+                            .font(.system(size: 11))
                             .foregroundStyle(.indigo)
-                            .help("Holding power assertion preventing system sleep")
+                            .help("Keeping the Mac awake")
+                            .accessibilityLabel("Keeping the Mac awake")
                     }
                     if row.isTamed {
-                        Text("TAMED")
-                            .font(.system(size: 8, weight: .bold))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 0.5)
-                            .background(Color.green.opacity(0.18))
-                            .foregroundStyle(.green)
-                            .clipShape(Capsule())
-                            .help("Throttled: running at lowest priority (nice 20) with background QoS")
+                        ContrastChip(text: "Tamed", tone: .notice)
+                            .help("Slowed down so it uses less of the Mac.")
                     }
                 }
                 Text(row.detail)

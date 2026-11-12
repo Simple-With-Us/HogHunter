@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum CompanionTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
@@ -162,6 +163,46 @@ extension CompanionRow {
     }
 }
 
+/// A short status label.  System orange, green, and purple fail WCAG AA as
+/// small text, so the ink and the fill stay above 4.5:1 in light and dark.
+struct StatusChip: View {
+    enum Tone { case neutral, caution, notice }
+
+    let text: String
+    var tone: Tone = .neutral
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Self.ink(tone))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Self.wash(tone)))
+    }
+
+    private static func ink(_ tone: Tone) -> Color { color(tone, text: true) }
+    private static func wash(_ tone: Tone) -> Color { color(tone, text: false) }
+
+    private static func color(_ tone: Tone, text: Bool) -> Color {
+        let pair = pairs(tone, text: text)
+        return Color(uiColor: UIColor { traits in
+            let rgb = traits.userInterfaceStyle == .dark ? pair.dark : pair.light
+            return UIColor(red: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1)
+        })
+    }
+
+    private static func pairs(_ tone: Tone, text: Bool) -> (light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat)) {
+        switch (tone, text) {
+        case (.neutral, true): return ((0.04, 0.24, 0.51), (0.77, 0.87, 1.0))
+        case (.neutral, false): return ((0.89, 0.93, 0.98), (0.06, 0.14, 0.24))
+        case (.caution, true): return ((0.45, 0.24, 0.0), (1.0, 0.86, 0.62))
+        case (.caution, false): return ((1.0, 0.93, 0.82), (0.28, 0.18, 0.08))
+        case (.notice, true): return ((0.0, 0.36, 0.16), (0.72, 0.94, 0.78))
+        case (.notice, false): return ((0.85, 0.95, 0.89), (0.05, 0.16, 0.09))
+        }
+    }
+}
+
 struct CompanionRootView: View {
     @Bindable var model: CompanionModel
 
@@ -235,8 +276,8 @@ struct CompanionRootView: View {
                 DashboardView(snapshot: snapshot, model: model)
             } else {
                 StatusPage(
-                    title: "Waiting for a Snapshot",
-                    message: "Hog Hunter is connected and waiting for the next sample from your Mac."
+                    title: "Waiting for Your Mac",
+                    message: "Hog Hunter is connected and waiting for the next reading from your Mac."
                 )
             }
         case .choose:
@@ -244,7 +285,7 @@ struct CompanionRootView: View {
         case .offline:
             StatusPage(
                 title: "Mac Offline or Not Found",
-                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.\u{00A0} Off Wi-Fi or remote?\u{00A0} Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
+                message: offlineDetail(status: model.statusLine),
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -257,7 +298,7 @@ struct CompanionRootView: View {
         case .looking, .code:
             StatusPage(
                 title: "Looking for Your Mac",
-                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.\u{00A0} Both devices need the same Wi-Fi, or connect via Tailscale.\u{00A0} Off Wi-Fi?\u{00A0} Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
+                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.\u{00A0} Both devices need the same Wi-Fi, or Tailscale.\u{00A0} Away from Wi-Fi?\u{00A0} Enter your Mac's Tailscale name or address.",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -268,6 +309,18 @@ struct CompanionRootView: View {
                 }
             )
         }
+    }
+
+    /// Joins the status line to the recovery note.  A finished sentence gets
+    /// the no-break gap; a name such as "MacBook (Remote)" gets one space.
+    private func offlineDetail(status: String) -> String {
+        let follow = "Hog Hunter shares while the Mac app is open and Share With iPhone is on.\u{00A0} Away from Wi-Fi?\u{00A0} Connect with Tailscale or your Mac's address."
+        let lead = status.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !lead.isEmpty else { return follow }
+        if let last = lead.last, ".!?".contains(last) {
+            return lead + "\u{00A0} " + follow
+        }
+        return lead + " " + follow
     }
 }
 
@@ -340,7 +393,7 @@ private struct StatusPage: View {
 
                     if let onDemoMode {
                         Button(action: onDemoMode) {
-                            Label("Explore Demo Mode (App Review)", systemImage: "sparkles")
+                            Label("Preview Sample Data", systemImage: "sparkles")
                                 .font(.subheadline.weight(.medium))
                         }
                         .buttonStyle(.bordered)
@@ -738,10 +791,10 @@ struct DashboardView: View {
                     Image(systemName: "sparkles")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
-                    Text("Explore Demo Mode (App Review)")
+                    Text("Sample data.\u{00A0} This is not your Mac.")
                         .font(.caption.weight(.semibold))
                     Spacer()
-                    Button("Exit Demo") {
+                    Button("Exit Preview") {
                         model.exitDemoMode()
                     }
                     .font(.caption.weight(.medium))
@@ -757,7 +810,7 @@ struct DashboardView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
-                    Text("This Mac and this app disagree about the snapshot version.\u{00A0} Update Hog Hunter on both to see everything.")
+                    Text("This Mac and this iPhone are on different versions.\u{00A0} Update Hog Hunter on both to see everything.")
                         .font(.caption.weight(.medium))
                 }
                 .padding(.horizontal, 16)
@@ -1309,12 +1362,8 @@ struct DashboardView: View {
                                         .accessibilityLabel("Preventing Sleep")
                                 }
                                 if row.isTamed == true {
-                                    Text("TAMED")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.orange))
+                                    StatusChip(text: "Tamed", tone: .notice)
+                                        .accessibilityLabel("Tamed")
                                 }
                             }
                             Text(row.detail)
@@ -1691,7 +1740,7 @@ struct DashboardView: View {
                             .controlSize(.small)
                     }
                 }
-                Text("Remotely trigger a safe Standard Clean on \(snapshot.hostName). Cleans user caches, logs, developer junk, and empties trash with instant APFS snapshot rollback.")
+                Text("Runs a Standard clean on \(snapshot.hostName).\u{00A0} It clears caches, logs, and developer clutter, and can empty the Trash.\u{00A0} A safety copy is saved first.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -1837,14 +1886,7 @@ struct DashboardView: View {
                                         .font(.body.weight(.medium))
                                         .foregroundStyle(category.isExcluded ? .secondary : .primary)
                                     if category.isExtremeOnly {
-                                        Text("EXTREME ONLY")
-                                            .font(.caption2.weight(.bold))
-                                            .foregroundStyle(.purple)
-                                            .padding(.horizontal, 4)
-                                            .padding(.vertical, 1)
-                                            .background(
-                                                Capsule().fill(Color.purple.opacity(0.12))
-                                            )
+                                        StatusChip(text: "Extreme Only", tone: .caution)
                                     }
                                 }
                                 Text(category.description)

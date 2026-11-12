@@ -31,7 +31,7 @@ struct TempFileSafetyPolicy: Equatable, Sendable {
     var minimumUntouchedInterval: TimeInterval { minimumUntouchedHours * 3_600 }
     var hoursLabel: String { String(format: "%.0f", minimumUntouchedHours) }
     var categoryDescription: String {
-        "Temporary files in /tmp untouched for at least \(hoursLabel) hours.\u{00A0} Preserves Git checkouts, source projects, staging, locks, and links."
+        "Temporary files in /tmp that have not changed for at least \(hoursLabel) hours.\u{00A0} Git projects, source folders, staging, locks, and links stay."
     }
 
     private static func storedHours(from defaults: UserDefaults) -> Double? {
