@@ -479,6 +479,10 @@ final class StorageGrowthLayoutTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         try XCTUnwrap(rep.representation(using: .png, properties: [:]))
             .write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + ".png"))
+        // Legacy component fixtures size to their intrinsic content once
+        // attached to a window. Compare the settled pre-hover viewport, not
+        // the requested outer size, so this checks hover rather than sizing.
+        let preHoverSize = host.bounds.size
         // Deliver pointer motion to this fixture window only. No global
         // pointer, sampler, process action or server request is involved.
         window.acceptsMouseMovedEvents = true
@@ -493,7 +497,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         host.layoutSubtreeIfNeeded()
-        XCTAssertEqual(host.bounds.size, size, "Hover must not resize the activity area")
+        XCTAssertEqual(host.bounds.size, preHoverSize, "Hover must not resize the activity area")
         host.cacheDisplay(in: host.bounds, to: rep)
         try XCTUnwrap(rep.representation(using: .png, properties: [:]))
             .write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + "-hover.png"))
