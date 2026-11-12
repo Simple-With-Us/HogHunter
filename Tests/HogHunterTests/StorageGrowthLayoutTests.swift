@@ -360,6 +360,19 @@ final class StorageGrowthLayoutTests: XCTestCase {
             try render(host, size: size, name: "hh-overview-" + name)
             try render(host, size: size, name: "hh-overview-" + name + "-scrolled", scrollToEnd: true)
         }
+        let drives = MountedDriveStore(probe: {
+            (1...12).map { index in
+                MountedDriveCandidate(name: "Fixture drive \(index)", path: "/Volumes/Fixture\(index)",
+                    isLocal: true, isHidden: false, isExternalPhysical: true,
+                    totalBytes: 500_000_000_000, availableBytes: 50_000_000_000)
+            }
+        })
+        await drives.refresh()
+        let crowded = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences).frame(width: 720, height: 640))
+        crowded.appearance = NSAppearance(named: .aqua)
+        try render(crowded, size: CGSize(width: 720, height: 640), name: "hh-overview-quick-many-drives")
+        try render(crowded, size: CGSize(width: 720, height: 640), name: "hh-overview-quick-many-drives-scrolled", scrollToEnd: true)
         preferences.set("Server", forKey: "dashboardHostScope")
         for (name, size) in [("minimum", CGSize(width: 860, height: 580)),
                              ("grown", CGSize(width: 1050, height: 780))] {

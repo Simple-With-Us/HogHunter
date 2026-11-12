@@ -481,14 +481,18 @@ struct HogHunterPanel: View {
 
             // Keep the summary and footer stable. Activity owns the remaining
             // height instead of changing its row count when the pointer moves.
-            VStack(alignment: .leading, spacing: 9) {
-                cpuSection
-                ramSection
-                storageSection
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 9) {
+                    cpuSection
+                    ramSection
+                    storageSection
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(height: 240)
+            .accessibilityLabel("Resource summary, scroll for more drives")
             activitySection
-                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
 
             Divider()
 
