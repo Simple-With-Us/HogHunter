@@ -100,14 +100,25 @@ class UICopyTests(unittest.TestCase):
     def test_safety_copy_progress_is_not_detected_by_the_word_snapshot(self):
         cleaner = (ROOT / "Sources" / "Storage" / "DiskCleaner.swift").read_text(encoding="utf-8")
         self.assertIn('static let safetyCopyProgressMark = "Saving a safety copy"', cleaner)
-        for relative in (
-            "Sources/Storage/DiskCleanerStore.swift",
-            "Sources/Store/HogStore.swift",
-            "Sources/UI/DiskCleanerView.swift",
+        self.assertIn('static let thinningSnapshotsProgressTitle = "Thinning APFS local snapshots…"', cleaner)
+        self.assertIn("isSafetyCopyProgress(title) || title == thinningSnapshotsProgressTitle", cleaner)
+        for relative, predicate in (
+            ("Sources/Storage/DiskCleanerStore.swift", "DiskCleaner.isSnapshotProgress"),
+            ("Sources/Store/HogStore.swift", "DiskCleaner.isSnapshotProgress"),
+            ("Sources/UI/DiskCleanerView.swift", "DiskCleaner.isSafetyCopyProgress"),
         ):
             text = (ROOT / relative).read_text(encoding="utf-8")
             self.assertNotIn('.contains("snapshot")', text, relative)
-            self.assertIn("DiskCleaner.isSafetyCopyProgress", text, relative)
+            self.assertIn(predicate, text, relative)
+
+    def test_snapshot_reporters_keep_milestones_in_snapshot_phase(self):
+        for relative, title in (
+            ("Sources/Storage/DiskCleanerStore.swift", "currentItem"),
+            ("Sources/Store/HogStore.swift", "itemTitle"),
+        ):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn(f'phase: DiskCleaner.isSnapshotProgress({title}) ? "snapshot"', text, relative)
+            self.assertIn(f'statusText: DiskCleaner.isSnapshotProgress({title}) ? {title} :', text, relative)
 
     def test_connection_list_errors_stay_plain_and_match_the_unit_tests(self):
         text = (ROOT / "Sources" / "Network" / "NetworkScanner.swift").read_text(encoding="utf-8")
