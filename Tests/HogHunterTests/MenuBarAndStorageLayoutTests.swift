@@ -72,6 +72,26 @@ final class MenuBarAndStorageLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testMenuBarRefreshesAfterApplicationAppearanceChanges() async throws {
+        let app = NSApplication.shared
+        let original = app.appearance
+        defer { app.appearance = original }
+        app.appearance = try XCTUnwrap(NSAppearance(named: .aqua))
+        let store = makeIsolatedHogStore()
+        store.refreshMenuBar()
+        let revision = store.menuBarStatus.presentation.revision
+        let rasters = store.menuBarStatus.rasterCount
+
+        app.appearance = try XCTUnwrap(NSAppearance(named: .darkAqua))
+        // The KVO callback hops to MainActor before updating the picture.
+        for _ in 0..<100 where store.menuBarStatus.presentation.revision == revision {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertGreaterThan(store.menuBarStatus.presentation.revision, revision)
+        XCTAssertGreaterThan(store.menuBarStatus.rasterCount, rasters)
+    }
+
+    @MainActor
     func testHogStoreDefaultsToHistoryBars() {
         let store = makeIsolatedHogStore()
         XCTAssertEqual(store.menuBarLabelMode, .historyBars)

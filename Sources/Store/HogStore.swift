@@ -442,7 +442,7 @@ final class HogStore: ObservableObject {
     /// so the apply does not write the same values back to Infisical.
     private var applyingInfisical = false
     private var lastTickAt = Date.distantPast
-    private var menuBarAppearanceObserver: NSObjectProtocol?
+    private var menuBarAppearanceObserver: NSKeyValueObservation?
 
     private var samples: [ProcessKey: ProcessSample] = [:]
     private var liveRows: [HogRow] = []
@@ -519,9 +519,7 @@ final class HogStore: ObservableObject {
     }
 
     deinit {
-        if let menuBarAppearanceObserver {
-            NotificationCenter.default.removeObserver(menuBarAppearanceObserver)
-        }
+        menuBarAppearanceObserver?.invalidate()
         directoryIdleTask?.cancel()
         timer?.invalidate()
         pressureSource?.cancel()
@@ -1266,11 +1264,9 @@ final class HogStore: ObservableObject {
     }
 
     private func observeMenuBarAppearance() {
-        menuBarAppearanceObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeEffectiveAppearanceNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
+        // AppKit exposes effectiveAppearance through KVO, not a notification.
+        // Retain the observation so a theme change refreshes a static label.
+        menuBarAppearanceObserver = NSApplication.shared.observe(\.effectiveAppearance) { [weak self] _, _ in
             Task { @MainActor in
                 self?.refreshMenuBar()
             }
