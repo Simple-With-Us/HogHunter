@@ -118,6 +118,11 @@ class UICopyTests(unittest.TestCase):
         for phrase in ("lsof denied", "lsof binary", "lsof exit", "lsof parse"):
             self.assertNotIn(phrase, lowered)
 
+    def test_demo_banner_uses_the_sentence_gap(self):
+        text = (ROOT / "ios" / "Sources" / "CompanionViews.swift").read_text(encoding="utf-8")
+        self.assertIn('Text("Sample data.\\u{00A0} This is not your Mac.")', text)
+        self.assertNotIn('Text("Sample data. This is not your Mac.")', text)
+
 
 if __name__ == "__main__":
     unittest.main()

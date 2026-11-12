@@ -791,7 +791,7 @@ struct DashboardView: View {
                     Image(systemName: "sparkles")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
-                    Text("Sample data. This is not your Mac.")
+                    Text("Sample data.\u{00A0} This is not your Mac.")
                         .font(.caption.weight(.semibold))
                     Spacer()
                     Button("Exit Preview") {
