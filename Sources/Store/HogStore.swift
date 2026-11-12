@@ -2476,7 +2476,7 @@ final class HogStore: ObservableObject {
         var lastReportedFraction: Double = -1.0
         return { [weak self] fraction, itemTitle in
             let now = Date()
-            let isMilestone = DiskCleaner.isSafetyCopyProgress(itemTitle) || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
+            let isMilestone = DiskCleaner.isSnapshotProgress(itemTitle) || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
             guard isMilestone else { return }
             lastReportedFraction = fraction
             lastReportedTime = now
@@ -2487,9 +2487,9 @@ final class HogStore: ObservableObject {
                 self.activeCleanRunId = runId
                 self.activeCleanProgress = CompanionCleanProgress(
                     isCleaning: true,
-                    phase: fraction >= 1.0 ? "finishing" : "cleaning",
+                    phase: DiskCleaner.isSnapshotProgress(itemTitle) ? "snapshot" : (fraction >= 1.0 ? "finishing" : "cleaning"),
                     progress: scaled,
-                    statusText: DiskCleaner.isSafetyCopyProgress(itemTitle) ? itemTitle : "Cleaning \(itemTitle)…",
+                    statusText: DiskCleaner.isSnapshotProgress(itemTitle) ? itemTitle : "Cleaning \(itemTitle)…",
                     currentItem: itemTitle,
                     itemsCleaned: itemsCleaned,
                     totalItems: totalItems,

@@ -2166,6 +2166,13 @@ final class DiskCleaner: @unchecked Sendable {
         title.contains(safetyCopyProgressMark)
     }
 
+    static let thinningSnapshotsProgressTitle = "Thinning APFS local snapshots…"
+
+    /// Snapshot milestones are already complete status sentences, not file names.
+    static func isSnapshotProgress(_ title: String) -> Bool {
+        isSafetyCopyProgress(title) || title == thinningSnapshotsProgressTitle
+    }
+
     /// What `clean` records for an item it did not delete because the run was
     /// stopped.  It is a sentinel and not a failure: the item was not refused,
     /// the run was cancelled.  The unattended runner filters it out before it
@@ -2236,7 +2243,7 @@ final class DiskCleaner: @unchecked Sendable {
                 errors.append(Self.cancelledMessage)
                 return resultSoFar(removed: 0)
             }
-            progress?(0.0, "Thinning APFS local snapshots…")
+            progress?(0.0, Self.thinningSnapshotsProgressTitle)
             // Offload the blocking tmutil wait to a utility task, but wire
             // cancellation so cancelAll()/stop() terminate the child instead of
             // awaiting a multi-minute thinlocalsnapshots run.

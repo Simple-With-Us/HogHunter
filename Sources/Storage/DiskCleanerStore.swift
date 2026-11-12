@@ -467,7 +467,7 @@ final class DiskCleanerStore: ObservableObject {
             var lastReportedProgress: Double = -1.0
             let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot, exclusions: activeExclusions) { progress, currentItem in
                 let now = Date()
-                let isSpecial = DiskCleaner.isSafetyCopyProgress(currentItem) || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
+                let isSpecial = DiskCleaner.isSnapshotProgress(currentItem) || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
                 if isSpecial {
                     lastReportedProgress = progress
                     lastReportedTime = now
@@ -476,9 +476,9 @@ final class DiskCleanerStore: ObservableObject {
                         self.state = .cleaning(progress: progress, currentItem: currentItem)
                         let activeProg = CompanionCleanProgress(
                             isCleaning: true,
-                            phase: DiskCleaner.isSafetyCopyProgress(currentItem) ? "snapshot" : (progress >= 1.0 ? "finishing" : "cleaning"),
+                            phase: DiskCleaner.isSnapshotProgress(currentItem) ? "snapshot" : (progress >= 1.0 ? "finishing" : "cleaning"),
                             progress: progress,
-                            statusText: DiskCleaner.isSafetyCopyProgress(currentItem) ? currentItem : "Cleaning \(currentItem)…",
+                            statusText: DiskCleaner.isSnapshotProgress(currentItem) ? currentItem : "Cleaning \(currentItem)…",
                             currentItem: currentItem,
                             itemsCleaned: Int(progress * Double(totalItems)),
                             totalItems: totalItems,
