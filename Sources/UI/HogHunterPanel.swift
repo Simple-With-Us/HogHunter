@@ -334,7 +334,7 @@ struct HogHunterPanel: View {
                 }
                 Text("Top Activity").font(.headline)
                 serverActivityColumn
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
+                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
                 if let outcome = serverActivityControl.lastOutcome {
                     Text(outcome.message).font(.caption).foregroundStyle(.secondary)
                 }
@@ -420,24 +420,33 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                cpuHistoryCard
-                Meter(title: "Memory", value: store.pulse.memoryPercent,
-                      caption: store.memorySizeCaption,
-                      severity: Severity.forPressure(store.pulse.pressure),
-                      accessibilityDetail: store.memoryCaption)
-                    // The memory meter keeps its size; the CPU graph takes
-                    // the rest of the width, because a graph squeezed into
-                    // half a card is not worth having.
-                    .frame(width: 260)
+        GeometryReader { geometry in
+            VStack(alignment: .leading, spacing: 12) {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 10) {
+                            cpuHistoryCard
+                            Meter(title: "Memory", value: store.pulse.memoryPercent,
+                                  caption: store.memorySizeCaption,
+                                  severity: Severity.forPressure(store.pulse.pressure),
+                                  accessibilityDetail: store.memoryCaption)
+                                .frame(width: 260)
+                        }
+                        .frame(height: 94)
+                        pillRow(memoryPills + thermalPills)
+                        capacityCards
+                        if !store.maintain.vpsStore.configuredHost.isEmpty {
+                            serverStrip
+                        }
+                        captions
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(height: min(320, geometry.size.height * 0.60))
+                .accessibilityLabel("Overview summary, scroll for capacity and captions")
+                activitySection
+                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
             }
-            .frame(height: 94)
-            pillRow(memoryPills + thermalPills)
-            capacityCards
-            activitySection
-                .frame(maxHeight: .infinity, alignment: .topLeading)
-            captions
         }
     }
 
@@ -1056,6 +1065,7 @@ struct HogHunterPanel: View {
                 Text(outcome.message).font(.system(size: 9)).foregroundStyle(.secondary)
             }
         }
+        .frame(minHeight: 100)
     }
 
     private var macActivityColumn: some View {

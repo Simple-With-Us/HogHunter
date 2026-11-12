@@ -373,6 +373,11 @@ final class StorageGrowthLayoutTests: XCTestCase {
         crowded.appearance = NSAppearance(named: .aqua)
         try render(crowded, size: CGSize(width: 720, height: 640), name: "hh-overview-quick-many-drives")
         try render(crowded, size: CGSize(width: 720, height: 640), name: "hh-overview-quick-many-drives-scrolled", scrollToEnd: true)
+        let crowdedDashboard = NSHostingView(rootView: HogHunterPanel(mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences).frame(width: 860, height: 580))
+        crowdedDashboard.appearance = NSAppearance(named: .aqua)
+        try render(crowdedDashboard, size: CGSize(width: 860, height: 580), name: "hh-overview-many-drives-minimum")
+        try render(crowdedDashboard, size: CGSize(width: 860, height: 580), name: "hh-overview-many-drives-minimum-scrolled", scrollToEnd: true)
         preferences.set("Server", forKey: "dashboardHostScope")
         for (name, size) in [("minimum", CGSize(width: 860, height: 580)),
                              ("grown", CGSize(width: 1050, height: 780))] {
@@ -381,6 +386,16 @@ final class StorageGrowthLayoutTests: XCTestCase {
             host.appearance = NSAppearance(named: .aqua)
             try render(host, size: size, name: "hh-overview-server-" + name)
             try render(host, size: size, name: "hh-overview-server-" + name + "-scrolled", scrollToEnd: true)
+        }
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        let empty = HogStore(historyURL: directory.appendingPathComponent("empty.sqlite"),
+            defaults: preferences, maintain: maintain, startImmediately: false)
+        for (name, quick, size) in [("empty-quick", true, CGSize(width: 720, height: 640)),
+                                   ("empty-minimum", false, CGSize(width: 860, height: 580))] {
+            let host = NSHostingView(rootView: HogHunterPanel(isQuickView: quick, mountedDrives: drives)
+                .environmentObject(empty).defaultAppStorage(preferences).frame(width: size.width, height: size.height))
+            host.appearance = NSAppearance(named: .aqua)
+            try render(host, size: size, name: "hh-overview-" + name)
         }
         XCTAssertTrue(processes[1].can(action: "quit"))
         XCTAssertFalse(processes[0].can(action: "quit"))
