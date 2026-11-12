@@ -195,10 +195,11 @@ struct HogHunterSmallWidgetView: View {
                     .padding(.vertical, 3)
                     .background(Color.primary.opacity(0.06), in: Capsule())
                 }
+                .accessibilityLabel("Clean Mac")
             }
             .widgetURL(URL(string: "hoghunter://open"))
         } else {
-            EmptyWidgetView(title: "Hog Hunter", message: "Open companion to view Mac")
+            EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your Mac.")
                 .widgetURL(URL(string: "hoghunter://open"))
         }
     }
@@ -272,9 +273,9 @@ struct HogHunterMediumWidgetView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if let topHog = snap.rows.first {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("TOP HOG")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(.secondary)
+                            Text("Top Hog")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
                             HStack {
                                 Text(topHog.name)
                                     .font(.footnote.weight(.semibold))
@@ -310,18 +311,19 @@ struct HogHunterMediumWidgetView: View {
                                 Text("Clean Mac")
                                     .font(.footnote.weight(.semibold))
                             }
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, minHeight: 44)
                             .padding(.vertical, 5)
                             .background(Color.accentColor)
                             .foregroundStyle(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
+                        .accessibilityLabel("Clean Mac")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         } else {
-            EmptyWidgetView(title: "Hog Hunter", message: "Open companion on iPhone to view Mac telemetry.")
+            EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your Mac.")
                 .widgetURL(URL(string: "hoghunter://open"))
         }
     }
@@ -398,9 +400,9 @@ struct HogHunterLargeWidgetView: View {
 
                 // Top Hogs Section
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("BUSY PROCESSES")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
+                    Text("Busy Processes")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
 
                     ForEach(snap.rows.prefix(3)) { row in
                         HStack(spacing: 6) {
@@ -435,7 +437,7 @@ struct HogHunterLargeWidgetView: View {
                         if let bytes = entry.lastCleanBytes {
                             Text("Reclaimed \(bytes)")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(.green)
+                                .foregroundStyle(.primary)
                         } else {
                             Text(entry.cleanStatus)
                                 .font(.caption)
@@ -451,17 +453,19 @@ struct HogHunterLargeWidgetView: View {
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
                         }
+                        .frame(minHeight: 44)
                         .padding(.vertical, 6)
                         .background(Color.accentColor)
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
+                    .accessibilityLabel("Clean Mac Clutter")
                 }
                 .padding(8)
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }
         } else {
-            EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter on iPhone to connect to your Mac.")
+            EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your Mac.")
                 .widgetURL(URL(string: "hoghunter://open"))
         }
     }

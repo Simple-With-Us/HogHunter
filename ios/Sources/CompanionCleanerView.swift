@@ -117,8 +117,8 @@ struct CleanerView: View {
             .pickerStyle(.segmented)
             .disabled(isBusy)
             Text(isExtreme
-                 ? "Deep scan of AI agent bloat, leftovers & large files."
-                 : "Safe major clutter removal.\u{00A0} Protected by APFS snapshot & Trash Put-Back.")
+                 ? "Also reviews old leftovers and large files.\u{00A0} Nothing is removed until you choose it."
+                 : "Removes everyday clutter.\u{00A0} Hog Hunter saves a safety copy first, and Trash items can be put back.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -155,7 +155,7 @@ struct CleanerView: View {
             Section {
                 Stepper(value: $tempHoursDraft, in: range) {
                     HStack {
-                        Text("Minimum Untouched Time")
+                        Text("Leave Files Newer Than")
                         Spacer()
                         Text("\(tempHoursDraft) hours")
                             .font(.body.monospacedDigit())
@@ -167,7 +167,8 @@ struct CleanerView: View {
                     ForEach([24, 72, 168, 720], id: \.self) { hours in
                         Button("\(hours)") { tempHoursDraft = hours }
                             .buttonStyle(.bordered)
-                            .controlSize(.small)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .accessibilityLabel("\(hours) hours")
                             .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
                     }
                     Spacer()
@@ -240,7 +241,7 @@ struct CleanerView: View {
                         systemImage: "sparkles"
                     )
                     .font(.subheadline.weight(.semibold))
-                    Text("\(hostName) scans for \(isExtreme ? "everything in Standard plus leftovers, AI artifacts and large files" : "caches, logs, trash and developer junk").\u{00A0} Nothing is deleted until you confirm.")
+                    Text("\(hostName) scans for \(isExtreme ? "everything in Standard plus leftovers and large files" : "caches, logs, the Trash, and developer clutter").\u{00A0} Nothing is deleted until you confirm.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -252,7 +253,7 @@ struct CleanerView: View {
                         .foregroundStyle(.green)
                     Text("Estimated moved/removed: \(last.formattedBytesReclaimed) (\(last.itemsRemoved) items).")
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.primary)
                 }
             }
 
@@ -262,7 +263,7 @@ struct CleanerView: View {
             }
             if let last = model.lastCleanResult, !isCleaningNow {
                 Text(CleanerSpaceObservation.text(last.observedFreeBytesChange)).font(.caption).foregroundStyle(.secondary)
-                Text("Trash, snapshots and concurrent writes affect available space.").font(.caption2).foregroundStyle(.secondary)
+                Text("The Trash, local snapshots, and other writes change free space.").font(.caption).foregroundStyle(.secondary)
             }
 
             Button {
@@ -324,12 +325,7 @@ struct CleanerView: View {
                             Text(category.title)
                                 .font(.body.weight(.medium))
                             if category.isExtremeOnly {
-                                Text("EXTREME ONLY")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.purple)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.purple.opacity(0.12)))
+                                StatusChip(text: "Extreme Only", tone: .caution)
                             }
                         }
                         Text("\(category.totalText) in \(category.itemCount) \(category.itemCount == 1 ? "item" : "items")\(selectedCount > 0 ? ", \(selectedCount) selected" : "")")
@@ -358,6 +354,7 @@ struct CleanerView: View {
                         .foregroundStyle(selectedCount > 0 ? Color.accentColor : Color.secondary)
                 }
                 .buttonStyle(.borderless)
+                .frame(minWidth: 44, minHeight: 44)
                 .disabled(category.items.isEmpty || isBusy)
                 .accessibilityLabel(allSelected ? "Deselect all in \(category.title)" : "Select all in \(category.title)")
             }
@@ -421,11 +418,13 @@ struct CleanerView: View {
         VStack(spacing: 8) {
             HStack {
                 Button("Select All") { model.selectAllCleanItems() }
+                    .frame(minHeight: 44)
                 Text("•").foregroundStyle(.tertiary)
                 Button("Deselect All") { model.deselectAllCleanItems() }
+                    .frame(minHeight: 44)
                 Spacer()
             }
-            .font(.caption)
+            .font(.body)
             .disabled(isBusy)
             Button {
                 showConfirm = true
@@ -462,12 +461,7 @@ struct CleanerView: View {
                             Text("Estimated moved/removed: \(record.sizeText)")
                                 .font(.subheadline.weight(.semibold))
                             if record.source == "iPhone" {
-                                Text("FROM IPHONE")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(Color.accentColor)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                StatusChip(text: "From iPhone", tone: .neutral)
                             }
                             Spacer()
                             Text(CompanionRelative.text(for: record.cleanedAt))

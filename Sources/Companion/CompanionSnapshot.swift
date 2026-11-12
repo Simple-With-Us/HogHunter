@@ -91,13 +91,13 @@ enum CleanerSpaceObservation {
 /// What the disk cleaner tells the person.  One copy, shared by the Mac's
 /// cleaner and the phone's, so the two cannot drift apart.
 enum CleanerCopy {
-    static let extremeTitle = "Extreme Clean Targets AI Agent & Deep Developer Clutter"
-    static let extremeBody = "Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini/Grok/Codex, temporary update downloads, and large/old files.\nWhile git repositories and critical directories are strictly protected, local AI tools may need to re-download model caches, re-index workspaces, or re-authenticate ephemeral CLI sessions."
-    static let extremeAcknowledgement = "I understand this targets AI tool caches, orphaned app data, and older transcripts."
+    static let extremeTitle = "Extreme Clean Looks Deeper"
+    static let extremeBody = "Extreme Clean scans for uninstalled app leftovers, older AI agent transcripts (>7 days) across Gemini, Grok, and Codex, temporary update downloads, and large or old files.\u{00A0} While git repositories and critical directories are strictly protected, local AI tools may need to download caches again, rebuild their index, or sign in again."
+    static let extremeAcknowledgement = "I understand this can remove AI tool caches, leftover app data, and older transcripts."
 
     /// The confirmation before a clean, with the amount and the count filled in.
     static func confirmationMessage(sizeText: String, itemCount: Int) -> String {
-        "Are you sure you want to clean \(sizeText) across \(itemCount) items?\u{00A0} An APFS local snapshot is created first.\u{00A0} If that snapshot fails, nothing is deleted.\u{00A0} Items that are not already in the Trash move to the Trash, where Put Back still works.\u{00A0} Items already in the Trash are removed permanently."
+        "Are you sure you want to clean \(sizeText) across \(itemCount) items?\u{00A0} Hog Hunter saves a safety copy first.\u{00A0} If that safety copy fails, nothing is deleted.\u{00A0} Items that are not already in the Trash move to the Trash, where Put Back still works.\u{00A0} Items already in the Trash are removed permanently."
     }
 }
 

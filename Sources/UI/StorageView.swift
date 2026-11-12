@@ -161,15 +161,10 @@ struct StorageView: View {
             .frame(width: 215)
             .disabled(cleanerStore.isBusy)
 
-            Text(cleanerStore.selectedTier.badge)
-                .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(cleanerStore.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
-                )
-                .foregroundStyle(cleanerStore.selectedTier == .extreme ? Color.orange : Color.blue)
+            ContrastChip(
+                text: cleanerStore.selectedTier.badge,
+                tone: cleanerStore.selectedTier == .extreme ? .caution : .neutral
+            )
 
             if !showModePicker {
                 Spacer(minLength: 8)

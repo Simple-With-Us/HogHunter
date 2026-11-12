@@ -85,20 +85,54 @@ struct CpuSparklineView: View {
     #if os(macOS)
     // MARK: - AppKit Rasterization for macOS Menu Bar
 
-    /// Rasterizes a micro-sparkline into an `NSImage` for use in `NSStatusBarButton` or other AppKit surfaces.
+    static let sparklinePointSize = NSSize(width: 36, height: 14)
+    static let hogPointSize = NSSize(width: 58, height: 16)
+
+    /// Status-bar bitmap of the sparkline.  Calm lines are template images.
     static func makeImage(samples: [Double], width: CGFloat = 36, height: CGFloat = 14) -> NSImage {
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
-            drawSparkline(in: rect, samples: samples)
-            return true
+        renderSparkline(
+            samples: MenuBarQuantize.sparkline(samples),
+            width: width,
+            height: height,
+            appearance: .current
+        )
+    }
+
+    static func renderSparkline(
+        samples: [Int],
+        width: CGFloat = 36,
+        height: CGFloat = 14,
+        appearance: MenuBarChrome
+    ) -> NSImage {
+        let monochrome = !MenuBarPicture.Graphic.sparkline(samples: samples, showIcon: false).bakesAppearance
+        let values = samples.map(Double.init)
+        let image = MenuBarBitmap.rasterize(
+            size: NSSize(width: width, height: height),
+            appearance: appearance
+        ) { rect in
+            drawSparkline(in: rect, samples: values, monochrome: monochrome)
         }
-        image.isTemplate = false
+        image.isTemplate = monochrome
         return image
     }
 
-    /// Rasterizes both the Hog profile icon and the micro-sparkline into a single combined `NSImage`
-    /// so macOS `NSStatusBarButton` displays both simultaneously without dropping either subview.
+    /// Hog icon plus sparkline, one bitmap, so the status item does not drop a subview.
     static func makeHogAndSparklineImage(
         samples: [Double],
+        sparklineWidth: CGFloat = 36,
+        sparklineHeight: CGFloat = 14
+    ) -> NSImage {
+        renderHogAndSparkline(
+            samples: MenuBarQuantize.sparkline(samples),
+            appearance: .current,
+            sparklineWidth: sparklineWidth,
+            sparklineHeight: sparklineHeight
+        )
+    }
+
+    static func renderHogAndSparkline(
+        samples: [Int],
+        appearance: MenuBarChrome,
         sparklineWidth: CGFloat = 36,
         sparklineHeight: CGFloat = 14
     ) -> NSImage {
@@ -106,35 +140,39 @@ struct CpuSparklineView: View {
         let hogHeight: CGFloat = 15
         let spacing: CGFloat = 4
         let totalWidth = hogWidth + spacing + sparklineWidth
-        let totalHeight: CGFloat = 16
-
-        let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
+        let totalHeight = hogPointSize.height
+        let values = samples.map(Double.init)
+        let image = MenuBarBitmap.rasterize(
+            size: NSSize(width: totalWidth, height: totalHeight),
+            appearance: appearance
+        ) { _ in
             let hogRect = NSRect(x: 0, y: (totalHeight - hogHeight) / 2.0, width: hogWidth, height: hogHeight)
             if let hog = NSImage(named: NSImage.Name("HogProfile")) ?? Bundle.main.image(forResource: "HogProfile") {
                 hog.draw(in: hogRect, from: .zero, operation: .sourceOver, fraction: 1.0)
             }
-
             let sparklineRect = NSRect(
                 x: hogWidth + spacing,
                 y: (totalHeight - sparklineHeight) / 2.0,
                 width: sparklineWidth,
                 height: sparklineHeight
             )
-            drawSparkline(in: sparklineRect, samples: samples)
-            return true
+            drawSparkline(in: sparklineRect, samples: values, monochrome: false)
         }
         image.isTemplate = false
         return image
     }
 
-    static func drawSparkline(in rect: NSRect, samples: [Double]) {
+    static func drawSparkline(in rect: NSRect, samples: [Double], monochrome: Bool = false) {
         guard samples.count >= 2 else {
             let baselineY = rect.minY + 1.0
             let path = NSBezierPath()
             path.move(to: NSPoint(x: rect.minX, y: baselineY))
             path.line(to: NSPoint(x: rect.maxX, y: baselineY))
             path.lineWidth = 1.0
-            NSColor.secondaryLabelColor.withAlphaComponent(0.4).setStroke()
+            let baseline = monochrome
+                ? NSColor.black.withAlphaComponent(0.4)
+                : NSColor.secondaryLabelColor.withAlphaComponent(0.4)
+            baseline.setStroke()
             path.stroke()
             return
         }
@@ -170,7 +208,9 @@ struct CpuSparklineView: View {
 
         let latest = samples.last ?? 0
         let color: NSColor
-        if latest >= 85 {
+        if monochrome {
+            color = NSColor.black.withAlphaComponent(0.85)
+        } else if latest >= 85 {
             color = NSColor(red: 0.75, green: 0.18, blue: 0.16, alpha: 1.0)
         } else if latest >= 60 {
             color = NSColor(red: 0.80, green: 0.52, blue: 0.10, alpha: 1.0)

@@ -150,51 +150,9 @@ struct HogHunterApp: App {
             HogHunterPanel(isQuickView: true)
                 .environmentObject(store)
         } label: {
-            if store.menuBarLabelMode == .historyBars {
-                MenuBarCpuBarsView(
-                    history: store.cpuMinuteHistory,
-                    cpuPercent: store.pulse.cpuPercent,
-                    showPercent: store.showMenuBarPercent
-                )
-                .help(store.menuBarHelp)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Hog Hunter")
-                .accessibilityValue(store.menuBarAccessibilityValue)
-            } else if store.menuBarLabelMode == .sparkline {
-                HStack(spacing: 4) {
-                    if store.showMenuBarIcon {
-                        Image(nsImage: CpuSparklineView.makeHogAndSparklineImage(samples: store.recentCpuPercents))
-                    } else {
-                        Image(nsImage: CpuSparklineView.makeImage(samples: store.recentCpuPercents))
-                    }
-                    if store.showMenuBarPercent {
-                        Text(store.menuBarLabel)
-                            .monospacedDigit()
-                    }
-                }
-                .help(store.menuBarHelp)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Hog Hunter")
-                .accessibilityValue(store.menuBarAccessibilityValue)
-            } else {
-                HStack(spacing: 5) {
-                    if store.showMenuBarIcon {
-                        Image("HogProfile")
-                            .renderingMode(.original)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 18, height: 15)
-                    }
-                    if store.showMenuBarPercent || !store.showMenuBarIcon {
-                        Text(store.menuBarLabel)
-                            .monospacedDigit()
-                    }
-                }
-                .help(store.menuBarHelp)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Hog Hunter")
-                .accessibilityValue(store.menuBarAccessibilityValue)
-            }
+            // The label observes only the menu-bar picture.  Reading the
+            // store here rebuilt a status-item bitmap on every sample.
+            MenuBarStatusLabel(status: store.menuBarStatus)
         }
         .menuBarExtraStyle(.window)
         .commands { commands }
