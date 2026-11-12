@@ -1266,7 +1266,7 @@ final class HogStore: ObservableObject {
         lastNotice = nil
         let outcome = ProcessControl.tame(members: row.keys, fallbackName: row.name)
         if outcome.actedOn > 0 {
-            lastNotice = "Tamed \(row.name) (nice priority 20 & background QoS)."
+            lastNotice = "Slowed down \(row.name) so it uses less of the Mac."
         } else {
             lastError = outcome.message ?? "Could not tame \(row.name)."
         }
@@ -2273,7 +2273,7 @@ final class HogStore: ObservableObject {
             isCleaning: true,
             phase: "snapshot",
             progress: 0.15,
-            statusText: "Creating APFS safety snapshot…",
+            statusText: "Saving a safety copy…",
             currentItem: nil,
             itemsCleaned: 0,
             totalItems: totalItems,
@@ -2476,7 +2476,7 @@ final class HogStore: ObservableObject {
         var lastReportedFraction: Double = -1.0
         return { [weak self] fraction, itemTitle in
             let now = Date()
-            let isMilestone = itemTitle.contains("snapshot") || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
+            let isMilestone = DiskCleaner.isSafetyCopyProgress(itemTitle) || fraction >= 1.0 || (fraction - lastReportedFraction) >= 0.05 || now.timeIntervalSince(lastReportedTime) >= 0.25
             guard isMilestone else { return }
             lastReportedFraction = fraction
             lastReportedTime = now
@@ -2489,7 +2489,7 @@ final class HogStore: ObservableObject {
                     isCleaning: true,
                     phase: fraction >= 1.0 ? "finishing" : "cleaning",
                     progress: scaled,
-                    statusText: itemTitle.contains("snapshot") ? itemTitle : "Cleaning \(itemTitle)…",
+                    statusText: DiskCleaner.isSafetyCopyProgress(itemTitle) ? itemTitle : "Cleaning \(itemTitle)…",
                     currentItem: itemTitle,
                     itemsCleaned: itemsCleaned,
                     totalItems: totalItems,

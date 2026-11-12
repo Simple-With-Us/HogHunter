@@ -299,7 +299,7 @@ extension CompanionModel {
         let bytes = selectedCleanBytes
         let count = selectedCleanItems.count
         demoSetCleanProgress(CompanionCleanProgress(
-            isCleaning: true, phase: "snapshot", progress: 0.15, statusText: "Creating APFS safety snapshot…",
+            isCleaning: true, phase: "snapshot", progress: 0.15, statusText: "Saving a safety copy…",
             currentItem: nil, itemsCleaned: 0, totalItems: count, bytesReclaimed: 0, formattedBytesReclaimed: "0 B",
             snapshotName: nil, error: nil
         ))

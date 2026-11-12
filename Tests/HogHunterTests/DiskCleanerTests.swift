@@ -155,7 +155,7 @@ final class DiskCleanerTests: XCTestCase {
         }
 
         XCTAssertEqual(CleanTier.standard.badge, "Reversible")
-        XCTAssertEqual(CleanTier.extreme.badge, "Deep / AI Artifacts")
+        XCTAssertEqual(CleanTier.extreme.badge, "Review First")
     }
 
     func testStaleBackupsListsOnlyOldVersionedBackups() throws {

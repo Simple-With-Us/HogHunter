@@ -320,7 +320,7 @@ private struct CleanerSettingsTab: View {
                 HStack {
                     Stepper(value: $tempHoursDraft, in: Int(TempFileSafetyPolicy.allowedHours.lowerBound)...Int(TempFileSafetyPolicy.allowedHours.upperBound)) {
                         HStack {
-                            Text("Minimum Untouched Time")
+                            Text("Leave Files Newer Than")
                             TextField("Hours", value: $tempHoursDraft, format: .number.grouping(.never))
                                 .frame(width: 60)
                                 .onSubmit { applyTempHours() }
@@ -331,7 +331,7 @@ private struct CleanerSettingsTab: View {
                         .disabled(!TempFileSafetyPolicy.isValid(Double(tempHoursDraft))
                             || Double(tempHoursDraft) == tempPolicy.minimumUntouchedHours)
                 }
-                Text("Current minimum: \(tempPolicy.hoursLabel) untouched hours.\u{00A0} Choose 1 to 8,760 whole hours, then Apply or press Return.")
+                Text("Files changed in the last \(tempPolicy.hoursLabel) hours stay.\u{00A0} Choose 1 to 8,760 hours, then Apply or press Return.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
@@ -344,7 +344,7 @@ private struct CleanerSettingsTab: View {
                         .controlSize(.small)
                     }
                 }
-                Text("Applies before /tmp items appear, including unchecked suggestions.\u{00A0} Git checkouts and recognizable source projects stay protected at every age.\u{00A0} Idle files are not evidence of a backup.")
+                Text("This applies before temp files are offered, including ones that are not ticked.\u{00A0} Git projects and recognizable source folders stay protected at every age.\u{00A0} An idle file is not a backup.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

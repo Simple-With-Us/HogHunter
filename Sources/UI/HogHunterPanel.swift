@@ -106,15 +106,7 @@ struct HogHunterPanel: View {
                     Text(pageTitle)
                         .font(.system(size: 20, weight: .semibold))
                     if store.isStale {
-                        Button {
-                            _ = store.tick()
-                        } label: {
-                            Text("Sampling behind")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.orange)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Last sample \(max(0, Int(Date().timeIntervalSince(store.pulse.sampledAt))))s ago.\u{00A0} Activate to sample now.")
+                        lateReadingsControl
                     }
                     Spacer(minLength: 8)
                 }
@@ -445,6 +437,20 @@ struct HogHunterPanel: View {
     /// True while the pointer is over the activity list, which opens it up.
     @State private var activityHovered = false
 
+    /// Shared by the menu bar and the dashboard.  Clicking it reads the Mac again.
+    private var lateReadingsControl: some View {
+        let age = max(0, Int(Date().timeIntervalSince(store.pulse.sampledAt)))
+        return Button {
+            _ = store.tick()
+        } label: {
+            ContrastChip(text: "Readings Are Late", tone: .caution)
+        }
+        .buttonStyle(.plain)
+        .help("The last reading is \(age) seconds old.\u{00A0} Click to read again.")
+        .accessibilityLabel("Readings are late")
+        .accessibilityHint("Reads the Mac again")
+    }
+
     /// Consolidated drop-down menu bar window.  Combines system alerts/flagged issues,
     /// graphical CPU meters, RAM usage, storage of all kinds (Mac internal/external and
     /// Server root / fleet-extra), and active hogs in a single high-density view.
@@ -460,9 +466,7 @@ struct HogHunterPanel: View {
                 Text("Hog Hunter")
                     .font(.system(size: 13, weight: .semibold))
                 if store.isStale {
-                    Text("Sampling behind")
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(.orange)
+                    lateReadingsControl
                 }
                 Spacer()
                 settingsMenu

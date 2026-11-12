@@ -148,15 +148,15 @@ enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var subtitle: String {
         switch self {
-        case .standard: return "Safe major clutter removal. Protected by APFS snapshot & Trash Put-Back."
-        case .extreme: return "Deep scan of AI agent bloat, leftovers & large files."
+        case .standard: return "Removes everyday clutter.\u{00A0} Hog Hunter saves a safety copy first, and Trash items can be put back."
+        case .extreme: return "Also reviews old leftovers and large files.\u{00A0} Nothing is removed until you choose it."
         }
     }
 
     var badge: String {
         switch self {
         case .standard: return "Reversible"
-        case .extreme: return "Deep / AI Artifacts"
+        case .extreme: return "Review First"
         }
     }
 
@@ -1002,7 +1002,7 @@ final class DiskCleaner: @unchecked Sendable {
                 category: .tempFiles, title: url.lastPathComponent, subtitle: itemURL.path,
                 url: itemURL, bytes: stats.bytes, fileCount: stats.fileCount,
                 lastModified: stats.lastModified, isSelected: false,
-                detail: "Temporary file — untouched for at least \(policy.hoursLabel) hours; review before cleaning"
+                detail: "Temporary file that has not changed for at least \(policy.hoursLabel) hours.\u{00A0} Review it before cleaning."
             ))
         }
         guard !enumerationFailed, !scanShouldStop(), policy == tempPolicyProvider() else { return [] }
@@ -2157,6 +2157,15 @@ final class DiskCleaner: @unchecked Sendable {
     /// point, so the text lives in one place.
     static let snapshotFailedPrefix = "APFS snapshot failed."
 
+    /// Progress title while the safety copy is taken.  The cleaner window and
+    /// the phone's progress reporter match this phrase, so a file whose name
+    /// merely contains "snapshot" is not treated as that step.
+    static let safetyCopyProgressMark = "Saving a safety copy"
+
+    static func isSafetyCopyProgress(_ title: String) -> Bool {
+        title.contains(safetyCopyProgressMark)
+    }
+
     /// What `clean` records for an item it did not delete because the run was
     /// stopped.  It is a sentinel and not a failure: the item was not refused,
     /// the run was cancelled.  The unattended runner filters it out before it
@@ -2259,7 +2268,7 @@ final class DiskCleaner: @unchecked Sendable {
         }
 
         if createSnapshot && !activeItems.isEmpty {
-            progress?(0.0, "Creating APFS safety snapshot…")
+            progress?(0.0, "\(Self.safetyCopyProgressMark)…")
             let (success, name) = makeSnapshot()
             if success {
                 snapshotCreatedName = name

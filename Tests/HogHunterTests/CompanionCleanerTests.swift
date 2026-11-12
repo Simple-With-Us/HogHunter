@@ -320,7 +320,7 @@ final class CompanionCleanerReportTests: XCTestCase {
     func testSharedCopyKeepsItsGapAndItsMeaning() {
         let confirmation = CleanerCopy.confirmationMessage(sizeText: "1.2 GB", itemCount: 14)
         XCTAssertTrue(confirmation.hasPrefix("Are you sure you want to clean 1.2 GB across 14 items?"))
-        XCTAssertTrue(confirmation.contains("If that snapshot fails, nothing is deleted."))
+        XCTAssertTrue(confirmation.contains("If that safety copy fails, nothing is deleted."))
         XCTAssertTrue(confirmation.contains("Items already in the Trash are removed permanently."))
         XCTAssertTrue(confirmation.contains("\u{00A0}"))
         XCTAssertFalse(confirmation.contains(".  "), "two ASCII spaces collapse on the phone")

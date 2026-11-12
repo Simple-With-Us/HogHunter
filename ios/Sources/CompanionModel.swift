@@ -606,7 +606,7 @@ final class CompanionModel {
                 pid: pid,
                 name: row.name,
                 isTamed: action == "tame",
-                message: action == "tame" ? "Process priority lowered to background QoS." : "Process priority restored to normal.",
+                message: action == "tame" ? "Slowed down so it uses less of the Mac." : "Back to normal speed.",
                 error: nil
             )
         }
@@ -1469,7 +1469,7 @@ final class CompanionModel {
                 isCleaning: true,
                 phase: "snapshot",
                 progress: 0.15,
-                statusText: "Creating APFS safety snapshot…",
+                statusText: "Saving a safety copy…",
                 currentItem: nil,
                 itemsCleaned: 0,
                 totalItems: 28,
