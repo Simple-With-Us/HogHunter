@@ -3,13 +3,18 @@
 # This lane is the visual-verification gate: it FAILS (exit 1) when any
 # expected artifact is missing, so CI can never pass with no screenshots.
 # It also requires the embedded widget extension, a widget-preview frame,
-# a cold-start Clean confirm frame, and a simctl openurl of hoghunter://clean.
+# unobstructed confirmation/cleaner/partial frames; URL routing is reported separately.
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 mkdir -p screenshots/ios screenshots/macos
+ocr_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/hoghunter-screenshot-ocr.XXXXXX")" || exit 1
+trap 'rm -rf "$ocr_dir"' EXIT
+export HOGHUNTER_SCREENSHOT_OCR_BINARY="$ocr_dir/screenshot-text"
+python3 scripts/ios_screenshot_checks.py --prepare-ocr "$HOGHUNTER_SCREENSHOT_OCR_BINARY" \
+  --report screenshots/ocr-compile.json || exit 1
 failures=0
 
 # 1. iOS Companion Screenshots
@@ -29,39 +34,12 @@ import json, os, re, subprocess, sys, time
 
 sys.path.insert(0, "scripts")
 from ios_screenshot_checks import (  # noqa: E402
-    CLEAN_URL,
-    COLD_CLEAN_LAUNCH_ARGS,
-    WARM_CLEAN_LAUNCH_ARGS,
-    WIDGET_PREVIEW_LAUNCH_ARGS,
-    clean_openurl_command,
-    screenshot_command,
     screenshot_problem,
-    widget_appex_present,
+    widget_appex_present, recognize_text, scene_problem, boot_simulator, preferred_device,
 )
+from ios_capture_scenes import capture_scenes
 
 app_path, bundle_id = sys.argv[1], sys.argv[2]
-
-BOOT_TIMEOUT_S = 180
-
-
-def boot_simulator(udid):
-    """Boot and WAIT for the simulator, never a blind sleep.  `bootstatus`
-    only blocks until boot completes with -b; without it, it prints the
-    current state and returns at once.
-    Returns None when it is booted, else the reason it is not."""
-    boot = subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True, text=True)
-    if boot.returncode != 0 and "current state: Booted" not in (boot.stderr or ""):
-        return f"boot failed: {(boot.stderr or boot.stdout or '').strip() or f'exit {boot.returncode}'}"
-    try:
-        status = subprocess.run(
-            ["xcrun", "simctl", "bootstatus", udid, "-b"], capture_output=True, text=True, timeout=BOOT_TIMEOUT_S
-        )
-    except subprocess.TimeoutExpired:
-        return f"not booted after {BOOT_TIMEOUT_S}s"
-    if status.returncode != 0:
-        return f"bootstatus failed: {(status.stderr or status.stdout or '').strip() or f'exit {status.returncode}'}"
-    return None
-
 
 def app_pid_from_launch(output):
     """`simctl launch` prints `<bundle id>: <pid>`."""
@@ -88,8 +66,17 @@ def launch_pid(udid):
 # the sample dashboard (see DashboardView).  These are best effort: a missing
 # one is a warning, because the five format frames above are the gate.
 EXTRA_SCREENS = [
+    ("activity", ["-HogHunterActivity"]),
     ("network", ["-HogHunterNetwork"]),
     ("storage", ["-HogHunterStorage"]),
+    ("storage-apps", ["-HogHunterStorage", "-HogHunterStorageApps"]),
+    ("storage-cleaner", ["-HogHunterStorage", "-HogHunterStorageCleaner"]),
+    ("maintain", ["-HogHunterMaintain"]),
+    ("server", ["-HogHunterServer"]),
+    ("server-confirm", ["-HogHunterServer", "-HogHunterServerConfirm"]),
+    ("server-details", ["-HogHunterServer", "-HogHunterServerDetails"]),
+    ("server-controls", ["-HogHunterServer", "-HogHunterServerControls"]),
+    ("issue-actions", ["-HogHunterIssueActions"]),
     ("mac-settings", ["-HogHunterMacSettings"]),
     ("sample-result", ["-HogHunterSampleResult"]),
     ("vacuum", ["-HogHunterVacuum"]),
@@ -112,6 +99,12 @@ def capture_extras(udid, out_dir):
             print(f"  WARN: extra screen {name}: screenshot failed")
             continue
         problem = screenshot_problem(out_file)
+        if not problem and name in ("cleaner", "cleaner-extreme", "issue-actions"):
+            scene = "issue-actions" if name == "issue-actions" else ("cleaner-extreme" if name.endswith("extreme") else "cleaner-quick")
+            try:
+                problem = scene_problem(scene, recognize_text(out_file))
+            except Exception as error:
+                problem = f"OCR unavailable: {error}"
         if problem:
             print(f"  WARN: extra screen {name}: frame rejected: {problem}")
             os.remove(out_file)
@@ -119,61 +112,12 @@ def capture_extras(udid, out_dir):
         print(f"  OK extra screen saved: {out_file}")
 
 
-def capture_required_frames(udid):
-    """Widget render plus the Clean deep link.  These fail the lane.
-
-    The home-screen widget is the extension embedded in the app.  simctl
-    cannot place that widget on SpringBoard, so the lane also launches
-    -HogHunterWidgetPreview, which draws the same SwiftUI the extension uses.
-    hoghunter://clean is opened with simctl openurl on the booted simulator,
-    and the cold-start confirm is a launch with the request already set.
-    """
-    global failures
-    shots = [
-        ("widget-small", WIDGET_PREVIEW_LAUNCH_ARGS, False),
-        ("clean-cold-start", COLD_CLEAN_LAUNCH_ARGS, False),
-        ("clean-deep-link", WARM_CLEAN_LAUNCH_ARGS, True),
-    ]
-    for name, args, open_clean in shots:
-        out_file = f"screenshots/ios/{name}.png"
-        subprocess.run(["xcrun", "simctl", "terminate", udid, bundle_id], capture_output=True)
-        launch = subprocess.run(
-            ["xcrun", "simctl", "launch", udid, bundle_id, *args],
-            capture_output=True, text=True,
-        )
-        if launch.returncode != 0:
-            print(f"ERROR: {name}: launch failed: {(launch.stderr or '').strip()}")
-            failures += 1
-            continue
-        time.sleep(5)
-        if open_clean:
-            opened = subprocess.run(clean_openurl_command(udid), capture_output=True, text=True)
-            if opened.returncode != 0:
-                detail = (opened.stderr or opened.stdout or "").strip()
-                print(f"ERROR: {name}: xcrun simctl openurl {CLEAN_URL} failed: {detail}")
-                failures += 1
-                continue
-            time.sleep(3)
-        res = subprocess.run(screenshot_command(udid, out_file), capture_output=True, text=True)
-        if res.returncode != 0 or not os.path.isfile(out_file):
-            print(f"ERROR: {name}: simctl io screenshot failed: {(res.stderr or '').strip() or 'no file'}")
-            failures += 1
-            continue
-        problem = screenshot_problem(out_file)
-        if problem:
-            print(f"ERROR: {name}: frame rejected: {problem}")
-            os.remove(out_file)
-            failures += 1
-            continue
-        print(f"  OK required screen saved: {out_file}")
-
-
 # Format definitions: key -> (output_name, list_of_preferred_devices, fallback_devicetype_pattern)
 FORMATS = {
     "iphone-6.9-6.7": ("iPhone_6.9_6.7_inch", ["iPhone 16 Pro Max", "iPhone 15 Pro Max", "iPhone 16 Plus", "iPhone 15 Plus", "iPhone 17 Pro Max", "iPhone 18 Pro Max"], "iPhone-16-Pro-Max"),
     "iphone-6.3-6.1": ("iPhone_6.3_6.1_inch", ["iPhone 16 Pro", "iPhone 16", "iPhone 15 Pro", "iPhone 15", "iPhone 14", "iPhone 17 Pro", "iPhone 18 Pro"], "iPhone-16-Pro"),
     "iphone-5.5-4.7": ("iPhone_5.5_4.7_inch", ["iPhone SE (3rd generation)", "iPhone 8 Plus", "iPhone SE"], "iPhone-SE-3rd-generation"),
-    "ipad-13":        ("iPad_13_inch",        ["iPad Pro 13-inch (M4)", "iPad Pro (12.9-inch) (6th generation)", "iPad Pro (12.9-inch)", "iPad Air 13-inch (M2)"], "iPad-Pro-13-inch-M4"),
+    "ipad-13":        ("iPad_13_inch",        ["iPad Pro 13-inch (M4)", "iPad Pro (12.9-inch) (6th generation)", "iPad Pro (12.9-inch)", "iPad Air 13-inch (M2)"], "iPad-Pro-13-inch-M4-16GB"),
     "ipad-11":        ("iPad_11_inch",        ["iPad Air 11-inch (M2)", "iPad Pro (11-inch) (4th generation)", "iPad (10th generation)", "iPad mini (6th generation)"], "iPad-Air-11-inch-M2")
 }
 
@@ -188,6 +132,8 @@ else:
     print("  OK widget extension embedded: HogHunterWidgets.appex")
 
 try:
+    # Preserve already booted compatible devices.  Each selected device still
+    # passes bootstatus readiness, and its actual boot failure remains fatal.
     proc = subprocess.run(["xcrun", "simctl", "list", "-j", "devices", "available"], capture_output=True, text=True, check=True)
     devices_data = json.loads(proc.stdout).get("devices", {})
 except Exception as e:
@@ -196,12 +142,14 @@ except Exception as e:
 
 # Build a lookup of available device name and deviceType -> udid
 available_devices = {}
+device_states = {}
 for runtime, dlist in devices_data.items():
     for d in dlist:
         if d.get("isAvailable", False):
             name = d.get("name")
             dtype = d.get("deviceTypeIdentifier", "")
             udid = d.get("udid")
+            device_states[udid] = d.get("state")
             if name and name not in available_devices:
                 available_devices[name] = udid
             if dtype and dtype not in available_devices:
@@ -235,13 +183,49 @@ print(f"Selected iOS runtime: {ios_runtimes[-1][2] if ios_runtimes else 'none'} 
 
 print(f"Available simulators detected: {len(available_devices)}")
 
+# Device type identifiers change across Xcode (the M4 iPad gained -16GB/-8GB
+# suffixes, so a hardcoded fallback rots).  Fetch the real list once and
+# prefer the configured fallback, then fuzzy matches, when creating.
+devtype_idents = []
+try:
+    tproc = subprocess.run(["xcrun", "simctl", "list", "-j", "devicetypes"], capture_output=True, text=True)
+    for t in json.loads(tproc.stdout).get("devicetypes", []):
+        ident = t.get("identifier", "")
+        if ident.startswith("com.apple.CoreSimulator.SimDeviceType."):
+            devtype_idents.append((ident.split(".")[-1], t.get("name", "")))
+except Exception as e:
+    print(f"  WARN: could not list device types: {e}")
+
+def creation_idents(configured, family, hint_words):
+    # Configured fallback first, then known device types of the same family
+    # whose identifier or display name contains a hint word, in hint order.
+    # Hint-major ordering keeps the preference (a 13-inch iPad beats a
+    # 12.9-inch one) regardless of simctl's listing order.
+    cands = [configured] if configured else []
+    for h in hint_words:
+        for ident, name in devtype_idents:
+            low = (ident + " " + name).lower()
+            if family in low and h in low and ident not in cands:
+                cands.append(ident)
+    return cands
+
+# Per-format hints for the fuzzy step, most-preferred first.  The 13-inch
+# iPad takes any 13-inch type, then a 12.9-inch one, rather than failing.
+FALLBACK_HINTS = {
+    "iphone-6.9-6.7": ["pro-max", "plus"],
+    "iphone-6.3-6.1": ["pro", "iphone-1"],
+    "iphone-5.5-4.7": ["se", "8-plus"],
+    "ipad-13": ["13-inch", "12-9-inch"],
+    "ipad-11": ["11-inch", "10th", "mini"],
+}
+
 for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
     udid = None
     chosen_device = None
     created_udid = None
     out_file = f"screenshots/ios/{out_name}.png"
 
-    for cand in candidates:
+    for cand in preferred_device(candidates, available_devices, device_states):
         if cand in available_devices:
             udid = available_devices[cand]
             chosen_device = cand
@@ -255,17 +239,27 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
                 chosen_device = name_or_type
                 break
 
-    # If still not found and runtime exists, create a temporary simulator
+    # If still not found and runtime exists, create a temporary simulator.
+    # The configured type is tried first, then live device types matching
+    # the format's hints: hardcoded identifiers rot across Xcode (the M4
+    # iPad gained memory suffixes), so a single blind attempt fails the
+    # whole lane on a newer runner.
     if not udid and latest_ios_runtime and fallback_type:
+        family = "iphone" if fmt_key.startswith("iphone") else "ipad"
+        tried = []
         try:
-            full_dev_type = f"com.apple.CoreSimulator.SimDeviceType.{fallback_type}"
-            c_proc = subprocess.run(["xcrun", "simctl", "create", f"temp-{out_name}", full_dev_type, latest_ios_runtime], capture_output=True, text=True)
-            if c_proc.returncode == 0:
-                created_udid = c_proc.stdout.strip()
-                udid = created_udid
-                chosen_device = f"Created {fallback_type}"
-            else:
-                print(f"[{fmt_key}] ERROR: could not create simulator: {c_proc.stderr.strip()}")
+            for cand_ident in creation_idents(fallback_type, family, FALLBACK_HINTS.get(fmt_key, [])):
+                full_dev_type = f"com.apple.CoreSimulator.SimDeviceType.{cand_ident}"
+                c_proc = subprocess.run(["xcrun", "simctl", "create", f"temp-{out_name}", full_dev_type, latest_ios_runtime], capture_output=True, text=True)
+                tried.append(cand_ident)
+                if c_proc.returncode == 0:
+                    created_udid = c_proc.stdout.strip()
+                    udid = created_udid
+                    chosen_device = f"Created {cand_ident}"
+                    break
+                print(f"[{fmt_key}] WARN: create with {cand_ident} failed: {c_proc.stderr.strip()}")
+            if not udid:
+                print(f"[{fmt_key}] ERROR: could not create simulator (tried: {', '.join(tried) or 'none'})")
         except Exception as e:
             print(f"[{fmt_key}] ERROR: could not create simulator: {e}")
 
@@ -324,9 +318,9 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
             # killed by the cap before it reaches the later ones.
             if not extras_done:
                 extras_done = True
-                capture_required_frames(udid)
-                required_done = True
                 capture_extras(udid, "screenshots/ios")
+                capture_scenes(udid, bundle_id, app_path, "screenshots/ios")
+                required_done = True
         else:
             print(f"[{fmt_key}] ERROR: screenshot failed: {res.stderr.strip() or 'no file written'}")
             failures += 1
@@ -339,7 +333,7 @@ for fmt_key, (out_name, candidates, fallback_type) in FORMATS.items():
             subprocess.run(["xcrun", "simctl", "delete", created_udid], capture_output=True)
 
 if not required_done:
-    print("ERROR: widget preview and hoghunter://clean screenshots were not captured.")
+    print("ERROR: required widget, confirmation and cleaner scenes were not verified.")
     failures += 1
 
 if failures:
@@ -387,12 +381,14 @@ try:
     for w in windows:
         owner = w.get("kCGWindowOwnerName", "")
         # The window may be at normal level (layer 0) or elevated above the menu bar panel (layer 102).
-        if owner in ("Hog Hunter", "HogHunter") and 0 <= w.get("kCGWindowLayer", -1) <= 200:
+        # The Debug build shows its display name ("Hog Hunter Dev"); match it
+        # too, or the lane times out staring at the right window.
+        if (owner in ("Hog Hunter", "HogHunter") or owner.startswith("Hog Hunter")) and 0 <= w.get("kCGWindowLayer", -1) <= 200:
             b = w.get("kCGWindowBounds", {})
-            # The Settings window is presented at 560x480 content (plus title bar).
+            # SettingsView requires 800x460 content (plus title bar).
             # A menu-bar-width strip (the 440x38 title-bar-only window from run
             # 36766658503) must NOT pass: require a window that can hold the UI.
-            if b.get("Width", 0) >= 400 and b.get("Height", 0) >= 300:
+            if b.get("Width", 0) >= 800 and b.get("Height", 0) >= 460:
                 print(w.get("kCGWindowNumber", ""))
                 break
 except Exception:
@@ -424,7 +420,7 @@ PYDUMP
       failures=$((failures + 1))
     else
       echo "  Capturing HogHunter window $win_id"
-      osascript -e 'tell application "Hog Hunter" to activate' 2>/dev/null || osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
+      osascript -e 'tell application "Hog Hunter Dev" to activate' 2>/dev/null || osascript -e 'tell application "Hog Hunter" to activate' 2>/dev/null || osascript -e 'tell application "HogHunter" to activate' 2>/dev/null || true
       sleep 1
       screencapture -o -l"$win_id" screenshots/macos/HogHunter_macOS.png 2>/dev/null || true
       if [[ -s screenshots/macos/HogHunter_macOS.png ]]; then
@@ -433,12 +429,32 @@ PYDUMP
         # larger than points, so the point thresholds are a safe floor).
         shot_w="$(sips -g pixelWidth screenshots/macos/HogHunter_macOS.png 2>/dev/null | awk '/pixelWidth/ {print $2}')"
         shot_h="$(sips -g pixelHeight screenshots/macos/HogHunter_macOS.png 2>/dev/null | awk '/pixelHeight/ {print $2}')"
-        if [[ "${shot_w:-0}" -lt 400 || "${shot_h:-0}" -lt 300 ]]; then
+        if [[ "${shot_w:-0}" -lt 800 || "${shot_h:-0}" -lt 460 ]]; then
           echo "ERROR: macOS capture is only ${shot_w:-?}x${shot_h:-?} px; the Settings UI did not render at a usable size."
           rm -f screenshots/macos/HogHunter_macOS.png
           failures=$((failures + 1))
         else
-          echo "  ✓ Saved screenshots/macos/HogHunter_macOS.png (${shot_w}x${shot_h})"
+          if python3 - <<'PYMAC'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, "scripts")
+from ios_screenshot_checks import recognize_text, scene_problem
+result = {"frame": "HogHunter_macOS.png", "verified": False}
+try:
+    text = recognize_text("screenshots/macos/HogHunter_macOS.png")
+    result.update(recognizedText=text, problem=scene_problem("mac-settings", text))
+    result["verified"] = result["problem"] is None
+except Exception as error:
+    result["problem"] = "OCR unavailable: " + str(error)
+Path("screenshots/macos/settings-verification.json").write_text(json.dumps(result, indent=2) + "\n")
+print("Mac Settings frame: " + ("verified" if result["verified"] else result["problem"]))
+sys.exit(0 if result["verified"] else 1)
+PYMAC
+          then
+            echo "  ✓ Saved verified screenshots/macos/HogHunter_macOS.png (${shot_w}x${shot_h})"
+          else
+            failures=$((failures + 1))
+          fi
         fi
       else
         echo "ERROR: macOS capture produced no image."

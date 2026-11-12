@@ -426,6 +426,13 @@ final class AsyncGate: @unchecked Sendable {
 
 @MainActor
 final class MaintainStoreInjectionTests: XCTestCase {
+    /// An Infisical that is never configured.  The test host is the real app,
+    /// which can hold the owner's Keychain credential, so a test that changes a
+    /// step must not fall back to the shared instance and reach the real service.
+    private func unconfiguredInfisical() -> InfisicalSettings {
+        InfisicalSettings(store: InfisicalStore(), credentialProvider: { nil })
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-maintain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -441,14 +448,19 @@ final class MaintainStoreInjectionTests: XCTestCase {
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
+        XCTAssertEqual(store.lastError, "Cleaning could not be started.\u{00A0} Check Logs for details.")
     }
 
     func testTheDefaultLauncherAlsoRefusesToChangeAStep() async throws {
-        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory())
+        let store = MaintainStore(
+            supportDirectory: try temporaryDirectory(),
+            repoRoot: try temporaryDirectory(),
+            infisical: unconfiguredInfisical(),
+            infisicalStore: InfisicalStore()
+        )
         store.setStepEnabled("npm_cache", enabled: false)
         for _ in 0..<200 where store.lastError == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        XCTAssertEqual(store.lastError, MaintainStore.LauncherRefused().errorDescription)
+        XCTAssertEqual(store.lastError, "That step setting could not be saved.\u{00A0} Check Logs for details.")
     }
 
     func testRunNowHandsTheLauncherTheFullRunAndOnlyOnce() async throws {
@@ -480,22 +492,29 @@ final class MaintainStoreInjectionTests: XCTestCase {
         XCTAssertFalse(message.contains(".  "), message)
     }
 
-    func testARunThatCannotStartReportsWhyAndFreesTheStore() async throws {
+    func testARunThatCannotStartReportsSafelyAndFreesTheStore() async throws {
         struct Boom: LocalizedError { var errorDescription: String? { "boom" } }
         let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { _ in throw Boom() }
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, "boom")
+        XCTAssertEqual(store.lastError, "Cleaning could not be started.\u{00A0} Check Logs for details.")
+        XCTAssertFalse(store.lastError?.contains("boom") ?? true, "the raw error must not leak")
         XCTAssertNotNil(store.runNow("full"), "the store is free to run again")
     }
 
     func testStepTogglesGoThroughTheLauncher() async throws {
         let launches = CompanionLocked<[[String]]>([])
-        let store = MaintainStore(supportDirectory: try temporaryDirectory(), repoRoot: try temporaryDirectory()) { arguments in
-            launches.value.append(arguments)
-            return true
-        }
+        let store = MaintainStore(
+            supportDirectory: try temporaryDirectory(),
+            repoRoot: try temporaryDirectory(),
+            launcher: { arguments in
+                launches.value.append(arguments)
+                return true
+            },
+            infisical: unconfiguredInfisical(),
+            infisicalStore: InfisicalStore()
+        )
         store.setStepEnabled("coolify_remote", enabled: false)
         for _ in 0..<200 where launches.value.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertEqual(launches.value, [["--set-step", "coolify_remote", "off"]])
@@ -953,7 +972,11 @@ final class CompanionMaintainCopyTests: XCTestCase {
     /// after a sentence inside a string literal.
     func testThePhoneScreenWritesItsGapsAsNonBreakingSpaces() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        for name in ["ios/Sources/CompanionMaintainView.swift", "Sources/UI/MaintainView.swift"] {
+        // A lane lives on an external volume, and reading it from the ad hoc test
+        // host would raise a removable-volume permission prompt.  CI still runs this.
+        try XCTSkipIf(root.resolvingSymlinksInPath().path.hasPrefix("/Volumes/"),
+                      "Source is on an external volume; CI runs this check")
+        for name in ["ios/Sources/CompanionMaintainView.swift", "ios/Sources/CompanionServerView.swift", "Sources/UI/MaintainView.swift"] {
             let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
             let code = source.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for line in code {

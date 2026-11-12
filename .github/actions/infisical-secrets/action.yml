@@ -1,0 +1,57 @@
+name: Infisical secrets
+description: Fetch named secrets with an exact-scope read-only service token; mask and export values.
+
+inputs:
+  names:
+    description: Space- or comma-separated Infisical secret names to fetch.
+    required: true
+  required:
+    description: >-
+      Space- or comma-separated subset of `names` that must resolve (from
+      the vault or its GH_FALLBACK_<NAME>) or the action fails the job.
+      Leave empty when every name is best-effort.
+    required: false
+    default: ""
+  project-id:
+    description: Infisical project (workspace) id.
+    required: true
+  environment:
+    description: Infisical environment slug.
+    required: false
+    default: prod
+  secret-path:
+    description: Infisical secret path.
+    required: false
+    default: /
+  service-token:
+    description: Read-only service token restricted to this project, environment and single folder.
+    required: true
+  asc-mode:
+    description: Stage the ASC key and export hosted credential aliases without raw PEM in GITHUB_ENV.
+    required: false
+    default: "false"
+  site-url:
+    description: Infisical site URL.
+    required: false
+    default: https://app.infisical.com
+
+runs:
+  using: composite
+  steps:
+    # A GH_FALLBACK_<NAME> value for each requested name is passed by the
+    # calling step's own `env:` block -- not an input here, since the set of
+    # names differs per caller and Actions has no way to declare "one input
+    # per entry of another input".  Those env vars are visible to this run
+    # step because they were set on the very step that invokes this action.
+    - name: Fetch Infisical secrets (with GitHub secret fallback)
+      shell: bash
+      env:
+        INFISICAL_ASC_MODE: ${{ inputs.asc-mode }}
+        INFISICAL_NAMES: ${{ inputs.names }}
+        INFISICAL_REQUIRED: ${{ inputs.required }}
+        INFISICAL_PROJECT_ID: ${{ inputs.project-id }}
+        INFISICAL_ENVIRONMENT: ${{ inputs.environment }}
+        INFISICAL_SECRET_PATH: ${{ inputs.secret-path }}
+        INFISICAL_SERVICE_TOKEN: ${{ inputs.service-token }}
+        INFISICAL_SITE_URL: ${{ inputs.site-url }}
+      run: node "$GITHUB_ACTION_PATH/../../../scripts/infisical-fetch.mjs"

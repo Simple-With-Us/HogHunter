@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import re
+import math
 import subprocess
 import sys
 import time
 from typing import Any, Optional
+
+from . import budget
 
 
 def _run(cmd: list[str], timeout: int = 20) -> str:
     if sys.platform != "darwin":
         return ""
     try:
-        return subprocess.check_output(cmd, text=True, timeout=timeout, stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        result = budget.run_process(cmd, text=True, timeout=timeout,
+                                    capture_output=True, stdin=subprocess.DEVNULL)
+        return result.stdout if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError, budget.BudgetExceeded):
         return ""
 
 
@@ -21,6 +26,7 @@ def sample_mac() -> dict[str, Any]:
     if sys.platform != "darwin":
         return {
             "at": int(time.time()),
+            "disk_sample_ok": True,
             "disk_free_gb": 100.0,
             "disk_used_pct": 50.0,
             "swap_total_gb": 0.0,
@@ -33,16 +39,24 @@ def sample_mac() -> dict[str, Any]:
 
     df = _run(["/bin/df", "-k", "/System/Volumes/Data"]) or _run(["/bin/df", "-k", "/"])
     disk_free_gb = disk_used_pct = 0.0
+    # A df that failed or timed out leaves the free-space number at zero, and
+    # zero free reads as a full disk: it would announce a critical shortage
+    # that does not exist and put the tick into pressure cleanup.  Say whether
+    # the answer is real so the callers can carry the last known one instead.
+    disk_ok = False
     for line in df.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 5:
-            avail_k = float(parts[3])
-            cap = parts[4].rstrip("%")
-            disk_free_gb = avail_k / 1024 / 1024
             try:
-                disk_used_pct = float(cap)
+                avail_k = float(parts[3])
+                used = float(parts[4].rstrip("%"))
             except ValueError:
-                disk_used_pct = 0.0
+                continue
+            if not math.isfinite(avail_k) or not math.isfinite(used) or min(avail_k, used) < 0:
+                continue
+            disk_free_gb = avail_k / 1024 / 1024
+            disk_used_pct = used
+            disk_ok = True
             break
 
     vm = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"])
@@ -61,6 +75,8 @@ def sample_mac() -> dict[str, Any]:
 
     return {
         "at": int(time.time()),
+        "sample_complete": bool(disk_ok and m and lm),
+        "disk_sample_ok": disk_ok,
         "disk_free_gb": round(disk_free_gb, 2),
         "disk_used_pct": round(disk_used_pct, 1),
         "swap_total_gb": round(swap_total_gb, 2),
@@ -82,15 +98,16 @@ def evaluate_hits(sample: dict[str, Any], prev_free: Optional[float], rw_cfg: di
     swap_gb_thr = float(rw_cfg.get("swap_used_gb", 32))
     load_thr = float(rw_cfg.get("load1_threshold", 65))
 
-    if free <= crit:
-        hits.append({"metric": "disk_free_gb", "severity": "critical", "threshold": crit, "value": free})
-    elif free <= warn:
-        hits.append({"metric": "disk_free_gb", "severity": "warn", "threshold": warn, "value": free})
+    if sample.get("disk_sample_ok", True):
+        if free <= crit:
+            hits.append({"metric": "disk_free_gb", "severity": "critical", "threshold": crit, "value": free})
+        elif free <= warn:
+            hits.append({"metric": "disk_free_gb", "severity": "warn", "threshold": warn, "value": free})
 
-    if prev_free is not None:
-        drop = prev_free - free
-        if drop >= drop_thr:
-            hits.append({"metric": "disk_drop_gb", "severity": "warn", "threshold": drop_thr, "value": round(drop, 2)})
+        if prev_free is not None:
+            drop = prev_free - free
+            if drop >= drop_thr:
+                hits.append({"metric": "disk_drop_gb", "severity": "warn", "threshold": drop_thr, "value": round(drop, 2)})
 
     swap_pct = float(sample.get("swap_used_pct", 0))
     swap_used_gb = float(sample.get("swap_used_gb", 0))

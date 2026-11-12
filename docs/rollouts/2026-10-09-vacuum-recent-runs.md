@@ -52,7 +52,7 @@ No simulator run.  The hosted `test` job launches the iOS app with `-HogHunterVa
 |---|---|
 | Decide whether the Mac and the phone should hide or collapse watch ticks (a "Hide Watch Checks" switch). | Owner |
 | Update the integration checkout and run `scripts/install.sh`, so the Mac gets the Python and Swift halves. | Owner, or any seat the owner asks |
-| Ship a new phone build.  It reaches testers only through the guarded TestFlight workflow, which stays disabled until replacement signing credentials are ready (issue #22). | Owner |
+| Ship a new phone build.  It reaches testers only through the guarded TestFlight workflow, which is active and uploads on every merge to `main` that touches the iOS app.  For the signing credentials, see `INFISICAL.md` (issue #22). | Owner |
 
 ## Rollback
 

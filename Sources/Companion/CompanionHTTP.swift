@@ -19,6 +19,11 @@ enum CompanionHTTP {
         settingsHandler: ((CompanionSettingsUpdateRequest) -> (status: Int, body: Data))? = nil,
         sampleHandler: ((CompanionProcessRequest) -> (status: Int, body: Data))? = nil,
         maintainHandler: ((_ kind: String) -> (status: Int, body: Data))? = nil,
+        maintainSettingsHandler: ((CompanionMaintainSettingsRequest) -> (status: Int, body: Data))? = nil,
+        cleanSettingsHandler: ((CompanionCleanSettingsRequest) -> (status: Int, body: Data))? = nil,
+        serverControlGate: (() -> (status: Int, body: Data)?)? = nil,
+        serverActionHandler: ((CompanionServerActionRequest) -> (status: Int, body: Data))? = nil,
+        serverRefreshHandler: (() -> (status: Int, body: Data, retryAfter: Int?))? = nil,
         peerTrusted: Bool = true,
         deviceAuthenticator: ((String) -> Bool)? = nil
     ) -> Data {
@@ -46,7 +51,11 @@ enum CompanionHTTP {
             || path == CompanionService.viewPath
             || path == CompanionService.settingsPath
             || path == CompanionService.samplePath
-            || path == CompanionService.maintainRunPath else {
+            || path == CompanionService.maintainRunPath
+            || path == CompanionService.maintainSettingsPath
+            || path == CompanionService.cleanSettingsPath
+            || path == CompanionService.serverRefreshPath
+            || CompanionHTTP.isServerControlPath(path) else {
             return message(status: 404, reason: "Not Found", body: Data("Not Found".utf8))
         }
 
@@ -117,10 +126,18 @@ enum CompanionHTTP {
             var scanRequest = CompanionCleanScanRequest(tier: "standard")
             if fullPath.contains("?") {
                 let query = queryString(of: fullPath)
+                var sawDepth = false
                 for param in query.split(separator: "&") {
-                    let kv = param.split(separator: "=", maxSplits: 1)
+                    let kv = param.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
                     guard kv.count == 2 else { continue }
                     let value = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                    if kv[0] == "depth" {
+                        guard !sawDepth, ["quick", "deeper"].contains(value) else {
+                            return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"Unknown or repeated scan depth."}"#.utf8), type: "application/json; charset=utf-8")
+                        }
+                        sawDepth = true
+                        scanRequest.depth = value
+                    }
                     if kv[0] == "tier" { scanRequest.tier = value.lowercased() }
                     if kv[0] == "ack" { scanRequest.acknowledgedExtreme = (value == "1" || value.lowercased() == "true") }
                 }
@@ -221,6 +238,8 @@ enum CompanionHTTP {
                         if k == "window" { updateReq.window = v }
                         if k == "grouping" { updateReq.grouping = v }
                         if k == "cpuScale" || k == "scale" { updateReq.cpuScale = v }
+                        if k == "sort" { updateReq.sort = v }
+                        if k == "sortAscending" { updateReq.sortAscending = (v == "true" || v == "1") }
                     }
                 }
             }
@@ -230,6 +249,8 @@ enum CompanionHTTP {
                     if decoded.window != nil { updateReq.window = decoded.window }
                     if decoded.grouping != nil { updateReq.grouping = decoded.grouping }
                     if decoded.cpuScale != nil { updateReq.cpuScale = decoded.cpuScale }
+                    if decoded.sort != nil { updateReq.sort = decoded.sort }
+                    if decoded.sortAscending != nil { updateReq.sortAscending = decoded.sortAscending }
                 }
             }
             let (code, resBody) = viewHandler(updateReq)
@@ -265,6 +286,71 @@ enum CompanionHTTP {
                 return message(status: 400, reason: "Bad Request", body: Data(#"{"error": "Missing row parameter"}"#.utf8), type: "application/json; charset=utf-8")
             }
             let (code, resBody) = sampleHandler(CompanionProcessRequest(rowId: processRequest.rowId, pid: nil))
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if isServerControlPath(path) {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            // The opt-in and the Tailscale rule come before the body is read at
+            // all, and fail closed if the host never wired them.
+            guard let serverControlGate, let serverActionHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Server Controls Not Configured".utf8))
+            }
+            if let refusal = serverControlGate() {
+                return message(status: refusal.status, reason: reason(for: refusal.status), body: refusal.body, type: "application/json; charset=utf-8")
+            }
+            // Everything the route takes is in the body.  A query is either a
+            // mistake or a second copy of a field.
+            guard !fullPath.contains("?"), let action = parseServerAction(path: path, body: bodyData(of: request)) else {
+                return message(status: 400, reason: "Bad Request", body: serverActionRejectedBody(), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = serverActionHandler(action)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.serverRefreshPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let serverRefreshHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Server Refresh Not Configured".utf8))
+            }
+            // The route takes nothing: no query and no body, so there is no
+            // field through which a request could name a host or a command.
+            guard !fullPath.contains("?"), bodyData(of: request).isEmpty else {
+                let body = (try? JSONEncoder().encode(CompanionServerRefreshResponse(status: "rejected", error: "A server refresh takes no details, so nothing was done."))) ?? Data()
+                return message(status: 400, reason: "Bad Request", body: body, type: "application/json; charset=utf-8")
+            }
+            let answer = serverRefreshHandler()
+            let headers = answer.retryAfter.map { ["Retry-After: \($0)"] } ?? []
+            return message(status: answer.status, reason: reason(for: answer.status), body: answer.body, type: "application/json; charset=utf-8", extraHeaders: headers)
+        } else if path == CompanionService.maintainSettingsPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let maintainSettingsHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Maintain Settings Not Configured".utf8))
+            }
+            // Everything the route takes is in the body.  A query is either a
+            // mistake or a second copy of a field.
+            guard !fullPath.contains("?"),
+                  let updateReq = try? JSONDecoder().decode(CompanionMaintainSettingsRequest.self, from: bodyData(of: request)),
+                  !updateReq.isEmpty else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The maintenance settings change could not be read, or was empty."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = maintainSettingsHandler(updateReq)
+            return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
+        } else if path == CompanionService.cleanSettingsPath {
+            guard method == "POST" else {
+                return message(status: 405, reason: "Method Not Allowed", body: Data("Method Not Allowed".utf8))
+            }
+            guard let cleanSettingsHandler else {
+                return message(status: 501, reason: "Not Implemented", body: Data("Clean Settings Not Configured".utf8))
+            }
+            guard !fullPath.contains("?"),
+                  let updateReq = try? JSONDecoder().decode(CompanionCleanSettingsRequest.self, from: bodyData(of: request)),
+                  !updateReq.isEmpty else {
+                return message(status: 400, reason: "Bad Request", body: Data(#"{"status":"rejected","error":"The cleaner settings change could not be read, or was empty."}"#.utf8), type: "application/json; charset=utf-8")
+            }
+            let (code, resBody) = cleanSettingsHandler(updateReq)
             return message(status: code, reason: reason(for: code), body: resBody, type: "application/json; charset=utf-8")
         } else if path == CompanionService.maintainRunPath {
             guard method == "POST" else {
@@ -374,6 +460,107 @@ enum CompanionHTTP {
 
     /// The answer to a control request from an address outside the local
     /// network and Tailscale.
+    static func isServerControlPath(_ path: String) -> Bool {
+        path == CompanionService.serverProcessPath
+            || path == CompanionService.serverWorkloadPath
+            || path == CompanionService.serverMaintainPath
+    }
+
+    static func serverActionRejectedBody() -> Data {
+        let response = CompanionServerActionResponse(status: "rejected", error: "That server action could not be read, so nothing was done.")
+        return (try? JSONEncoder().encode(response)) ?? Data()
+    }
+
+    /// Reads one server action, whole or not at all.  An unknown field, a
+    /// repeated field, a missing field, a wrong type or an unknown action is
+    /// nil, so a request that tried to name a host, a pid or a command fails
+    /// here instead of having the extra field quietly dropped.
+    static func parseServerAction(path: String, body: Data) -> CompanionServerActionRequest? {
+        switch path {
+        case CompanionService.serverProcessPath, CompanionService.serverWorkloadPath:
+            guard let fields = strictJSONObject(body, allowed: ["rowId", "action"]),
+                  fields.count == 2,
+                  let rowId = fields["rowId"] as? String, CompanionServerControl.isRowID(rowId),
+                  let action = fields["action"] as? String else { return nil }
+            if path == CompanionService.serverProcessPath {
+                return CompanionServerControl.processActions.contains(action) ? .process(rowId: rowId, action: action) : nil
+            }
+            return CompanionServerControl.workloadActions.contains(action) ? .workload(rowId: rowId, action: action) : nil
+        case CompanionService.serverMaintainPath:
+            guard let fields = strictJSONObject(body, allowed: ["mode", "strategies", "acknowledgeImageRemoval"]),
+                  let mode = fields["mode"] as? String, CompanionServerControl.maintainModes.contains(mode),
+                  let strategies = fields["strategies"] as? [String], !strategies.isEmpty,
+                  Set(strategies).count == strategies.count,
+                  strategies.allSatisfy(CompanionServerControl.strategies.contains) else { return nil }
+            let removesImages = mode == "run" && strategies.contains(CompanionServerControl.imageStrategy)
+            // A literal `true`, on the one request that needs it: never a 1, and
+            // never a field that means nothing on the request it came with.
+            if removesImages {
+                guard isJSONTrue(fields["acknowledgeImageRemoval"]) else { return nil }
+            } else if fields["acknowledgeImageRemoval"] != nil {
+                return nil
+            }
+            return .maintain(mode: mode, strategies: strategies, imageRemovalAcknowledged: removesImages)
+        default:
+            return nil
+        }
+    }
+
+    /// `as? Bool` also accepts the number 1, which is not an acknowledgement.
+    private static func isJSONTrue(_ value: Any?) -> Bool {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+        return number.boolValue
+    }
+
+    /// A JSON object with only `allowed` keys, each appearing once.
+    /// `JSONSerialization` keeps one copy of a repeated key without saying so,
+    /// so the keys are counted from the bytes first.
+    static func strictJSONObject(_ data: Data, allowed: Set<String>) -> [String: Any]? {
+        guard let keys = topLevelKeys(in: data), Set(keys).count == keys.count,
+              keys.allSatisfy(allowed.contains),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object.count == keys.count else { return nil }
+        return object
+    }
+
+    /// The keys of a top-level JSON object, in order, with escapes decoded so
+    /// `"a"` and `"\u0061"` count as the same key.  Nil if it is not an object.
+    private static func topLevelKeys(in data: Data) -> [String]? {
+        let bytes = [UInt8](data)
+        var keys: [String] = []
+        var index = 0
+        var depth = 0
+        var expectingKey = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == UInt8(ascii: "\"") {
+                let start = index
+                index += 1
+                while index < bytes.count, bytes[index] != UInt8(ascii: "\"") {
+                    index += bytes[index] == UInt8(ascii: "\\") ? 2 : 1
+                }
+                guard index < bytes.count else { return nil }
+                if depth == 1, expectingKey {
+                    let raw = Data(bytes[start...index])
+                    guard let key = try? JSONSerialization.jsonObject(with: raw, options: [.fragmentsAllowed]) as? String else { return nil }
+                    keys.append(key)
+                    expectingKey = false
+                }
+            } else if byte == UInt8(ascii: "{") || byte == UInt8(ascii: "[") {
+                if depth == 0 && byte != UInt8(ascii: "{") { return nil }
+                depth += 1
+                if depth == 1 { expectingKey = true }
+            } else if byte == UInt8(ascii: "}") || byte == UInt8(ascii: "]") {
+                depth -= 1
+                expectingKey = false
+            } else if byte == UInt8(ascii: ","), depth == 1 {
+                expectingKey = true
+            }
+            index += 1
+        }
+        return depth == 0 ? keys : nil
+    }
+
     static func untrustedNetworkReply() -> Data {
         let body = Data(#"{"status":"forbidden","reason":"untrusted-network","error":"Hog Hunter accepts phone controls only from your local network or Tailscale.\u00a0 This connection came from somewhere else."}"#.utf8)
         return jsonReply(status: 403, body: body)
@@ -387,12 +574,82 @@ enum CompanionHTTP {
         return jsonReply(status: 403, body: body)
     }
 
+    /// The `Host` value for a host and port (RFC 7230 §5.4, RFC 3986 §3.2.2).
+    /// An IPv6 literal is bracketed and loses its zone id, so
+    /// `fd7a:115c:a1e0::1` on 24240 is `[fd7a:115c:a1e0::1]:24240`, never
+    /// `fd7a:115c:a1e0::1:24240`.  Ports 80 and 443 are left off.
+    static func hostHeaderValue(host: String, port: UInt16) -> String {
+        var name = host
+        if name.contains(":") {
+            if name.hasPrefix("[") && name.hasSuffix("]") {
+                name = String(name.dropFirst().dropLast())
+            }
+            if let zone = name.firstIndex(of: "%") { name = String(name[..<zone]) }
+            name = "[\(name)]"
+        }
+        return port == 80 || port == 443 ? name : "\(name):\(port)"
+    }
+
+    static func hostHeaderLine(_ host: String?) -> String {
+        let trimmed = host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "Host: \(trimmed.isEmpty ? "hoghunter" : trimmed)"
+    }
+
+    /// Reads the client address a tunnel daemon on this Mac forwarded:
+    /// `CF-Connecting-IP` (Cloudflare Tunnel, which overwrites any value the
+    /// client sent), otherwise the rightmost `X-Forwarded-For` entry.  Proxies
+    /// append to `X-Forwarded-For`, so only the last entry was written by the
+    /// hop that connected here; anything to its left came from the client and
+    /// could name a trusted address.  Callers honour this only for a loopback
+    /// peer (`CompanionPeer.resolvingForwardedClient(in:)`).
+    static func forwardedClientIP(in request: Data) -> String? {
+        let text = String(data: request.prefix(maxHeadBytes), encoding: .isoLatin1) ?? ""
+        let head = text.components(separatedBy: "\r\n\r\n").first ?? text
+        let lines = head.components(separatedBy: "\r\n")
+        for line in lines where line.lowercased().hasPrefix("cf-connecting-ip:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2 {
+                let ip = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ip.isEmpty { return ip }
+            }
+        }
+        // A proxy may add its own X-Forwarded-For line rather than extend the
+        // client's, so the last line's last entry is the nearest hop's.
+        var nearest: String?
+        for line in lines where line.lowercased().hasPrefix("x-forwarded-for:") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let last = parts[1].split(separator: ",").last.map(String.init) ?? ""
+            let ip = last.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ip.isEmpty { nearest = ip }
+        }
+        return nearest
+    }
+
+    /// Whether the request carries the marks of a Cloudflare Tunnel or an HTTPS
+    /// proxy.  A loopback request with these marks but no readable client
+    /// address is not trusted (`CompanionPeer.resolvingForwardedClient(in:)`).
+    static func isForwardedTunnel(in request: Data) -> Bool {
+        let text = String(data: request.prefix(maxHeadBytes), encoding: .isoLatin1) ?? ""
+        let head = text.components(separatedBy: "\r\n\r\n").first ?? text
+        for line in head.components(separatedBy: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("cf-ray:") || lower.hasPrefix("cf-connecting-ip:") || lower.hasPrefix("cf-visitor:") {
+                return true
+            }
+            if lower.hasPrefix("x-forwarded-proto:") && lower.contains("https") {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Trading the code for a token
 
-    static func enrollRequest(code: String, deviceName: String) -> Data {
+    static func enrollRequest(code: String, deviceName: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.enrollPath)?code=\(queryAllowedValue(code))&device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Accept: application/json",
             "Connection: close",
             "",
@@ -474,6 +731,15 @@ enum CompanionHTTP {
     }
 
     /// True for `GET /v1/snapshot`, whatever its auth outcome.
+    /// The path a request names, without its query.
+    static func requestPath(_ request: Data) -> String? {
+        let text = String(data: request.prefix(512), encoding: .isoLatin1) ?? ""
+        guard let line = text.components(separatedBy: "\r\n").first else { return nil }
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        return parts[1].split(separator: "?", maxSplits: 1).first.map(String.init)
+    }
+
     static func isSnapshotRequest(_ request: Data) -> Bool {
         let text = String(data: request.prefix(512), encoding: .isoLatin1) ?? ""
         guard let line = text.components(separatedBy: "\r\n").first else { return false }
@@ -482,10 +748,10 @@ enum CompanionHTTP {
         return parts[1].split(separator: "?", maxSplits: 1).first.map(String.init) == CompanionService.path
     }
 
-    static func request(token: String) -> Data {
+    static func request(token: String, host: String? = nil) -> Data {
         let lines = [
             "GET \(CompanionService.path) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -504,10 +770,10 @@ enum CompanionHTTP {
     /// Longest device name the Mac will show in the approval alert.
     static let maxDeviceNameLength = 40
 
-    static func pairRequest(deviceName: String) -> Data {
+    static func pairRequest(deviceName: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.pairPath)?device=\(queryAllowedValue(sanitizedDeviceName(deviceName))) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Accept: application/json",
             "Connection: close",
             "",
@@ -561,10 +827,10 @@ enum CompanionHTTP {
         return message(status: 429, reason: "Too Many Requests", body: body, type: "application/json; charset=utf-8")
     }
 
-    static func cleanRequest(token: String) -> Data {
+    static func cleanRequest(token: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.cleanPath) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -575,18 +841,19 @@ enum CompanionHTTP {
 
     /// A clean from a scan the Mac is holding: the scan's id, the tier, the
     /// references to clean, and the Extreme acknowledgement.
-    static func cleanRequest(token: String, request: CompanionCleanRequest) -> Data {
+    static func cleanRequest(token: String, request: CompanionCleanRequest, host: String? = nil) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = (try? encoder.encode(request)) ?? Data("{}".utf8)
-        return jsonPostRequest(path: CompanionService.cleanRunPath, token: token, body: body)
+        return jsonPostRequest(path: CompanionService.cleanRunPath, token: token, body: body, host: host)
     }
 
-    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool) -> Data {
+    static func cleanScanRequest(token: String, tier: String, acknowledgedExtreme: Bool, host: String? = nil, depth: String? = nil) -> Data {
         let ack = acknowledgedExtreme ? "&ack=1" : ""
+        let depthQuery = depth.map { "&depth=" + queryAllowedValue($0) } ?? ""
         let lines = [
-            "POST \(CompanionService.cleanScanPath)?tier=\(queryAllowedValue(tier))\(ack) HTTP/1.1",
-            "Host: hoghunter",
+            "POST \(CompanionService.cleanScanPath)?tier=\(queryAllowedValue(tier))\(ack)\(depthQuery) HTTP/1.1",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -595,10 +862,10 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func cleanReportRequest(token: String) -> Data {
+    static func cleanReportRequest(token: String, host: String? = nil) -> Data {
         let lines = [
             "GET \(CompanionService.cleanReportPath) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -641,11 +908,11 @@ enum CompanionHTTP {
         return result
     }
 
-    static func quitRequest(token: String, pid: Int32, rowId: String? = nil, force: Bool = false) -> Data {
+    static func quitRequest(token: String, pid: Int32, rowId: String? = nil, force: Bool = false, host: String? = nil) -> Data {
         let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
             "POST \(CompanionService.quitPath)?pid=\(pid)\(rowParam)&force=\(force) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -654,11 +921,11 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func tameRequest(token: String, pid: Int32, rowId: String? = nil, action: String = "tame") -> Data {
+    static func tameRequest(token: String, pid: Int32, rowId: String? = nil, action: String = "tame", host: String? = nil) -> Data {
         let rowParam = rowId.map { "&row=\(queryAllowedValue($0))" } ?? ""
         let lines = [
             "POST \(CompanionService.tamePath)?pid=\(pid)\(rowParam)&action=\(queryAllowedValue(action)) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -674,7 +941,7 @@ enum CompanionHTTP {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    static func exclusionsRequest(token: String, toggleCategory: String? = nil, addPath: String? = nil, removePath: String? = nil) -> Data {
+    static func exclusionsRequest(token: String, toggleCategory: String? = nil, addPath: String? = nil, removePath: String? = nil, host: String? = nil) -> Data {
         var queryItems: [String] = []
         if let toggleCategory { queryItems.append("toggleCategory=\(queryAllowedValue(toggleCategory))") }
         if let addPath {
@@ -686,7 +953,7 @@ enum CompanionHTTP {
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
         let lines = [
             "POST \(CompanionService.exclusionsPath)\(queryString) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -695,29 +962,47 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func viewRequest(token: String, window: String? = nil, grouping: String? = nil, cpuScale: String? = nil) -> Data {
+    /// The view request.
+    ///
+    /// The view fields travel in the request body and in the query string,
+    /// with the same value in both, so the phone and the Mac cannot read two
+    /// different copies of the request and end up disagreeing about the sort.
+    static func viewRequest(
+        token: String,
+        window: String? = nil,
+        grouping: String? = nil,
+        cpuScale: String? = nil,
+        sort: String? = nil,
+        sortAscending: Bool? = nil,
+        host: String? = nil
+    ) -> Data {
         var queryItems: [String] = []
-        if let window { queryItems.append("window=\(queryAllowedValue(window))") }
-        if let grouping { queryItems.append("grouping=\(queryAllowedValue(grouping))") }
-        if let cpuScale { queryItems.append("cpuScale=\(queryAllowedValue(cpuScale))") }
+        var fields: [String: Any] = [:]
+        if let window {
+            queryItems.append("window=\(queryAllowedValue(window))")
+            fields["window"] = window
+        }
+        if let grouping {
+            queryItems.append("grouping=\(queryAllowedValue(grouping))")
+            fields["grouping"] = grouping
+        }
+        if let cpuScale {
+            queryItems.append("cpuScale=\(queryAllowedValue(cpuScale))")
+            fields["cpuScale"] = cpuScale
+        }
+        if let sort {
+            queryItems.append("sort=\(queryAllowedValue(sort))")
+            fields["sort"] = sort
+        }
+        if let sortAscending {
+            queryItems.append("sortAscending=\(sortAscending)")
+            fields["sortAscending"] = sortAscending
+        }
         let queryString = queryItems.isEmpty ? "" : "?" + queryItems.joined(separator: "&")
+        let body = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])) ?? Data("{}".utf8)
         let lines = [
             "POST \(CompanionService.viewPath)\(queryString) HTTP/1.1",
-            "Host: hoghunter",
-            "Authorization: Bearer \(token)",
-            "Accept: application/json",
-            "Connection: close",
-            "",
-        ]
-        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
-    }
-
-    /// A request with a JSON body.  The body is sent in the same write as the
-    /// headers, and the Mac waits for `Content-Length` bytes either way.
-    private static func jsonPostRequest(path: String, token: String, body: Data) -> Data {
-        let lines = [
-            "POST \(path) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Content-Type: application/json",
@@ -731,17 +1016,50 @@ enum CompanionHTTP {
         return data
     }
 
-    static func settingsRequest(token: String, update: CompanionSettingsUpdateRequest) -> Data {
+    /// A request with a JSON body.  The body is sent in the same write as the
+    /// headers, and the Mac waits for `Content-Length` bytes either way.
+    private static func jsonPostRequest(path: String, token: String, body: Data, host: String? = nil) -> Data {
+        let lines = [
+            "POST \(path) HTTP/1.1",
+            hostHeaderLine(host),
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Content-Type: application/json",
+            "Content-Length: \(body.count)",
+            "Connection: close",
+            "",
+            "",
+        ]
+        var data = Data(lines.joined(separator: "\r\n").utf8)
+        data.append(body)
+        return data
+    }
+
+    static func settingsRequest(token: String, update: CompanionSettingsUpdateRequest, host: String? = nil) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
-        return jsonPostRequest(path: CompanionService.settingsPath, token: token, body: body)
+        return jsonPostRequest(path: CompanionService.settingsPath, token: token, body: body, host: host)
     }
 
-    static func sampleRequest(token: String, rowId: String) -> Data {
+    static func maintainSettingsRequest(token: String, update: CompanionMaintainSettingsRequest, host: String? = nil) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
+        return jsonPostRequest(path: CompanionService.maintainSettingsPath, token: token, body: body, host: host)
+    }
+
+    static func cleanSettingsRequest(token: String, update: CompanionCleanSettingsRequest, host: String? = nil) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = (try? encoder.encode(update)) ?? Data("{}".utf8)
+        return jsonPostRequest(path: CompanionService.cleanSettingsPath, token: token, body: body, host: host)
+    }
+
+    static func sampleRequest(token: String, rowId: String, host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.samplePath)?row=\(queryAllowedValue(rowId)) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",
@@ -750,10 +1068,28 @@ enum CompanionHTTP {
         return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
     }
 
-    static func maintainRunRequest(token: String, kind: String = "full") -> Data {
+    static func serverActionRequest(token: String, action: CompanionServerActionRequest, host: String? = nil) -> Data {
+        jsonPostRequest(path: action.path, token: token, body: action.body, host: host)
+    }
+
+    /// A server refresh: a bare POST, because the route takes nothing.
+    static func serverRefreshRequest(token: String, host: String? = nil) -> Data {
+        let lines = [
+            "POST \(CompanionService.serverRefreshPath) HTTP/1.1",
+            hostHeaderLine(host),
+            "Authorization: Bearer \(token)",
+            "Accept: application/json",
+            "Content-Length: 0",
+            "Connection: close",
+            "",
+        ]
+        return Data((lines.joined(separator: "\r\n") + "\r\n").utf8)
+    }
+
+    static func maintainRunRequest(token: String, kind: String = "full", host: String? = nil) -> Data {
         let lines = [
             "POST \(CompanionService.maintainRunPath)?kind=\(queryAllowedValue(kind)) HTTP/1.1",
-            "Host: hoghunter",
+            hostHeaderLine(host),
             "Authorization: Bearer \(token)",
             "Accept: application/json",
             "Connection: close",

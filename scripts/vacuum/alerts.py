@@ -166,7 +166,13 @@ def notify_macos(title: str, body: str) -> None:
         return
     if sys.platform != "darwin":
         return
-    script = f'display notification "{_escape_apple(body)}" with title "{_escape_apple(title)}"'
+    script = (
+        'try\n'
+        f'  tell application "Hog Hunter" to display notification "{_escape_apple(body)}" with title "{_escape_apple(title)}"\n'
+        'on error\n'
+        f'  display notification "{_escape_apple(body)}" with title "{_escape_apple(title)}"\n'
+        'end try'
+    )
     try:
         subprocess.run(["osascript", "-e", script], check=False, timeout=10)
     except (subprocess.TimeoutExpired, FileNotFoundError):

@@ -315,3 +315,257 @@ final class RemoteTameStatusTests: XCTestCase {
         XCTAssertEqual(decoded.skipped, 1)
     }
 }
+
+// MARK: - The names the phone sends
+
+final class CompanionPhoneNameTests: XCTestCase {
+    func testTheSortIsTheWholeNameAndNothingElse() {
+        XCTAssertEqual(HogSort.fromPhone("CPU"), .cpu)
+        XCTAssertEqual(HogSort.fromPhone("Memory"), .memory)
+        XCTAssertEqual(HogSort.fromPhone(" Memory "), .memory)
+        XCTAssertNil(HogSort.fromPhone("program"), "\"program\" merely contains \"ram\"")
+        XCTAssertNil(HogSort.fromPhone("cpu usage"), "\"cpu usage\" merely contains \"cpu\"")
+        XCTAssertNil(HogSort.fromPhone("ram"), "\"ram\" was never a name the Mac offered")
+        XCTAssertNil(HogSort.fromPhone(""))
+    }
+
+    func testTheCpuScaleIsTheWholeNameAndNothingElse() {
+        XCTAssertEqual(CpuScale.fromPhone("Per Core"), .perCore)
+        XCTAssertEqual(CpuScale.fromPhone("Share of Machine"), .machineShare)
+        XCTAssertEqual(CpuScale.fromPhone("Per Machine"), .machineShare)
+        XCTAssertEqual(CpuScale.fromPhone("Machine Share"), .machineShare)
+        XCTAssertEqual(CpuScale.fromPhone(" share of machine "), .machineShare)
+        XCTAssertNil(CpuScale.fromPhone("machinesplatter"), "it merely contains \"machine\"")
+        XCTAssertNil(CpuScale.fromPhone("sideways"))
+        XCTAssertNil(CpuScale.fromPhone(""))
+        for scale in CpuScale.allCases {
+            XCTAssertEqual(CpuScale.fromPhone(scale.rawValue), scale, "the raw value the phone echoes back must map to itself")
+        }
+    }
+}
+
+// MARK: - The directory status line
+
+final class CompanionDirectoryStatusTests: XCTestCase {
+    private func row(title: String = "Code") -> DirectoryUsageRow {
+        DirectoryUsageRow(title: title, path: "/Users/jay/Code", displayPath: "/Users/jay/Code")
+    }
+
+    func testARowInTheMiddleOfAWalkShowsTheProgress() {
+        var row = row()
+        row.scanStartedAt = Date(timeIntervalSince1970: 1_767_225_600)
+        row.progressBytes = 1024
+        row.progressEntries = 12
+        row.statusText = "Scanning"
+        XCTAssertEqual(row.statusLine, "1 KB scanned · 12 entries · scanning")
+    }
+
+    func testAFinishedRowShowsWhenTheWalkBegan() {
+        var row = row()
+        row.bytes = 2048
+        row.statusText = "Complete"
+        row.sampledAt = Date(timeIntervalSince1970: 1_767_225_600)
+        XCTAssertEqual(row.statusLine, "walk began Dec 31, 6:00pm")
+    }
+
+    func testARowThatHasNotStartedShowsItsOwnStatus() {
+        var row = row()
+        row.statusText = "Waiting to measure"
+        XCTAssertEqual(row.statusLine, "Waiting to measure")
+    }
+
+    func testTheStampIsTheMacsOwn() {
+        XCTAssertEqual(DirectoryUsageRow.timestamp(Date(timeIntervalSince1970: 1_767_225_600)), "Dec 31, 6:00pm")
+        XCTAssertEqual(DirectoryUsageRow.timestamp(Date(timeIntervalSince1970: 1_767_229_200)), "Dec 31, 7:00pm")
+    }
+}
+
+// MARK: - The reply to a view change
+
+final class CompanionViewStateTests: XCTestCase {
+    private func current() -> CompanionViewState {
+        CompanionViewState(window: .day, grouping: .processes, cpuScale: .machineShare, sort: .memory, sortAscending: true)
+    }
+
+    func testARequestThatNamesNoSortKeepsTheMacsOwn() {
+        let resolved = current().resolving(after: CompanionViewUpdateRequest(window: "Past Hour"))
+        XCTAssertEqual(resolved.sort, .memory, "the reply must not claim a sort the Mac is not using")
+        XCTAssertTrue(resolved.sortAscending, "the reply must not claim a direction the Mac is not using")
+        XCTAssertEqual(resolved.window, .hour)
+        XCTAssertEqual(resolved.grouping, .processes, "a field the request leaves out keeps the Mac's value")
+        XCTAssertEqual(resolved.cpuScale, .machineShare)
+    }
+
+    func testARequestThatNamesTheSortIsTaken() {
+        let resolved = current().resolving(after: CompanionViewUpdateRequest(sort: "Memory"))
+        XCTAssertEqual(resolved.sort, .memory)
+    }
+
+    func testARequestThatAsksForTheOtherSortIsTaken() {
+        let start = CompanionViewState(sort: .memory, sortAscending: true)
+        let resolved = start.resolving(after: CompanionViewUpdateRequest(sort: "CPU"))
+        XCTAssertEqual(resolved.sort, .cpu)
+        XCTAssertFalse(resolved.sortAscending, "the Mac puts the list back the right way round when the sort changes")
+    }
+
+    func testARequestThatNamesTheDirectionIsTaken() {
+        let resolved = current().resolving(after: CompanionViewUpdateRequest(sortAscending: false))
+        XCTAssertFalse(resolved.sortAscending)
+        XCTAssertEqual(resolved.sort, .memory, "the direction does not change the sort")
+    }
+
+    func testTheWindowAndGroupingAreTheWholeNames() {
+        XCTAssertEqual(CompanionViewState.window(from: "Now"), .now)
+        XCTAssertEqual(CompanionViewState.window(from: "Past Hour"), .hour)
+        XCTAssertEqual(CompanionViewState.window(from: "Past 24 Hours"), .day)
+        XCTAssertNil(CompanionViewState.window(from: "Last Week"))
+        XCTAssertEqual(CompanionViewState.grouping(from: "Apps"), .apps)
+        XCTAssertEqual(CompanionViewState.grouping(from: "Processes"), .processes)
+        XCTAssertNil(CompanionViewState.grouping(from: "Everything"))
+    }
+
+    func testAnUnknownSortLeavesTheMacsOwnAlone() {
+        let resolved = current().resolving(after: CompanionViewUpdateRequest(sort: "program"))
+        XCTAssertEqual(resolved.sort, .memory)
+    }
+}
+
+// MARK: - The resolved appearance on the wire
+
+final class CompanionResolvedAppearanceTests: XCTestCase {
+    func testTheSummaryCarriesTheResolvedAppearance() throws {
+        let summary = CompanionSettingsSummary(
+            refreshInterval: 5,
+            alertsEnabled: true,
+            alertThresholdPercent: 300,
+            alertSustainedMinutes: 5,
+            webhookConfigured: false,
+            resolvedAppearance: "Dark"
+        )
+        let data = try JSONEncoder().encode(summary)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["resolvedAppearance"] as? String, "Dark")
+        let decoded = try JSONDecoder().decode(CompanionSettingsSummary.self, from: data)
+        XCTAssertEqual(decoded.resolvedAppearance, "Dark")
+    }
+
+    func testAMacThatPredatesTheFieldStillDecodes() throws {
+        let json = """
+        {
+          "refreshInterval": 5,
+          "alertsEnabled": true,
+          "alertThresholdPercent": 300,
+          "alertSustainedMinutes": 5,
+          "webhookConfigured": false
+        }
+        """
+        let decoded = try JSONDecoder().decode(CompanionSettingsSummary.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.resolvedAppearance, "Light")
+    }
+
+    func testTheMacsOwnChoiceResolvesToARealAppearance() {
+        XCTAssertEqual(AppearanceChoice.light.resolvedName, "Light")
+        XCTAssertEqual(AppearanceChoice.dark.resolvedName, "Dark")
+        let system = AppearanceChoice.system.resolvedName
+        XCTAssertTrue(system == "Light" || system == "Dark", "System must never travel as itself: \(system)")
+    }
+}
+
+// MARK: - The step toggle that has not landed yet
+
+@MainActor
+final class MaintainStepPersistTests: XCTestCase {
+    /// An Infisical that is never configured, so a test that changes a step
+    /// cannot reach the real service.
+    private func unconfiguredInfisical() -> InfisicalSettings {
+        InfisicalSettings(store: InfisicalStore(), credentialProvider: { nil })
+    }
+
+    private func temporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hoghunter-step-persist-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func testTheToggleIsNotPersistedUntilTheSaveLands() async throws {
+        let gate = AsyncGate()
+        let launches = CompanionLocked<[[String]]>([])
+        let store = MaintainStore(
+            supportDirectory: try temporaryDirectory(),
+            repoRoot: try temporaryDirectory(),
+            launcher: { arguments in
+                launches.value.append(arguments)
+                await gate.wait()
+                return true
+            },
+            infisical: unconfiguredInfisical(),
+            infisicalStore: InfisicalStore()
+        )
+        XCTAssertTrue(store.stepTogglesPersisted, "nothing is being saved, so everything is on disk")
+
+        store.setStepEnabled("coolify_remote", enabled: true)
+        XCTAssertFalse(store.stepTogglesPersisted, "the save has not landed yet")
+
+        for _ in 0..<200 where launches.value.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(launches.value, [["--set-step", "coolify_remote", "on"]])
+        XCTAssertFalse(store.stepTogglesPersisted, "the script is still saving the step")
+
+        gate.open()
+        for _ in 0..<200 where !store.stepTogglesPersisted { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(store.stepTogglesPersisted, "the save has landed, so the step can be run")
+    }
+
+    func testASaveThatFailsSaysSoAndFreesTheFlag() async throws {
+        let store = MaintainStore(
+            supportDirectory: try temporaryDirectory(),
+            repoRoot: try temporaryDirectory(),
+            launcher: { _ in false },
+            infisical: unconfiguredInfisical(),
+            infisicalStore: InfisicalStore()
+        )
+        store.setStepEnabled("coolify_remote", enabled: true)
+        XCTAssertFalse(store.stepTogglesPersisted)
+        for _ in 0..<200 where !store.stepTogglesPersisted { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(store.stepTogglesPersisted, "a failed save must not leave the step unsavable")
+        XCTAssertEqual(store.lastError, "Could not save that step setting.")
+    }
+}
+
+// MARK: - The intervals the Mac will accept
+
+final class CompanionIntervalValidatorTests: XCTestCase {
+    /// The Mac's own rule for both intervals: a value of a second or more.
+    /// The phone offers the Mac's own choices plus whatever the Mac is
+    /// already using, so the Mac must never refuse a value it holds.
+    func testAValueTheMacAlreadyHoldsIsNeverRefused() {
+        for interval in [1.0, 2.0, 7.5, 20.0, 45.0, 300.0] {
+            var request = CompanionSettingsUpdateRequest()
+            request.refreshInterval = interval
+            request.backgroundRefreshInterval = interval
+            guard case .success = CompanionSettingsValidator.validate(request) else {
+                XCTFail("the Mac refuses \(interval), a value it would hold itself")
+                continue
+            }
+        }
+    }
+
+    func testAnIntervalTheMacCannotUseIsRefused() {
+        for interval in [0.0, 0.5, -1.0] {
+            var request = CompanionSettingsUpdateRequest()
+            request.refreshInterval = interval
+            guard case .failure = CompanionSettingsValidator.validate(request) else {
+                XCTFail("the Mac accepts \(interval), which it cannot run")
+                continue
+            }
+        }
+    }
+
+    func testTheRuleIsTheOneTheMacsOwnSettingsUse() {
+        XCTAssertTrue(CompanionSettingsValidator.isAcceptedInterval(1))
+        XCTAssertTrue(CompanionSettingsValidator.isAcceptedInterval(60))
+        XCTAssertFalse(CompanionSettingsValidator.isAcceptedInterval(0.999))
+        XCTAssertFalse(CompanionSettingsValidator.isAcceptedInterval(.nan))
+        XCTAssertFalse(CompanionSettingsValidator.isAcceptedInterval(.infinity))
+    }
+}

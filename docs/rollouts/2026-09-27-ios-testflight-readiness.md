@@ -31,8 +31,9 @@ invite is not yet a usable installation path.
 
 ## Remaining gates
 
-1. Complete replacement signing credentials and repository secret setup, then
-   enable the [manual iOS workflow](2026-09-27-ios-manual-release.md).
+1. Cleared by the owner ruling of 2026-10-17: signing and App Store Connect
+   credentials are in Infisical (see [`INFISICAL.md`](../../INFISICAL.md)), and
+   the [iOS workflow](2026-09-27-ios-manual-release.md) is enabled.
    It uses Xcode automatic provisioning and validates the resulting profile.
    Do not use the previous ASC key or place a multiline private key in workflow
    `env` or `$GITHUB_ENV`.
@@ -55,6 +56,6 @@ action, and the Mac accepts them only from its local network or Tailscale.  A
 reviewer who wants to see them without a Mac can use Demo Mode in the app.  The
 review notes must not describe the app as read-only.
 
-Tracking: [HogHunter #22](https://github.com/jaywedgeworth22/HogHunter/issues/22),
-fleet release [#296](https://github.com/jaywedgeworth22/AI-Fleet-Coordinator/issues/296),
+Tracking: [HogHunter #22](https://github.com/Simple-With-Us/HogHunter/issues/22),
+fleet release [#296](https://github.com/Simple-With-Us/AI-Fleet-Coordinator/issues/296),
 effort board `1dd567c8c0054e708882ee69e91c2652`.

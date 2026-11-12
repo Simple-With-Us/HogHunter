@@ -17,6 +17,12 @@ Rules this module lives by:
   edits (skip-worktree, assume-unchanged), and nested git repositories inside ignored folders all refuse.
 * Removal is `git worktree remove` WITHOUT force.  remove_argv refuses any argv that carries a force flag.
 * Every function takes an injectable runner and clock so tests need no real processes except temp repos.
+* The doctor takes minutes across hundreds of lanes on a USB drive and times
+  out (300 s) on busy days.  A fresh report is always preferred, but when a
+  run fails the last good report on disk is reused if it is under
+  CACHED_REPORT_MAX_AGE_SECONDS old.  This stays safe because removal still
+  re-checks HEAD, branch, tree state and processes live: cached merged-PR
+  evidence only applies to the exact HEAD the re-check confirms.
 
 Python 3.9 compatible on purpose: launchd runs this under /usr/bin/python3.
 """
@@ -33,11 +39,12 @@ import signal
 import stat
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from .config import DEFAULT_LANES
+from . import budget
+from .config import DEFAULT_LANES, MAX_RETIRE_DAYS, MIN_RETIRE_DAYS, parse_retire_min_days
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 DoctorRunner = Callable[[list, float], "subprocess.CompletedProcess[str]"]
@@ -98,9 +105,23 @@ FUTURE_SKEW_SECONDS = 300.0
 # Report and age limits.  Code constants, not knobs: config cannot loosen or tighten them (only the doctor
 # command is configurable).  Changing one is a code change with a test.
 REPORT_MAX_AGE_SECONDS = 900.0
+# A cached doctor report may be reused this long after it was generated when a
+# fresh run fails (timeout, non-zero exit, unreadable output).  The live
+# re-check at removal time re-validates HEAD, branch, tree state and
+# processes, so a cached report can only retire a lane that is still exactly
+# what the doctor saw.  A code constant like the rest: changing it is a code
+# change with a test.
+CACHED_REPORT_MAX_AGE_SECONDS = 24 * 3600.0
+DOCTOR_CACHE_NAME = "lane-doctor-report.json"
 MIN_SCHEMA = 2
-DOCTOR_TIMEOUT_SECONDS = 300.0
-RETIRE_MIN_DAYS = 7.0
+DOCTOR_TIMEOUT_SECONDS = 420.0
+DOCTOR_TIMEOUT_MIN_SECONDS = 300.0
+DOCTOR_TIMEOUT_MAX_SECONDS = 900.0
+DOCTOR_TIMEOUT_MARGIN = 1.25
+DOCTOR_TIMEOUT_PAD_SECONDS = 45.0
+DOCTOR_LAST_RUN_NAME = "doctor-last-run.json"
+DEFAULT_RETIRE_MIN_DAYS = 7
+DOCTOR_RETIRE_DAYS_FLAG = "--cleaner-retention-days"
 DEPS_MIN_HOURS = 24.0
 LSOF_CACHE_SECONDS = 30.0
 WALK_FILE_CAP = 200_000
@@ -134,14 +155,15 @@ def _expand_arg(arg: str, home: Path) -> str:
 
 def lane_settings(cfg: Mapping[str, Any], home: Path, env: Optional[Mapping[str, str]] = None) -> LaneSettings:
     """Read the doctor command from the `lanes` block of the Vacuum config (or HOGHUNTER_LANE_DOCTOR_COMMAND).
-    Everything else is a code constant: report age 15 minutes, schema 2, doctor timeout 5 minutes, 7 days to
-    retire, 24 hours for dependency folders.  Numeric `lanes` keys in a config file are ignored, so a stray
-    value can neither loosen nor tighten a safety limit."""
+    Report age, schema, doctor timeout, and dependency idle time are code constants.  The merged-worktree
+    retention is configurable from 1 to 90 whole days, defaulting safely to 7 when invalid."""
     env = os.environ if env is None else env
     raw: dict = dict(DEFAULT_LANES)
     block = cfg.get("lanes")
     if isinstance(block, dict) and "doctor_command" in block:
         raw["doctor_command"] = block["doctor_command"]
+    if isinstance(block, dict) and "retire_min_days" in block:
+        raw["retire_min_days"] = block["retire_min_days"]
 
     command: Any = raw.get("doctor_command")
     override = env.get(DOCTOR_ENV_VAR)
@@ -158,12 +180,15 @@ def lane_settings(cfg: Mapping[str, Any], home: Path, env: Optional[Mapping[str,
     if not isinstance(command, (list, tuple)) or not all(isinstance(part, str) and part for part in command):
         command = []
     argv = tuple(_expand_arg(part, home) for part in command)
+    retire_days = parse_retire_min_days(raw.get("retire_min_days", DEFAULT_RETIRE_MIN_DAYS))
+    if retire_days is None:
+        retire_days = DEFAULT_RETIRE_MIN_DAYS
     return LaneSettings(
         command=argv,
         max_report_age_seconds=REPORT_MAX_AGE_SECONDS,
         min_schema=MIN_SCHEMA,
         timeout_seconds=DOCTOR_TIMEOUT_SECONDS,
-        retire_min_days=RETIRE_MIN_DAYS,
+        retire_min_days=float(retire_days),
         deps_min_hours=DEPS_MIN_HOURS,
     )
 
@@ -183,20 +208,23 @@ _STRIPPED_GIT_ENV = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GI
 
 
 def _default_runner(argv: list, **kwargs: Any) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(argv, **kwargs)
+    return budget.run_process(argv, **kwargs)
 
 
 def call(runner: Runner, argv: list, timeout: float, env: Optional[dict] = None):
     """Run argv through the injected runner.  Returns (completed process or None, error text)."""
+    timeout = budget.timeout(timeout)
     kwargs: dict = {"capture_output": True, "text": True, "timeout": timeout}
     if env is not None:
         kwargs["env"] = env
     try:
         res = runner(argv, **kwargs)
     except subprocess.TimeoutExpired:
+        budget.check()
         return None, f"{argv[0]} timed out after {timeout:g}s"
     except (OSError, ValueError) as exc:  # missing binary, permission, undecodable output
         return None, f"{argv[0]} could not run ({type(exc).__name__})"
+    budget.check()
     return res, ""
 
 
@@ -207,30 +235,8 @@ def _git(runner: Runner, path: str, args: list, timeout: float = 60.0):
 
 def run_doctor_process(argv: list, timeout: float) -> "subprocess.CompletedProcess[str]":
     """Default doctor runner: no shell, its own session so a timeout kills the whole process group."""
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        try:
-            proc.communicate(timeout=5)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            pass
-        raise
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    return budget.run_process(argv, timeout=timeout, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True)
 
 
 # --------------------------------------------------------------------------- the report
@@ -239,7 +245,11 @@ def run_doctor_process(argv: list, timeout: float) -> "subprocess.CompletedProce
 @dataclass
 class LaneReport:
     """The doctor's report after the gates that apply to every use.  ok is False when ANY of them fails;
-    gh_ok is a separate gate because only removal (not dependency folders) needs the PR lookups."""
+    gh_ok and gh_reason record whether EVERY repository's PR lookup came back.  They are facts about the
+    report, not a gate: a candidate is judged on its own repository's lookup (report_gate_retire), so one
+    failed lookup does not throw away the rest of the report.
+    cached is True when this came from the on-disk cache after a fresh run failed; generated_at_text
+    still names the report's own generation time, so the log shows how old the evidence is."""
 
     ok: bool
     reason: str = ""
@@ -251,6 +261,7 @@ class LaneReport:
     generated_at_text: str = ""
     command: tuple = ()
     seconds: float = 0.0
+    cached: bool = False
 
 
 def _fail(reason: str, **extra: Any) -> LaneReport:
@@ -273,14 +284,144 @@ def parse_timestamp(value: Any) -> Optional[float]:
     return parsed.timestamp()
 
 
+def _doctor_last_run_path(cache_file: Optional[Path]) -> Optional[Path]:
+    if cache_file is None:
+        return None
+    return cache_file.parent / DOCTOR_LAST_RUN_NAME
+
+
+def record_doctor_duration(cache_file: Optional[Path], seconds: float) -> None:
+    path = _doctor_last_run_path(cache_file)
+    if path is None or seconds <= 0:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"seconds": round(seconds, 3)}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def adaptive_doctor_timeout(settings: LaneSettings, cache_file: Optional[Path]) -> float:
+    """Raise the wait when the last successful doctor run was slow, capped so a tick never exceeds 900 s."""
+    base = float(settings.timeout_seconds)
+    path = _doctor_last_run_path(cache_file)
+    if path is None or not path.is_file():
+        return base
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        last = float(raw.get("seconds") or 0)
+    except (OSError, ValueError, TypeError):
+        return base
+    if last <= 0:
+        return base
+    scaled = last * DOCTOR_TIMEOUT_MARGIN + DOCTOR_TIMEOUT_PAD_SECONDS
+    return min(DOCTOR_TIMEOUT_MAX_SECONDS, max(base, scaled))
+
+
+def doctor_cache_file(data_dir: Optional[Path]) -> Optional[Path]:
+    """Where the last good doctor report lives, or None when no data dir is configured."""
+    if data_dir is None:
+        return None
+    try:
+        return Path(data_dir) / DOCTOR_CACHE_NAME
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_doctor_cache(cache_file: Path, payload: str) -> None:
+    """Best-effort atomic save of a fresh doctor stdout.  Never raises."""
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_name(cache_file.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp, cache_file)
+    except (OSError, ValueError):
+        pass
+
+
+def _doctor_argv(settings: LaneSettings) -> tuple[list[str], str]:
+    """Add the configured cleaner floor only when it differs from the doctor default.
+
+    A custom command may already carry the flag.  Keep one exact match, but reject malformed,
+    duplicate, or conflicting values rather than allowing two sources to disagree.
+    """
+    argv = list(settings.command)
+    found: list[int] = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == DOCTOR_RETIRE_DAYS_FLAG:
+            if index + 1 >= len(argv) or not argv[index + 1].isdigit():
+                return argv, f"doctor command has an invalid {DOCTOR_RETIRE_DAYS_FLAG} value"
+            found.append(int(argv[index + 1]))
+            index += 2
+            continue
+        prefix = DOCTOR_RETIRE_DAYS_FLAG + "="
+        if arg.startswith(prefix):
+            value = arg[len(prefix):]
+            if not value.isdigit():
+                return argv, f"doctor command has an invalid {DOCTOR_RETIRE_DAYS_FLAG} value"
+            found.append(int(value))
+        index += 1
+
+    expected = int(settings.retire_min_days)
+    if len(found) > 1:
+        return argv, f"doctor command repeats {DOCTOR_RETIRE_DAYS_FLAG}"
+    if found and found[0] != expected:
+        return argv, f"doctor command {DOCTOR_RETIRE_DAYS_FLAG}={found[0]} conflicts with configured {expected} days"
+    if not found and expected != DEFAULT_RETIRE_MIN_DAYS:
+        argv.extend((DOCTOR_RETIRE_DAYS_FLAG, str(expected)))
+    return argv, ""
+
+
+def _load_cached_report(
+    cache_file: Path,
+    settings: LaneSettings,
+    home: Path,
+    clock: Callable[[], float],
+) -> LaneReport:
+    """The last good report, validated with the relaxed cache age.  Anything
+    unreadable, too old, or failing the other gates is a fail-closed report."""
+    try:
+        payload = cache_file.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return _fail("doctor failed and no cached report is available")
+    try:
+        data = json.loads(payload or "")
+    except ValueError:
+        return _fail("doctor failed and the cached report is not valid JSON")
+    if not isinstance(data, dict):
+        return _fail("doctor failed and the cached report is not a JSON object")
+    relaxed = replace(settings, max_report_age_seconds=CACHED_REPORT_MAX_AGE_SECONDS)
+    report = validate_report(data, relaxed, home, clock)
+    if not report.ok:
+        return _fail(f"doctor failed and the cached report is unusable: {report.reason}")
+    try:
+        age = max(clock() - (report.generated_at or clock()), 0.0)
+    except (TypeError, ValueError):
+        age = 0.0
+    report.cached = True
+    report.reason = f"doctor report from cache ({age:.0f}s old)"
+    return report
+
+
 def load_report(
     settings: LaneSettings,
     home: Path,
     doctor_runner: Optional[DoctorRunner] = None,
     clock: Callable[[], float] = time.time,
+    cache_file: Optional[Path] = None,
+    cache_write: bool = True,
 ) -> LaneReport:
-    """Run the doctor and validate its report.  Never raises; any problem is a fail-closed LaneReport."""
-    argv = list(settings.command)
+    """Run the doctor and validate its report.  Never raises; any problem is a fail-closed LaneReport.
+    When cache_file is given, a validated report is saved there on success, and a failed run falls back
+    to the cached report when one is young enough (CACHED_REPORT_MAX_AGE_SECONDS).  Only a report that
+    passes every gate may overwrite the cache, so a bad run can never poison it.  cache_write=False
+    (dry runs) reads the cache but never writes it: planning persists no state."""
+    argv, argv_error = _doctor_argv(settings)
+    if argv_error:
+        return _fail(argv_error, command=tuple(argv))
     if not argv:
         return _fail("no doctor command configured")
     exe = argv[0]
@@ -288,23 +429,55 @@ def load_report(
         return _fail(f"doctor command missing: {exe}", command=tuple(argv))
     runner = doctor_runner or run_doctor_process
     started = clock()
+    timeout = budget.timeout(adaptive_doctor_timeout(settings, cache_file))
     try:
-        res = runner(argv, settings.timeout_seconds)
+        res = runner(argv, timeout)
     except subprocess.TimeoutExpired:
-        return _fail(f"doctor timed out after {settings.timeout_seconds:g}s", command=tuple(argv))
+        budget.check()
+        seconds = max(clock() - started, 0.0)
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
+        return _fail(f"doctor timed out after {timeout:g}s", command=tuple(argv), seconds=seconds)
     except (OSError, ValueError) as exc:
-        return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv))
+        seconds = max(clock() - started, 0.0)
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
+        return _fail(f"doctor could not run ({type(exc).__name__})", command=tuple(argv), seconds=seconds)
+    budget.check()
     seconds = max(clock() - started, 0.0)
     if res.returncode != 0:
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
         tail = " ".join((res.stderr or "").split())[:160]
         return _fail(f"doctor exited {res.returncode}" + (f": {tail}" if tail else ""), command=tuple(argv), seconds=seconds)
     try:
         data = json.loads(res.stdout or "")
     except ValueError:
+        if cache_file is not None:
+            cached = _load_cached_report(cache_file, settings, home, clock)
+            if cached.ok:
+                cached.command = tuple(argv)
+                cached.seconds = seconds
+                return cached
         return _fail("doctor output is not valid JSON", command=tuple(argv), seconds=seconds)
     report = validate_report(data, settings, home, clock)
     report.command = tuple(argv)
     report.seconds = seconds
+    if report.ok and cache_file is not None and cache_write and isinstance(data, dict):
+        _save_doctor_cache(cache_file, res.stdout or "")
+        record_doctor_duration(cache_file, seconds)
     return report
 
 
@@ -317,6 +490,14 @@ def validate_report(data: Any, settings: LaneSettings, home: Path, clock: Callab
         return _fail("doctor report has no schema number")
     if schema < settings.min_schema:
         return _fail(f"doctor schema {schema} is below the required {settings.min_schema}")
+    reported_retire_days = _num(data.get("cleaner_min_days"))
+    if reported_retire_days is None:
+        if settings.retire_min_days != DEFAULT_RETIRE_MIN_DAYS:
+            return _fail("doctor report has no cleaner_min_days for the configured retention")
+    elif reported_retire_days != settings.retire_min_days:
+        return _fail(
+            f"doctor cleaner_min_days is {reported_retire_days:g}, expected {settings.retire_min_days:g}"
+        )
     stamp = data.get("generated_at")
     generated = parse_timestamp(stamp)
     if generated is None:
@@ -397,6 +578,10 @@ class LaneScan:
     refused: list = field(default_factory=list)
     generated_at: str = ""
     doctor_seconds: float = 0.0
+    # The doctor's overall PR lookup status, kept so the plan can show it.
+    # It is not a gate (a candidate is judged on its own repository), but a
+    # reader has to be able to see that the report was partial.
+    lookup_status: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -404,6 +589,7 @@ class LaneScan:
             "reason": self.reason,
             "report_generated_at": self.generated_at,
             "doctor_seconds": round(self.doctor_seconds, 1),
+            "lookup_status": self.lookup_status,
             "choices": [c.as_dict() for c in self.choices],
             "refused": list(self.refused),
         }
@@ -634,6 +820,24 @@ def process_state(runner: Runner, pattern: str, what: str = "a running process m
     return True, f"pgrep exited {res.returncode}; treated as busy"
 
 
+def executable_state(runner: Runner, name: str, what: Optional[str] = None) -> tuple:
+    """Check an executable name exactly, without matching unrelated argv text.
+
+    `pgrep -x` checks the process name instead of its full command line.  As
+    with process_state, any probe failure is busy so a failed lookup cannot
+    open a destructive gate.
+    """
+    label = what or f"{name} is running"
+    res, err = call(runner, ["pgrep", "-x", name], 3.0)
+    if res is None:
+        return True, f"pgrep failed ({err}); treated as busy"
+    if res.returncode == 0:
+        return True, label
+    if res.returncode == 1:
+        return False, ""
+    return True, f"pgrep exited {res.returncode}; treated as busy"
+
+
 _ERE_SPECIAL = re.compile(r"([.\[\\()*+?{|^$])")
 
 
@@ -661,16 +865,25 @@ def _walk_dirs(root: str, cap: int, skip_names: frozenset = frozenset()):
     seen = 0
     stack = [root]
     while stack:
+        budget.check()
         current = stack.pop()
         with os.scandir(current) as listing:
-            entries = list(listing)
-        seen += len(entries)
-        if seen > cap:
-            raise _WalkCap(cap)
-        yield current, entries
-        for entry in entries:
-            if entry.name not in skip_names and entry.is_dir(follow_symlinks=False):
-                stack.append(entry.path)
+            # Incremental batches bound memory and allow cancellation even in
+            # a single directory containing millions of entries.
+            entries = []
+            for entry in listing:
+                budget.check()
+                seen += 1
+                if seen > cap:
+                    raise _WalkCap(cap)
+                entries.append(entry)
+                if entry.name not in skip_names and entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                if len(entries) == 128:
+                    yield current, entries
+                    entries = []
+            if entries:
+                yield current, entries
 
 
 class _WalkCap(Exception):
@@ -697,6 +910,8 @@ def nested_repo_blocker(folder: str, cap: int = NESTED_WALK_CAP) -> str:
             for entry in entries:
                 if entry.name.casefold() == ".git":
                     return f"a nested git repository at {entry.path}"
+                if entry.name.casefold() == KEEP_SENTINEL:
+                    return f"keep marker at {entry.path}"
     except _WalkCap:
         return f"more than {cap} entries under {folder}, too many to prove no nested git repository is inside"
     except OSError as exc:
@@ -833,13 +1048,29 @@ def never_touch_reason(path: str, home_real: str) -> str:
 
 def _live_basics(path: str, co: dict, ctx: LaneContext) -> str:
     """Filesystem facts that do not need git.  Empty string means pass."""
-    if os.path.realpath(path) != path:
-        return "path resolves somewhere else now"
+    # The path itself must be a plain directory: a symlinked lane could point
+    # anywhere.  A symlinked PARENT is normal and must not refuse the lane:
+    # the fleet keeps its lanes under a per-repository root behind a
+    # symlink, and the doctor reports that spelling without
+    # resolving it.  The old check compared the path with its own realpath,
+    # so every lane on the external drive was refused with "path resolves
+    # somewhere else now" and could never be retired.  The lane's identity is
+    # proved by the repository it belongs to instead (see _linked_facts and
+    # the parent-repo check in recheck_for_removal).
     if os.path.islink(path) or not os.path.isdir(path):
         return "path is not a plain directory"
     if not path.startswith(ctx.home_real + os.sep):
         return "outside the home directory"
     why = never_touch_reason(path, ctx.home_real)
+    if why:
+        return why
+    # The spelling above proves nothing about where the lane really lives: a symlinked parent is
+    # allowed now, so a lane root can point at a protected home folder, and the old
+    # realpath check no longer refuses it.  git worktree remove follows the link and deletes the
+    # resolved directory, so the never-touch rule has to be read against the resolved path too.
+    # A lane on the external disk resolves outside home and is unaffected: the rule names folders
+    # under home, and /Volumes is not one of them.
+    why = never_touch_reason(os.path.realpath(path), ctx.home_real)
     if why:
         return why
     git_entry = os.path.join(path, ".git")
@@ -854,11 +1085,18 @@ def _live_processes(path: str, ctx: LaneContext) -> str:
     cwds, err = ctx.cwd_paths()
     if cwds is None:
         return f"process check failed: {err}"
-    folded = path.casefold()
+    # lsof reports each working directory as the kernel sees it, which is the
+    # physical path.  A lane behind a symlinked parent (the external-disk lanes
+    # root) is spelled with the symlink here, so its resolved path has to be
+    # compared as well or a process sitting in an external lane goes unseen.
+    # The lane itself is never a symlink (_live_basics refuses that), so this
+    # only ever resolves the parent chain.
+    folded = {path.casefold(), os.path.realpath(path).casefold()}
     for cwd in cwds:
         low = cwd.casefold()
-        if low == folded or low.startswith(folded + os.sep):
-            return "a process has it as its working directory"
+        for one in folded:
+            if low == one or low.startswith(one + os.sep):
+                return "a process has it as its working directory"
     busy, reason = path_process_state(ctx.runner, path)
     return reason if busy else ""
 
@@ -891,6 +1129,33 @@ def _linked_facts(path: str, co: dict, ctx: LaneContext):
     if not os.path.isdir(os.path.join(repo_root, ".git")) or os.path.realpath(os.path.join(repo_root, ".git")) != common:
         return "", "cannot find the main repository to run the removal from"
     return repo_root, ""
+
+
+def _reported_repo(co: dict) -> str:
+    """The repository the doctor recorded for this lane, or "" when it recorded none."""
+    value = co.get("parent_repo")
+    return value if isinstance(value, str) else ""
+
+
+def _repo_matches_report(repo_root: str, co: dict) -> str:
+    """The lane must still belong to the repository the doctor saw.  Returns a refusal, or "" when it does.
+
+    Every step that touches a lane makes this check: retirement removes the lane itself, and clearing
+    regenerable folders deletes inside it.  Both use it, so a lane that has moved to another repository
+    is left alone by either.  The doctor records that repository as `parent_repo` on every row it
+    reports (the 2026-10-19 report carried it on 798 of 798 rows).  When it is not there - an older
+    doctor, whose report the schema does not yet require it from - there is nothing to confirm against
+    and nothing is refused here."""
+    expected_repo = _reported_repo(co)
+    if not expected_repo:
+        return ""
+    # Case-insensitively, like every other path comparison here: the two
+    # spellings are recorded independently (Git's common dir against the
+    # doctor's parent repository) and the filesystem is case-insensitive,
+    # so a case-only difference is the same directory.
+    if os.path.realpath(repo_root).casefold() != os.path.realpath(expected_repo).casefold():
+        return "it now belongs to a different repository"
+    return ""
 
 
 def _head_matches_report(path: str, co: dict, ctx: LaneContext) -> str:
@@ -1009,6 +1274,21 @@ def recheck_for_removal(path: str, co: dict, ctx: LaneContext, notes: Optional[l
     repo_root, why = _linked_facts(path, co, ctx)
     if why:
         return "", why
+    # The lane must still belong to the repository the doctor saw.  This is
+    # what the old "path resolves somewhere else" check really meant, and it
+    # survives the fleet's symlinked lanes root: where the lane lives on disk
+    # says nothing, which repository it belongs to says everything.
+    #
+    # Where the report does not name the repository (_repo_matches_report),
+    # refusing every lane would make retirement a no-op for ordinary lanes
+    # too.  So the fallback is the behaviour this change replaced: a lane
+    # whose own spelling resolves somewhere else cannot be confirmed and is
+    # refused.
+    why = _repo_matches_report(repo_root, co)
+    if why:
+        return "", why
+    if not _reported_repo(co) and os.path.realpath(path) != os.path.normpath(path):
+        return "", "the doctor did not say which repository this lane belongs to"
     why = _head_matches_report(path, co, ctx)
     if why:
         return "", why
@@ -1053,15 +1333,26 @@ def assert_no_force(argv: list) -> None:
 # --------------------------------------------------------------------------- selectors
 
 
-def _evidence(co: dict, notes: list) -> list:
+def _evidence(co: dict, notes: list, report: Optional[LaneReport] = None) -> list:
+    """Why this lane may go, in the order a reader wants it.  The PR lookup line
+    says what the lookup for THIS lane's repository answered, not a flat "gh
+    ok": a report whose overall lookup was partial still carries the lanes
+    whose own repository answered, and the line has to say so truthfully."""
     pr = f"PR {co.get('pr_state')}" + (f" #{co.get('pr_number')}" if co.get("pr_number") else "")
+    repo = co.get("owner_repo")
+    status = None
+    if report is not None and isinstance(repo, str) and repo:
+        repos = report.data.get("gh_repos")
+        if isinstance(repos, dict):
+            status = repos.get(repo)
+    lookup = f"gh {status}" if isinstance(status, str) and status else "gh ok"
     return [
         pr,
         f"safety {co.get('safety')}",
         f"age {co.get('lane_age_days')}d",
         f"idle {co.get('idle_days')}d",
         *notes,
-        "gh ok",
+        lookup,
     ]
 
 
@@ -1079,11 +1370,18 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
     """Lanes the doctor lists AND that pass the Vacuum's re-check.  Fails closed with an empty choices list."""
     if not report.ok:
         return LaneScan(False, report.reason, doctor_seconds=report.seconds)
-    scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds)
-    if not report.gh_ok:
-        scan.ok = False
-        scan.reason = report.gh_reason
-        return scan
+    # lookup_status carries the doctor's raw status token ("ok", "partial",
+    # "failed", "skipped") so a consumer can switch on it; gh_reason stays the
+    # human-readable sentence for the log.
+    scan = LaneScan(True, generated_at=report.generated_at_text, doctor_seconds=report.seconds,
+                    lookup_status=str(report.data.get("gh") or "unknown"))
+    # The doctor's overall gh status is NOT a gate here.  It says whether every
+    # repository's PR lookup came back, and one failed lookup (a retired repo,
+    # a network blip) used to throw away the whole report, so a single bad
+    # repository stopped every lane on the machine from being retired.  The
+    # precise gate already exists per candidate: report_gate_retire refuses a
+    # candidate whose OWN repository's lookup failed, and a candidate with no
+    # merged-PR evidence has none to trust either way.
     listed = report.data.get("cleaner_candidates")
     if not isinstance(listed, list):
         scan.ok = False
@@ -1091,6 +1389,7 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
         return scan
     seen = set()
     for item in listed:
+        budget.check()
         if not isinstance(item, str) or not item:
             scan.refused.append({"path": repr(item)[:120], "reason": "candidate is not a path string"})
             continue
@@ -1122,7 +1421,7 @@ def removable_lanes(report: LaneReport, ctx: LaneContext) -> LaneScan:
                 owner_repo=str(co.get("owner_repo") or ""),
                 location_class=str(co.get("location_class") or ""),
                 size_bytes=dir_size_bytes(item, ctx.runner),
-                reasons=_evidence(co, notes),
+                reasons=_evidence(co, notes, report),
                 command=removal_argv(repo_root, item),
                 checkout=co,
             )
@@ -1136,6 +1435,7 @@ def dependency_candidates(report: LaneReport, ctx: LaneContext) -> tuple:
     passing: list = []
     refused: list = []
     for path in sorted(report.by_real):
+        budget.check()
         co = report.by_real[path]
         why = report_gate_deps(co, ctx)
         if why:
@@ -1153,6 +1453,11 @@ def evaluate_dependency_lane(path: str, co: dict, ctx: LaneContext) -> tuple:
     if why:
         return None, why
     repo_root, why = _linked_facts(path, co, ctx)
+    if why:
+        return None, why
+    # Clearing folders is a delete too, so it makes the same repository check
+    # retirement makes, before anything in the lane is touched.
+    why = _repo_matches_report(repo_root, co)
     if why:
         return None, why
     res, err = _git(ctx.runner, path, ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"])
@@ -1197,8 +1502,13 @@ def safe_target_path(lane: str, rel: str) -> str:
     full = os.path.join(lane, rel)
     if os.path.islink(full) or not os.path.isdir(full):
         return ""
+    # Containment is decided on the resolved paths, because a lane behind a symlinked parent (the
+    # external-disk lanes root) has a resolved target that never matches its spelling, and spelling
+    # equality would refuse every target in it.  The target must still be a plain folder, and must
+    # still resolve inside the resolved lane, so a link out of the lane is refused as before.
+    real_lane = os.path.realpath(lane)
     real = os.path.realpath(full)
-    if real != os.path.normpath(full) or not real.startswith(lane + os.sep):
+    if not real.startswith(real_lane + os.sep):
         return ""
     return real
 
@@ -1215,6 +1525,53 @@ def deletable_target(lane: str, rel: str) -> tuple:
     if why:
         return "", why
     return full, ""
+
+
+def remove_dependency_tree(path: str, on_bytes=None) -> int:
+    """Delete cooperatively through directory descriptors, never following links.
+
+    The caller proves lane safety before entry.  A changing tree or new keep/git
+    marker refuses further deletion; already removed files are counted exactly.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    removed = 0
+
+    def clear(fd):
+        nonlocal removed
+        with os.scandir(fd) as listing:
+            for entry in listing:
+                budget.check()
+                if entry.name.casefold() in {".git", KEEP_SENTINEL}:
+                    raise OSError("protected marker appeared during dependency cleanup")
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    child = os.open(entry.name, flags, dir_fd=fd)
+                    try:
+                        clear(child)
+                    finally:
+                        os.close(child)
+                    budget.check()
+                    os.rmdir(entry.name, dir_fd=fd)
+                else:
+                    budget.check()
+                    os.unlink(entry.name, dir_fd=fd)
+                    removed += st.st_size
+                    if on_bytes is not None:
+                        on_bytes(removed)
+    budget.check()
+    parent = os.open(os.path.dirname(path), flags)
+    try:
+        name = os.path.basename(path)
+        fd = os.open(name, flags, dir_fd=parent)
+        try:
+            clear(fd)
+        finally:
+            os.close(fd)
+        budget.check()
+        os.rmdir(name, dir_fd=parent)
+    finally:
+        os.close(parent)
+    return removed
 
 
 # --------------------------------------------------------------------------- the action log

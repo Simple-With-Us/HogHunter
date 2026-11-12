@@ -1,15 +1,75 @@
 import SwiftUI
+import UIKit
 
 enum CompanionTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case activity = "Activity"
     case storage = "Storage"
+    case maintain = "Maintain"
     case network = "Network"
+    case server = "Server"
+    var id: String { rawValue }
+
+    /// The same SF Symbol the Mac's window uses for this tab
+    /// (Sources/UI/HogHunterPanel.swift), so the phone's compact picker and
+    /// the Mac's tabs read as one control.
+    var symbol: String {
+        switch self {
+        case .overview: return "house"
+        case .activity: return "chart.bar.xaxis"
+        case .storage: return "internaldrive"
+        case .maintain: return "wrench.and.screwdriver"
+        case .network: return "network"
+        case .server: return "server.rack"
+        }
+    }
+}
+
+/// The Mac's Storage subtabs on the phone (HH-212).  The Mac names them
+/// Installed Apps, Disk Cleaner and Drives & Folders; the phone shortens the
+/// labels so the segmented picker fits.
+enum CompanionStorageSubTab: String, CaseIterable, Identifiable {
+    case apps = "Apps"
+    case cleaner = "Cleaner"
+    case drives = "Drives"
     var id: String { rawValue }
 }
 
 enum CompanionSort: String, CaseIterable, Identifiable {
     case cpu = "CPU %"
     case memory = "Memory"
+    var id: String { rawValue }
+
+    /// The name the Mac uses for this sort.  The Mac takes "CPU" or "Memory",
+    /// so the phone sends that and not its own label.
+    var macValue: String {
+        switch self {
+        case .cpu: return "CPU"
+        case .memory: return "Memory"
+        }
+    }
+
+    /// The sort the Mac reports, as one of the phone's own choices.  Nil when
+    /// the Mac named a sort this app does not know.
+    init?(macValue: String) {
+        switch macValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "cpu": self = .cpu
+        case "memory": self = .memory
+        default: return nil
+        }
+    }
+}
+
+enum CompanionNetworkSort: String, CaseIterable, Identifiable {
+    case connections = "Active"
+    case hosts = "Hosts"
+    var id: String { rawValue }
+}
+
+enum CompanionAppStorageSort: String, CaseIterable, Identifiable {
+    case total = "Total Size"
+    case hidden = "Hidden Clutter"
+    case bundle = "App Bundle"
     var id: String { rawValue }
 }
 
@@ -103,6 +163,46 @@ extension CompanionRow {
     }
 }
 
+/// A short status label.  System orange, green, and purple fail WCAG AA as
+/// small text, so the ink and the fill stay above 4.5:1 in light and dark.
+struct StatusChip: View {
+    enum Tone { case neutral, caution, notice }
+
+    let text: String
+    var tone: Tone = .neutral
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Self.ink(tone))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Self.wash(tone)))
+    }
+
+    private static func ink(_ tone: Tone) -> Color { color(tone, text: true) }
+    private static func wash(_ tone: Tone) -> Color { color(tone, text: false) }
+
+    private static func color(_ tone: Tone, text: Bool) -> Color {
+        let pair = pairs(tone, text: text)
+        return Color(uiColor: UIColor { traits in
+            let rgb = traits.userInterfaceStyle == .dark ? pair.dark : pair.light
+            return UIColor(red: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1)
+        })
+    }
+
+    private static func pairs(_ tone: Tone, text: Bool) -> (light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat)) {
+        switch (tone, text) {
+        case (.neutral, true): return ((0.04, 0.24, 0.51), (0.77, 0.87, 1.0))
+        case (.neutral, false): return ((0.89, 0.93, 0.98), (0.06, 0.14, 0.24))
+        case (.caution, true): return ((0.45, 0.24, 0.0), (1.0, 0.86, 0.62))
+        case (.caution, false): return ((1.0, 0.93, 0.82), (0.28, 0.18, 0.08))
+        case (.notice, true): return ((0.0, 0.36, 0.16), (0.72, 0.94, 0.78))
+        case (.notice, false): return ((0.85, 0.95, 0.89), (0.05, 0.16, 0.09))
+        }
+    }
+}
+
 struct CompanionRootView: View {
     @Bindable var model: CompanionModel
 
@@ -176,8 +276,8 @@ struct CompanionRootView: View {
                 DashboardView(snapshot: snapshot, model: model)
             } else {
                 StatusPage(
-                    title: "Waiting for a Snapshot",
-                    message: "Hog Hunter is connected and waiting for the next sample from your Mac."
+                    title: "Waiting for Your Mac",
+                    message: "Hog Hunter is connected and waiting for the next reading from your Mac."
                 )
             }
         case .choose:
@@ -185,7 +285,7 @@ struct CompanionRootView: View {
         case .offline:
             StatusPage(
                 title: "Mac Offline or Not Found",
-                message: model.statusLine + "  Hog Hunter shares while the Mac app is open and Share With iPhone is on.  Off Wi-Fi or remote?  Tap below to connect via Tailscale or your Mac's IP/domain on port \(CompanionModel.defaultPort).",
+                message: offlineDetail(status: model.statusLine),
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -198,7 +298,7 @@ struct CompanionRootView: View {
         case .looking, .code:
             StatusPage(
                 title: "Looking for Your Mac",
-                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.  Both devices need the same Wi-Fi, or connect via Tailscale.  Off Wi-Fi?  Tap below to enter your Mac's Tailscale name (e.g. my-mac.tailnet.ts.net) or IP on port \(CompanionModel.defaultPort).",
+                message: "Open Hog Hunter on your Mac, then turn on Share With iPhone in Settings.\u{00A0} Both devices need the same Wi-Fi, or Tailscale.\u{00A0} Away from Wi-Fi?\u{00A0} Enter your Mac's Tailscale name or address.",
                 isOnWiFi: model.isOnWiFi,
                 onRemoteConnect: {
                     model.remoteConnectError = nil
@@ -209,6 +309,18 @@ struct CompanionRootView: View {
                 }
             )
         }
+    }
+
+    /// Joins the status line to the recovery note.  A finished sentence gets
+    /// the no-break gap; a name such as "MacBook (Remote)" gets one space.
+    private func offlineDetail(status: String) -> String {
+        let follow = "Hog Hunter shares while the Mac app is open and Share With iPhone is on.\u{00A0} Away from Wi-Fi?\u{00A0} Connect with Tailscale or your Mac's address."
+        let lead = status.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !lead.isEmpty else { return follow }
+        if let last = lead.last, ".!?".contains(last) {
+            return lead + "\u{00A0} " + follow
+        }
+        return lead + " " + follow
     }
 }
 
@@ -259,7 +371,7 @@ private struct StatusPage: View {
                 VStack(spacing: 6) {
                     Label("This iPhone is not on Wi-Fi", systemImage: "wifi.slash")
                         .font(.subheadline.weight(.semibold))
-                    Text("Do you use Tailscale or another route to your Mac?  Connect by address on port \(CompanionModel.defaultPort).")
+                    Text("Do you use Tailscale or another route to your Mac?\u{00A0} Connect by address on port \(CompanionModel.defaultPort).")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -281,7 +393,7 @@ private struct StatusPage: View {
 
                     if let onDemoMode {
                         Button(action: onDemoMode) {
-                            Label("Explore Demo Mode (App Review)", systemImage: "sparkles")
+                            Label("Preview Sample Data", systemImage: "sparkles")
                                 .font(.subheadline.weight(.medium))
                         }
                         .buttonStyle(.bordered)
@@ -375,7 +487,7 @@ private struct CodeEntryView: View {
                     }
                     .disabled(model.isWaitingForApproval || model.isSubmittingCode)
                 } footer: {
-                    Text("No code needed.  Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.")
+                    Text("No code needed.\u{00A0} Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.\u{00A0} Quit, tame, and clean work only on the same network or over Tailscale.")
                 }
                 if let codeError = model.codeError {
                     Section {
@@ -410,9 +522,32 @@ struct SampleOutcome: Identifiable {
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
-    @State private var selectedTab: CompanionTab = ProcessInfo.processInfo.arguments.contains("-HogHunterStorage") ? .storage : (ProcessInfo.processInfo.arguments.contains("-HogHunterNetwork") ? .network : .activity)
+    @State private var selectedTab: CompanionTab = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterActivity") { return .activity }
+        if arguments.contains("-HogHunterStorage") { return .storage }
+        if arguments.contains("-HogHunterMaintain") { return .maintain }
+        if arguments.contains("-HogHunterNetwork") { return .network }
+        if arguments.contains("-HogHunterServer") { return .server }
+        // The Mac opens on Overview; the phone matches (HH-212).
+        return .overview
+    }()
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
+    /// Counts the sort requests this view has sent, so a reply for an older
+    /// one cannot put a sort the Mac has already left back on the list.
+    @State private var sortRequestGeneration: Int = 0
+    @State private var networkSortOrder: CompanionNetworkSort = .connections
+    @State private var appStorageSortOrder: CompanionAppStorageSort = .total
+    /// The Storage pane on screen.  Drives stays the default so the Mac's own
+    /// disk usage keeps its place as the first storage a person sees.  The
+    /// flags exist for the screenshot lane, which has to reach each pane.
+    @State private var storageSubTab: CompanionStorageSubTab = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterStorageApps") { return .apps }
+        if arguments.contains("-HogHunterStorageCleaner") { return .cleaner }
+        return .drives
+    }()
     @State private var showCleanConfirm = false
     @State private var pendingQuitRow: CompanionRow?
     @State private var isForceQuit = false
@@ -446,11 +581,12 @@ struct DashboardView: View {
     private func consumeCleanRequest() {
         guard model.takeCleanRequest() else { return }
         // The link never calls triggerRemoteClean.  Offer the destructive
-        // confirmation only when the Mac has opted in.
-        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) {
+        // confirmation only when the Mac has opted in and this link is one
+        // the Mac takes controls on.
+        if CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) && model.controlsReachable {
             showCleanConfirm = true
         } else {
-            model.controlError = CleanLinkPolicy.cleanOffNote
+            model.controlError = model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote)
         }
     }
 
@@ -460,14 +596,57 @@ struct DashboardView: View {
         showQuitConfirm = true
     }
 
+    /// Whether a Flagged Issue may show its button: the opt-in its action needs
+    /// is on, and this link is one the Mac takes controls on.  The Mac also
+    /// leaves the action off while the opt-in is off; this is the phone's half.
+    private func issueActionAllowed(_ action: CompanionIssueAction) -> Bool {
+        guard model.controlsReachable else { return false }
+        switch action {
+        case .quit: return snapshot.remoteQuitAllowed == true
+        case .clean: return snapshot.remoteCleanAllowed == true
+        case .retry:
+            if case .available = snapshot.serverAccess { return true }
+            return false
+        }
+    }
+
+    /// Each button goes where the phone already goes for that action.  Quit
+    /// takes the row the issue names to the usual confirmation, by row id,
+    /// and the Mac's quit route checks it again.
+    private func performIssueAction(_ issue: CompanionFlaggedIssue, _ action: CompanionIssueAction) {
+        guard issueActionAllowed(action) else { return }
+        switch action {
+        case .quit:
+            guard let row = snapshot.rows.first(where: { CompanionFlaggedIssue.quitIssueID(forRow: $0.id) == issue.id }), row.canQuit else {
+                model.controlError = "That process is no longer in the list.\u{00A0} Wait for the list to refresh, then try again."
+                return
+            }
+            confirmQuit(row: row, force: false)
+        case .clean:
+            showCleaner = true
+        case .retry:
+            // The Server tab shows the note under its Refresh button.  Anywhere
+            // else the outcome goes to the alert, so a refusal is not silent.
+            let onServerTab = selectedTab == .server
+            Task {
+                await model.refreshServer()
+                if !onServerTab, let note = model.serverRefreshNote {
+                    model.controlError = note
+                }
+            }
+        }
+    }
+
     private func confirmTame(row: CompanionRow, action: String) {
         pendingTameRow = row
         pendingTameAction = action
         showTameConfirm = true
     }
 
-    /// Exclusion and view changes exist only when the Mac owner turned them on.
-    private var canEdit: Bool { snapshot.remoteEditAllowed == true }
+    /// Exclusion and view changes exist only when the Mac owner turned them on
+    /// and this link is one the Mac takes controls on.  Anything else answers
+    /// 403, so the phone does not offer buttons that cannot work.
+    private var canEdit: Bool { snapshot.remoteEditAllowed == true && model.controlsReachable }
 
     /// The CPU rows' scale as the Mac reports it ("Per Core" or "Share of Machine").
     private var isMachineScale: Bool {
@@ -524,6 +703,87 @@ struct DashboardView: View {
         return sortAscending ? sorted.reversed() : sorted
     }
 
+    /// Sends the phone's sort to the Mac, so the two lists agree about which
+    /// app is on top.  The Mac's opt-in governs: without it the phone still
+    /// sorts its own list and the Mac keeps the sort it has.
+    ///
+    /// The list is changed before the Mac answers, so a refused or failed
+    /// change has to be undone.  Each request takes a number, and only the
+    /// newest one may undo the change: an older answer must not put a sort
+    /// the Mac has already left back on the list.
+    private func sendSort(_ order: CompanionSort, ascending: Bool) {
+        guard canEdit else { return }
+        sortRequestGeneration += 1
+        let generation = sortRequestGeneration
+        Task {
+            await model.switchSort(order.macValue, ascending: ascending)
+            guard generation == sortRequestGeneration else { return }
+            fallBackToMacSort()
+        }
+    }
+
+    /// Falls back to the sort the Mac took.  `switchSort` refreshes before it
+    /// returns, so the model's snapshot is the Mac's answer: a refused or
+    /// failed change reverts instead of leaving the list sorted a way the
+    /// Mac did not take.  Read through the model (a reference, always
+    /// current), not this view's snapshot (a value, fixed when tapped).
+    ///
+    /// Only the newest request gets here, so a slow answer cannot undo a
+    /// sort the person has made since.
+    private func fallBackToMacSort() {
+        guard let settings = model.snapshot?.settings else { return }
+        if let macSort = CompanionSort(macValue: settings.sort), macSort != sortOrder {
+            sortOrder = macSort
+        }
+        if settings.sortAscending != sortAscending {
+            sortAscending = settings.sortAscending
+        }
+    }
+
+    /// Takes the sort the Mac holds, so the phone shows what the Mac shows.
+    /// A sort changed on the Mac reaches the phone here.
+    private func syncSortFromMac() {
+        guard let settings = snapshot.settings else { return }
+        if let macSort = CompanionSort(macValue: settings.sort), macSort != sortOrder {
+            sortOrder = macSort
+        }
+        if settings.sortAscending != sortAscending {
+            sortAscending = settings.sortAscending
+        }
+    }
+
+    private var sortedNetworkRows: [CompanionNetworkRow] {
+        guard let rows = snapshot.network else { return [] }
+        switch networkSortOrder {
+        case .connections:
+            return rows.sorted { a, b in
+                if a.establishedCount != b.establishedCount {
+                    return a.establishedCount > b.establishedCount
+                }
+                return a.uniqueRemoteHosts > b.uniqueRemoteHosts
+            }
+        case .hosts:
+            return rows.sorted { a, b in
+                if a.uniqueRemoteHosts != b.uniqueRemoteHosts {
+                    return a.uniqueRemoteHosts > b.uniqueRemoteHosts
+                }
+                return a.establishedCount > b.establishedCount
+            }
+        }
+    }
+
+    private var sortedAppStorageRows: [CompanionAppStorageRow] {
+        guard let apps = snapshot.storage?.topApps else { return [] }
+        switch appStorageSortOrder {
+        case .total:
+            return apps.sorted { $0.totalBytes > $1.totalBytes }
+        case .hidden:
+            return apps.sorted { $0.hiddenBytes > $1.hiddenBytes }
+        case .bundle:
+            return apps.sorted { $0.bundleBytes > $1.bundleBytes }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if model.isDemoMode {
@@ -531,19 +791,31 @@ struct DashboardView: View {
                     Image(systemName: "sparkles")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
-                    Text("Explore Demo Mode (App Review)")
+                    Text("Sample data.\u{00A0} This is not your Mac.")
                         .font(.caption.weight(.semibold))
                     Spacer()
-                    Button("Exit Demo") {
+                    Button("Exit Preview") {
                         model.exitDemoMode()
                     }
-                    .font(.caption2.weight(.medium))
+                    .font(.caption.weight(.medium))
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .frame(minHeight: 44)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
                 .background(Color.blue.opacity(0.12))
+            }
+            if model.snapshotVersionMismatch {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                    Text("This Mac and this iPhone are on different versions.\u{00A0} Update Hog Hunter on both to see everything.")
+                        .font(.caption.weight(.medium))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.12))
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -554,7 +826,12 @@ struct DashboardView: View {
                     .padding(.top, 6)
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(CompanionTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
+                        // Six named segments do not fit a phone, so the picker
+                        // carries the Mac's own icons; the names stay as the
+                        // accessibility labels (HH-212).
+                        Image(systemName: tab.symbol)
+                            .accessibilityLabel(tab.rawValue)
+                            .tag(tab)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -565,16 +842,40 @@ struct DashboardView: View {
             List {
                 hostHeaderSection
 
+                // The first tab a person sees and the tab about the server: the
+                // two places "is anything wrong?" gets asked.
+                if selectedTab == .overview || selectedTab == .activity || selectedTab == .server {
+                    FlaggedIssuesSection(snapshot: snapshot, canAct: issueActionAllowed, onAction: performIssueAction)
+                }
+
                 switch selectedTab {
+                case .overview:
+                    overviewContent
                 case .activity:
                     activityContent
                 case .storage:
                     storageContent
+                case .maintain:
+                    maintainContent
                 case .network:
                     networkContent
+                case .server:
+                    ServerTabContent(snapshot: snapshot, model: model)
                 }
             }
             .listStyle(.insetGrouped)
+            .refreshable {
+                // On the Server tab a pull asks the Mac to read the server too,
+                // when this phone may see it.  Anywhere else it re-polls.
+                if selectedTab == .server, issueActionAllowed(.retry) {
+                    await model.refreshServer()
+                } else {
+                    await model.refresh()
+                }
+            }
+            .sheet(item: $model.serverActionOutcome) { outcome in
+                ServerActionResultView(outcome: outcome)
+            }
         }
         .confirmationDialog(
             "Clean \(snapshot.hostName)?",
@@ -583,9 +884,10 @@ struct DashboardView: View {
         ) {
             Button("Run Safe Clean", role: .destructive) {
                 // The only place a Clean deep link can reach the Mac, and
-                // only after the Mac opt-in.  hoghunter://clean stops here.
-                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) else {
-                    model.controlError = CleanLinkPolicy.cleanOffNote
+                // only after the Mac opt-in on a link it takes controls on.
+                // hoghunter://clean stops here.
+                guard CleanLinkPolicy.mayOfferCleanConfirmation(remoteCleanAllowed: snapshot.remoteCleanAllowed) && model.controlsReachable else {
+                    model.controlError = model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote)
                     return
                 }
                 Task { await model.triggerRemoteClean() }
@@ -611,7 +913,7 @@ struct DashboardView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(isForceQuit
-                ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).  Any unsaved work will be lost."
+                ? "Force quitting \(pendingQuitRow?.name ?? "this app") will terminate it immediately on \(snapshot.hostName).\u{00A0} Any unsaved work will be lost."
                 : "Quitting \(pendingQuitRow?.name ?? "this app") will ask it to close gracefully on \(snapshot.hostName).")
         }
         .confirmationDialog(
@@ -688,9 +990,18 @@ struct DashboardView: View {
         } message: {
             Text(model.controlError ?? "")
         }
-        .onAppear { consumeCleanRequest() }
+        .onAppear {
+            consumeCleanRequest()
+            syncSortFromMac()
+        }
         .onChange(of: model.showCleanDialogRequested) { _, _ in
             consumeCleanRequest()
+        }
+        .onChange(of: snapshot.settings?.sort) { _, _ in
+            syncSortFromMac()
+        }
+        .onChange(of: snapshot.settings?.sortAscending) { _, _ in
+            syncSortFromMac()
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -778,49 +1089,168 @@ struct DashboardView: View {
         }
     }
 
+    /// The CPU and memory meters with their pills.  Overview and Activity
+    /// both lead with these, the pair the Mac's own Overview opens with.
     @ViewBuilder
-    private var activityContent: some View {
-        Section {
-            HStack(alignment: .top, spacing: 12) {
-                MeterCard(
-                    title: "CPU",
-                    value: snapshot.pulse.cpuPercent,
-                    headline: snapshot.pulse.cpuText,
-                    caption: snapshot.pulse.cpuCaption,
-                    severity: snapshot.pulse.cpuSeverity,
-                    history: snapshot.cpuHistory
-                )
-                MeterCard(
-                    title: "Memory",
-                    value: snapshot.pulse.memoryPercent,
-                    headline: snapshot.pulse.memoryText,
-                    caption: snapshot.pulse.memoryCaption,
-                    severity: snapshot.pulse.pressureSeverity
-                )
-            }
-            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-            if snapshot.pulse.swapText != nil || snapshot.pulse.pressureText != nil || snapshot.pulse.batteryText != nil || (snapshot.pulse.thermalState != nil && snapshot.pulse.thermalState != "nominal") {
-                HStack(spacing: 8) {
-                    if let swap = snapshot.pulse.swapText {
-                        Pill(text: swap, severity: snapshot.pulse.pressureSeverity)
-                    }
-                    if let pressure = snapshot.pulse.pressureText {
-                        Pill(text: pressure, severity: snapshot.pulse.pressureSeverity)
-                    }
-                    if let battery = snapshot.pulse.batteryText {
-                        Pill(text: (snapshot.pulse.isCharging == true ? "⚡ " : "🔋 ") + battery, severity: "calm")
-                    }
-                    if let thermal = snapshot.pulse.thermalState, thermal != "nominal" {
-                        Pill(text: "Thermal: \(thermal)", severity: (thermal == "critical" || thermal == "serious") ? "hot" : "elevated")
-                    }
+    private var metersAndPills: some View {
+        HStack(alignment: .top, spacing: 12) {
+            MeterCard(
+                title: "CPU",
+                value: snapshot.pulse.cpuPercent,
+                headline: snapshot.pulse.cpuText,
+                caption: snapshot.pulse.cpuCaption,
+                severity: snapshot.pulse.cpuSeverity,
+                history: snapshot.cpuHistory
+            )
+            MeterCard(
+                title: "Memory",
+                value: snapshot.pulse.memoryPercent,
+                headline: snapshot.pulse.memoryText,
+                caption: snapshot.pulse.memoryCaption,
+                severity: snapshot.pulse.pressureSeverity
+            )
+        }
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        if snapshot.pulse.swapText != nil || snapshot.pulse.pressureText != nil || snapshot.pulse.batteryText != nil || (snapshot.pulse.thermalState != nil && snapshot.pulse.thermalState != "nominal") {
+            HStack(spacing: 8) {
+                if let swap = snapshot.pulse.swapText {
+                    Pill(text: swap, severity: snapshot.pulse.pressureSeverity)
+                }
+                if let pressure = snapshot.pulse.pressureText {
+                    Pill(text: pressure, severity: snapshot.pulse.pressureSeverity)
+                }
+                if let battery = snapshot.pulse.batteryText {
+                    Pill(text: (snapshot.pulse.isCharging == true ? "⚡ " : "🔋 ") + battery, severity: "calm")
+                }
+                if let thermal = snapshot.pulse.thermalState, thermal != "nominal" {
+                    Pill(text: "Thermal: \(thermal)", severity: (thermal == "critical" || thermal == "serious") ? "hot" : "elevated")
                 }
             }
         }
+    }
+
+    /// The Overview's busiest rows, ranked in shared code
+    /// (`rankedByActivity`, covered by the Mac test bundle): strictly
+    /// descending CPU, then memory, name and id.  A total order, never an
+    /// epsilon comparator, so the list cannot cycle; and independent of the
+    /// shared sort, so it keeps its meaning when Activity is sorted by
+    /// memory.
+    private var overviewTopRows: [CompanionRow] {
+        snapshot.rows.rankedByActivity()
+    }
+
+    /// The busiest-rows section.  Takes the ranked rows so one sort per body
+    /// pass serves both the emptiness check and the list, instead of the
+    /// computed property sorting the full snapshot twice per pass.
+    @ViewBuilder
+    private func overviewActivitySection(topRows: [CompanionRow]) -> some View {
+        Section {
+            HStack {
+                Text("Top Activity")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Open Activity") { selectedTab = .activity }
+                    .font(.caption.weight(.medium))
+            }
+            if topRows.isEmpty {
+                Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(topRows.prefix(6).enumerated()), id: \.element.id) { index, row in
+                    HStack(spacing: 8) {
+                        Text("#\(index + 1)")
+                            .font(.caption.weight(.bold).monospacedDigit())
+                            .foregroundStyle(index < 3 ? Color.orange : Color.secondary)
+                            .frame(width: 24, alignment: .leading)
+                        Text(row.name)
+                            .font(.subheadline)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(row.cpuText)
+                        Text(row.memoryText)
+                    }
+                    .font(.caption.monospacedDigit())
+                }
+            }
+        }
+    }
+
+
+    /// The Mac's Overview tab on the phone (HH-212): the meters, the busiest
+    /// rows and the server's strip.  Each part opens the tab that owns it;
+    /// nothing here is a second place to manage anything.
+    @ViewBuilder
+    private var overviewContent: some View {
+        Section { metersAndPills }
+
+        overviewActivitySection(topRows: overviewTopRows)
+
+        if let server = snapshot.server {
+            Section {
+                Button { selectedTab = .server } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "server.rack")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Server")
+                                .font(.subheadline.weight(.semibold))
+                            Text(serverStripLine(server))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// One line about the server for the Overview strip.  The state comes
+    /// first, so a stale or failed reading is never presented as current
+    /// numbers; the numbers themselves are the Mac's own headline words.
+    private func serverStripLine(_ server: CompanionServerStatus) -> String {
+        switch server.resolvedState() {
+        case .notConfigured:
+            return "No server set up on the Mac."
+        case .noReading:
+            return "Waiting for the first reading."
+        case .error:
+            return server.errorText ?? "The last read failed."
+        case .stale:
+            return "This reading is stale.\u{00A0}The Server tab has what the Mac last saw."
+        case .ok:
+            let parts = [server.headline?.cpuText, server.headline?.memoryText, server.headline?.diskText].compactMap { $0 }
+            return parts.isEmpty ? "Readings are on the Server tab." : parts.joined(separator: " · ")
+        }
+    }
+
+    /// The Mac's Maintenance tab as its own entry (HH-212).  This is the card
+    /// that used to sit inside Storage; its destination is unchanged.
+    @ViewBuilder
+    private var maintainContent: some View {
+        Section("Maintain") {
+            NavigationLink {
+                MaintainView(snapshot: snapshot, model: model)
+            } label: {
+                MaintainSummaryRow(snapshot: snapshot)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var activityContent: some View {
+        Section { metersAndPills }
 
         Section {
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("Lookback")
+                    Text("Timing")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 68, alignment: .leading)
@@ -886,7 +1316,7 @@ struct DashboardView: View {
             .padding(.vertical, 2)
             .disabled(!canEdit)
             if !canEdit {
-                Text(Self.editOffNote)
+                Text(model.controlOffNote(optedIn: snapshot.remoteEditAllowed == true, optInNote: Self.editOffNote))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -897,10 +1327,11 @@ struct DashboardView: View {
                 Text(snapshot.hasBaseline ? "Nothing is busy right now." : "Measuring…")
                     .foregroundStyle(.secondary)
             } else {
-                // Quit and Tame exist only when the Mac owner turned them on.
-                // Without this the swipe and long-press actions showed on
-                // every row and answered 403 when used.
-                let controlsOn = snapshot.remoteQuitAllowed == true
+                // Quit and Tame exist only when the Mac owner turned them on and
+                // this link is one the Mac takes controls on.  Without this
+                // the swipe and long-press actions showed on every row and
+                // answered 403 when used.
+                let controlsOn = snapshot.remoteQuitAllowed == true && model.controlsReachable
                 ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
                     let rank = index + 1
                     HStack(spacing: 10) {
@@ -918,7 +1349,7 @@ struct DashboardView: View {
                             HStack(spacing: 4) {
                                 Text(row.name)
                                     .font(.body.weight(.medium))
-                                    .lineLimit(1)
+                                    .lineLimit(2)
                                 if model.samplingRowId == row.id {
                                     ProgressView()
                                         .controlSize(.mini)
@@ -931,18 +1362,14 @@ struct DashboardView: View {
                                         .accessibilityLabel("Preventing Sleep")
                                 }
                                 if row.isTamed == true {
-                                    Text("TAMED")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.orange))
+                                    StatusChip(text: "Tamed", tone: .notice)
+                                        .accessibilityLabel("Tamed")
                                 }
                             }
                             Text(row.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                                .lineLimit(2)
                         }
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 2) {
@@ -994,8 +1421,7 @@ struct DashboardView: View {
                     }
                     .contextMenu {
                         if !controlsOn {
-                            Text("Quit and Tame are off for \(snapshot.hostName).")
-                            Text("Turn them on in Hog Hunter Settings > iPhone.")
+                            Text(model.controlOffNote(optedIn: snapshot.remoteQuitAllowed == true, optInNote: "Quit and Tame are off for \(snapshot.hostName).\u{00A0} Turn them on in Hog Hunter Settings > iPhone."))
                         }
                         if controlsOn, row.canTame != false, row.pid != nil {
                             if row.isTamed == true {
@@ -1043,19 +1469,28 @@ struct DashboardView: View {
             HStack(spacing: 8) {
                 Text(snapshot.grouping == "Processes" ? "Busy Processes" : "Busy Apps")
                 Spacer()
-                Picker("Sort", selection: $sortOrder) {
+                Picker("Sort", selection: Binding(
+                    get: { sortOrder },
+                    set: { next in
+                        // A new sort starts at the top again, the way the Mac
+                        // does it.  The setter runs only when the person taps,
+                        // so taking the Mac's sort never resets the direction.
+                        sortOrder = next
+                        sortAscending = false
+                        sendSort(next, ascending: false)
+                    }
+                )) {
                     ForEach(CompanionSort.allCases) { sort in
                         Text(sort.rawValue).tag(sort)
                     }
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 150)
-                .onChange(of: sortOrder) {
-                    sortAscending = false
-                }
 
                 Button {
-                    sortAscending.toggle()
+                    let next = !sortAscending
+                    sortAscending = next
+                    sendSort(sortOrder, ascending: next)
                 } label: {
                     Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
                         .font(.caption.weight(.bold))
@@ -1068,22 +1503,22 @@ struct DashboardView: View {
         }
 
         Section {
-            if snapshot.remoteQuitAllowed == true {
+            if snapshot.remoteQuitAllowed == true && model.controlsReachable {
                 if snapshot.rows.contains(where: { $0.canQuit }) {
                     Text("Swipe left to quit an app, swipe right to tame runaway CPU, or long-press to quit, tame or sample it on \(snapshot.hostName).\u{00A0} You confirm each one.\u{00A0} System processes and tasks owned by other users are protected.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else if sortedRows.isEmpty {
-                    Text("Remote control is enabled on \(snapshot.hostName).  Waiting for active process telemetry.")
+                    Text("Remote control is enabled on \(snapshot.hostName).\u{00A0} Waiting for active process telemetry.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("Remote control is enabled on \(snapshot.hostName).  All visible processes are protected system tasks and cannot be quit or tamed.")
+                    Text("Remote control is enabled on \(snapshot.hostName).\u{00A0} All visible processes are protected system tasks and cannot be quit or tamed.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text("Quitting from iPhone is off.  Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac.")
+                Text(model.controlOffNote(optedIn: snapshot.remoteQuitAllowed == true, optInNote: "Quitting from iPhone is off.\u{00A0} Turn on Allow iPhone to Quit or Tame Apps & Processes in Hog Hunter Settings > iPhone on your Mac."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1092,6 +1527,21 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var storageContent: some View {
+        Section {
+            Picker("Storage Pane", selection: $storageSubTab) {
+                ForEach(CompanionStorageSubTab.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+        }
+
+        // The sections below keep their old order inside the Mac's three
+        // panes (HH-212): drives and folders under Drives, per-app storage and
+        // the kind-of-data totals under Apps, the cleaner and its categories
+        // and exclusions under Cleaner.  Maintain moved out to its own tab.
+        if storageSubTab == .drives {
         // Mac storage is intentionally FIRST.  Prior to 1.0.6 the iPhone-storage
         // section sat on top and several users assumed it WAS the Mac storage
         // (the phone is showing its own storage, not the Mac's).  Putting the
@@ -1122,6 +1572,14 @@ struct DashboardView: View {
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
+
+                    // What a Standard clean found on its last scan, when the
+                    // Mac holds a current one.
+                    if let cleanable = storage.standardCleanableText {
+                        Label("Standard Clean: \(cleanable)", systemImage: "sparkles")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(.vertical, 4)
             } else {
@@ -1131,9 +1589,44 @@ struct DashboardView: View {
             }
         }
 
+        // The drives the Mac has mounted, with where each one is mounted.
+        // The old Mac layout showed the mount path and the new dashboard does
+        // not, so the phone shows it here.
+        if let drives = snapshot.storage?.drives, !drives.isEmpty {
+            Section {
+                ForEach(drives) { drive in
+                    macDriveRow(drive)
+                }
+            } header: {
+                Text("Mounted Drives")
+            } footer: {
+                Text("Every drive mounted on \(snapshot.hostName), with the path it is mounted at.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        // The Mac's largest folders, with the status line its own rows show.
+        if let directories = snapshot.storage?.topDirectories, !directories.isEmpty {
+            Section {
+                ForEach(directories) { directory in
+                    macDirectoryRow(directory)
+                }
+            } header: {
+                Text("Top Directories")
+            } footer: {
+                Text("The largest folders on \(snapshot.hostName).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        }
+
+        if storageSubTab == .apps {
         if let apps = snapshot.storage?.topApps, !apps.isEmpty {
             Section {
-                ForEach(apps) { app in
+                ForEach(sortedAppStorageRows) { app in
                     macAppStorageRow(app)
                 }
                 if let scanned = snapshot.storage?.topAppsScannedAt {
@@ -1147,19 +1640,43 @@ struct DashboardView: View {
             } header: {
                 HStack {
                     Text("Mac Storage by App")
-                    if let top = snapshot.storage?.topApps, top.contains(where: { $0.isHiddenHeavy }) {
+                    if apps.contains(where: { $0.isHiddenHeavy }) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.caption2)
                     }
                     Spacer()
+                    Picker("Sort", selection: $appStorageSortOrder) {
+                        ForEach(CompanionAppStorageSort.allCases) { sort in
+                            Text(sort.rawValue).tag(sort)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.caption)
                 }
             } footer: {
-                Text("Top apps on \(snapshot.hostName), sorted by total on-disk size.  Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).  Open the Storage pane on the Mac for the full list and cleanup.")
+                Text("Top apps on \(snapshot.hostName), sorted by \(appStorageSortOrder.rawValue.lowercased()).\u{00A0} Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).\u{00A0} Open the Storage pane on the Mac for the full list and cleanup.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-        } else if snapshot.storage != nil {
+        }
+
+        // What the scanned apps add up to by kind of data, the Mac's subtitle.
+        if let totals = snapshot.storage?.categoryTotals, !totals.isEmpty {
+            Section {
+                ForEach(totals) { total in
+                    LabeledContent(total.title, value: total.text)
+                }
+            } header: {
+                Text("Space by Kind")
+            } footer: {
+                Text("What the Mac's listed apps add up to on \(snapshot.hostName), by kind of data.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if snapshot.storage?.topApps?.isEmpty ?? true, snapshot.storage != nil {
             // Storage summary landed but the per-app walk has not yet returned;
             // show a single "Scanning" hint instead of nothing so the section
             // does not silently disappear on first render.
@@ -1173,6 +1690,9 @@ struct DashboardView: View {
             }
         }
 
+        }
+
+        if storageSubTab == .drives {
         Section("iPhone Storage") {
             if let phoneStorage = iPhoneStorage.summary() {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1206,6 +1726,9 @@ struct DashboardView: View {
             }
         }
 
+        }
+
+        if storageSubTab == .cleaner {
         Section("Disk & System Clutter") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -1217,7 +1740,7 @@ struct DashboardView: View {
                             .controlSize(.small)
                     }
                 }
-                Text("Remotely trigger a safe Standard Clean on \(snapshot.hostName). Cleans user caches, logs, developer junk, and empties trash with instant APFS snapshot rollback.")
+                Text("Runs a Standard clean on \(snapshot.hostName).\u{00A0} It clears caches, logs, and developer clutter, and can empty the Trash.\u{00A0} A safety copy is saved first.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -1251,7 +1774,7 @@ struct DashboardView: View {
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 if progress.bytesReclaimed > 0 {
-                                    Text("Reclaimed \(progress.formattedBytesReclaimed)")
+                                    Text("Estimated moved/removed: \(progress.formattedBytesReclaimed)")
                                         .font(.caption2.weight(.medium))
                                         .foregroundStyle(.green)
                                 }
@@ -1267,9 +1790,11 @@ struct DashboardView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Reclaimed \(progress.formattedBytesReclaimed) (\(progress.itemsCleaned) items)")
+                            Text("Estimated moved/removed: \(progress.formattedBytesReclaimed) (\(progress.itemsCleaned) items)")
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(.green)
+                            Text(CleanerSpaceObservation.text(progress.observedFreeBytesChange))
+                                .font(.caption2).foregroundStyle(.secondary)
                             if let snap = progress.snapshotName {
                                 Text("APFS Snapshot: \(snap)")
                                     .font(.caption2)
@@ -1282,9 +1807,12 @@ struct DashboardView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                        Text("Reclaimed \(result.formattedBytesReclaimed) (\(result.itemsRemoved) items) with APFS snapshot.")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Estimated moved/removed: \(result.formattedBytesReclaimed) (\(result.itemsRemoved) items)")
+                                .font(.caption.weight(.medium)).foregroundStyle(.green)
+                            Text(CleanerSpaceObservation.text(result.observedFreeBytesChange))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.vertical, 2)
                 }
@@ -1319,10 +1847,10 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true)
+                .disabled(model.isCleaning || snapshot.cleanProgress?.isCleaning == true || snapshot.remoteCleanAllowed != true || !model.controlsReachable)
 
-                if snapshot.remoteCleanAllowed != true {
-                    Text(CleanLinkPolicy.cleanOffNote)
+                if snapshot.remoteCleanAllowed != true || !model.controlsReachable {
+                    Text(model.controlOffNote(optedIn: snapshot.remoteCleanAllowed == true, optInNote: CleanLinkPolicy.cleanOffNote))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1342,14 +1870,6 @@ struct DashboardView: View {
             }
         }
 
-        Section("Maintain") {
-            NavigationLink {
-                MaintainView(snapshot: snapshot, model: model)
-            } label: {
-                MaintainSummaryRow(snapshot: snapshot)
-            }
-        }
-
         if let storage = snapshot.storage {
             Section("Cleanable Categories") {
                 if let breakdown = storage.categoryBreakdown, !breakdown.isEmpty {
@@ -1366,14 +1886,7 @@ struct DashboardView: View {
                                         .font(.body.weight(.medium))
                                         .foregroundStyle(category.isExcluded ? .secondary : .primary)
                                     if category.isExtremeOnly {
-                                        Text("EXTREME ONLY")
-                                            .font(.caption2.weight(.bold))
-                                            .foregroundStyle(.purple)
-                                            .padding(.horizontal, 4)
-                                            .padding(.vertical, 1)
-                                            .background(
-                                                Capsule().fill(Color.purple.opacity(0.12))
-                                            )
+                                        StatusChip(text: "Extreme Only", tone: .caution)
                                     }
                                 }
                                 Text(category.description)
@@ -1453,7 +1966,7 @@ struct DashboardView: View {
                 .disabled(!canEdit)
 
                 if !canEdit {
-                    Text(Self.editOffNote)
+                    Text(model.controlOffNote(optedIn: snapshot.remoteEditAllowed == true, optInNote: Self.editOffNote))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1464,6 +1977,7 @@ struct DashboardView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+        }
         }
     }
 
@@ -1489,9 +2003,9 @@ struct DashboardView: View {
             }
         }
 
-        Section("Active Network Connections") {
-            if let networkRows = snapshot.network, !networkRows.isEmpty {
-                ForEach(networkRows) { row in
+        Section {
+            if !sortedNetworkRows.isEmpty {
+                ForEach(sortedNetworkRows) { row in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Image(systemName: "network")
@@ -1529,6 +2043,20 @@ struct DashboardView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
+            }
+        } header: {
+            HStack {
+                Text("Active Network Connections")
+                Spacer()
+                if let rows = snapshot.network, rows.count > 1 {
+                    Picker("Sort", selection: $networkSortOrder) {
+                        ForEach(CompanionNetworkSort.allCases) { sort in
+                            Text(sort.rawValue).tag(sort)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 160)
+                }
             }
         }
     }
@@ -1593,6 +2121,84 @@ struct DashboardView: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(app.name), total \(app.totalText), bundle \(app.bundleText), hidden \(app.hiddenText)\(app.isHiddenHeavy ? ", flagged: hidden exceeds five times bundle and over two hundred megabytes" : "")")
+    }
+
+    /// One mounted drive: its name, where it is mounted, and how full it is.
+    /// The mount path is the point of the row, so it is shown under the name
+    /// rather than hidden in a tooltip.
+    @ViewBuilder
+    private func macDriveRow(_ drive: CompanionDriveRow) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(drive.name, systemImage: drive.isLocal ? "internaldrive" : "externaldrive")
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                Spacer()
+                Text(drive.usedPercent.map { String(format: "%.0f%% used", $0) } ?? "unavailable")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(driveSeverityColor(drive.severity))
+            }
+
+            if let percent = drive.usedPercent {
+                ProgressView(value: min(max(percent / 100.0, 0), 1.0))
+                    .tint(driveSeverityColor(drive.severity))
+            }
+
+            Text(drive.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(drive.name), mounted at \(drive.path), \(drive.usedPercent.map { String(format: "%.0f percent used", $0) } ?? "capacity unavailable")")
+    }
+
+    /// The Mac's own colours for a drive: green while there is room, orange
+    /// while it fills up, red when it is nearly full, and grey when the Mac
+    /// could not read the capacity.
+    private func driveSeverityColor(_ severity: String) -> Color {
+        switch severity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "normal": return .green
+        case "warning": return .orange
+        case "critical": return .red
+        default: return .secondary
+        }
+    }
+
+    /// One of the Mac's largest directories: its name, where it is, how big it
+    /// is, and the short status line the Mac shows under its own row.
+    @ViewBuilder
+    private func macDirectoryRow(_ directory: CompanionDirectoryRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(directory.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                // The Mac formatted this, so the phone shows it as it is.
+                Text(directory.bytesText)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+
+            Text(directory.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if !directory.detail.isEmpty {
+                Text(directory.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(directory.name), \(directory.bytesText), \(directory.path)\(directory.detail.isEmpty ? "" : ", \(directory.detail)")")
     }
 
     static let relativeTimeFormatter: RelativeDateTimeFormatter = {
@@ -1781,10 +2387,12 @@ struct RemoteConnectSheet: View {
                             .multilineTextAlignment(.trailing)
                             .font(.body.monospacedDigit())
                     }
+
+                    Toggle("Use HTTPS / Cloudflare Tunnel", isOn: $model.remoteUseTLS)
                 } header: {
                     Text("Mac Address")
                 } footer: {
-                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net) or its 100.x.y.z address.  Hog Hunter on the Mac listens on port \(CompanionModel.defaultPort).  A VPN or a tunnel that lands on the Mac itself pairs like the local network.  Do not forward this port from your router: the link is not encrypted.  An HTTPS tunnel needs app TLS first, which is still to come.")
+                    Text("Use your Mac's Tailscale name (like my-mac.tailnet.ts.net on port \(CompanionModel.defaultPort)), or a Cloudflare Tunnel hostname over HTTPS on port 443.\u{00A0} Over Tailscale this iPhone can do everything the Mac allows it.\u{00A0} Over a Cloudflare Tunnel it shows the Mac's figures only: type the pairing code, because quitting, taming, cleaning, the Robotic Vacuum and settings changes need your local network or Tailscale.")
                 }
 
                 Section {
@@ -1797,7 +2405,7 @@ struct RemoteConnectSheet: View {
                 } header: {
                     Text("Pairing Code")
                 } footer: {
-                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.  Or type the code from Hog Hunter Settings > iPhone.")
+                    Text("Leave the code blank and your Mac will ask whether to allow this iPhone.\u{00A0} Or type the code from Hog Hunter Settings > iPhone.")
                 }
 
                 if model.isWaitingForApproval {
@@ -1846,6 +2454,21 @@ struct RemoteConnectSheet: View {
             .onChange(of: model.isRemoteSheetPresented) { _, isPresented in
                 if !isPresented {
                     dismiss()
+                }
+            }
+            .onChange(of: model.remoteUseTLS) { _, isTLS in
+                if isTLS && model.remotePortDraft == "\(CompanionModel.defaultPort)" {
+                    model.remotePortDraft = "443"
+                } else if !isTLS && model.remotePortDraft == "443" {
+                    model.remotePortDraft = "\(CompanionModel.defaultPort)"
+                }
+            }
+            .onChange(of: model.remoteHostDraft) { _, newHost in
+                if newHost.lowercased().hasPrefix("https://") && !model.remoteUseTLS {
+                    model.remoteUseTLS = true
+                    if model.remotePortDraft == "\(CompanionModel.defaultPort)" {
+                        model.remotePortDraft = "443"
+                    }
                 }
             }
             .onDisappear {

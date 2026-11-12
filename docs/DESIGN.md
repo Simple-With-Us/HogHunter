@@ -39,13 +39,26 @@ Sources/
   Assets.xcassets/AppIcon         Square Finder/About icon; no pre-applied squircle crop
 Tests/HogHunterTests/             XCTest: CpuMath, MemoryMath, Grouping, HistoryStore, HogFormat, AlertPolicy, MetadataResolver
 scripts/install.sh                build, sign, install to ~/Applications, relaunch
+.github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
+HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
+Brand/                           traced logo and icon vectors, the 16 px and 32 px small-size crops, and the favicon set
+```
 
 ## App icon
 
 The Finder / About / notification icon is `Assets.xcassets/AppIcon.appiconset`, compiled from the square Hog Hunter lockup (boar, wordmark, and the line "Monitor. Detect. Reclaim.").  The source is not squircle-cropped; macOS applies the system mask at display time.  `LSUIElement` still hides the Dock icon while the menu bar extra is running.  The menu bar extra itself stays the flame glyph plus the live CPU number.  The iPhone app uses the same lockup at 1024×1024.
-.github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
-HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
-```
+
+`Brand/` is the source for the mark outside the app bundle: the traced logo and icon vectors, the 16 px and 32 px small-size crops that keep the boar readable when the whole head is scaled down, the favicon set, and `Brand/README.md`, which documents the crop windows, the measured 9.5 degree rotation, the favicon simplification settings, the favicon crop window measured off the owner's own render, and how to rebuild the `.icns` and the Windows `.ico`.  The shipped app icon set is not touched by that tree.
+
+## Favicon
+
+A favicon is not a small app icon.  At 16 device pixels the traced artwork has about 250 of them, and the mane, the brow, the eye and the tusk all land inside the same one or two pixels, so the mark stops being a boar and becomes a brown smudge.  The favicon set therefore splits by what each size can carry, and the owner ruled on 2026-10-21 that the mark should be the master's own artwork.
+
+`Brand/HogHunter-Favicon-16.svg` is the one size that cannot carry it, so it keeps the reduced contour: the traced artwork simplified with a Ramer-Douglas-Peucker epsilon of 45 logo units, a spike filter that removes convex vertices under 30 units so the mane fringe closes into one solid mass, then cropped to the head and rotated -6 degrees.  The ear, the eye, the tusk and the snout survive; the cream crescent along the snout is dropped because at 16 px it eats the muzzle.
+
+`Brand/HogHunter-Favicon-32.svg` and `Brand/favicon.svg` carry the owner's own artwork instead: the master's path data untouched, 17 subpaths and 26 cubic curves, cropped to the owner's own window, which cuts the ear flat at the top and the mane at the right and the bottom, and turned to the same 9.5 degrees.  It holds the eye, the tusk and the teeth at 32 px and up.  `Brand/HogHunter-Favicon-Tile.svg` is the same artwork and the same crop on the rounded tile, for a tab that wants one silhouette.  Every crop and every rotation was tried at true 16 px before the split was made, and none of them produced a readable boar there.
+
+`Brand/favicon.ico` carries 16, 32, 48 and 64 px entries as 32-bit DIBs, not PNG payloads, because a PNG-compressed ICO entry is only read by Windows at the 256x256 size.  Its largest entry is 64 because Google Search takes one favicon per hostname and its guidance is a square icon larger than 48x48.  `Brand/preview-favicons.png` shows the shipped set at true size, the evidence for the 16 px frame, and the same marks in a browser tab.  The method, the measured crop window and the failed alternatives are in `Brand/README.md`.
 
 ## Data types (Models.swift)
 
@@ -210,12 +223,12 @@ FROM per_ts, win GROUP BY k ORDER BY <avg_cpu | avg_mem> DESC LIMIT 40
 ## Build, signing, install
 
 - `project.yml` gains a `HogHunterTests` unit-test target and Release settings `ENABLE_HARDENED_RUNTIME = YES`, `CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO`, `CODE_SIGN_ENTITLEMENTS = HogHunter.entitlements` (an empty dict).
-- `scripts/install.sh` builds Release, signs with "Developer ID Application" when that identity is in the keychain and signing does not prompt within 20 s, otherwise adhoc, then `ditto`s to `~/Applications/Hog Hunter.app`, quits the running instance, and relaunches.  `build.sh` stays as the plain build.
+- `scripts/install.sh` builds Release, signs with the Developer ID Application identity of team CC8UTF7ATG and refuses without it (an ad hoc build would lose every privacy grant), checks a staged copy with `scripts/check-mac-identity.sh`, quits the running instance, swaps the bundle into `~/Applications/Hog Hunter.app`, and relaunches.  `build.sh` stays as the plain build.
 - CI runs on `macos-15`: `brew install xcodegen`, `xcodegen generate`, `xcodebuild -scheme HogHunter -destination 'platform=macOS' test CODE_SIGNING_ALLOWED=NO`.
 
 ## Copy rules
 
-Two ASCII spaces between sentences in every user-facing string.  Buttons, headings and titles in Title Case.  Status text in sentence case.  Times in Central Time when shown.
+A real U+00A0 plus a normal space between sentences in every user-facing string (owner ruling 2026-10-23), written `"\u{00A0} "` in Swift string literals.  Buttons, headings and titles in Title Case.  Status text in sentence case.  Times in Central Time when shown.
 
 ## Out of scope for 1.1
 

@@ -8,9 +8,9 @@ Extreme Clean treated shared vendor Application Support containers (Google, Mozi
 
 Issue #67.  Branch `grok-build/hh-vendor-folders`.  PR #72.
 
-### Agent-sync / handoff
+### Handoff
 
-`AGENT-SYNC.md` was read from the AI-Fleet-Coordinator mirror before this follow-up (canonical live path is unavailable on the cloud seat).  Pre-work `#agent-sync` claim: process failure — the cloud environment has `AGENT_SYNC_TOKEN` / `AGENT_SYNC_POST_TOKEN`, but `https://agent-sync.jays.services` exposes only `/health` (authenticated POST to `/post` returns 404) and no Zulip bot credentials (`ZULIP_EMAIL` / `ZULIP_API_KEY`) are present, so no `repo:`-first claim could be posted.  No claim id is invented.  Effort row and issue #67 remain the board reservation; Mac-side reconciliation can post the missing claim when Zulip credentials are available.
+The fleet handbook was read from the AI-Fleet-Coordinator mirror before this follow-up (canonical live path is unavailable on the cloud seat).  Pre-work coordination-channel claim: process failure — the cloud environment had the retired relay env tokens, but the retired relay host exposed only `/health` (authenticated POST to `/post` returns 404) and no Zulip bot credentials (`ZULIP_EMAIL` / `ZULIP_API_KEY`) are present, so no `repo:`-first claim could be posted.  No claim id is invented.  Effort row and issue #67 remain the board reservation; Mac-side reconciliation can post the missing claim when Zulip credentials are available.
 
 ## Changes Made
 

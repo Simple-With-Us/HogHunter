@@ -64,7 +64,7 @@ extension CompanionModel {
             return
         }
         do {
-            let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: saved.token)
+            let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             applyCleanReport(report)
             if report.state == "scanning" {
                 await followScan(endpoint: endpoint, token: saved.token)
@@ -105,9 +105,9 @@ extension CompanionModel {
     }
 
     /// Starts a scan as work the screen can stop: leaving the screen cancels it.
-    func beginCleanScan() {
+    func beginCleanScan(depth: String = "quick") {
         cleanScanTask?.cancel()
-        cleanScanTask = Task { await startCleanScan() }
+        cleanScanTask = Task { await startCleanScan(depth: depth) }
     }
 
     func cancelCleanerPolling() {
@@ -133,7 +133,7 @@ extension CompanionModel {
     // MARK: - Scan
 
     /// Asks the Mac to scan for the chosen tier and follows it until it is done.
-    func startCleanScan() async {
+    func startCleanScan(depth: String = "quick") async {
         guard !cleanScanIsRunning, !isCleaningSelection else { return }
         cleanerError = nil
         if cleanTier == "extreme", !extremeAcknowledged {
@@ -154,7 +154,9 @@ extension CompanionModel {
                 endpoint: endpoint,
                 token: saved.token,
                 tier: cleanTier,
-                acknowledgedExtreme: extremeAcknowledged
+                acknowledgedExtreme: extremeAcknowledged,
+                useTLS: isUsingTLS(for: saved),
+                depth: depth
             )
             isStartingScan = false
             if response.status == "scanning" {
@@ -182,7 +184,7 @@ extension CompanionModel {
         let started = Date()
         while !Task.isCancelled, Date().timeIntervalSince(started) < 10 * 60 {
             do {
-                let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: token)
+                let report = try await CompanionConnection.fetchCleanReport(endpoint: endpoint, token: token, useTLS: isUsingTLS(for: saved))
                 applyCleanReport(report)
                 if report.state != "scanning" { return }
             } catch {
@@ -230,7 +232,7 @@ extension CompanionModel {
         }
         defer { progress.cancel() }
         do {
-            lastCleanResult = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, request: request)
+            lastCleanResult = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, request: request, useTLS: isUsingTLS(for: saved))
             await refresh()
         } catch CompanionClientError.forbidden(let reason) {
             // Refused before anything ran: the scan and the person's ticks stand.
@@ -272,7 +274,13 @@ extension CompanionModel {
         isScreenshotMode = true
         cleanTier = extreme ? "extreme" : "standard"
         extremeAcknowledged = extreme
-        applyCleanReport(Self.sampleCleanReport(state: "ready", tier: cleanTier))
+        var report = Self.sampleCleanReport(state: "ready", tier: cleanTier)
+        report.scanDepth = "quick"
+        if arguments.contains("-HogHunterCleanerPartial") {
+            report.isPartial = true
+            report.incompleteCategories = ["Developer Junk"]
+        }
+        applyCleanReport(report)
     }
 
     // MARK: - Demo mode
@@ -291,7 +299,7 @@ extension CompanionModel {
         let bytes = selectedCleanBytes
         let count = selectedCleanItems.count
         demoSetCleanProgress(CompanionCleanProgress(
-            isCleaning: true, phase: "snapshot", progress: 0.15, statusText: "Creating APFS safety snapshot…",
+            isCleaning: true, phase: "snapshot", progress: 0.15, statusText: "Saving a safety copy…",
             currentItem: nil, itemsCleaned: 0, totalItems: count, bytesReclaimed: 0, formattedBytesReclaimed: "0 B",
             snapshotName: nil, error: nil
         ))

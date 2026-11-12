@@ -4,6 +4,19 @@ Prepared September 27, 2026.  This workflow preparation does not establish a
 signed archive, an uploaded build, Apple beta approval, or an installable beta.
 No signing or upload was performed while preparing it.
 
+> **Status, 2026-10-17:** This page records the original manual-only design.
+> The workflow is now active: the repository variable
+> `HH_IOS_TESTFLIGHT_ENABLED` is `true`, and every merge to `main` that touches
+> the iOS app also archives and uploads (see [`../AUTO-UPDATE.md`](../AUTO-UPDATE.md)),
+> in addition to manual dispatch.  The credential hold is cleared by the owner
+> ruling of 2026-10-17: signing and App Store Connect credentials for all apps
+> are in Infisical (see [`INFISICAL.md`](../../INFISICAL.md)).  Where the text
+> below says the workflow is manual-only, stays disabled, or waits on
+> replacement credentials, read it as superseded.  The release script and the
+> validator this page describes (`scripts/ios-testflight-release.sh`,
+> `scripts/validate-ios-release.py`) were replaced on 2026-10-17 by the fleet
+> ship script;  see [`2026-10-17-ios-auto-ship.md`](2026-10-17-ios-auto-ship.md).
+
 ## Current state and remaining blockers
 
 App Store Connect app `6816633156` uses `com.simplewithus.hoghunter.ios` and
@@ -12,10 +25,11 @@ with public link `https://testflight.apple.com/join/yrHXfqSR`, but had zero buil
 when verified.  The [readiness record](2026-09-27-ios-testflight-readiness.md)
 contains the saved Apple identity and reviewer setup.
 
-The workflow requires repository variable `HH_IOS_TESTFLIGHT_ENABLED=true`.
-It stays disabled while replacement ASC credentials and the HogHunter
-repository's Infisical references are pending.  No repository secrets were
-configured when this preparation began.  Do not use the previous ASC key.
+The workflow requires repository variable `HH_IOS_TESTFLIGHT_ENABLED=true`,
+which is now set.  When this preparation began it stayed disabled while
+replacement ASC credentials and the HogHunter repository's Infisical references
+were pending, and no repository secrets were configured; the five signing
+secrets now exist.  Do not use the previous ASC key.
 
 Hog Hunter iOS has no App Group or Associated Domains entitlement.  The Mac
 app's entitlements must not be copied into the iPhone target or provisioning
@@ -23,7 +37,12 @@ profile.  The existing iOS App Store profile is `6RSNAV8S3S`, for team
 `CC8UTF7ATG`; the workflow lets Xcode resolve a current matching profile and
 checks its embedded identity and expiration before upload.
 
-## Configuration after the credential hold is cleared
+## Configuration (credential hold cleared 2026-10-17)
+
+The workflow reads the five signing secrets named below as same-named GitHub
+repository secrets first, and they now exist.  The Infisical fallback in this
+section applies only when one of them is empty.  `INFISICAL.md` (Build-time
+signing) is the current reference.
 
 Configure these GitHub repository secrets through the approved secret manager:
 
@@ -54,9 +73,10 @@ published as workflow artifacts.
 ## First manual run
 
 After the replacement credentials and access have been verified, enable the
-repository variable and run **Hog Hunter iOS TestFlight (manual)** from `main`.
+repository variable and run **Hog Hunter iOS TestFlight** from `main`.
 Use stable Xcode 26 or later on the hosted runner.  The workflow also rejects a
-beta macOS host.  A push, PR, or schedule cannot trigger this release job.
+beta macOS host.  A PR or schedule cannot trigger this release job; a push to
+`main` that touches the iOS app can, and it uploads.
 
 1. Choose an unused positive numeric build number, up to 18 digits.  Leaving
    it blank uses the current UTC timestamp (`YYYYMMDDHHMM`), matching fleet standard build numbers.
@@ -90,14 +110,15 @@ the controls without a Mac.
 Assign the eligible build to the existing external group, submit beta review
 when required, and verify that the public TestFlight link offers the approved
 build before advertising installation.  Leave
-[HogHunter #22](https://github.com/jaywedgeworth22/HogHunter/issues/22) and board
+[HogHunter #22](https://github.com/Simple-With-Us/HogHunter/issues/22) and board
 `1dd567c8c0054e708882ee69e91c2652` open until that external release is verified.
 
 ## Checks requiring no signing credentials
 
 ```sh
-bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh
+bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/test-ios-stage-asc-key.sh
 bash scripts/test-ios-stage-asc-key.sh
+bash scripts/ios-fleet/test-scheduled-ship-gate.sh
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
 ```
 

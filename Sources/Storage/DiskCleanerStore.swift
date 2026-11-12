@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -37,24 +38,80 @@ final class DiskCleanerStore: ObservableObject {
     @Published var exclusions: CleanerExclusions
     /// Where exclusions live.  Tests pass a throwaway suite.
     private let exclusionsDefaults: UserDefaults
-    /// A scan follows every exclusion edit.  Tests turn that off so they do
-    /// not walk the real disk.
+    /// Dashboard option edits require an explicit Scan.  The standalone
+    /// Storage window keeps its existing automatic rescan behavior.
     private let rescanAfterExclusionChange: Bool
+    /// The dashboard's Storage tab requires an explicit Scan, so changing a
+    /// tier or an exclusion updates the stored options without starting a walk.
+    private let manualScanOnly: Bool
+    /// Set when an exclusion edit arrives while a clean is in flight, so the
+    /// report it was scanned under is dropped as soon as that clean finishes.
+    private var reportIsStale = false
+    @Published private(set) var tempFilePolicy: TempFileSafetyPolicy
+    private var tempPolicyObserver: AnyCancellable?
+    private var tempPolicyRevision = TempFileSafetyPolicy.currentRevision
+
+    /// Invalidate hidden dashboard stores too; changing safety never starts a scan.
+    func reloadTempFilePolicy() {
+        let policy = TempFileSafetyPolicy.load(from: exclusionsDefaults)
+        let revision = TempFileSafetyPolicy.currentRevision
+        guard policy != tempFilePolicy || revision != tempPolicyRevision else { return }
+        tempFilePolicy = policy
+        tempPolicyRevision = revision
+        if isCleaning {
+            // Keep the active report/progress stable and discard its stale
+            // results after the existing clean finishes.
+            reportIsStale = true
+            showConfirmation = false
+        } else if case .cleaned = state {
+            // The notification is deferred to the main run loop, so a policy
+            // edit saved as a clean finishes can land after it.  The report is
+            // still stale, but the clean's result must stay on screen.
+            reportIsStale = false
+            report = nil
+            selectedItemIds.removeAll()
+            expandedCategoryIds.removeAll()
+            showConfirmation = false
+        } else {
+            discardResults()
+        }
+    }
+
+    func setTempFileMinimumUntouchedHours(_ hours: Double) {
+        TempFileSafetyPolicy.save(hours: hours, to: exclusionsDefaults)
+        reloadTempFilePolicy()
+    }
+
 
     var isCleaning: Bool {
         if case .cleaning = state { return true }
         return false
     }
 
+    var isBusy: Bool {
+        switch state {
+        case .scanning, .cleaning: return true
+        default: return false
+        }
+    }
+
     /// Re-reads the stored exclusions.  The phone and the Settings window edit
     /// the same value, so a copy loaded at launch goes stale.
     func reloadExclusions() {
-        exclusions = CleanerExclusions.load(from: exclusionsDefaults)
+        let updated = CleanerExclusions.load(from: exclusionsDefaults)
+        // A clean in flight is already running against the items the report
+        // held, so dropping it here would blank the page mid-clean.  Remember
+        // it instead: `exclusions` is about to equal `updated`, so without the
+        // flag this edit could never invalidate the report again.
+        if updated != exclusions && manualScanOnly {
+            if isCleaning { reportIsStale = true } else { discardResults() }
+        }
+        exclusions = updated
     }
 
     func toggleCategoryExclusion(_ category: CleanCategory) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.toggleCategory(category) }
-        if rescanAfterExclusionChange { scan() }
+        rescanAfterOptionChange()
     }
 
     func addExcludedPath(_ path: String) {
@@ -63,14 +120,41 @@ final class DiskCleanerStore: ObservableObject {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { current in
             if !current.excludedPaths.contains(normalized) { current.excludedPaths.append(normalized) }
         }
-        if rescanAfterExclusionChange { scan() }
+        rescanAfterOptionChange()
     }
 
     func removeExcludedPath(_ path: String) {
         exclusions = CleanerExclusions.update(in: exclusionsDefaults) { $0.removePath(path) }
-        if rescanAfterExclusionChange { scan() }
+        rescanAfterOptionChange()
     }
 
+    /// An exclusion edit invalidates the results on screen.  Manual-scan mode
+    /// drops them and waits for Scan; otherwise a scan follows the edit.
+    private func rescanAfterOptionChange() {
+        if manualScanOnly {
+            // A clean in flight is already running against the items the report
+            // held, so dropping it here would blank the page mid-clean.
+            if !isCleaning { discardResults() }
+        }
+        else if rescanAfterExclusionChange { scan() }
+    }
+
+    /// Drops results that no longer describe the stored options, so nothing is
+    /// shown or cleaned under a tier or an exclusion set the scan never saw.
+    private func discardResults() {
+        cancelScan()
+        reportIsStale = false
+        report = nil
+        selectedItemIds.removeAll()
+        expandedCategoryIds.removeAll()
+        showConfirmation = false
+        if !isCleaning { state = .idle }
+    }
+
+    /// Tests publish provisional reports without scanning a real filesystem.
+    typealias ScanOperation = (CleanTier, CleanerExclusions, DiskCleaner.ScanDepth,
+                              @escaping (CleanScanReport) -> Void, @escaping (String) -> Void) async -> CleanScanReport
+    private let scanOperation: ScanOperation
     let cleaner: DiskCleaner
     /// Append-only cleanup history under the stable app-support namespace.
     /// Refreshed on clean and on view appear so the hero header's "last cleanup" line is always fresh.
@@ -85,13 +169,24 @@ final class DiskCleanerStore: ObservableObject {
     init(cleaner: DiskCleaner = DiskCleaner(),
          historyStore: CleanupHistoryStore = CleanupHistoryStore(inMemory: false),
          exclusionsDefaults: UserDefaults = CleanerExclusions.sharedDefaults,
-         rescanAfterExclusionChange: Bool = true) {
+         rescanAfterExclusionChange: Bool = true,
+         manualScanOnly: Bool = false,
+         scanOperation: ScanOperation? = nil) {
         self.cleaner = cleaner
+        self.scanOperation = scanOperation ?? { tier, exclusions, depth, partial, progress in
+            await cleaner.scan(tier: tier, exclusions: exclusions, depth: depth,
+                               partialReport: partial, progress: progress)
+        }
         self.historyStore = historyStore
         self.exclusionsDefaults = exclusionsDefaults
         self.rescanAfterExclusionChange = rescanAfterExclusionChange
+        self.manualScanOnly = manualScanOnly
         self.exclusions = CleanerExclusions.load(from: exclusionsDefaults)
+        self.tempFilePolicy = TempFileSafetyPolicy.load(from: exclusionsDefaults)
         self.lastCleanup = historyStore.latestRecord()
+        tempPolicyObserver = NotificationCenter.default.publisher(for: .tempFileSafetyPolicyChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reloadTempFilePolicy() }
     }
 
     deinit {
@@ -102,14 +197,23 @@ final class DiskCleanerStore: ObservableObject {
     // MARK: - Scan
 
     /// Switches the active cleaning tier and initiates a scan for that tier.
+    /// In manual-scan mode the tier is recorded and the stale results dropped,
+    /// so the walk only ever starts from the Scan button.
     func setTier(_ tier: CleanTier) {
         guard tier != selectedTier else { return }
         selectedTier = tier
-        scan()
+        if manualScanOnly { discardResults() } else { scan() }
     }
 
     /// Cancels any in-flight clutter scan.
     func cancelScan() {
+        // Provisional results never become cleanable by cancelling or leaving the view.
+        if isScanInFlight {
+            report = nil
+            selectedItemIds.removeAll()
+            expandedCategoryIds.removeAll()
+            showConfirmation = false
+        }
         currentScanId = nil
         scanTask?.cancel()
         scanTask = nil
@@ -131,30 +235,44 @@ final class DiskCleanerStore: ObservableObject {
     }
 
     /// Initiates a full disk clutter scan for the active tier.
-    func scan() {
+    func scan(depth: DiskCleaner.ScanDepth = .quick) {
+        guard ApplicationRunMode.current != .uiHarness else { return }
         cancelScan()
         reloadExclusions()
+        reloadTempFilePolicy()
+        report = nil
+        selectedItemIds.removeAll()
         isScanInFlight = true
         let scanId = UUID()
         currentScanId = scanId
         let currentTier = selectedTier
         state = .scanning(category: "Starting \(currentTier.title) scan…")
 
-        let cleaner = self.cleaner
         let activeExclusions = exclusions
-        scanTask = Task.detached(priority: .utility) { [weak self, cleaner] in
-            let scanReport = await cleaner.scan(tier: currentTier, exclusions: activeExclusions) { categoryTitle in
+        let scanOperation = self.scanOperation
+        scanTask = Task.detached(priority: .utility) { [weak self] in
+            let scanReport = await scanOperation(currentTier, activeExclusions, depth, { partial in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.currentScanId == scanId, self.isScanInFlight,
+                              (self.report?.categories.count ?? 0) <= partial.categories.count else { return }
+                        self.report = partial
+                        // Suggestions are visible during scanning, but only a finalized report
+                        // supplies default selections or cleaning authority.
+                    }
+                }, { categoryTitle in
                 Task { @MainActor [weak self] in
                     guard let self, self.currentScanId == scanId else { return }
                     self.state = .scanning(category: categoryTitle)
                 }
-            }
+            })
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 guard let self, self.currentScanId == scanId else { return }
                 self.report = scanReport
+                // A fresh scan supersedes any report an edit marked stale.
+                self.reportIsStale = false
 
                 // Initialize selections according to category defaultSelected and item isSelected
                 var initialSelected: Set<String> = []
@@ -257,8 +375,37 @@ final class DiskCleanerStore: ObservableObject {
         return sum
     }
 
+    func totalSelectedInternalBytes() -> UInt64 {
+        guard let report else { return 0 }
+        var sum: UInt64 = 0
+        for cat in report.categories {
+            for item in cat.items where selectedItemIds.contains(item.id) && !item.isExternal {
+                sum &+= item.bytes
+            }
+        }
+        return sum
+    }
+
+    func totalSelectedExternalBytes() -> UInt64 {
+        guard let report else { return 0 }
+        var sum: UInt64 = 0
+        for cat in report.categories {
+            for item in cat.items where selectedItemIds.contains(item.id) && item.isExternal {
+                sum &+= item.bytes
+            }
+        }
+        return sum
+    }
+
     func totalSelectedItemsCount() -> Int {
         selectedItemIds.count
+    }
+
+    /// True when any selected item's size walk hit its file cap, so the
+    /// selected total is a lower bound, not an exact size.
+    func selectionIsApproximate() -> Bool {
+        guard let report else { return false }
+        return report.categories.flatMap { $0.items }.contains { $0.isApproximate && selectedItemIds.contains($0.id) }
     }
 
     func totalDiscoveredBytes() -> UInt64 {
@@ -269,7 +416,23 @@ final class DiskCleanerStore: ObservableObject {
 
     /// Executes cleaning on all selected items with APFS snapshot preservation.
     func cleanSelected(createSnapshot: Bool = true) {
-        guard let report else { return }
+        guard !isCleaning, !isScanInFlight else { return }
+        // A policy edit since the scan voids its temp rows.  Note the mismatch
+        // before the reload discards the report, so a clean that cannot run
+        // says why instead of silently emptying the panel.
+        let policyChanged = TempFileSafetyPolicy.load(from: exclusionsDefaults) != tempFilePolicy
+            || TempFileSafetyPolicy.currentRevision != tempPolicyRevision
+        // Both external exclusion edits and temp-policy changes invalidate
+        // stale results before any selected items are captured.
+        reloadExclusions()
+        reloadTempFilePolicy()
+        guard let report else {
+            if policyChanged && !isCleaning {
+                state = .failed("Temp file safety policy changed.\u{00A0} Scan again to clean with the new setting.")
+            }
+            return
+        }
+
         let itemsToClean = report.categories.flatMap { $0.items }.filter { selectedItemIds.contains($0.id) }
         guard !itemsToClean.isEmpty else { return }
 
@@ -279,10 +442,7 @@ final class DiskCleanerStore: ObservableObject {
         currentCleanId = cleanId
 
         let currentTier = selectedTier
-        // The scan that produced these items may be older than an edit made
-        // from the phone or Settings.  `clean` re-filters against whatever it
-        // is handed, so hand it the stored value, not the launch-time copy.
-        reloadExclusions()
+        // `clean` re-filters against the stored value, not the launch-time copy.
         let activeExclusions = exclusions
         let totalItems = max(1, itemsToClean.count)
         state = .cleaning(progress: 0, currentItem: "Preparing…")
@@ -307,7 +467,7 @@ final class DiskCleanerStore: ObservableObject {
             var lastReportedProgress: Double = -1.0
             let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot, exclusions: activeExclusions) { progress, currentItem in
                 let now = Date()
-                let isSpecial = currentItem.contains("snapshot") || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
+                let isSpecial = DiskCleaner.isSnapshotProgress(currentItem) || progress >= 1.0 || (progress - lastReportedProgress) >= 0.02 || now.timeIntervalSince(lastReportedTime) >= 0.1
                 if isSpecial {
                     lastReportedProgress = progress
                     lastReportedTime = now
@@ -316,9 +476,9 @@ final class DiskCleanerStore: ObservableObject {
                         self.state = .cleaning(progress: progress, currentItem: currentItem)
                         let activeProg = CompanionCleanProgress(
                             isCleaning: true,
-                            phase: currentItem.contains("snapshot") ? "snapshot" : (progress >= 1.0 ? "finishing" : "cleaning"),
+                            phase: DiskCleaner.isSnapshotProgress(currentItem) ? "snapshot" : (progress >= 1.0 ? "finishing" : "cleaning"),
                             progress: progress,
-                            statusText: currentItem.contains("snapshot") ? currentItem : "Cleaning \(currentItem)…",
+                            statusText: DiskCleaner.isSnapshotProgress(currentItem) ? currentItem : "Cleaning \(currentItem)…",
                             currentItem: currentItem,
                             itemsCleaned: Int(progress * Double(totalItems)),
                             totalItems: totalItems,
@@ -337,6 +497,13 @@ final class DiskCleanerStore: ObservableObject {
 
             await MainActor.run {
                 guard let self, self.currentCleanId == cleanId else { return }
+                // An exclusion or temp-policy edit mid-clean left this report
+                // describing paths the scan never saw.  Drop it now that the
+                // deletion is done; `state` is still `.cleaning`, so the result
+                // banner below survives.
+                if self.reportIsStale {
+                    self.discardResults()
+                }
                 self.selectedItemIds.removeAll()
                 self.state = .cleaned(result)
                 self.cleanTask = nil
@@ -345,14 +512,15 @@ final class DiskCleanerStore: ObservableObject {
                     isCleaning: false,
                     phase: "completed",
                     progress: 1.0,
-                    statusText: "Clean complete: Reclaimed \(result.formattedBytesReclaimed)",
+                    statusText: "Clean complete: \(result.formattedBytesReclaimed) moved or removed (estimated)",
                     currentItem: nil,
                     itemsCleaned: result.itemsRemoved,
                     totalItems: totalItems,
                     bytesReclaimed: result.bytesReclaimed,
                     formattedBytesReclaimed: result.formattedBytesReclaimed,
                     snapshotName: result.snapshotName,
-                    error: result.errors.isEmpty ? nil : result.errors.joined(separator: ", ")
+                    error: result.errors.isEmpty ? nil : "\(result.errors.count) items could not be removed.\u{00A0} Details are on the Mac.",
+                    observedFreeBytesChange: result.observedFreeBytesChange
                 )
                 let completedUpdate = DiskCleanerProgressUpdate(runId: cleanId, progress: completedProg)
                 NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: completedUpdate)

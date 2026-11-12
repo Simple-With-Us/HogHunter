@@ -11,13 +11,21 @@ import Network
 /// This judges the address the connection arrived from.  A router that rewrites
 /// forwarded traffic to its own LAN address (SNAT, hairpin NAT) makes that
 /// traffic look local, so port forwarding is still not safe.  Encrypting the
-/// link is the real fix and is tracked as a follow-up.
+/// link is the real fix and is tracked as a follow-up.  A Cloudflare Tunnel
+/// daemon on this Mac arrives over loopback; `resolvingForwardedClient(in:)`
+/// judges those requests by the client the tunnel names, so a phone on a
+/// tunnel reads the snapshot like any outside client and controls nothing.
 struct CompanionPeer: Equatable, Sendable {
     /// The client's address with zone ids and IPv4-in-IPv6 wrapping removed,
     /// so one client is one key.  The auth throttle counts by this.
     var key: String
     /// Loopback, link-local, private (RFC 1918 and unique-local) or Tailscale.
     var isTrusted: Bool
+    /// Whether this connection is proven to have arrived over Tailscale.  Only
+    /// `provingTailscaleArrival` sets it, from the kernel's view of the socket.
+    /// A client address alone never does, and neither does a forwarded header,
+    /// which a client could write.
+    var arrivedOverTailscale = false
 
     /// Used when the address cannot be read.  Never trusted.
     static let unknown = CompanionPeer(key: "unknown", isTrusted: false)
@@ -38,13 +46,175 @@ struct CompanionPeer: Equatable, Sendable {
         }
     }
 
+    /// This peer, marked as having arrived over Tailscale if the socket proves it.
+    ///
+    /// Both ends have to agree.  The client's address must be in Tailscale's
+    /// range, and the address it connected to must be one this Mac holds on a
+    /// `utun` interface.  The second half is what tells Tailscale from a carrier
+    /// that hands out the same 100.64.0.0/10 range to a home router: there the
+    /// Mac's own address sits on a Wi-Fi or Ethernet interface.  A host on the
+    /// local network that forges a Tailscale source address never completes the
+    /// handshake, because the Mac's reply is routed into the tunnel.
+    func provingTailscaleArrival(
+        remote: NWEndpoint?,
+        local: NWEndpoint?,
+        tunnelAddresses: () -> Set<String> = CompanionPeer.localTunnelAddresses
+    ) -> CompanionPeer {
+        var copy = self
+        copy.arrivedOverTailscale = false
+        guard let remote, let local,
+              Self.isTailscaleAddress(remote), Self.isTailscaleAddress(local),
+              let localKey = Self.addressKey(local), tunnelAddresses().contains(localKey) else {
+            return copy
+        }
+        copy.arrivedOverTailscale = true
+        return copy
+    }
+
+    /// Tailscale's two ranges: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
+    static func isTailscaleIPv4(_ b: [UInt8]) -> Bool {
+        b.count == 4 && b[0] == 100 && (64...127).contains(b[1])
+    }
+
+    static func isTailscaleIPv6(_ b: [UInt8]) -> Bool {
+        if b.count == 16, let embedded = mappedIPv4(b) { return isTailscaleIPv4(embedded) }
+        return b.count == 16 && Array(b.prefix(6)) == [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0]
+    }
+
+    /// Whether a numeric endpoint is in Tailscale's ranges.  A name is not.
+    static func isTailscaleAddress(_ endpoint: NWEndpoint) -> Bool {
+        guard case let .hostPort(host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address): return isTailscaleIPv4([UInt8](address.rawValue))
+        case .ipv6(let address): return isTailscaleIPv6([UInt8](address.rawValue))
+        default: return false
+        }
+    }
+
+    /// Whether the phone is about to reach the Mac over Tailscale, so it can
+    /// offer the server controls.  Only a hint for the buttons: the Mac decides
+    /// from the socket.  A Bonjour service is on the local link, never Tailscale.
+    /// Port 443 and a TLS link are Tailscale Serve's shape, which reaches the Mac
+    /// over loopback and is always refused, so they are not offered either.
+    static func isTailscaleEndpoint(_ endpoint: NWEndpoint, usesTLS: Bool = false) -> Bool {
+        guard !usesTLS, case let .hostPort(host, port) = endpoint, port.rawValue != 443 else { return false }
+        if case .name(let name, _) = host {
+            var lowered = name.lowercased()
+            if lowered.hasSuffix(".") { lowered.removeLast() }
+            return lowered.hasSuffix(".ts.net")
+        }
+        return isTailscaleAddress(endpoint)
+    }
+
+    /// One form for an address, whichever way it was spelled.
+    static func addressKey(_ endpoint: NWEndpoint) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let address): return make(ipv4: [UInt8](address.rawValue)).key
+        case .ipv6(let address): return make(ipv6: [UInt8](address.rawValue)).key
+        default: return nil
+        }
+    }
+
+    /// The Tailscale-range addresses this Mac holds on `utun` interfaces.
+    static func localTunnelAddresses() -> Set<String> {
+        var result = Set<String>()
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(first) }
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard String(cString: pointer.pointee.ifa_name).hasPrefix("utun"), let address = pointer.pointee.ifa_addr else { continue }
+            if address.pointee.sa_family == sa_family_t(AF_INET) {
+                let bytes = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { pointer in
+                    withUnsafeBytes(of: pointer.pointee.sin_addr) { [UInt8]($0) }
+                }
+                if isTailscaleIPv4(bytes) { result.insert(make(ipv4: bytes).key) }
+            } else if address.pointee.sa_family == sa_family_t(AF_INET6) {
+                let bytes = address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { pointer in
+                    withUnsafeBytes(of: pointer.pointee.sin6_addr) { [UInt8]($0) }
+                }
+                if isTailscaleIPv6(bytes) { result.insert(make(ipv6: bytes).key) }
+            }
+        }
+        return result
+    }
+
+    /// Key for a forwarded request whose client address cannot be read.
+    static let unreadableForwardedKey = "forwarded"
+
+    /// The IPv6 loopback address (`::1`) as `make(ipv6:)` keys it.
+    private static let ipv6LoopbackKey = String(repeating: "0", count: 31) + "1"
+
+    /// Whether the connection came from this Mac itself, which is where a
+    /// tunnel daemon such as `cloudflared` connects from.
+    var isLoopback: Bool {
+        key.hasPrefix("127.") || key == Self.ipv6LoopbackKey
+    }
+
+    /// The peer a request should be judged as.  A Cloudflare Tunnel daemon on
+    /// this Mac connects over loopback, which would make every tunnel request
+    /// look local, so a loopback request that names its client in a forwarded
+    /// header is judged by that client instead: a public address is not
+    /// trusted and is throttled under its own key.  A loopback request with
+    /// tunnel marks but no client address it can read is not trusted either.
+    ///
+    /// Forwarded headers from any other peer are ignored.  A LAN or Tailscale
+    /// phone talks to the Mac directly, and honouring its headers would let it
+    /// borrow another address's throttle key (locking that client out) or
+    /// rotate keys to dodge the per-address limit on wrong codes.
+    func resolvingForwardedClient(in request: Data) -> CompanionPeer {
+        guard isLoopback else { return self }
+        if let clientIP = CompanionHTTP.forwardedClientIP(in: request) {
+            return Self.forwarded(clientIP)
+        }
+        if CompanionHTTP.isForwardedTunnel(in: request) {
+            return CompanionPeer(key: Self.unreadableForwardedKey, isTrusted: false)
+        }
+        return self
+    }
+
+    /// A forwarded client address judged like a direct peer's.  Anything that
+    /// is not a bare IPv4 or IPv6 address is not trusted.
+    static func forwarded(_ clientIP: String) -> CompanionPeer {
+        if let v4 = IPv4Address(clientIP) {
+            return make(ipv4: [UInt8](v4.rawValue))
+        }
+        if let v6 = IPv6Address(clientIP) {
+            return make(ipv6: [UInt8](v6.rawValue))
+        }
+        return CompanionPeer(key: unreadableForwardedKey, isTrusted: false)
+    }
+
+    /// Splits an address typed on the phone into a host and an optional port.
+    /// `name:port` and `a.b.c.d:port` split on their one colon.  An IPv6
+    /// literal takes a port only in brackets (`[fd7a:115c:a1e0::1]:24240`),
+    /// because a bare one's last group can be all digits (`fd7a:115c:a1e0::1`)
+    /// and would otherwise be read as a port.  The brackets are dropped.
+    static func splitHostAndPort(_ raw: String) -> (host: String, port: Int?) {
+        if raw.hasPrefix("["), let close = raw.firstIndex(of: "]") {
+            let host = String(raw[raw.index(after: raw.startIndex)..<close])
+            let rest = raw[raw.index(after: close)...]
+            if rest.hasPrefix(":"), let port = Int(rest.dropFirst()) {
+                return (host, port)
+            }
+            return (host, nil)
+        }
+        let colons = raw.filter { $0 == ":" }.count
+        if colons == 1, let colon = raw.firstIndex(of: ":"), let port = Int(raw[raw.index(after: colon)...]) {
+            return (String(raw[..<colon]), port)
+        }
+        return (raw, nil)
+    }
+
     /// Whether the phone should treat the Mac it is about to send a secret to
     /// as being on the local network or Tailscale.  A Bonjour service was found
     /// on the local link; an address is judged like a peer's; a name is trusted
-    /// only if it is a MagicDNS or `.local` name, because any other name can
-    /// point anywhere.  The Mac refuses controls from outside regardless, but
-    /// it reads a request before it can refuse it, so a secret must not be sent
-    /// to a Mac that is only reachable over the public internet.
+    /// only if it is a MagicDNS, `.local` or `localhost` name, because any other
+    /// name can point anywhere.  The port says nothing: 443 proves neither that
+    /// the link is encrypted nor who answers, and a tunnel's edge reads what it
+    /// carries.  The Mac refuses controls from outside regardless, but it reads
+    /// a request before it can refuse it, so a secret must not be sent to a Mac
+    /// that is only reachable over the public internet or a tunnel.
     static func isTrustedEndpoint(_ endpoint: NWEndpoint) -> Bool {
         switch endpoint {
         case .service:
@@ -101,6 +271,36 @@ struct CompanionPeer: Equatable, Sendable {
         if b[0..<15].allSatisfy({ $0 == 0 }), b[15] == 1 { return true }   // ::1
         if b[0] == 0xfe, (b[1] & 0xc0) == 0x80 { return true }              // fe80::/10 link-local
         if (b[0] & 0xfe) == 0xfc { return true }                            // fc00::/7 unique-local, includes Tailscale's fd7a:115c:a1e0::/48
+        // Home Wi-Fi with global unicast IPv6 (2000::/3): check if client shares a /64 prefix with any local interface
+        if (b[0] & 0xe0) == 0x20 {
+            let prefixes = localIPv6Prefixes()
+            if prefixes.contains(where: { b.starts(with: $0) }) { return true }
+        }
         return false
+    }
+
+    private static func localIPv6Prefixes() -> [[UInt8]] {
+        var prefixes: [[UInt8]] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(first) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = ptr {
+            let flags = Int32(current.pointee.ifa_flags)
+            if (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0 && (flags & IFF_LOOPBACK) == 0,
+               let sa = current.pointee.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET6) {
+                sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                    var bytes = [UInt8](repeating: 0, count: 16)
+                    withUnsafeBytes(of: sin6.pointee.sin6_addr) { raw in
+                        for i in 0..<min(16, raw.count) { bytes[i] = raw[i] }
+                    }
+                    if (bytes[0] & 0xe0) == 0x20 {
+                        prefixes.append(Array(bytes.prefix(8)))
+                    }
+                }
+            }
+            ptr = current.pointee.ifa_next
+        }
+        return prefixes
     }
 }

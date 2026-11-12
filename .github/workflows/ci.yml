@@ -15,32 +15,97 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check manual release scripts without signing credentials
         run: |
-          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-testflight-release.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh
+          bash -n scripts/ios-stage-asc-key.sh scripts/ios-appstore-gm-prepare.sh scripts/ios-ship-testflight.sh scripts/ios-fleet/ship-testflight.sh scripts/ios-fleet/scheduled-ship-gate.sh scripts/ios-fleet/test-scheduled-ship-gate.sh scripts/ios-fleet/test-next-shared-build.sh scripts/test-ios-stage-asc-key.sh scripts/capture-app-screenshots.sh scripts/install.sh scripts/mac-release-build.sh scripts/make_appcast.sh
+          bash -n scripts/smb-root-files-share.sh
+          node --check scripts/ios-fleet/asc-api.mjs
+          node --check scripts/ios-fleet/asc-key.mjs
+          node --check scripts/ios-fleet/version-plan.mjs
+          node --check scripts/ios-fleet/tester-policy.mjs
           bash scripts/test-ios-stage-asc-key.sh
+          bash scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-key.test.mjs
+          node --test scripts/ios-fleet/test-asc-credentials.mjs
+          node --test scripts/ios-fleet/version-plan.test.mjs
+          node --test scripts/ios-fleet/shared-build.test.mjs
+          node --test scripts/ios-fleet/next-shared-build.test.mjs
+          node --test scripts/ios-fleet/tester-policy.test.mjs
+          node --test scripts/infisical-fetch.node-test.mjs scripts/infisical-fetch-expand.node-test.mjs
+          bash scripts/ios-fleet/test-scheduled-ship-gate.sh
+          bash scripts/ios-fleet/test-next-shared-build.sh
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-release.py
+          node --test scripts/release-inventory.test.mjs
+          node --test scripts/release-build-policy.test.mjs
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ios-screenshot-checks.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ui-copy.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-ci-report.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-sentry-wiring.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-smb-root-files-share.py
 
       - name: Robotic Vacuum Python tests
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-hoghunter-clean.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-robotic-vacuum.py
 
+      - name: Server status Python tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/server-status -p 'test_*.py'
+
   test:
-    runs-on: macos-15
-    timeout-minutes: 30
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
+      TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # macOS exposes waitid/WNOWAIT in Python 3.13 and newer.  Keep the
+      # supervisor and capture dependencies on the same explicit interpreter.
+      - name: Set Up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.15'
+
+      - name: Test Capture Supervisor on macOS
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-bounded-process.py
+
+      - name: Test Code Identity Rules on macOS
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-mac-identity.py
 
       - name: Install dependencies
         run: |
-          brew install xcodegen
+          curl -sSL --fail --retry 3 --retry-all-errors -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          test -s /tmp/xcodegen.zip
+          rm -rf /tmp/xcodegen && ditto -xk /tmp/xcodegen.zip /tmp/xcodegen
+          # The zip wraps the binary AND its SettingPresets
+          # (xcodegen/bin/xcodegen plus xcodegen/share/xcodegen).  The
+          # binary alone generates a preset-less project -- xcodebuild
+          # then resolves an empty PRODUCT_NAME and drops -enable-testing
+          # ("module name '' is not a valid identifier").  Install both,
+          # like the bundled install.sh does, tolerating layout drift.
+          BIN="$(find /tmp/xcodegen -path '*/bin/xcodegen' -type f | head -1)"
+          [ -n "$BIN" ] || BIN="$(find /tmp/xcodegen -maxdepth 2 -name xcodegen -type f | head -1)"
+          test -n "$BIN" && test -x "$BIN"
+          sudo mkdir -p /usr/local/bin
+          sudo rm -rf /usr/local/bin/xcodegen
+          sudo cp "$BIN" /usr/local/bin/xcodegen
+          SHARE="$(find /tmp/xcodegen -type d -path '*share/xcodegen' | head -1)"
+          if [ -n "$SHARE" ]; then
+            sudo rm -rf /usr/local/share/xcodegen
+            sudo mkdir -p /usr/local/share
+            sudo cp -r "$SHARE" /usr/local/share/
+          fi
+          # The runner shell does not always carry /usr/local/bin on PATH
+          # (non-login shell, image-dependent), so pin it for this step and
+          # every later one via GITHUB_PATH, and check by absolute path.
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          /usr/local/bin/xcodegen --version
           python3 -m pip install --break-system-packages pyobjc-framework-Quartz || python3 -m pip install pyobjc-framework-Quartz
 
       - name: Generate project
@@ -57,6 +122,9 @@ jobs:
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           fi
 
+      - name: Require server maintenance render
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png" && test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-incomplete-inventory.png"
+
       - name: Build iOS companion
         run: |
           xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \
@@ -65,7 +133,7 @@ jobs:
       - name: Headless UI smoke test
         run: |
           set -o pipefail
-          xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build-ui \
+          xcodebuild -scheme HogHunter -configuration Release -destination 'platform=macOS' -derivedDataPath build-ui \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           # Drives the real views and the real NSApp window list with nobody
           # logged in, then exits non-zero on the first failed check.  This is
@@ -74,31 +142,18 @@ jobs:
           "build-ui/Build/Products/Release/HogHunter.app/Contents/MacOS/HogHunter" -HogHunterUISmoke
 
       - name: Capture app screenshots
-        if: always()
-        continue-on-error: true
-        # Hard cap: the shared macOS-15 runner has hung twice on this step
-        # (simulator boot / window detection).  Without a wall-clock limit the
-        # 30-minute job timeout fires and fails the whole `test` check, which
-        # blocks PR merge because branch protection does not allow admin
-        # override of a `cancelled` required status check.  The screenshots are
-        # a nice-to-have artifact, not a gate; cap them and let them fail
-        # softly so build / unit tests / UI smoke test are what gate merge.
-        run: |
-          if command -v gtimeout >/dev/null 2>&1; then
-            gtimeout --kill-after=30 8m bash scripts/capture-app-screenshots.sh || true
-          else
-            ( bash scripts/capture-app-screenshots.sh & CAP_PID=$!
-              sleep 480
-              if kill -0 "$CAP_PID" 2>/dev/null; then
-                echo "Capture app screenshots exceeded 8m; killing."
-                kill -TERM "$CAP_PID" 2>/dev/null || true
-                sleep 5
-                kill -KILL "$CAP_PID" 2>/dev/null || true
-              fi
-              wait "$CAP_PID" 2>/dev/null || true ) || true
-          fi
+        if: ${{ !cancelled() }}
+        timeout-minutes: 35
+        # The supervisor finishes when capture exits and kills its whole process
+        # group, including orphan helpers that could retain runner output handles.
+        # Budget: the first iOS format alone takes ~6 min on these runners
+        # (simulator boot dominates), and five formats plus the macOS phase
+        # need ~25 min.  The old 480s cap always fired mid-way through the
+        # second format, after the required screens were already saved.
+        run: python3 scripts/bounded-process.py --timeout 1980 --grace 2 -- bash scripts/capture-app-screenshots.sh
 
       - name: Upload screenshots artifact
+        timeout-minutes: 3
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v7

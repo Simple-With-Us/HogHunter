@@ -57,6 +57,7 @@ enum CpuScale: String, CaseIterable, Identifiable {
 }
 
 enum MenuBarLabelMode: String, CaseIterable, Identifiable {
+    case historyBars = "History Bars & %"
     case machinePercent = "Machine CPU"
     case topHogName = "Top Hog"
     case sparkline = "Live Sparkline"
@@ -76,6 +77,21 @@ enum AppearanceChoice: String, CaseIterable, Identifiable {
         case .light: return .light
         case .dark: return .dark
         case .system: return nil
+        }
+    }
+
+    /// The appearance the Mac is actually showing:  "Light" or "Dark", never
+    /// "System".
+    ///
+    /// The phone's System choice follows the Mac, and the phone cannot see
+    /// the Mac's screen, so it needs the resolved name.
+    var resolvedName: String {
+        switch self {
+        case .light: return "Light"
+        case .dark: return "Dark"
+        case .system:
+            let match = NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+            return match == .darkAqua ? "Dark" : "Light"
         }
     }
 }
@@ -343,17 +359,22 @@ struct DiskSpace: Equatable {
 
 // MARK: - Formatting
 
+/// Number formatting for the panel.
+///
+/// These helpers deliberately call `String(format:)` with no locale.  A
+/// non-nil locale makes CoreFoundation build an ICU number formatter (and
+/// load locale resources) for `%f` / `%d` on every call, which hung the
+/// main thread when every row reformatted on every refresh tick
+/// (HOGHUNTER-G).  With no locale, formatting takes the non-localized C
+/// path: it always prints `.` as the decimal separator and never touches
+/// ICU, which is exactly the output these helpers want (`12.3%`,
+/// `1.4 GB`, `512 MB`).  Do not pass a locale here again.
 enum HogFormat {
-    /// Locale that prints `.` as the decimal separator regardless of the
-    /// user's region.  Cached because `Locale(identifier:)` is not free, and
-    /// every formatted number in the panel goes through here.
-    private static let posix = Locale(identifier: "en_US_POSIX")
-
     /// One decimal below 100, an integer at or above.  Always a "%" suffix.
     static func cpu(_ value: Double) -> String {
         let v = value.isFinite ? max(0, value) : 0
-        if v < 100 { return String(format: "%.1f%%", locale: posix, v) }
-        return String(format: "%.0f%%", locale: posix, v)
+        if v < 100 { return String(format: "%.1f%%", v) }
+        return String(format: "%.0f%%", v)
     }
 
     /// Converts a per-core value for display under the chosen scale.
@@ -372,9 +393,9 @@ enum HogFormat {
         let gb = Double(bytes) / 1_073_741_824
         let mb = Double(bytes) / 1_048_576
         let kb = Double(bytes) / 1024
-        if mb >= 1023.5 { return String(format: "%.1f GB", locale: posix, gb) }
-        if kb >= 1023.5 { return String(format: "%.0f MB", locale: posix, mb) }
-        return String(format: "%.0f KB", locale: posix, kb)
+        if mb >= 1023.5 { return String(format: "%.1f GB", gb) }
+        if kb >= 1023.5 { return String(format: "%.0f MB", mb) }
+        return String(format: "%.0f KB", kb)
     }
 
     /// "12 MB/s", "1.4 GB/s", "0 KB/s".
@@ -392,8 +413,18 @@ enum HogFormat {
         return "\(total) s"
     }
 
+    /// How full a volume is and how much room is left, said the same way for
+    /// every volume: the internal disk, an external drive, a Time Machine
+    /// destination.  The internal disk used to read "17.0 of 460.4 GB free"
+    /// while the others read "69% used · 145.4 GB free", which read as two
+    /// different facts about two different things.
+    static func capacity(usedPercent: Double?, freeBytes: UInt64?) -> String {
+        guard let usedPercent, let freeBytes else { return "Unavailable" }
+        return "\(Int(usedPercent.rounded()))% used · \(memory(freeBytes)) free"
+    }
+
     static func percent(_ fraction: Double) -> String {
-        String(format: "%.0f%%", locale: posix, max(0, min(1, fraction)) * 100)
+        String(format: "%.0f%%", max(0, min(1, fraction)) * 100)
     }
 
     /// "1,115" -- a process count is unreadable at four digits without a

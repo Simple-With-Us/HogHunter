@@ -11,6 +11,11 @@ struct MaintainStatus: Codable, Equatable {
     var stepLastResults: [String: MaintainStepResult]
     var historyCount: Int
     var updatedAt: Double?
+    /// The disk reading the engine last sampled.  Nil before the first watch
+    /// tick, and nil for a status written before the engine reported it.
+    var disk: MaintainDisk? = nil
+    /// Last persisted unfinished run; this alone does not prove it is still running.
+    var partialRun: MaintainRun? = nil
 
     enum CodingKeys: String, CodingKey {
         case health
@@ -22,6 +27,8 @@ struct MaintainStatus: Codable, Equatable {
         case stepLastResults = "step_last_results"
         case historyCount = "history_count"
         case updatedAt = "updated_at"
+        case disk
+        case partialRun = "partial_run"
     }
 
     var displayHealth: String {
@@ -30,8 +37,34 @@ struct MaintainStatus: Codable, Equatable {
         case "overdue": return "Overdue"
         case "failed": return "Needs attention"
         case "unloaded": return "Not running in background"
+        case "critical": return "Disk critically low"
+        case "degraded": return "Disk low"
         default: return health.capitalized
         }
+    }
+}
+
+/// How much room is left, as the engine's watch tick last measured it.
+///
+/// The engine used to report "healthy" while the disk sat at 100% with three
+/// gigabytes free, because health never looked at the disk at all.  It does
+/// now, and this carries the number so the panel can show it.
+struct MaintainDisk: Codable, Equatable {
+    /// Free space on the Data volume, in gigabytes.  Nil when the engine has
+    /// not sampled the disk yet.
+    var freeGb: Double?
+    /// "ok", "acute", "critical", or "unknown" before the first sample.
+    var health: String
+
+    enum CodingKeys: String, CodingKey {
+        case freeGb = "free_gb"
+        case health
+    }
+
+    /// The free space as a short string for the panel, or nil when unknown.
+    var freeText: String? {
+        guard let freeGb else { return nil }
+        return String(format: "%.1f GB free", freeGb)
     }
 }
 
@@ -44,9 +77,11 @@ struct MaintainRun: Codable, Equatable {
     var exitCode: Int
     var steps: [MaintainStepResult]
     /// How the run ended, as the engine recorded it: "ok", "partial" (a step
-    /// failed and another did its work, so the run exits 0) or "failed".
+    /// failed and another did its work, so the run exits 0), "skipped" or "failed".
     /// Nil for a record written before the engine kept the field.
     var outcome: String? = nil
+    var currentStep: String? = nil
+    var currentTarget: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case runId = "run_id"
@@ -57,6 +92,8 @@ struct MaintainRun: Codable, Equatable {
         case exitCode = "exit_code"
         case steps
         case outcome
+        case currentStep = "current_step"
+        case currentTarget = "current_target"
     }
 }
 
@@ -68,12 +105,17 @@ extension MaintainRun {
     /// check, or the lock being held by another run.
     private static let lookOnlyStepIds: Set<String> = ["resource_sample", "housekeeper_lock"]
 
-    /// "ok", "partial" or "failed".  The run's recorded outcome, so a partial
+    /// "ok", "partial", "skipped" or "failed".  The run's recorded outcome, so a partial
     /// run (exit 0) is told from a clean one; a record from before the field
     /// existed, or one holding a word this build does not know, is judged by
     /// its exit code.  A non-zero exit is always failed, as in the engine.
     var resolvedOutcome: String {
-        CompanionMaintainRunResult.resolve(exitCode: exitCode, outcome: outcome).rawValue
+        // Older engines wrote lock contention as a successful run.
+        if exitCode == 0 && outcome == nil && !steps.isEmpty
+            && steps.allSatisfy({ $0.stepId == "housekeeper_lock" && $0.status == "skipped" }) {
+            return "skipped"
+        }
+        return CompanionMaintainRunResult.resolve(exitCode: exitCode, outcome: outcome).rawValue
     }
 
     /// A watch tick the engine took no further action on.  Most ticks are.
@@ -145,4 +187,45 @@ struct MaintainStepResult: Codable, Equatable, Identifiable {
 struct MaintainStepCatalogEntry: Identifiable, Sendable {
     let id: String
     let title: String
+    var description: String = ""
+    var tooltip: String = ""
+    let associatedTool: ToolInfo?
+
+    init(id: String, title: String, description: String = "", tooltip: String = "", associatedTool: ToolInfo? = nil) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.tooltip = tooltip
+        self.associatedTool = associatedTool ?? ToolCatalog.tool(for: id)
+    }
+
+    var isToolRequired: Bool {
+        associatedTool != nil
+    }
+
+    var isInstalled: Bool {
+        guard let tool = associatedTool else { return true }
+        return tool.isInstalled
+    }
+
+    var installedPaths: [String] {
+        associatedTool?.installedPaths ?? []
+    }
 }
+
+struct StepOutcomeSample: Identifiable, Equatable {
+    let id = UUID()
+    let timestamp: Date
+    let status: String
+    let reason: String
+}
+
+struct Step24hHistory: Equatable {
+    let runsCount: Int
+    let successCount: Int
+    let skipCount: Int
+    let failCount: Int
+    let lastRunDate: Date?
+    let recentOutcomes: [StepOutcomeSample]
+}
+

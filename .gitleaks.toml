@@ -1,0 +1,17 @@
+# Extend the default ruleset; do not replace it.
+# Global allowlists and targetRules require gitleaks >= v8.25.0.
+minVersion = "v8.25.0"
+
+[extend]
+useDefault = true
+
+# Sparkle's EdDSA PUBLIC verification key.  It is committed on purpose and is
+# already in scripts/mac-release-build.sh and docs/AUTO-UPDATE.md: a public key
+# checks a downloaded archive's signature and cannot sign one, so holding it
+# discloses nothing.  Scoped to generic-api-key and to the one script so a real
+# secret added there still fails the scan.
+[[allowlists]]
+description = "Sparkle public EdDSA verification key (cannot sign an archive)"
+targetRules = ["generic-api-key"]
+paths = ['''^scripts/install\.sh$''']
+stopwords = ['''^8nQ6\+N6opPFZYkZUgMtyvfbqZH92Kpw3haG/6trehuE=$''']

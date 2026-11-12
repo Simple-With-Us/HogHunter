@@ -7,28 +7,50 @@ import SwiftUI
 struct DiskCleanerView: View {
     @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
+    var autoScanOnAppear: Bool = true
+    var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
+    /// The unattended clean regimen, as the owner set it.
+    @State private var regimen = CleanRegimen.load()
+    /// The one runner the app uses.  Observed so the summary and the next
+    /// run time refresh themselves after a run.
+    @ObservedObject private var regimenRunner = CleanRegimenRunner.shared
 
     var body: some View {
         VStack(spacing: 10) {
-            tierSelector
+            if showInlineTierSelector {
+                tierSelector
+            }
             if store.selectedTier == .extreme {
                 extremeDisclaimerBanner
             }
             heroHeader
+            Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            regimenSection
             contentBody
             bottomBar
         }
         .onAppear {
             // An iPhone can edit the exclusions while this view is closed.
             store.reloadExclusions()
-            if isTabActive, case .idle = store.state {
+            store.reloadTempFilePolicy()
+            if autoScanOnAppear, isTabActive, case .idle = store.state {
                 store.scan()
             }
             store.refreshLastCleanup()
         }
         .onChange(of: isTabActive) { active in
-            if active, case .idle = store.state {
+            // The dashboard keeps this view mounted while another page is up, so
+            // an exclusion edited from the phone or Settings arrives on return
+            // rather than through onAppear.
+            if active {
+                store.reloadExclusions()
+                store.reloadTempFilePolicy()
+            }
+            if autoScanOnAppear, active, case .idle = store.state {
                 store.scan()
             }
             store.refreshLastCleanup()
@@ -44,14 +66,112 @@ struct DiskCleanerView: View {
             isPresented: $store.showConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
+            Button("Clean Selected (\(store.selectedTier.title))", role: .destructive) {
                 store.cleanSelected(createSnapshot: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(CleanerCopy.confirmationMessage(sizeText: HogFormat.memory(store.totalSelectedBytes()), itemCount: store.totalSelectedItemsCount()))
+            Text(CleanerCopy.confirmationMessage(sizeText: "\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))", itemCount: store.totalSelectedItemsCount()))
         }
     }
+
+    // MARK: - Automatic Cleanup Regimen
+
+    /// The unattended clean regimen.
+    ///
+    /// It is off by default and the owner turns it on.  An unattended delete
+    /// is a decision a person makes, not something an app grants itself, so
+    /// the toggle sits here beside the rest of the reclaim controls rather
+    /// than behind a settings screen nobody opens.
+    private var regimenSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Toggle("Automatic Cleanup", isOn: Binding(
+                    get: { regimen.isEnabled },
+                    set: { enabled in
+                        regimen.isEnabled = enabled
+                        regimen = regimen.sanitized()
+                        regimen.save()
+                        // Turning it on schedules the first run one interval
+                        // out.  It does not fire a clean the moment the
+                        // switch flips: an unattended delete starts at a time
+                        // the owner chose, and "Run Now" is right beside it.
+                        if regimen.isEnabled {
+                            regimenRunner.scheduleFromNow()
+                        } else {
+                            regimenRunner.refreshSchedule()
+                        }
+                    }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 11))
+
+                Spacer()
+
+                if regimen.isEnabled {
+                    Picker("Every", selection: Binding(
+                        get: { regimen.intervalHours },
+                        set: { hours in
+                            regimen.intervalHours = hours
+                            regimen = regimen.sanitized()
+                            regimen.save()
+                            // A new interval is a new schedule, so the clock
+                            // starts again from now.
+                            regimenRunner.scheduleFromNow()
+                        }
+                    )) {
+                        ForEach(Self.regimenIntervals, id: \.self) { hours in
+                            Text(hours == 1 ? "1 Hour" : "\(Int(hours)) Hours")
+                                .tag(hours)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .font(.system(size: 11))
+                    .labelsHidden()
+
+                    Button {
+                        regimenRunner.runNow()
+                    } label: {
+                        Label("Run Now", systemImage: "play.circle")
+                            .font(.system(size: 11))
+                    }
+                    .controlSize(.small)
+                    .disabled(regimenRunner.isRunning)
+                }
+            }
+
+            if regimen.isEnabled {
+                if let next = regimenRunner.nextRunDate {
+                    Text("Next run \(next.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                if let waiting = regimenRunner.waitingReason {
+                    Text(waiting)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                if let summary = regimenRunner.lastSummary {
+                    Text(summary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Off.\u{00A0} Hog Hunter never deletes anything on its own until this is turned on.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    /// The intervals the picker offers, in hours.
+    private static let regimenIntervals: [Double] = [1, 4, 12, 24]
 
     // MARK: - Tier Selector & Disclaimer
 
@@ -74,15 +194,10 @@ struct DiskCleanerView: View {
 
             Spacer()
 
-            Text(store.selectedTier.badge)
-                .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(store.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
-                )
-                .foregroundStyle(store.selectedTier == .extreme ? Color.orange : Color.blue)
+            ContrastChip(
+                text: store.selectedTier.badge,
+                tone: store.selectedTier == .extreme ? .caution : .neutral
+            )
         }
         .padding(.horizontal, 2)
     }
@@ -118,19 +233,12 @@ struct DiskCleanerView: View {
     private var heroHeader: some View {
         switch store.state {
         case .idle:
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(Color.accentColor)
-                    Text("Ready to scan system clutter")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                Text("Select Reclaim to start cleaning")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            VStack(spacing: 4) {
+                Text("Ready to scan system clutter")
+                    .font(.system(size: 13, weight: .medium))
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+            .padding(.vertical, 12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
 
         case .scanning(let category):
@@ -152,26 +260,28 @@ struct DiskCleanerView: View {
         case .scanned(let report):
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 16) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.accentColor.opacity(0.12))
-                            .frame(width: 52, height: 52)
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 24))
-                            .foregroundStyle(Color.accentColor)
-                    }
-
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(HogFormat.memory(store.totalSelectedBytes()))
+                            Text("\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))")
                                 .font(.system(size: 22, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.primary)
-                            Text("ready to reclaim")
+                            Text("selected (estimated)")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
 
-                        Text("\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
+                        if store.totalSelectedExternalBytes() > 0 {
+                            HStack(spacing: 8) {
+                                Label("Internal: \(HogFormat.memory(store.totalSelectedInternalBytes()))", systemImage: "internaldrive")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Label("External: \(HogFormat.memory(store.totalSelectedExternalBytes()))", systemImage: "externaldrive")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.purple)
+                            }
+                        }
+
+                        Text("\(report.anyApproximate ? "at least " : "")\(HogFormat.memory(report.totalBytes)) total discovered across \(report.categories.map(\.items.count).reduce(0, +)) items")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -185,10 +295,20 @@ struct DiskCleanerView: View {
                         .frame(width: 152)
                 }
 
+                if report.isPartial {
+                    HStack {
+                        Text("Partial scan.\u{00A0} Some folders were not measured, so these sizes are a minimum.")
+                            .font(.system(size: 12)).foregroundStyle(.primary)
+                        Spacer()
+                        Button("Scan Deeper") { store.scan(depth: .deeper) }
+                    }
+                    Text("A deeper scan restarts with larger limits; slow or unavailable locations can still remain partial.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
                 if let last = store.lastCleanup {
-                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)) — freed \(last.formattedBytesReclaimed)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)).\u{00A0} Moved or removed \(last.formattedBytesReclaimed), estimated.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -197,12 +317,12 @@ struct DiskCleanerView: View {
 
         case .cleaning(let progress, let currentItem):
             VStack(spacing: 8) {
-                if currentItem.contains("snapshot") {
+                if DiskCleaner.isSafetyCopyProgress(currentItem) {
                     HStack(spacing: 8) {
                         ProgressView()
                             .scaleEffect(0.7)
-                        Text("Creating APFS safety snapshot (this can take 15–30s)…")
-                            .font(.system(size: 11, weight: .medium))
+                        Text("Saving a safety copy.\u{00A0} This can take 15 to 30 seconds.")
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -218,7 +338,7 @@ struct DiskCleanerView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    if currentItem.contains("snapshot") {
+                    if DiskCleaner.isSafetyCopyProgress(currentItem) {
                         Text("Working…")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
@@ -239,14 +359,18 @@ struct DiskCleanerView: View {
                     .foregroundStyle(.green)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Reclaimed \(result.formattedBytesReclaimed)!")
+                    Text("\(result.formattedBytesReclaimed) moved or removed (estimated)")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Cleaned \(result.itemsRemoved) items safely.")
+                    Text("Cleaned \(result.itemsRemoved) items.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
+                    Text(freeSpaceObservation(result))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("The Trash and local snapshots can still hold space.\u{00A0} Other apps change free space too.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
                     if !result.errors.isEmpty {
-                        Text("\(result.errors.count) items could not be deleted (system locked).")
+                        Text("\(result.errors.count) cleanup issues reported.")
                             .font(.system(size: 10))
                             .foregroundStyle(.orange)
                     }
@@ -282,9 +406,8 @@ struct DiskCleanerView: View {
         }
     }
 
-    /// Free space on the startup volume, and how much of it this clean would
-    /// hand back.  `DiskSpace` is the same reading the panel's Storage card
-    /// uses, so the two can never disagree.
+    /// Current startup-volume availability uses the same metric as the Storage card.
+    /// Item sizes do not forecast a free-space gain because undo protections retain blocks.
     private var volumeGauge: some View {
         VStack(alignment: .trailing, spacing: 4) {
             Text("Startup Volume")
@@ -298,7 +421,7 @@ struct DiskCleanerView: View {
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
-        .help("Reclaiming everything selected would take free space from this to the number below.  macOS counts purgeable space as available, so a healthy disk can look nearly full here and still be fine.")
+        .help("Available space includes macOS purgeable capacity.\u{00A0} Selected item sizes do not predict a free-space gain: Trash and safety snapshots can retain blocks.")
     }
 
     private var volumeSpace: DiskSpace? { DiskSpace.current() }
@@ -312,8 +435,14 @@ struct DiskCleanerView: View {
 
     private var volumeDetail: String {
         guard let volumeSpace else { return "" }
-        let after = max(0, volumeSpace.freeBytes) + store.totalSelectedBytes()
-        return "→ \(HogFormat.memory(after)) of \(HogFormat.memory(volumeSpace.totalBytes))"
+        return "of \(HogFormat.memory(volumeSpace.totalBytes)) total"
+    }
+
+    private func freeSpaceObservation(_ result: CleanResult) -> String {
+        guard let delta = result.observedFreeBytesChange else { return "Available-space change could not be measured." }
+        if delta == 0 { return "No available-space change observed during this run." }
+        let direction = delta > 0 ? "increased" : "decreased"
+        return "Available space \(direction) by \(HogFormat.memory(UInt64(delta.magnitude))) during this run."
     }
 
     // MARK: - Content Body
@@ -381,7 +510,7 @@ struct DiskCleanerView: View {
             Button {
                 store.scan()
             } label: {
-                Label("Rescan", systemImage: "arrow.clockwise")
+                Label(store.state == .idle ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
                     .font(.system(size: 11))
             }
             .controlSize(.small)
@@ -390,8 +519,7 @@ struct DiskCleanerView: View {
             Button {
                 store.showConfirmation = true
             } label: {
-                let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(HogFormat.memory(selectedBytes))")
+                Text("Clean Selected")
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 4)
             }
@@ -447,7 +575,7 @@ private struct CategoryCardView: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
-                    Text(catReport.category.description)
+                    Text(catReport.category == .tempFiles ? store.tempFilePolicy.categoryDescription : catReport.category.description)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -455,7 +583,7 @@ private struct CategoryCardView: View {
 
                 Spacer()
 
-                Text(catReport.formattedTotalSize)
+                Text(catReport.anyApproximate ? "at least \(catReport.formattedTotalSize)" : catReport.formattedTotalSize)
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
                     .padding(.horizontal, 6)
@@ -552,9 +680,25 @@ private struct CategoryCardView: View {
             .padding(.leading, 8)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(item.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    if item.isExternal {
+                        Text(item.volumeName)
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.purple)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.purple.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+                    }
+                    if item.isSymlink {
+                        Image(systemName: "link")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                            .help("Symlink target: \(item.url.resolvingSymlinksInPath().path)")
+                    }
+                }
                 Text(item.subtitle)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -569,7 +713,7 @@ private struct CategoryCardView: View {
 
             Spacer()
 
-            Text(item.formattedSize)
+            Text(item.isApproximate ? "at least \(item.formattedSize)" : item.formattedSize)
                 .font(.system(size: 10.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -604,6 +748,7 @@ private struct CategoryCardView: View {
         case .largeAndOldFiles: color = .teal
         case .apfsSnapshots: color = .cyan
         case .tempFiles: color = .brown
+        case .staleBackups: color = .gray
         }
 
         return ZStack {
@@ -657,7 +802,7 @@ private struct CleanerExclusionsSheet: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(category.title)
                                         .font(.system(size: 12, weight: .medium))
-                                    Text(category.description)
+                                    Text(category == .tempFiles ? store.tempFilePolicy.categoryDescription : category.description)
                                         .font(.system(size: 10))
                                         .foregroundStyle(.secondary)
                                 }

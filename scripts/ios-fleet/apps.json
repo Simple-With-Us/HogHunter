@@ -1,0 +1,20 @@
+{
+  "teamId": "CC8UTF7ATG",
+  "apps": {
+    "hoghunter": {
+      "fixedMarketingVersion": "0.1.0",
+      "buildNumberPolicy": "paired-release",
+      "displayName": "Hog Hunter",
+      "bundleId": "com.simplewithus.hoghunter.ios",
+      "testerPolicy": "public-group",
+      "pairedBuildFeed": "https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml",
+      "appleId": 6816633156,
+      "platform": "iOS",
+      "scheme": "HogHunterIOS",
+      "projectRel": "HogHunter.xcodeproj",
+      "xcodegenDir": ".",
+      "marketingVersionDefault": "0.1.0",
+      "notes": "Hog Hunter iPhone companion; Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios; XcodeGen project.yml; marketing version stays 0.1.0; build numbers start at 1000 and increment the observed complete ASC/feed floor, including earlier timestamp builds"
+    }
+  }
+}

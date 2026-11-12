@@ -27,7 +27,7 @@ final class NetworkStore: ObservableObject {
     }
 
     func refresh() {
-        guard !inflight else { return }
+        guard ApplicationRunMode.current != .uiHarness, !inflight else { return }
         inflight = true
         state = .scanning
         let scanner = self.scanner

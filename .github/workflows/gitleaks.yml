@@ -52,4 +52,5 @@ jobs:
             log_opts="--no-merges --first-parent $range"
           fi
           "$RUNNER_TEMP/gitleaks" git --redact -v --no-banner --exit-code 2 \
+            --config .gitleaks.toml \
             --log-opts="$log_opts" .

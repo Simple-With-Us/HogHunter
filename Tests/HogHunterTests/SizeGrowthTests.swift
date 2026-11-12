@@ -1,0 +1,230 @@
+import XCTest
+@testable import HogHunter
+
+final class SizeGrowthTests: XCTestCase {
+    func testUsesDayBaselineAndIsolatesHostsAndSourceTimestamps() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: nil, now: { now })
+        XCTAssertTrue(history.record(host: "a", metric: "db", path: "/db", bytes: 100, sampledAt: now.addingTimeInterval(-86400)))
+        XCTAssertTrue(history.record(host: "b", metric: "db", path: "/db", bytes: 900, sampledAt: now.addingTimeInterval(-86400)))
+        XCTAssertTrue(history.record(host: "a", metric: "db", path: "/db", bytes: 108, sampledAt: now))
+        XCTAssertEqual(history.percentChange(host: "a", metric: "db", path: "/db")!, 8, accuracy: 0.001)
+        XCTAssertNil(history.percentChange(host: "b", metric: "db", path: "/db"))
+        XCTAssertFalse(history.record(host: "a", metric: "db", path: "/db", bytes: 999, sampledAt: now))
+        XCTAssertFalse(history.record(host: "a", metric: "db", path: "/db", bytes: 999, sampledAt: now.addingTimeInterval(-60)))
+        XCTAssertEqual(history.latest(host: "a", metric: "db", path: "/db")?.bytes, 108)
+    }
+
+    func testMissingShortAndZeroBaselinesStayUnknown() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: nil, now: { now })
+        history.record(host: "a", metric: "size", path: "short", bytes: 100, sampledAt: now.addingTimeInterval(-3600))
+        history.record(host: "a", metric: "size", path: "short", bytes: 200, sampledAt: now)
+        history.record(host: "a", metric: "size", path: "zero", bytes: 0, sampledAt: now.addingTimeInterval(-86400))
+        history.record(host: "a", metric: "size", path: "zero", bytes: 200, sampledAt: now)
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "short"))
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "zero"))
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "missing"))
+    }
+
+    func testPersistencePrunesOldSamplesAndRejectsInvalidRead() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("history.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: url, now: { now })
+        XCTAssertFalse(history.record(host: "a", metric: "size", path: "p", bytes: 8, sampledAt: now.addingTimeInterval(-49 * 3600)))
+        history.record(host: "a", metric: "size", path: "p", bytes: 80, sampledAt: now)
+        XCTAssertFalse(history.record(host: "a", metric: "size", path: "p", bytes: -1, sampledAt: now.addingTimeInterval(1)))
+        history.flushPersistence()
+        XCTAssertEqual(SizeGrowthHistory(fileURL: url, now: { now }).latest(host: "a", metric: "size", path: "p")?.bytes, 80)
+        XCTAssertNil(SizeGrowthHistory(fileURL: url, now: { now.addingTimeInterval(49 * 3600) }).latest(host: "a", metric: "size", path: "p"))
+    }
+
+    func testStaleAndDistantBaselinesDoNotProduceDelta() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: nil, now: { now })
+        history.record(host: "a", metric: "size", path: "distant", bytes: 100, sampledAt: now.addingTimeInterval(-22 * 3600))
+        history.record(host: "a", metric: "size", path: "distant", bytes: 120, sampledAt: now)
+        history.record(host: "a", metric: "size", path: "shortDay", bytes: 100, sampledAt: now.addingTimeInterval(-23 * 3600))
+        history.record(host: "a", metric: "size", path: "shortDay", bytes: 120, sampledAt: now)
+        history.record(host: "a", metric: "size", path: "stale", bytes: 100, sampledAt: now.addingTimeInterval(-26 * 3600))
+        history.record(host: "a", metric: "size", path: "stale", bytes: 120, sampledAt: now.addingTimeInterval(-2 * 3600))
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "distant"))
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "shortDay"))
+        XCTAssertNil(history.percentChange(host: "a", metric: "size", path: "stale"))
+    }
+
+    func testDefaultPersistenceIsDisabledUnderXCTest() {
+        XCTAssertNil(SizeGrowthHistory.defaultURL)
+        XCTAssertTrue(SizeGrowthHistory.shared === SizeGrowthHistory.shared)
+    }
+
+    func testPersistenceRetainsDifferentHostsAndMetrics() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("history.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: url, now: { now })
+        history.record(host: "mac", metric: "directory", path: "/code", bytes: 123, sampledAt: now)
+        history.record(host: "remote", metric: "database", path: "/db", bytes: 456, sampledAt: now)
+        history.flushPersistence()
+        let restored = SizeGrowthHistory(fileURL: url, now: { now })
+        XCTAssertEqual(restored.latest(host: "mac", metric: "directory", path: "/code")?.bytes, 123)
+        XCTAssertEqual(restored.latest(host: "remote", metric: "database", path: "/db")?.bytes, 456)
+    }
+
+    func testBatchBackfillsDayBaselineWithoutReplacingLatestAndIsIdempotent() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: nil, now: { now })
+        history.record(host: "remote", metric: "db", path: "/db", bytes: 120, sampledAt: now)
+        XCTAssertNil(history.percentChange(host: "remote", metric: "db", path: "/db"))
+        let baselineTime = now.addingTimeInterval(-86400)
+        let samples = [SizeGrowthSample(bytes: 100, sampledAt: baselineTime),
+                       SizeGrowthSample(bytes: 999, sampledAt: now),
+                       SizeGrowthSample(bytes: 90, sampledAt: baselineTime.addingTimeInterval(-1)),
+                       SizeGrowthSample(bytes: -1, sampledAt: now.addingTimeInterval(1))]
+        XCTAssertTrue(history.importSamples(host: "remote", metric: "db", path: "/db", samples: samples))
+        XCTAssertEqual(history.latest(host: "remote", metric: "db", path: "/db")?.bytes, 120)
+        XCTAssertEqual(history.percentChange(host: "remote", metric: "db", path: "/db")!, 20, accuracy: 0.001)
+        XCTAssertFalse(history.importSamples(host: "remote", metric: "db", path: "/db", samples: samples))
+        XCTAssertNil(history.latest(host: "other", metric: "db", path: "/db"))
+        XCTAssertTrue(history.importSamples(host: "other", metric: "db", path: "/db", samples: [SizeGrowthSample(bytes: 700, sampledAt: now)]))
+        XCTAssertEqual(history.latest(host: "remote", metric: "db", path: "/db")?.bytes, 120)
+    }
+
+    func testCoalescedWriterKeepsNewestSnapshotAndFailedWritesKeepMemory() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("history.json")
+        let now = Date()
+        let history = SizeGrowthHistory(fileURL: url, now: { now })
+        for index in 0..<1000 {
+            XCTAssertTrue(history.record(host: "mac", metric: "directory", path: "/code", bytes: Int64(index),
+                                         sampledAt: now.addingTimeInterval(Double(index) / 100)))
+        }
+        history.flushPersistence()
+        XCTAssertEqual(SizeGrowthHistory(fileURL: url, now: { now }).latest(host: "mac", metric: "directory", path: "/code")?.bytes, 999)
+        // Making the parent path a file causes a write failure without corrupting another cache.
+        let blocker = folder.appendingPathComponent("blocker")
+        try Data("kept".utf8).write(to: blocker)
+        let failed = SizeGrowthHistory(fileURL: blocker.appendingPathComponent("history.json"), now: { now })
+        failed.record(host: "mac", metric: "directory", path: "/code", bytes: 5, sampledAt: now)
+        failed.flushPersistence()
+        XCTAssertEqual(try String(contentsOf: blocker, encoding: .utf8), "kept")
+        XCTAssertEqual(failed.latest(host: "mac", metric: "directory", path: "/code")?.bytes, 5)
+    }
+
+    func testGrowthFormatting() {
+        XCTAssertEqual(SizeGrowthFormat.delta(8.4), "↑8%")
+        XCTAssertEqual(SizeGrowthFormat.delta(-8.4), "↓-8%")
+        XCTAssertEqual(SizeGrowthFormat.delta(0.8), "↑0.8%")
+        XCTAssertEqual(SizeGrowthFormat.delta(0.99), "↑1%")
+        XCTAssertEqual(SizeGrowthFormat.delta(-0.99), "↓-1%")
+        XCTAssertEqual(SizeGrowthFormat.delta(9.9), "↑10%")
+        XCTAssertEqual(SizeGrowthFormat.delta(12), "↑12%")
+        XCTAssertEqual(SizeGrowthFormat.delta(123), "↑120%")
+        XCTAssertEqual(SizeGrowthFormat.delta(-0.09), "~0%")
+        XCTAssertNil(SizeGrowthFormat.delta(nil))
+    }
+
+    func testAppreciableDeltaOmitsUnavailableAndNegligibleValues() {
+        XCTAssertEqual(SizeGrowthFormat.appreciableDelta(8), "↑8%")
+        XCTAssertEqual(SizeGrowthFormat.appreciableDelta(-8), "↓-8%")
+        XCTAssertEqual(SizeGrowthFormat.appreciableDelta(0.1), "↑0.1%")
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(nil))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(Double.nan))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(Double.infinity))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(0.099))
+        XCTAssertNil(SizeGrowthFormat.appreciableDelta(-0.099))
+        XCTAssertEqual(SizeGrowthFormat.delta(0.02), "~0%")
+    }
+
+    @MainActor
+    func testFailedDirectoryReadPreservesSizeAndMarksUnavailable() async {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let history = SizeGrowthHistory(fileURL: nil, now: { now })
+        history.record(host: "test", metric: "directory", path: "/example", bytes: 123, sampledAt: now)
+        let store = DirectoryUsageStore(history: history, candidates: [("Example", "/example")], host: "test", now: { now }, probe: { _ in nil }, pressure: { .normal })
+        await store.refreshIfNeeded()
+        XCTAssertEqual(store.rows.first?.bytes, 123)
+        XCTAssertEqual(store.rows.first?.isUnavailable, true)
+        XCTAssertNil(store.rows.first?.percentChange)
+    }
+    func testLaneRootsFollowOnlyLayoutLinksAndDeduplicateAliases() throws {
+        let manager = FileManager.default
+        let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: fixture) }
+        let lanes = fixture.appendingPathComponent("local/lanes")
+        let external = fixture.appendingPathComponent("external/Lanes/Repo")
+        let canonicalLane = external.appendingPathComponent("codex-task")
+        let legacy = lanes.appendingPathComponent("legacy")
+        try manager.createDirectory(at: canonicalLane, withIntermediateDirectories: true)
+        try manager.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: lanes.appendingPathComponent("Repo"), withDestinationURL: external)
+        try manager.createSymbolicLink(at: legacy.appendingPathComponent("alias"), withDestinationURL: canonicalLane)
+        try manager.createSymbolicLink(at: lanes.appendingPathComponent("duplicate"), withDestinationURL: external)
+        try manager.createSymbolicLink(at: legacy.appendingPathComponent("local-alias"), withDestinationURL: legacy)
+        try manager.createSymbolicLink(at: lanes.appendingPathComponent("loop"), withDestinationURL: lanes)
+        XCTAssertEqual(DirectoryUsageStore.measurementRoots(lanes.path, includeLaneLinks: true),
+                       [lanes.path, external.path])
+        XCTAssertEqual(DirectoryUsageStore.measurementRoots(lanes.path, includeLaneLinks: false), [lanes.path])
+    }
+
+    func testDirectoryMeasurementValidatesAllRootsAndOverflow() {
+        XCTAssertEqual(DirectoryUsageStore.measuredBytes("2\t/local/lanes\n3\t/external/Repo\n",
+                                                        roots: ["/local/lanes", "/external/Repo"]), 5120)
+        XCTAssertNil(DirectoryUsageStore.measuredBytes("2\t/local/lanes\n", roots: ["/local/lanes", "/external/Repo"]))
+        XCTAssertNil(DirectoryUsageStore.measuredBytes("2\t/wrong\n", roots: ["/local/lanes"]))
+        let large = Int64.max / 1024
+        XCTAssertNil(DirectoryUsageStore.measuredBytes("\(large)\t/a\n\(large)\t/b\n", roots: ["/a", "/b"]))
+    }
+
+    @MainActor
+    func testDirectoryRowPreservesLogicalDisplayPath() async throws {
+        let manager = FileManager.default
+        let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: fixture) }
+        let target = fixture.appendingPathComponent("target")
+        let link = fixture.appendingPathComponent("lanes")
+        try manager.createDirectory(at: target, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: link, withDestinationURL: target)
+        let store = DirectoryUsageStore(history: SizeGrowthHistory(fileURL: nil), candidates: [("Coding Lanes", link.path)], pressure: { .normal })
+        await store.refreshIfNeeded()
+        XCTAssertEqual(store.rows.first?.displayPath, link.path)
+        XCTAssertEqual(store.rows.first?.path, DirectorySizeWalker.canonicalPath(target.path))
+    }
+
+    @MainActor
+    func testBrokenMeasuredSymlinkKeepsLastCompleteCache() async throws {
+        let manager = FileManager.default
+        let fixture = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: fixture) }
+        let target = fixture.appendingPathComponent("target")
+        let link = fixture.appendingPathComponent("lanes")
+        try manager.createDirectory(at: target, withIntermediateDirectories: true)
+        try Data(repeating: 0x5a, count: 4096).write(to: target.appendingPathComponent("payload"))
+        try manager.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let history = SizeGrowthHistory(fileURL: nil)
+        let store = DirectoryUsageStore(history: history, candidates: [("Coding Lanes", link.path)],
+                                        host: "test", pressure: { .normal })
+        for _ in 0..<32 where store.rows.first?.bytes == nil {
+            await store.refreshIfNeeded(force: true)
+        }
+        let completed = try XCTUnwrap(store.rows.first)
+        let completedBytes = try XCTUnwrap(completed.bytes)
+        let physicalTarget = try XCTUnwrap(DirectorySizeWalker.canonicalPath(target.path))
+        XCTAssertEqual(completed.path, physicalTarget)
+        XCTAssertEqual(history.latest(host: "test", metric: "directory", path: link.path)?.sourcePath, physicalTarget)
+
+        try manager.removeItem(at: link)
+        await store.refreshIfNeeded(force: true)
+
+        let failed = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(failed.bytes, completedBytes)
+        XCTAssertEqual(failed.path, physicalTarget)
+        XCTAssertTrue(failed.isUnavailable)
+        XCTAssertFalse(failed.hasResolvedPath)
+        XCTAssertEqual(history.latest(host: "test", metric: "directory", path: link.path)?.sourcePath, physicalTarget)
+    }
+
+}

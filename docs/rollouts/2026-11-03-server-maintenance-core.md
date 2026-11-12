@@ -1,0 +1,31 @@
+# HH-203 Server Maintenance Core
+
+This source unit replaces the untracked maintenance behavior with a pressure-gated, versioned root tool and a compatibility wrapper.  It does not deploy a server change.  The parent session owns containment, deployment, host verification and the broader Server Activity experience.
+
+The new tool reports scan/plan/run results with exact strategy names, candidate counts, bounded work, shared-lock evidence, before/after root capacity and explicit byte semantics.  Healthy root storage skips without Docker inventory.  Package cache and selected rotated logs require age, unchanged identity, no keep marker, no symlink, no hard link and a complete active-file check.  Docker cache uses exact unused, immutable private regular records; image cleanup requires explicit selection and excludes scheduled defaults.  Data directories, named volumes, databases, backups, active worktrees, swap files and user files are outside its deletion scope.
+
+The compatibility wrapper preserves the existing invocation path and schedules.  Deployment defaults to read-only planning and requires an expected legacy hash for apply; it records a protected backup, installs a versioned root-owned tool and verifies installed hashes/modes.  No maintenance command runs during deployment.  See `scripts/server-maintenance/README.md` for the command and JSON contract, bounded-work limits, conservative reclaim evidence and lock recovery rules.
+
+Hog Hunter's remote maintenance step now invokes the fixed root tool through noninteractive sudo, validates structured output and exit status, and reports failures, skips and timeouts truthfully.  It never invokes the old script.  Server process/workload control now refuses malformed output and numeric JSON booleans, and refuses concurrent actions while a request is suspended.
+
+Validation: hermetic maintenance/caller tests, Python compilation, shell syntax, Swift source parsing and diff whitespace checks.  XCTest regressions cover malformed control output and overlapping requests; hosted XCTest execution remains an integration check.  Server dry-run, root/non-root caller permission checks, installed hash verification and external cron behavior remain deployment checks for the parent session.  Physical reclaimed bytes stay unclaimed until an authoritative attribution source exists; observed free-space delta is a separate metric.
+
+Refs HH-203.  Operator-facing history and sustained memory-pressure alert delivery remain follow-up work.
+
+## Server Activity Extension
+
+The same source unit now connects Mac Server Activity menus to guarded Quit, Force Quit, Tame, Restore Priority, three-second kernel-counter sampling, and Coolify workload Stop/Restart.  Current boot/process/container identities are mandatory and every mutation receives an explicit UI confirmation.  Container-process changes and workload changes carry a separate interruption acknowledgement.  Legacy snapshots still decode and their identity-less controls stay disabled.  Protected host, database, Docker, network and fleet infrastructure remains visible with its refusal reason.
+
+Telemetry adds optional per-process anonymous swap/nice/action limits and source-stamped paging/PSI.  Process retention includes CPU, resident-memory and swap leaders, and a reused PID cannot inherit the preceding process's CPU rate.  Kernel sampling reads a fixed set of counters; no argv, environment, stack attachment, database access, new companion control route or production interruption is introduced.
+
+Signalling uses pidfds after live identity checks.  Priority changes retain the original nice level and validate before and after, but Linux setpriority remains PID-based and has a race window that pidfd signalling does not; this limit is documented in the server-status README.  Workload identity is rechecked before passing the full container ID to Docker; Docker offers no conditional compare-and-swap on the process start timestamp.
+
+Read-only runtime checks verified that the existing SSH account and jay can use noninteractive sudo, the host supports pidfd signalling/setpriority, memory PSI and paging counters exist, and the default Docker builder uses the local Docker driver.  A read-only build-cache query accepted the exact planned ID/age/in-use/mutable/shared/type filters and returned no matching records.  No prune, process signal, priority update, workload action or deployment was run during those checks.  The maintenance tool now repeats local-builder verification before cache inventory and each attempted cache prune; partial file-removal failures preserve successful unlink counts and logical-byte evidence.
+
+Validation of the Activity extension: 58 hermetic server tests and 21 maintenance tests passed, including harmless real-child runner success, nonzero exit, timeout and output-cap checks.  The final combined Debug XCTest selection for ServerControlTests and VPSActivityTests passed all 19 cases, compiling the frozen confirmation target and verifying boot/PID/start-derived row identity.  Production remains untouched by this source unit.
+
+## Deployment Blocker Corrections
+
+Workload changes now require the exact inspected Coolify application classification; database, service and unknown classifications remain protected regardless of display names.  Read-only host label inspection verified this distinction, and the actual fleet listener application name is guarded too.
+
+External maintenance mutations now fsync dispatch evidence before launch and clear it only after confirmed success.  A killed parent therefore leaves an unrecoverable lock while detached CLI or daemon work may continue.  Regression coverage includes per-dispatch success, nonzero/exception retention, prevention of later cleanup after uncertainty, and a real killed-parent fixture with a harmless detached child.

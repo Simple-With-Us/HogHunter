@@ -1,0 +1,72 @@
+# Permission Prompts And Code Identity
+
+Fixes HH-214.
+
+## Observed Problem
+
+The owner's screen shows "HogHunter" would like to access files on a removable volume, over and over.  The owner requires every permission to persist across app updates.
+
+## Cause, From The TCC Log
+
+The dialog was reproduced under `log stream` by one hosted test, `HogFormatTests`, which reads no files, run with the default DerivedData on the external volume:
+
+- `Failed to match existing code requirement for subject com.simplewithus.hoghunter.macos.development and service kTCCServiceSystemPolicyRemovableVolumes`, followed by the stored `cdhash H"6f22…"` and the new `cdhash H"9b9a…"`.
+- `AUTHREQ_PROMPTING` for the same service and subject, with `binary_path=/Volumes/External/Excluded/Xcode/DerivedData/…/Debug/HogHunter.app/Contents/MacOS/HogHunter` and `requesting=com.apple.sandboxd`.
+
+A Debug build is signed ad hoc, so its designated requirement is its own hash and the grant dies with the build.  It runs from the external volume because the Mac's global Xcode setting keeps DerivedData there.  The dialog says "HogHunter" because that is the `CFBundleName` Xcode generates from `PRODUCT_NAME` for Debug and Release alike, so a test host looks exactly like the installed app.
+
+With the host on the internal disk, the same test raised only a `preflight=yes` request that answered `authValue=1`, and no `AUTHREQ_PROMPTING`.  A rerun on the external volume two minutes after that Allow did not prompt, because the requirement still matched, which fits the hash being what voids the grant.
+
+The installed app is not the requester.  It made no removable-volume request during the streams, and it has had no kernel denial in the logged window.  Its Full Disk Access, Accessibility and Screen Recording rows in the system TCC database store exactly its current designated requirement, and System Settings lists its removable-volume grant as allowed.
+
+## Changes
+
+- `scripts/xcodegen-post.sh`, run by `options.postGenCommand`, gives each checkout a default DerivedData under `~/Library/Caches/HogHunterDerivedData`.  It writes the per-user workspace settings, because xcodebuild ignores that setting in `xcshareddata`.  An explicit `-derivedDataPath` still wins, which is what Release and CI use.  A project-level `SYMROOT` is not an option: Swift packages refuse legacy build locations.
+- `CodeIdentityGuardTests` fails if a test host runs from `/Volumes`.
+- `testThePhoneScreenWritesItsGapsAsNonBreakingSpaces` reads repository source, so it now skips on `/Volumes`, and CI still runs it.
+- `scripts/check-mac-identity.sh` refuses anything but the production bundle id, Team ID CC8UTF7ATG, a Developer ID certificate and the exact designated requirement.  `scripts/mac-release-build.sh` runs it after signing, before notarization, so the Sparkle path cannot publish a changed identity.
+- `scripts/install.sh` refuses, before building, to install without the team's Developer ID identity, to install ad hoc to a production folder, or to create a second copy.  A signing failure now stops the install instead of falling back to ad hoc.  It signs by full certificate name, checks a staged copy before it quits the running app, and swaps that copy in, because `ditto` merges into an existing bundle and can break its seal.  An ad hoc copy never launches: it carries the production bundle id, and a grant made to it would displace the real app's.
+- `scripts/install.sh` decides whether a destination is a production folder by device and inode, walking up from the deepest folder that exists, so a case variant, a symlink, `//Applications/x` or `/private/../Applications/x` all count.  A path it cannot judge, such as a dangling symlink or a `..` below a folder that does not exist yet, counts as production.  It asks again once the folder exists, right before it stages.  A relative `--dest` means the caller's folder.
+- An ad hoc install to a throwaway folder no longer quits the running app.  It stops a copy only when that copy's executable is the one in the folder being replaced, and only by pid.  A symlink in that folder does not count, and neither does an executable that lives in a production folder.
+- Every way out of the swap ends in one trap.  A failed move, a failed check after the move, and an interruption all put the previous copy back, and a failure with no previous copy to restore leaves no failed copy behind.  The restore runs before any report and with errexit off and SIGPIPE ignored, so a reader that has gone away or a closed stderr cannot stop it.  A dead reader alone no longer stops an install at all.  The message says what is on disk, naming a pre-rename copy that is still there, and when the restore fails it names the backup, which is never deleted.  A signal after the quit says the app is closed, and it says the app was quit only when one was running.
+- The previous copy, any leftovers and a pre-rename copy stay on disk until the new copy has passed its check and `open` has accepted it, because the checks read the signature and cannot say whether macOS will start the app (HH-160).  If `open` fails, the previous copy goes back, is reopened, and the script exits 1.  With no previous copy, the new one stays, the script says so and names any leftover, and it exits 1.  A failure to remove anything after that is a warning, and the install reports success.  A signal between the check and that cleanup keeps the new copy and names the previous one, which the next finished install removes.
+- `--no-launch` has no launch check, so a production run retires nothing: the previous copy stays in a `.hoghunter-previous.*` folder the script names, leftovers and a pre-rename copy stay too, and the next install that opens Hog Hunter removes them.  Each such run keeps one more until then.  An ad hoc run never opens a copy, so it still tidies its throwaway folder.
+- If `open` fails and the previous copy cannot go back, the new copy returns to the installed path, the script says the app is not running, and it names both copies.  If the new copy cannot go back either, its staging folder is kept and named.  With only a pre-rename copy to fall back on, the failure names that copy.
+- `--dest` is made physical before the swap, because a spelling through the bundle such as `X/Hog Hunter.app/..` stops resolving once that bundle moves aside.  One through a bundle that is not there is refused before `mkdir` could create it.
+- One install at a time in a folder: the script takes an advisory lock on the destination folder before it stages, and a second run exits 6 and changes nothing.  A finishing run retires every `.hoghunter-*` folder, so those must only ever be a dead run's.  The lock leaves nothing on disk and the kernel drops it when the holder ends, a SIGKILL included.
+- A SIGKILL or a power loss can still leave a `.hoghunter-previous.*` or `.hoghunter-install.*` folder holding a signed copy.  A later run names them before it builds, and removes them only after its own copy is in place and has passed, so the one copy left on disk is never the one removed.
+- The second-copy guard and the default destination walk both production folders at any depth, pruning bundles, and count a copy in a subfolder or set aside in a `.hoghunter-*` folder.  So a hidden only copy in `/Applications` keeps a plain install in `/Applications`, where it is named and later retired, instead of moving the app to `~/Applications`.  A copy anywhere else in those folders is refused with exit 4 unless it sits in the destination itself.  The guard runs again once the staged copy has passed its check, before the running app is touched, because another lane can install during a build that takes minutes.
+- A failure that leaves nothing at the installed path names any copy an earlier interrupted install left, rather than saying nothing can be recovered.
+- `--dest ""` is refused, so an empty variable in a caller cannot turn a scoped install into a production one.  A dry run's summary follows its flags, and it warns about each refusal a real run would make, a missing Developer ID included.  A failed staged check now exits 6 as documented, and a failed signature check exits 5.
+- `scripts/test-mac-identity.py` covers the check, the installer gates and the location script, and runs in the macOS CI job.
+
+## Internal Disk Cost
+
+Each checkout's Debug builds take about 3.8 GB on the disk the owner is trying to free, so they have to be swept.
+
+The existing `app-caches` rule did reach the folder, but only as one tree: a single busy lane would have kept every stale lane on disk, and that rule has no build gate.  `Sources/Storage/DiskCleaner.swift` skipped it altogether, because its user-cache scan ignores any name holding "hoghunter".
+
+- `xcode-artifacts` in `scripts/hoghunter-clean` now sweeps each checkout separately.  It waits for any running xcodebuild, clang or swift-frontend, reads a failed process check as busy, and keeps a checkout with a file touched in the last 90 minutes, an open handle or a keep marker.  A failed `lsof` listing reads as in use, because the per-path fallback cannot see a Debug host running from deep in the tree.  Every one of those gates is asked again right before the delete, on a fresh listing.
+- `app-caches` leaves the folder to that rule.
+- The Disk Cleaner's developer scan lists each checkout as its own Hog Hunter Debug Builds row, off by default, and refuses to clean the folder above them whole.  The scan lists that folder only after the scan gate has allowed it and it is not a symlink, as `scripts/hoghunter-clean` does.  One row for the whole folder could not honor a keep marker in one lane: the bounded marker walk reads 2,000 entries, and a lane runs far past that.  The clean gets a walk of the whole lane with a 30 second budget instead, which answers "kept" when it runs out of time, is cancelled or cannot read part of the tree.  The bound on every other tree is unchanged (HH-184).
+- The scan's filter uses only the bounded walk on these rows, because a whole walk does not fit an 8 second scan and would lose the rows and categories after it.  So a lane with a deep marker can show a row, and the clean refuses it.
+- A row's size is a lower bound and says so, but it does not make the scan partial and its entries do not count against the scan's budget.  A lane runs past the per-target limits, and a partial scan stops the regimen recording a run, which it could never clear because it does not select these rows.
+
+The sweep runs whenever the Robotic Vacuum's reclaim step or the opt-in regimen runs `xcode-artifacts`.  A swept lane rebuilds on its next test run, which took about two and a half minutes here.
+
+Signing Debug hosts with a stable local identity would avoid the internal disk, and it was rejected.  The only candidate on this Mac is an Apple Development certificate on a personal team, which CI does not have, so the build would need a per-machine signing override.  A headless codesign can stall on a keychain prompt, which trades one dialog for another.  It would also need one Allow from the owner, and that standing grant would cover whatever code any seat builds next.
+
+## What Code Cannot Do
+
+An app cannot grant itself Full Disk Access or removable-volume access.  A grant survives an update only while the designated requirement is unchanged, which is what these checks protect.  Moving to another Team ID, or changing the bundle id, would still cost every grant once.
+
+## Limits
+
+- A checkout picks up the new location only after it has this change and runs `xcodegen generate`.  Lanes that have not rebased keep prompting until then.
+- A Debug run with an explicit `-derivedDataPath` on `/Volumes` still prompts.  The guard test fails afterward; it cannot prevent that dialog.
+- The owner's 5 to 10 minute cadence was not reproduced.  Retained logs show four Debug host launches between 2:24pm and 3:11pm, with gaps of about 5, 3 and 38 minutes.
+- Seven `sandboxd` removable-volume requests between 2:04pm and 2:53pm stay unattributed.  They line up with no Debug host launch, and their tccd lines had rolled off.
+- `open` succeeding is the only launch check, so a build that `open` accepts and that then dies is not caught, and `--no-launch` has no launch check at all.  How the real `open` reports an amfid refusal is inferred, not tested.
+- The install lock covers one folder.  Runs into `/Applications` and `~/Applications` at once are left to the second-copy guard, which may refuse both.
+- The phone reports a scan as partial whenever any row is a lower bound, these rows included, because it reads `anyApproximate`.
+- The dialog's name is unchanged.  `CFBundleName` in `macos/Info.plist` is overridden by the generated plist, so correcting it needs a build step of its own.

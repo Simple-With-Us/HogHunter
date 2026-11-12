@@ -25,6 +25,7 @@ class VacuumStore:
         self.state_path = self.data_dir / "scheduler-state.json"
         self.status_path = self.data_dir / "status.json"
         self.alert_state_path = self.data_dir / "alert-state.json"
+        self.partial_run_path = self.data_dir / "partial-run.json"
         self._lock_path = self.data_dir / ".store.lock"
 
     @classmethod
@@ -58,11 +59,47 @@ class VacuumStore:
         except (OSError, json.JSONDecodeError):
             return []
 
+    def write_partial_run(self, record: RunRecord) -> None:
+        """Record what a run has reclaimed so far, before the run finishes.
+
+        A tick the watchdog kills still has to report what it reclaimed.  The
+        finished run is appended to the history when it completes, so this is
+        the in-progress copy: one file, overwritten as the run advances, and
+        removed once a run finishes.
+        """
+        self._locked_json_update(self.partial_run_path, {}, lambda _: record.as_dict())
+
+    def load_partial_run(self) -> dict[str, Any]:
+        if not self.partial_run_path.is_file():
+            return {}
+        try:
+            return json.loads(self.partial_run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def clear_partial_run(self, run_id: str | None = None) -> None:
+        # A peer that merely skipped the housekeeper lock must not erase the
+        # holder's live checkpoint.  Compare and clear under the store lock.
+        self._locked_json_update(
+            self.partial_run_path, {},
+            lambda current: {} if run_id is None or current.get("run_id") == run_id else current,
+        )
+
     def last_run_for(self, trigger: str) -> Optional[dict[str, Any]]:
         for raw in reversed(self.load_history()):
-            if raw.get("trigger") == trigger:
+            if raw.get("trigger") == trigger and not self.is_lock_skip(raw):
                 return raw
         return None
+
+    @staticmethod
+    def is_lock_skip(raw: dict[str, Any]) -> bool:
+        steps = raw.get("steps") or []
+        if any(s.get("status") == "failed" for s in steps) or int(raw.get("exit_code") or 0) != 0:
+            return False
+        return raw.get("outcome") == "skipped" or (
+            any(s.get("step_id") == "housekeeper_lock" and s.get("status") == "skipped" for s in steps)
+            and not any(s.get("status") == "ran" for s in steps)
+        )
 
     def scheduler_state(self) -> dict[str, Any]:
         if not self.state_path.is_file():
@@ -119,6 +156,30 @@ class VacuumStore:
             step_cfg = user_cfg.setdefault("steps", {})
             for step_id, enabled in steps.items():
                 step_cfg.setdefault(step_id, {})["enabled"] = bool(enabled)
+            return user_cfg
+
+        self._locked_json_update(cfg_path, {}, updater)
+        self.cfg = load_config(cfg_path, self.home)
+
+    def save_config_value(self, key_path: str, value: Any) -> None:
+        cfg_path = self.data_dir / "config.json"
+
+        def updater(user_cfg: dict[str, Any]) -> dict[str, Any]:
+            keys = key_path.split(".")
+            d = user_cfg
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
+            return user_cfg
+
+        self._locked_json_update(cfg_path, {}, updater)
+        self.cfg = load_config(cfg_path, self.home)
+
+    def save_coolify_host(self, host: str) -> None:
+        cfg_path = self.data_dir / "config.json"
+
+        def updater(user_cfg: dict[str, Any]) -> dict[str, Any]:
+            user_cfg["coolify_ssh_host"] = host
             return user_cfg
 
         self._locked_json_update(cfg_path, {}, updater)

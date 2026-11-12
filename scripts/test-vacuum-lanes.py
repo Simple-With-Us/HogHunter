@@ -220,6 +220,10 @@ class Sandbox:
             "kind": "LINKED-WORKTREE",
             "location_class": "LANE_NESTED",
             "owner_repo": REPO_SLUG,
+            # The doctor records the parent repository of every checkout it
+            # reports (fleet_lanes.doctor sets it for each one), and the
+            # Vacuum's re-check compares the live repository against it.
+            "parent_repo": str(self.main),
             "tool_cache": False,
             "branch": over["branch"] if "branch" in over else self.branch(path),
             "head_sha": self.head(path),
@@ -256,6 +260,7 @@ class Sandbox:
             "anomalies": [],
             "summary": {},
             "cleaner_candidates": [r["realpath"] for r in rows] if candidates is None else list(candidates),
+            "cleaner_min_days": 7,
         }
         rep.update(top)
         return rep
@@ -269,7 +274,7 @@ class Sandbox:
         return cfg
 
     def settings(self, **lane_over) -> "lanes.LaneSettings":
-        """Settings read from a config whose `lanes` block carries lane_over (numeric keys there are ignored)."""
+        """Settings read from a config whose `lanes` block carries lane_over."""
         return lanes.lane_settings(self.cfg(**lane_over), self.home, env={})
 
     def ctx(self, runner=None, keep=NEVER, clock=time.time, **lane_over) -> "lanes.LaneContext":
@@ -387,14 +392,137 @@ class TestReportGates(unittest.TestCase):
         _rep, scan = self.scan({}, text="not json at all")
         self.assert_nothing(scan, "not valid JSON")
 
+    def _timeout_runner(self):
+        def run(argv, timeout):
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        return run
+
+    def _seed_cache(self, report) -> Path:
+        cache = self.sb.root / "cache" / "lane-doctor-report.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(report), encoding="utf-8")
+        return cache
+
+    def test_timeout_fallback_carries_the_elapsed_seconds(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row]))
+        base = time.time()
+        ticks = iter([base, base + 300.0, base + 300.0, base + 300.0])
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, self._timeout_runner(),
+            clock=lambda: next(ticks), cache_file=cache,
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertEqual(rep.seconds, 300.0)
+
+    def test_timeout_without_a_cache_yields_nothing(self) -> None:
+        rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner())
+        self.assertFalse(rep.ok)
+        self.assertIn("timed out", rep.reason)
+        self.assertEqual(lanes.removable_lanes(rep, self.sb.ctx()).choices, [])
+
+    def test_timeout_falls_back_to_a_fresh_enough_cache(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row]))
+        rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner(), cache_file=cache)
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertTrue(rep.cached)
+        scan = lanes.removable_lanes(rep, self.sb.ctx())
+        self.assertTrue(scan.ok, scan.reason)
+        self.assertEqual([c.path for c in scan.choices], [str(self.lane)])
+
+    def test_timeout_ignores_a_cache_older_than_a_day(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row], now=time.time() - 25 * 3600))
+        rep = lanes.load_report(self.sb.settings(), self.sb.home, self._timeout_runner(), cache_file=cache)
+        self.assertFalse(rep.ok)
+        # An unusable cache changes nothing: the original failure reason stands.
+        self.assertIn("timed out", rep.reason)
+
+    def test_bad_json_falls_back_to_the_cache(self) -> None:
+        cache = self._seed_cache(self.sb.report([self.row]))
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning({}, text="not json at all"), cache_file=cache
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertTrue(rep.cached)
+
+    def test_a_fresh_report_is_saved_to_the_cache(self) -> None:
+        cache = self.sb.root / "cache" / "lane-doctor-report.json"
+        report = self.sb.report([self.row])
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning(report), cache_file=cache
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertFalse(rep.cached)
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(saved["generated_at"], report["generated_at"])
+
+    def test_an_unvalidatable_fresh_report_never_overwrites_the_cache(self) -> None:
+        good = self.sb.report([self.row])
+        cache = self._seed_cache(good)
+        stale = self.sb.report([self.row], now=time.time() - 3600)
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning(stale), cache_file=cache
+        )
+        self.assertFalse(rep.ok)
+        self.assertIn("stale", rep.reason)
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(saved["generated_at"], good["generated_at"])
+
+    def test_a_dry_run_reads_but_never_writes_the_cache(self) -> None:
+        # Its own cache file: the class Sandbox (and _seed_cache) shares
+        # sb.root / "cache" across tests in this class.
+        cache = self.sb.root / "dryrun-cache" / "lane-doctor-report.json"
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, doctor_returning(self.sb.report([self.row])),
+            cache_file=cache, cache_write=False,
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertFalse(cache.exists(), "planning persists no state")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(self.sb.report([self.row])), encoding="utf-8")
+        before = cache.read_bytes()
+        rep = lanes.load_report(
+            self.sb.settings(), self.sb.home, self._timeout_runner(),
+            cache_file=cache, cache_write=False,
+        )
+        self.assertTrue(rep.ok, rep.reason)
+        self.assertTrue(rep.cached)
+        self.assertEqual(cache.read_bytes(), before)
+
     def test_non_object_json_yields_nothing(self) -> None:
         _rep, scan = self.scan({}, text="[1, 2, 3]")
         self.assert_nothing(scan, "not a JSON object")
 
-    def test_gh_not_ok_yields_nothing(self) -> None:
+    def test_one_failed_gh_lookup_does_not_throw_the_whole_report_away(self) -> None:
+        """The doctor's overall gh status says whether EVERY repository's PR
+        lookup came back.  One failed lookup (a retired repo, a network blip)
+        used to stop every lane on the machine from being retired, even the
+        ones in repositories whose lookup was fine."""
         for status in ("failed", "partial", "skipped"):
             _rep, scan = self.scan(self.sb.report([self.row], gh=status))
-            self.assert_nothing(scan, "gh status")
+            self.assertTrue(scan.ok, status)
+            self.assertEqual([c.path for c in scan.choices], [str(self.lane)], status)
+            # The report's status travels with the plan, so a reader can see
+            # that the report was partial.
+            self.assertIn(status, scan.lookup_status, status)
+
+    def test_the_evidence_names_the_lane_own_repository_lookup(self) -> None:
+        """The per-lane evidence must not claim a flat "gh ok" when the
+        report's overall lookup was partial.  A listed lane is one whose OWN
+        repository answered, so its line says so, and a lane whose own
+        repository did not answer is refused rather than listed."""
+        report = self.sb.report([self.row], gh="partial")
+        report["gh_repos"] = {REPO_SLUG: "ok"}
+        _rep, scan = self.scan(report)
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+        self.assertIn("gh ok", scan.choices[0].reasons)
+        # The report's own status travels with the plan, so a reader sees
+        # that the report was partial even where the lane is fine.
+        self.assertIn("partial", scan.lookup_status)
+        report["gh_repos"] = {REPO_SLUG: "partial"}
+        _rep, scan = self.scan(report)
+        self.assertEqual(scan.choices, [])
+        self.assertIn("gh lookup", refused_reason(scan, self.lane))
 
     def test_gh_repo_not_ok_refuses_that_candidate(self) -> None:
         _rep, scan = self.scan(self.sb.report([self.row], gh_repos={REPO_SLUG: "failed"}))
@@ -505,7 +633,7 @@ class TestReportGates(unittest.TestCase):
 
 
 class TestSettings(unittest.TestCase):
-    CONSTANTS = (900.0, 300.0, 2, 7.0, 24.0)
+    CONSTANTS = (900.0, 420.0, 2, 7.0, 24.0)
 
     @staticmethod
     def limits(settings) -> tuple:
@@ -526,8 +654,8 @@ class TestSettings(unittest.TestCase):
         # Review finding: max_report_age_seconds 1e9 used to make a saved report count as fresh forever.
         for block in (
             {"max_report_age_seconds": 1e9, "timeout_seconds": 1e9},
-            {"min_schema": 1, "retire_min_days": 1, "dependency_min_idle_hours": 2, "timeout_seconds": "bad"},
-            {"min_schema": 3, "retire_min_days": 14, "dependency_min_idle_hours": 48, "max_report_age_seconds": 60},
+            {"min_schema": 1, "dependency_min_idle_hours": 2, "timeout_seconds": "bad"},
+            {"min_schema": 3, "dependency_min_idle_hours": 48, "max_report_age_seconds": 60},
             {"max_report_age_seconds": float("inf"), "timeout_seconds": -1, "min_schema": None},
         ):
             settings = lanes.lane_settings({"lanes": dict(block, doctor_command=["/bin/doctor"])}, Path("/h"), env={})
@@ -537,6 +665,106 @@ class TestSettings(unittest.TestCase):
     def test_shipped_config_numbers_have_no_effect(self) -> None:
         cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"))
         self.assertEqual(self.limits(lanes.lane_settings(cfg, Path("/h"), env={})), self.CONSTANTS)
+
+    def test_retention_config_is_bounded_and_invalid_values_default_to_seven(self) -> None:
+        for value, expected in (
+            (1, 1.0), (3, 3.0), (3.0, 3.0), (90, 90.0),
+            (0, 7.0), (91, 7.0), (3.5, 7.0), (True, 7.0), ("bad", 7.0),
+        ):
+            settings = lanes.lane_settings({"lanes": {"retire_min_days": value}}, Path("/h"), env={})
+            self.assertEqual(settings.retire_min_days, expected, value)
+
+    def test_retention_env_uses_canonical_ascii_integer_strings_for_both_names(self) -> None:
+        keys = (
+            "hoghunter.maintain.janitor.retireMinDays",
+            "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
+        )
+        for key in keys:
+            for value, expected in (("1", 1.0), ("90", 90.0)):
+                cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, expected, (key, value))
+            for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
+                cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, 7.0, (key, value[:16]))
+
+    def test_retention_config_uses_canonical_strings_and_accepts_integral_json_numbers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hh-retire-config-") as temp:
+            path = Path(temp) / "config.json"
+            for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
+                path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
+                cfg = load_config(path=path, home=Path(temp), env={})
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, 7.0, value[:16])
+            for value in (1, 3, 3.0, 90):
+                path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
+                cfg = load_config(path=path, home=Path(temp), env={})
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, float(value), value)
+
+    def test_nondefault_retention_is_passed_to_doctor_without_changing_default_argv(self) -> None:
+        sb = Sandbox(self)
+        settings = sb.settings(retire_min_days=3)
+        seen = []
+        payload = sb.report([], cleaner_min_days=3)
+
+        def run(argv, timeout):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+        report = lanes.load_report(settings, sb.home, doctor_runner=run)
+        self.assertTrue(report.ok, report.reason)
+        self.assertEqual(seen[0], [*settings.command, "--cleaner-retention-days", "3"])
+
+        matching_cfg = sb.cfg(retire_min_days=3)
+        matching_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "3"]
+        matching = lanes.lane_settings(matching_cfg, sb.home, env={})
+        report = lanes.load_report(matching, sb.home, doctor_runner=run)
+        self.assertTrue(report.ok, report.reason)
+        self.assertEqual(seen[1], list(matching.command), "an exact command-line value is not duplicated")
+
+        conflicting_cfg = sb.cfg(retire_min_days=3)
+        conflicting_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "4"]
+        conflicting = lanes.lane_settings(conflicting_cfg, sb.home, env={})
+        refused = lanes.load_report(conflicting, sb.home, doctor_runner=run)
+        self.assertFalse(refused.ok)
+        self.assertIn("conflicts", refused.reason)
+        self.assertEqual(len(seen), 2, "a conflicting configured command must not run")
+
+    def test_report_retention_metadata_must_match_and_old_default_report_still_loads(self) -> None:
+        sb = Sandbox(self)
+        settings = sb.settings(retire_min_days=3)
+        mismatched = lanes.validate_report(sb.report([], cleaner_min_days=7), settings, sb.home)
+        self.assertFalse(mismatched.ok)
+        self.assertIn("expected 3", mismatched.reason)
+
+        missing = sb.report([])
+        del missing["cleaner_min_days"]
+        missing_default = lanes.validate_report(missing, sb.settings(), sb.home)
+        self.assertTrue(missing_default.ok, missing_default.reason)
+        missing_nondefault = lanes.validate_report(missing, settings, sb.home)
+        self.assertFalse(missing_nondefault.ok)
+        self.assertIn("no cleaner_min_days", missing_nondefault.reason)
+
+    def test_cached_report_with_a_different_retention_floor_is_rejected(self) -> None:
+        sb = Sandbox(self)
+        settings = sb.settings(retire_min_days=3)
+        cache = sb.root / "cache" / "lane-doctor-report.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sb.report([], cleaner_min_days=7)), encoding="utf-8")
+
+        def broken(argv, timeout):
+            raise FileNotFoundError("doctor unavailable")
+
+        report = lanes.load_report(settings, sb.home, doctor_runner=broken, cache_file=cache)
+        self.assertFalse(report.ok)
+        self.assertFalse(report.cached, "the mismatched cache must never be used")
+        self.assertIn("could not run", report.reason)
+
+    def test_adaptive_doctor_timeout_grows_after_a_slow_success(self) -> None:
+        settings = lanes.lane_settings({}, Path("/h"), env={})
+        cache = Path("/tmp/hh-doctor-cache-test.json")
+        lanes.record_doctor_duration(cache, 350.0)
+        timeout = lanes.adaptive_doctor_timeout(settings, cache)
+        self.assertGreater(timeout, settings.timeout_seconds)
+        self.assertLessEqual(timeout, lanes.DOCTOR_TIMEOUT_MAX_SECONDS)
 
     def test_a_stale_report_stays_stale_whatever_the_config_says(self) -> None:
         sb = Sandbox(self)
@@ -557,6 +785,80 @@ class TestSettings(unittest.TestCase):
             self.assertEqual(settings.command, ())
         rep = lanes.load_report(lanes.lane_settings({"lanes": {"doctor_command": []}}, Path("/h"), env={}), Path("/h"))
         self.assertFalse(rep.ok)
+
+    def test_load_config_applies_infisical_env_knobs(self) -> None:
+        # Test 1: hoghunter.maintain.* namespace overrides.
+        env_dotted = {
+            "hoghunter.maintain.step.shutdown_simulators": "false",
+            "hoghunter.maintain.step.coolify_remote": "true",
+            "hoghunter.maintain.step.cleanmymac_cli": "1",
+            "hoghunter.maintain.interval.watchSec": "120",
+            "hoghunter.maintain.interval.janitorSec": "900",
+            "hoghunter.maintain.interval.fullSec": "7200",
+            "hoghunter.maintain.historyMaxRuns": "350",
+            "hoghunter.maintain.cleanBudgetSec": "450",
+            "hoghunter.maintain.coolifySshHost": "deploy.fleet.internal",
+            "hoghunter.maintain.janitor.maxLoadHard": "180.5",
+            "hoghunter.maintain.janitor.lowFreeGib": "95.0",
+            "hoghunter.maintain.watch.diskFreeWarnGb": "30.0",
+            "hoghunter.maintain.watch.swapUsedPct": "85.0",
+            "hoghunter.maintain.janitor.retireMinDays": "3",
+        }
+        cfg_dotted = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env=env_dotted)
+        self.assertFalse(cfg_dotted["steps"]["shutdown_simulators"]["enabled"])
+        self.assertTrue(cfg_dotted["steps"]["coolify_remote"]["enabled"])
+        self.assertTrue(cfg_dotted["steps"]["cleanmymac_cli"]["enabled"])
+        self.assertEqual(cfg_dotted["intervals_seconds"]["watch"], 120)
+        self.assertEqual(cfg_dotted["intervals_seconds"]["janitor"], 900)
+        self.assertEqual(cfg_dotted["intervals_seconds"]["full"], 7200)
+        self.assertEqual(cfg_dotted["history_max_runs"], 350)
+        self.assertEqual(cfg_dotted["hoghunter_clean_budget_sec"], 450)
+        self.assertEqual(cfg_dotted["coolify_ssh_host"], "deploy.fleet.internal")
+        self.assertEqual(cfg_dotted["janitor"]["max_load_hard"], 180.5)
+        self.assertEqual(cfg_dotted["janitor"]["low_free_gib"], 95.0)
+        self.assertEqual(cfg_dotted["resource_watch"]["disk_free_warn_gb"], 30.0)
+        self.assertEqual(cfg_dotted["resource_watch"]["swap_used_pct"], 85.0)
+        self.assertEqual(lanes.lane_settings(cfg_dotted, Path("/h"), env={}).retire_min_days, 3.0)
+
+        # Test 2: HOGHUNTER_MAINTAIN_* uppercase namespace overrides.
+        env_upper = {
+            "HOGHUNTER_MAINTAIN_STEP_SHUTDOWN_SIMULATORS": "0",
+            "HOGHUNTER_MAINTAIN_STEP_COOLIFY_REMOTE": "on",
+            "HOGHUNTER_MAINTAIN_STEP_XCODE_DERIVED_DATA": "off",
+            "HOGHUNTER_MAINTAIN_INTERVAL_WATCH_SEC": "150",
+            "HOGHUNTER_MAINTAIN_INTERVAL_JANITOR_SEC": "1200",
+            "HOGHUNTER_MAINTAIN_INTERVAL_FULL_SEC": "10000",
+            "HOGHUNTER_MAINTAIN_HISTORY_MAX_RUNS": "400",
+            "HOGHUNTER_MAINTAIN_CLEAN_BUDGET_SEC": "500",
+            "HOGHUNTER_MAINTAIN_COOLIFY_SSH_HOST": "coolify.custom.internal",
+            "HOGHUNTER_MAINTAIN_JANITOR_MAX_LOAD_HARD": "220.0",
+            "HOGHUNTER_MAINTAIN_JANITOR_LOW_FREE_GIB": "70.0",
+            "HOGHUNTER_MAINTAIN_WATCH_DISK_FREE_WARN_GB": "20.0",
+            "HOGHUNTER_MAINTAIN_WATCH_SWAP_USED_PCT": "75.0",
+            "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS": "5",
+        }
+        cfg_upper = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env=env_upper)
+        self.assertFalse(cfg_upper["steps"]["shutdown_simulators"]["enabled"])
+        self.assertTrue(cfg_upper["steps"]["coolify_remote"]["enabled"])
+        self.assertFalse(cfg_upper["steps"]["xcode_derived_data"]["enabled"])
+        self.assertEqual(cfg_upper["intervals_seconds"]["watch"], 150)
+        self.assertEqual(cfg_upper["intervals_seconds"]["janitor"], 1200)
+        self.assertEqual(cfg_upper["intervals_seconds"]["full"], 10000)
+        self.assertEqual(cfg_upper["history_max_runs"], 400)
+        self.assertEqual(cfg_upper["hoghunter_clean_budget_sec"], 500)
+        self.assertEqual(cfg_upper["coolify_ssh_host"], "coolify.custom.internal")
+        self.assertEqual(cfg_upper["janitor"]["max_load_hard"], 220.0)
+        self.assertEqual(cfg_upper["janitor"]["low_free_gib"], 70.0)
+        self.assertEqual(cfg_upper["resource_watch"]["disk_free_warn_gb"], 20.0)
+        self.assertEqual(cfg_upper["resource_watch"]["swap_used_pct"], 75.0)
+        self.assertEqual(lanes.lane_settings(cfg_upper, Path("/h"), env={}).retire_min_days, 5.0)
+
+        for invalid in ("0", "91", "3.5", "n/a"):
+            cfg_invalid = load_config(
+                path=Path("/nonexistent/config.json"), home=Path("/h"),
+                env={"hoghunter.maintain.janitor.retireMinDays": invalid},
+            )
+            self.assertEqual(lanes.lane_settings(cfg_invalid, Path("/h"), env={}).retire_min_days, 7.0, invalid)
 
 
 # --------------------------------------------------------------------------- the Vacuum's own re-check
@@ -585,6 +887,16 @@ class TestRecheck(unittest.TestCase):
         self.assertGreater(choice.size_bytes or 0, 0)
         self.assertEqual(choice.command, ["git", "-C", str(self.sb.main), "worktree", "remove", str(self.lane)])
         self.assertIn("PR MERGED #7", choice.reasons)
+
+    def test_configured_retention_controls_actual_retirement_boundary(self) -> None:
+        settings = self.sb.settings(retire_min_days=3)
+        ctx = lanes.LaneContext(self.sb.home, NEVER, settings, Runner())
+        exact = self.sb.row(self.lane, lane_age_days=3.0, idle_days=3.0)
+        report = lanes.validate_report(self.sb.report([exact], cleaner_min_days=3), settings, self.sb.home)
+        self.assertEqual(len(lanes.removable_lanes(report, ctx).choices), 1)
+        too_young = self.sb.row(self.lane, lane_age_days=2.99, idle_days=3.0)
+        report = lanes.validate_report(self.sb.report([too_young], cleaner_min_days=3), settings, self.sb.home)
+        self.assert_blocked(lanes.removable_lanes(report, ctx), "lane_age_days")
 
     def test_ignored_env_file_blocks(self) -> None:
         (self.lane / ".env").write_text("LOCAL_ONLY=1\n", encoding="utf-8")
@@ -719,7 +1031,86 @@ class TestRecheck(unittest.TestCase):
         row = self.sb.row(self.lane, realpath=str(link), path=str(link))
         scan = self.removable([row])
         self.assertEqual(scan.choices, [])
-        self.assertIn("resolves somewhere else", refused_reason(scan, link))
+        # The lane itself is a symlink, so it is not a plain directory.  The
+        # guard that used to catch it (the path resolving elsewhere) now
+        # compares the two resolved forms, and both point at the same place.
+        self.assertIn("not a plain directory", refused_reason(scan, link))
+
+    def test_lane_behind_a_symlinked_parent_is_not_refused(self) -> None:
+        """The fleet keeps its lanes under a per-repository root in the home
+        directory, behind a symlink, and the doctor reports that spelling without
+        resolving it.  Such a lane must still be removable, or every lane on
+        the external drive is stuck for good."""
+        external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
+        self.addCleanup(shutil.rmtree, str(external), True)
+        link = self.sb.lanes_root / "external"
+        link.symlink_to(external)
+        lane = link / "claude-external"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/external", str(lane))
+        self.sb.push(lane)
+        # The doctor reports the symlinked spelling, not the real one.
+        row = self.sb.row(lane, realpath=str(lane), path=str(lane))
+        scan = self.removable([row])
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+        self.assertEqual(scan.choices[0].path, str(lane))
+
+    def test_a_lane_that_moved_to_another_repository_is_still_refused(self) -> None:
+        """The point of the guard: the lane must still belong to the repository
+        the doctor saw, whatever a symlinked parent does."""
+        row = self.sb.row(self.lane, parent_repo=str(self.sb.root / "some-other-repo"))
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [])
+        self.assertIn("different repository", refused_reason(scan, self.lane))
+
+    def test_a_case_only_difference_in_the_repository_is_the_same_repository(self) -> None:
+        """The two spellings are recorded independently and the filesystem is
+        case-insensitive, so a case-only difference is the same directory."""
+        row = self.sb.row(self.lane, parent_repo=str(self.sb.main).swapcase())
+        scan = self.removable([row])
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+
+    def test_a_report_that_does_not_say_which_repository_refuses(self) -> None:
+        """Without the parent repository there is nothing to confirm the lane
+        against.  A lane whose own spelling resolves elsewhere cannot be
+        confirmed and is refused, the way it was before this change; an
+        ordinary lane stays retirable, so an older report cannot make
+        retirement a no-op for everything."""
+        row = self.sb.row(self.lane)
+        del row["parent_repo"]
+        scan = self.removable([row])
+        self.assertEqual(len(scan.choices), 1, scan.refused)
+
+        external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
+        self.addCleanup(shutil.rmtree, str(external), True)
+        link = self.sb.lanes_root / "external"
+        link.symlink_to(external)
+        lane = link / "claude-external"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/external", str(lane))
+        self.sb.push(lane)
+        row = self.sb.row(lane, realpath=str(lane), path=str(lane))
+        del row["parent_repo"]
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [], scan.refused)
+        self.assertIn("which repository", refused_reason(scan, lane))
+
+    def test_a_symlinked_parent_may_not_redirect_a_lane_into_a_never_touch_folder(self) -> None:
+        """Allowing a symlinked parent must not reopen the path the removed
+        realpath check used to close: a lane spelled inside the lane root that
+        resolves under a protected home folder is still a never-touch location, and
+        `git worktree remove` would follow the link and delete it there."""
+        bait = self.sb.home / "Documents" / "hoghunter"
+        bait.mkdir(parents=True)
+        link = self.sb.lanes_root / "redirected"
+        link.symlink_to(bait)
+        lane = link / "claude-redirected"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/redirected", str(lane))
+        self.sb.push(lane)
+        # The doctor reports the lane-root spelling, so the resolved path is the only place the
+        # never-touch folder shows up.
+        row = self.sb.row(lane, realpath=str(lane), path=str(lane))
+        scan = self.removable([row])
+        self.assertEqual(scan.choices, [], scan.refused)
+        self.assertIn("~/Documents", refused_reason(scan, lane))
 
     def test_dirty_report_facts_refuse(self) -> None:
         for over, needle in (
@@ -1381,7 +1772,7 @@ class TestEngineProcessChecks(unittest.TestCase):
     def test_install_steps_skip_when_pgrep_errors(self) -> None:
         engine = self.engine(Runner(pgrep_rc=2))
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch(
-            "vacuum.engine.subprocess.run"
+            "vacuum.engine.work.run_process"
         ) as ran:
             for step in (engine._npm_cache, engine._pnpm_store, engine._brew_cleanup):
                 freed, reason, status = step()
@@ -1393,7 +1784,7 @@ class TestEngineProcessChecks(unittest.TestCase):
     def test_install_steps_run_when_pgrep_is_clear(self) -> None:
         engine = self.engine(Runner(pgrep_rc=1))
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch(
-            "vacuum.engine.subprocess.run"
+            "vacuum.engine.work.run_process"
         ) as ran, patch("vacuum.engine.shutil.rmtree"):
             _freed, _reason, status = engine._pnpm_store()
         self.assertEqual(status, StepStatus.RAN)
@@ -1417,6 +1808,27 @@ class OnlyMatching(Runner):
         if argv[0] == "pgrep":
             self.calls.append(list(argv))
             return subprocess.CompletedProcess(argv, 0 if self.needle in argv[-1] else 1, "", "")
+        return super().__call__(argv, **kwargs)
+
+
+class ExecutableOnly(Runner):
+    """Exact executable matches, independent of command-line text."""
+
+    def __init__(self, names=(), argv_text=(), pgrep_rc=1):
+        super().__init__(pgrep_rc=pgrep_rc)
+        self.names = set(names)
+        self.argv_text = tuple(argv_text)
+
+    def __call__(self, argv, **kwargs):
+        if argv[0] == "pgrep":
+            self.calls.append(list(argv))
+            if len(argv) > 2 and argv[1] == "-x":
+                rc = 0 if argv[2] in self.names else self.pgrep_rc
+            elif len(argv) > 2 and argv[1] == "-f":
+                rc = 0 if any(text in argv[2] for text in self.argv_text) else self.pgrep_rc
+            else:
+                rc = self.pgrep_rc
+            return subprocess.CompletedProcess(argv, rc, "123\n" if rc == 0 else "", "")
         return super().__call__(argv, **kwargs)
 
 
@@ -1467,6 +1879,23 @@ class TestLegacyFullSteps(unittest.TestCase):
             self.assertIn(needle, reason)
             self.assertTrue(idle.exists(), needle)
 
+    def test_build_gate_uses_executable_name_not_command_line_arguments(self) -> None:
+        fake_helper_args = ExecutableOnly(argv_text=("xcodebuild",))
+        engine = self.engine(fake_helper_args)
+        self.assertEqual(engine._build_running(), "")
+        self.assertTrue(fake_helper_args.calls)
+        self.assertEqual(fake_helper_args.calls[0], ["pgrep", "-x", "xcodebuild"])
+        self.assertEqual(fake_helper_args.calls[1:], [
+            ["pgrep", "-f", "swift-frontend"],
+            ["pgrep", "-f", "clang"],
+        ])
+
+        running_builder = self.engine(ExecutableOnly(names=("xcodebuild",)))
+        self.assertEqual(running_builder._build_running(), "xcodebuild is running")
+
+        failed_check = self.engine(ExecutableOnly(pgrep_rc=2))
+        self.assertIn("treated as busy", failed_check._build_running())
+
     def test_derived_data_keeps_marked_and_linked_folders(self) -> None:
         kept = self.folder(self.dd, "Kept", 0)
         (kept / ".janitor-keep").write_text("", encoding="utf-8")
@@ -1477,6 +1906,42 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertTrue(kept.exists())
         self.assertTrue((outside / "sub" / "x.bin").exists())
         self.assertTrue((self.dd / "Link").is_symlink())
+
+    def test_configured_derived_data_path_must_be_a_derived_data_folder(self) -> None:
+        """Settings > Maintenance takes a typed path, and the step deletes every idle child of it, so a path
+        that is the home folder, a parent of it, or any folder not named DerivedData is refused with the
+        reason, and the default folder is not cleaned in its place."""
+        idle_in_home = self.folder(self.home, "Projects-idle", 3 * 3600)
+        idle_default = self.folder(self.dd, "Idle-def", 3 * 3600)
+        documents = self.home / "Documents"
+        idle_doc = self.folder(documents, "Old", 3 * 3600)
+        for typed in (str(self.home), "~", str(self.home.parent), str(documents), "relative/DerivedData"):
+            self.cfg["xcode_derived_data_path"] = typed
+            freed, reason, status = self.engine()._xcode_derived_data()
+            self.assertEqual((freed, status), (0, StepStatus.SKIPPED), typed)
+            self.assertIn("configured DerivedData path refused", reason, typed)
+        self.assertTrue(idle_in_home.exists())
+        self.assertTrue(idle_default.exists())
+        self.assertTrue(idle_doc.exists())
+
+    def test_configured_derived_data_folder_is_cleaned(self) -> None:
+        custom = self.home / "Volumes" / "Fast" / "DerivedData"
+        idle = self.folder(custom, "Idle-ghi", 3 * 3600)
+        default_idle = self.folder(self.dd, "Idle-def", 3 * 3600)
+        self.cfg["xcode_derived_data_path"] = str(custom)
+        _freed, reason, status = self.engine()._xcode_derived_data()
+        self.assertEqual(status, StepStatus.RAN, reason)
+        self.assertFalse(idle.exists())
+        self.assertTrue(default_idle.exists())
+
+    def test_xcode_reported_location_must_be_a_derived_data_folder(self) -> None:
+        idle_in_home = self.folder(self.home, "Projects-idle", 3 * 3600)
+        reported = subprocess.CompletedProcess([], 0, stdout=str(self.home) + "\n", stderr="")
+        with patch("vacuum.engine.work.run_process", return_value=reported):
+            freed, reason, status = self.engine()._xcode_derived_data()
+        self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
+        self.assertIn("DerivedData path missing", reason)
+        self.assertTrue(idle_in_home.exists())
 
     def test_device_support_is_off_by_default_and_keeps_versions_used_within_seven_days(self) -> None:
         self.assertFalse(step_enabled(self.cfg, "xcode_device_support"))
@@ -1489,25 +1954,94 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertFalse(old.exists())
 
     def test_simctl_delete_unavailable_never_deletes(self) -> None:
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"), patch("vacuum.engine.work.run_process") as ran:
             freed, reason, status = self.engine()._simctl_delete_unavailable()
         self.assertEqual((freed, status), (0, StepStatus.SKIPPED))
         self.assertIn("CoreSimulator/Devices", reason)
         ran.assert_not_called()
 
+    def test_shutdown_simulators_respects_build_and_bitrig_gates(self) -> None:
+        booted_payload = json.dumps({
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                    {"udid": "U-1", "name": "iPhone 16", "state": "Booted"},
+                    {"udid": "U-2", "name": "iPhone 16 Pro", "state": "Booted"},
+                ]
+            }
+        })
+        shut: list[str] = []
+        pgrep_calls: list[list[str]] = []
+
+        def fake_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                pgrep_calls.append(list(cmd))
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            if cmd[:4] == ["xcrun", "simctl", "list", "devices"]:
+                return subprocess.CompletedProcess(cmd, 0, booted_payload, "")
+            if cmd[:3] == ["xcrun", "simctl", "shutdown"]:
+                shut.append(cmd[3])
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(fake_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 2 booted simulators"))
+        self.assertEqual(shut, ["U-1", "U-2"])
+        self.assertEqual(pgrep_calls[:3], [
+            ["pgrep", "-x", "xcodebuild"],
+            ["pgrep", "-f", "xctest"],
+            ["pgrep", "-f", r"Simulator\.app"],
+        ])
+
+        # Bitrig running -> exempts 1 simulator and shuts down the extra one
+        shut.clear()
+
+        def bitrig_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                rc = 0 if cmd[-1] in ("Bitrig", "[Bb]itrig") else 1
+                return subprocess.CompletedProcess(cmd, rc, "123\n" if rc == 0 else "", "")
+            return fake_runner(cmd, **kwargs)
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(bitrig_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 1 booted simulator, kept 1 for Bitrig"))
+        self.assertEqual(shut, ["U-2"])
+
+        # When U-2 is more recently used, keep U-2 and shut down U-1
+        shut.clear()
+        reaper_dir = self.home / "Library" / "Application Support" / "sim-idle-reaper"
+        reaper_dir.mkdir(parents=True, exist_ok=True)
+        (reaper_dir / "state.json").write_text(json.dumps({"U-1": 100.0, "U-2": 500.0}))
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(bitrig_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.RAN, "shut down 1 booted simulator, kept 1 for Bitrig"))
+        self.assertEqual(shut, ["U-1"])
+
+        # Simulator.app running -> skipped
+        def sim_app_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "pgrep":
+                rc = 0 if "Simulator\\.app" in cmd or "Simulator" in cmd[-1] else 1
+                return subprocess.CompletedProcess(cmd, rc, "123\n" if rc == 0 else "", "")
+            return fake_runner(cmd, **kwargs)
+
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/xcrun"):
+            _freed, reason, status = self.engine(sim_app_runner)._shutdown_simulators()
+        self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: Simulator.app is open"))
+
     def test_brew_cleanup_uses_prune_all_and_waits_for_node_gyp(self) -> None:
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             _freed, _reason, status = self.engine(Runner(pgrep_rc=1))._brew_cleanup()
         self.assertEqual(status, StepStatus.RAN)
         self.assertEqual(ran.call_args[0][0], ["brew", "cleanup", "--prune=all"])
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             _freed, reason, status = self.engine(OnlyMatching("node-gyp"))._brew_cleanup()
         self.assertEqual((status, reason), (StepStatus.SKIPPED, "node-gyp build in progress"))
         ran.assert_not_called()
 
     def test_package_caches_wait_for_a_build(self) -> None:
         engine = self.engine(OnlyMatching("xcodebuild"))
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run") as ran:
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             for step in (engine._npm_cache, engine._pnpm_store, engine._yarn_cache):
                 _freed, reason, status = step()
                 self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: xcodebuild is running"))
@@ -1517,10 +2051,15 @@ class TestLegacyFullSteps(unittest.TestCase):
         npx = self.home / ".npm" / "_npx" / "abc"
         npx.mkdir(parents=True)
         (npx / "server.js").write_text("x\n", encoding="utf-8")
-        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.subprocess.run"):
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process"):
             _freed, reason, status = self.engine(OnlyMatching("_npx"))._npm_cache()
         self.assertEqual((status, reason), (StepStatus.RAN, "npm cache cleaned; npx folder kept"))
         self.assertTrue((npx / "server.js").exists())
+
+
+class TestShutdownSimulatorsStep(TestLegacyFullSteps):
+    """Targeted runner for simulator shutdown tests."""
+    pass
 
 
 class TestEngineDependencies(unittest.TestCase):
@@ -1565,7 +2104,7 @@ class TestEngineDependencies(unittest.TestCase):
         removed = [a for a in engine.plan if a["action"] == "removed-folder"]
         self.assertEqual(len(removed), 3)
         for item in removed:
-            self.assertTrue(item["command"].startswith("shutil.rmtree "))
+            self.assertTrue(item["command"].startswith("bounded dependency cleanup "))
             self.assertGreater(item["size_bytes"], 0)
         log = (Path(self.cfg["data_dir"]) / lanes.ACTION_LOG_NAME).read_text(encoding="utf-8")
         self.assertEqual(len(log.splitlines()), 3)
@@ -1579,6 +2118,36 @@ class TestEngineDependencies(unittest.TestCase):
             self.assertTrue((self.lane / name).exists(), name)
         self.assertEqual(sorted(a["action"] for a in engine.plan), ["would-remove-folder"] * 3)
         self.assertFalse((Path(self.cfg["data_dir"]) / lanes.ACTION_LOG_NAME).exists())
+
+    def test_clears_a_lane_behind_a_symlinked_parent(self) -> None:
+        """The fleet keeps its lanes under a per-repository root behind a symlink, so the lane's
+        resolved path never matches its spelling.  Containment is decided on the resolved paths, and
+        the folders there must still be clearable rather than refused as 'not a plain folder inside
+        the lane' one by one."""
+        external = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhexternal-")))
+        self.addCleanup(shutil.rmtree, str(external), True)
+        link = self.sb.lanes_root / "external"
+        link.symlink_to(external)
+        lane = link / "claude-external"
+        self.sb.git(self.sb.main, "worktree", "add", "-q", "-b", "claude/external", str(lane))
+        (lane / "node_modules").mkdir()
+        (lane / "node_modules" / "blob.js").write_text("x" * 2048, encoding="utf-8")
+        old = time.time() - 3 * 86400
+        for target in (lane, lane / "node_modules", lane / "node_modules" / "blob.js"):
+            os.utime(target, (old, old))
+        # The doctor reports the symlinked spelling, not the real one.
+        row = self.sb.row(lane, pr_state="NONE", safety="NEEDS-REVIEW", idle_days=2.0, lane_age_days=2.0)
+        engine = self.engine([row])
+        freed, reason, status = engine._pressure_apps_deps(dry_run=False)
+        self.assertEqual(status, StepStatus.RAN, reason)
+        self.assertFalse((lane / "node_modules").exists())
+        self.assertGreater(freed, 0)
+
+    def test_a_lane_that_now_belongs_to_another_repository_is_not_cleared(self) -> None:
+        """Clearing regenerable folders deletes inside the lane, so it makes the same repository
+        check retirement makes: a lane whose live common dir names another repository is left alone."""
+        engine = self.engine([self.row(parent_repo=str(self.sb.root / "some-other-repo"))])
+        self.assert_untouched(engine, "different repository")
 
     def assert_untouched(self, engine, needle: str = "") -> None:
         _freed, reason, status = engine._pressure_apps_deps(dry_run=False)
@@ -2061,6 +2630,290 @@ class TestKeepRegex(unittest.TestCase):
         elsewhere.write_text(json.dumps({"seats": [{"worktreeSuffix": "mm", "retired": True}]}), encoding="utf-8")
         pattern = default_keep_worktree_regex(home, env={"FLEET_APPS_JSON": str(elsewhere)})
         self.assertNotIn("|mm)", pattern)
+
+
+
+class TestBoundedWork(unittest.TestCase):
+    """Deadline tests use temporary trees and injected time, never live cleaners."""
+
+    def test_single_wide_directory_stops_enumerating_at_deadline(self):
+        from vacuum import budget
+        ticks = [0.0]
+        visited = [0]
+        class Entry:
+            name = "file"
+            path = "file"
+            def is_dir(self, **kwargs):
+                return False
+        class Listing:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def __iter__(self):
+                for _ in range(1000000):
+                    ticks[0] += 1
+                    visited[0] += 1
+                    yield Entry()
+        with budget.scope(budget.WorkBudget(20, lambda: ticks[0])):
+            with patch("vacuum.lanes.os.scandir", return_value=Listing()):
+                with self.assertRaises(budget.BudgetExceeded):
+                    list(lanes._walk_dirs("fake", 1000000))
+        self.assertLessEqual(visited[0], 20)
+
+    def test_du_timeout_is_clamped_and_cannot_fall_back_to_unbounded_walk(self):
+        from vacuum import budget
+        ticks = [0.0]
+        def runner(argv, **kwargs):
+            self.assertEqual(kwargs["timeout"], 3)
+            ticks[0] = 3
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        with budget.scope(budget.WorkBudget(3, lambda: ticks[0])):
+            with self.assertRaises(budget.BudgetExceeded):
+                lanes.dir_size_bytes("fake", runner)
+
+    def test_delete_stops_between_entries_and_counts_completed_unlinks(self):
+        from vacuum import budget
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "node_modules"
+            target.mkdir()
+            for i in range(10):
+                (target / str(i)).write_bytes(b"abc")
+            ticks = [0.0]
+            counts = []
+            unlink = os.unlink
+            def slow_unlink(*args, **kwargs):
+                unlink(*args, **kwargs)
+                ticks[0] += 1
+            with budget.scope(budget.WorkBudget(2, lambda: ticks[0])):
+                with patch("vacuum.lanes.os.unlink", side_effect=slow_unlink):
+                    with self.assertRaises(budget.BudgetExceeded):
+                        lanes.remove_dependency_tree(str(target), counts.append)
+            self.assertEqual(counts, [3, 6])
+            self.assertEqual(len(list(target.iterdir())), 8)
+
+    def test_delete_never_follows_a_child_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            outside = Path(td) / "outside"
+            outside.mkdir()
+            (outside / "history").write_text("keep")
+            target = Path(td) / "node_modules"
+            target.mkdir()
+            (target / "link").symlink_to(outside)
+            lanes.remove_dependency_tree(str(target))
+            self.assertEqual((outside / "history").read_text(), "keep")
+
+    def test_nested_calls_share_deadline_and_later_runs_get_fresh_budget(self):
+        from vacuum import budget
+        ticks = [0.0]
+        class Host:
+            _work_budget_seconds = 10
+            _monotonic = staticmethod(lambda: ticks[0])
+            @budget.bounded_run
+            def outer(self):
+                first = budget.current().deadline
+                ticks[0] += 4
+                return first, self.inner()
+            @budget.bounded_run
+            def inner(self):
+                return budget.current().deadline
+        host = Host()
+        self.assertEqual(host.outer(), (10, 10))
+        self.assertEqual(host.outer(), (14, 14))
+        self.assertIsNone(budget.current())
+
+    def test_completed_target_checkpoint_survives_next_target_budget_stop(self):
+        from types import SimpleNamespace
+        from vacuum import budget
+        from vacuum.models import RunRecord
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            one = home / "node_modules"
+            two = home / ".next"
+            one.mkdir()
+            two.mkdir()
+            (one / "blob").write_bytes(b"abc")
+            (two / "blob").write_bytes(b"untouched")
+            ticks = [0.0]
+            snapshots = []
+            engine = VacuumEngine({"housekeeper_lock": str(home / "lock"), "data_dir": str(home / "data")},
+                                  home, on_step=lambda record: snapshots.append(record.as_dict()))
+            engine._active_record = RunRecord("test", TriggerKind.MANUAL, 0)
+            choice = SimpleNamespace(targets=[{"path": "node_modules"}, {"path": ".next"}])
+            real_remove = lanes.remove_dependency_tree
+            def remove(path, on_bytes):
+                value = real_remove(path, on_bytes)
+                ticks[0] = 2
+                return value
+            with budget.scope(budget.WorkBudget(1, lambda: ticks[0])):
+                with patch("vacuum.engine.sys.platform", "darwin"), \
+                     patch.object(engine, "_lane_report", return_value=SimpleNamespace(ok=True)), \
+                     patch("vacuum.lanes.dependency_candidates", return_value=([(td, {})], [])), \
+                     patch("vacuum.lanes.evaluate_dependency_lane", return_value=(choice, "")), \
+                     patch("vacuum.lanes.deletable_target", side_effect=lambda lane, rel: (str(home / rel), "")), \
+                     patch("vacuum.lanes.dir_size_bytes", return_value=1024), \
+                     patch("vacuum.lanes.remove_dependency_tree", side_effect=remove):
+                    result = engine._run_step("pressure_apps_deps", True, "cheap", {}, "normal", False)
+            self.assertEqual(result.status, StepStatus.FAILED)
+            self.assertIn("budget exhausted", result.reason)
+            self.assertEqual(result.bytes_freed, 3)
+            self.assertTrue(any(s["bytes_freed"] == 3 for s in snapshots))
+            self.assertFalse(one.exists())
+            self.assertTrue((two / "blob").exists())
+
+    def test_drain_checkpoint_keeps_lock_and_finishes_after_children_stop(self):
+        from vacuum import budget
+        for worked, dry_run, expected in ((True, False, "partial"), (False, False, "failed"),
+                                          (True, True, "partial")):
+            with tempfile.TemporaryDirectory() as td:
+                home = Path(td)
+                lock = home / "lock"
+                ticks = [0.0]
+                snapshots = []
+                cfg = {"housekeeper_lock": str(lock), "steps": {"pm2_logs": {"enabled": True}}}
+                def checkpoint(record):
+                    self.assertTrue(lock.is_dir())
+                    self.assertEqual(record.ended_at, 0)
+                    snapshots.append(record.as_dict())
+                engine = VacuumEngine(cfg, home, monotonic=lambda: ticks[0], on_step=checkpoint)
+                proc = unittest.mock.Mock(pid=4242)
+                attempts = []
+                def drain(_proc):
+                    self.assertTrue(lock.is_dir())
+                    self.assertEqual(engine._active_record.ended_at, 0)
+                    attempts.append(_proc)
+                    ticks[0] += 31
+                    if len(attempts) == 1:
+                        return False
+                    budget._children.pop(proc.pid)
+                    return True
+                real_barrier = budget.child_barrier
+                def barrier(**kwargs):
+                    return real_barrier(sleep=lambda seconds: None, **kwargs)
+                with patch.object(budget, "_children", {proc.pid: proc}), \
+                     patch("vacuum.budget.kill_group", side_effect=drain), \
+                     patch("vacuum.budget.child_barrier", side_effect=barrier), \
+                     patch("vacuum.engine.sample_mac", return_value={"load1": 0, "swap_used_pct": 0}), \
+                     patch.object(engine, "_dispatch", return_value=(0, "fixture", StepStatus.RAN if worked else StepStatus.SKIPPED)):
+                    record = engine.run_single_step("pm2_logs", dry_run=dry_run)
+                self.assertEqual(len(attempts), 2)
+                self.assertFalse(lock.exists())
+                self.assertGreater(record.ended_at, 0)
+                self.assertEqual(record.outcome, expected)
+                notices = [s for s in record.steps if s.step_id == "child_shutdown"]
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(notices[0].status, StepStatus.FAILED)
+                self.assertIn("lock retained", notices[0].reason)
+                if dry_run:
+                    self.assertEqual(snapshots, [])
+                else:
+                    self.assertEqual(snapshots[-1]["current_step"], "child_shutdown")
+                    self.assertEqual(snapshots[-1]["ended_at"], 0)
+
+    def test_drain_wait_notices_are_rate_limited(self):
+        from vacuum import budget
+        ticks = [0.0]
+        notices = []
+        moments = iter((31, 32, 61, 62, 63))
+        def drain(proc):
+            ticks[0] = next(moments)
+            return ticks[0] == 63
+        with patch.object(budget, "_children", {4242: object()}), \
+             patch("vacuum.budget.kill_group", side_effect=drain):
+            with budget.child_barrier(on_wait=notices.append, monotonic=lambda: ticks[0], sleep=lambda _: None):
+                pass
+        self.assertEqual(notices, [31, 61])
+
+    def test_watchdog_shutdown_refuses_new_children(self):
+        from vacuum import budget
+        with patch.object(budget, "_shutdown", False), patch.object(budget, "_children", {}):
+            self.assertTrue(budget.terminate_all())
+            with patch("vacuum.budget.subprocess.Popen") as popen:
+                with self.assertRaises(budget.BudgetExceeded):
+                    budget.spawn(["never-start"])
+                popen.assert_not_called()
+
+    def test_unproven_group_or_unreaped_leader_retains_ownership(self):
+        from vacuum import budget
+        for wait_error in (None, subprocess.TimeoutExpired("owned leader", 5)):
+            proc = unittest.mock.Mock()
+            proc.pid = 4242
+            if wait_error is not None:
+                proc.wait.side_effect = wait_error
+            with patch.object(budget, "_children", {proc.pid: proc}), \
+                 patch("vacuum.budget.os.killpg"), \
+                 patch("vacuum.budget.group_stopped", return_value=False):
+                self.assertFalse(budget.kill_group(proc))
+                self.assertIn(proc.pid, budget._children)
+                proc.stdout.close.assert_not_called()
+                proc.stderr.close.assert_not_called()
+
+    def test_detached_grandchild_holding_pipes_cannot_wedge_group_cleanup(self):
+        from vacuum import budget
+        import signal
+        # This fixture deliberately escapes containment.  The test owns and
+        # kills that session explicitly; production group cleanup cannot claim
+        # ownership of a descendant that has moved to a different session.
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "detached.pid"
+            escaped = ("import os,pathlib,time; os.setsid(); "
+                       "pathlib.Path(%r).write_text(str(os.getpid())); time.sleep(60)" % str(pid_file))
+            child = ("import subprocess,sys,time; "
+                     "subprocess.Popen([sys.executable,'-c',%r]); time.sleep(60)" % escaped)
+            leader = ("import subprocess,sys,time; "
+                      "subprocess.Popen([sys.executable,'-c',%r]); time.sleep(60)" % child)
+            proc = budget.spawn([sys.executable, "-c", leader], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+            detached_pid = None
+            try:
+                deadline = time.monotonic() + 5
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(pid_file.exists(), "detached fixture never became ready")
+                detached_pid = int(pid_file.read_text())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=.05)
+                started = time.monotonic()
+                self.assertTrue(budget.kill_group(proc))
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertNotIn(proc.pid, budget._children)
+                self.assertTrue(proc.stdout.closed)
+                self.assertTrue(proc.stderr.closed)
+                # The escaped session remains alive: pipe ownership is not a
+                # claim that it belonged to the group we just stopped.
+                os.kill(detached_pid, 0)
+                with budget.child_barrier():
+                    pass
+            finally:
+                budget.kill_group(proc)
+                if detached_pid is None and pid_file.exists():
+                    detached_pid = int(pid_file.read_text())
+                if detached_pid is not None:
+                    try:
+                        os.killpg(detached_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_leader_exit_cleans_child_and_grandchild_group(self):
+        from vacuum import budget
+        # Both descendants close inherited pipes; leader exit alone therefore
+        # returns communicate() immediately while the descendants still run.
+        with tempfile.TemporaryDirectory() as td:
+            marker = str(Path(td) / "unexpected")
+            grandchild = "import time,pathlib; time.sleep(.4); pathlib.Path(%r).write_text('leaked')" % marker
+            child = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',%r],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(5)" % grandchild
+            leader = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)" % child
+            try:
+                budget.run_process([sys.executable, "-c", leader], capture_output=True, text=True, timeout=3)
+            except ChildProcessError:
+                # A zombie group still visible to kill(0) is fail-closed; it
+                # cannot be mistaken for proven shutdown and release a lock.
+                pass
+            time.sleep(.6)
+            self.assertFalse(Path(marker).exists())
+            budget.terminate_all()
+            # This test's watchdog simulation must not poison other tests.
+            budget._shutdown = False
 
 
 if __name__ == "__main__":

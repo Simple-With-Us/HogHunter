@@ -14,6 +14,7 @@ struct HogRowView: View {
     /// Used only to report a failed action; the row does not observe it, so a
     /// store update never redraws twenty-five rows.
     let store: HogStore
+    var sort: HogSort = .cpu
     let onQuit: () -> Void
 
     /// History rows describe a key that may be long gone, so they offer none
@@ -30,19 +31,14 @@ struct HogRowView: View {
                         .lineLimit(1)
                     if row.isSleepBlocker {
                         Image(systemName: "moon.fill")
-                            .font(.system(size: 8.5))
+                            .font(.system(size: 11))
                             .foregroundStyle(.indigo)
-                            .help("Holding power assertion preventing system sleep")
+                            .help("Keeping the Mac awake")
+                            .accessibilityLabel("Keeping the Mac awake")
                     }
                     if row.isTamed {
-                        Text("TAMED")
-                            .font(.system(size: 8, weight: .bold))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 0.5)
-                            .background(Color.green.opacity(0.18))
-                            .foregroundStyle(.green)
-                            .clipShape(Capsule())
-                            .help("Throttled: running at lowest priority (nice 20) with background QoS")
+                        ContrastChip(text: "Tamed", tone: .notice)
+                            .help("Slowed down so it uses less of the Mac.")
                     }
                 }
                 Text(row.detail)
@@ -248,6 +244,34 @@ enum HogActions {
         }
     }
 
+    /// A tab asked for by `openSettings(tab:using:)`, held until the Settings
+    /// window takes it.  The first open builds the window asynchronously, so
+    /// the notification below has no subscriber yet; `SettingsView` reads
+    /// this in `onAppear` instead.
+    @MainActor private static var pendingSettingsTab: SettingsTab?
+
+    @MainActor
+    static func takePendingSettingsTab() -> SettingsTab? {
+        defer { pendingSettingsTab = nil }
+        return pendingSettingsTab
+    }
+
+    /// Opens Settings, optionally on `tab`.  `openSettings` is the caller's
+    /// `@Environment(\.openSettings)` action: sending `showSettingsWindow:`
+    /// to `NSApp` by hand is silently dropped on this app (see
+    /// `frontSettingsWindow` above), so it is not used here.
+    @MainActor
+    static func openSettings(tab: SettingsTab? = nil, using openSettings: OpenSettingsAction) {
+        if let tab {
+            pendingSettingsTab = tab
+            NotificationCenter.default.post(name: .selectSettingsTab, object: tab)
+        }
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        openSettings()
+        scheduleFrontSettingsWindow()
+    }
+
     @MainActor
     static func openStorageWindow(openWindow: OpenWindowAction) {
         NSApp.activate(ignoringOtherApps: true)
@@ -310,6 +334,9 @@ enum SampleReport {
     /// heaviest first.  A dozen lines at most, each cut short, so a phone
     /// can show them and the report itself stays on the Mac.
     static func summary(of report: String, maxLines: Int = 12, maxLineLength: Int = 110) -> [String] {
+        // Call-site lines can carry the owner's absolute home directory, and
+        // this summary travels to the phone.  Fold the home directory to ~.
+        let home = NSHomeDirectory()
         var lines: [String] = []
         var inSection = false
         for raw in report.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -327,7 +354,7 @@ enum SampleReport {
             lines.append(trimmed.count > maxLineLength ? String(trimmed.prefix(maxLineLength - 1)) + "…" : trimmed)
             if lines.count >= maxLines { break }
         }
-        return lines
+        return lines.map { $0.replacingOccurrences(of: home, with: "~") }
     }
 
     /// The last `bytes` bytes of a report as text.  The call-site summary sits
@@ -377,7 +404,7 @@ enum SampleReport {
                     at: directory, withIntermediateDirectories: true
                 )
             } catch {
-                finish(.failed("Could not create the log folder: \(error.localizedDescription)"))
+                finish(.failed("Could not create the log folder.\u{00A0} Try again, and check disk space if it keeps failing."))
                 return
             }
 
@@ -393,7 +420,7 @@ enum SampleReport {
             do {
                 try process.run()
             } catch {
-                finish(.failed("Could not run sample: \(error.localizedDescription)"))
+                finish(.failed("Could not start sampling.\u{00A0} Try again."))
                 return
             }
             // `sample` ends itself after `seconds`; a hung one is stopped here
@@ -401,16 +428,13 @@ enum SampleReport {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Double(seconds) + 30) {
                 if process.isRunning { process.terminate() }
             }
-            let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+            // Drained so a chatty `sample` cannot block on a full pipe; the
+            // text itself stays out of the message, which names no paths.
+            _ = errors.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
 
             guard process.terminationStatus == 0 else {
-                let text = String(data: errorData, encoding: .utf8) ?? ""
-                let firstLine = text
-                    .split(separator: "\n")
-                    .first
-                    .map(String.init) ?? "sample exited with code \(process.terminationStatus)"
-                finish(.failed("Could not sample \(name): \(firstLine)"))
+                finish(.failed("Sampling \(name) did not finish.\u{00A0} Try again."))
                 return
             }
             finish(.written(url))

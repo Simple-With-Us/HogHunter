@@ -29,7 +29,7 @@ Commands actually run are recorded in the PR.  The gate is `xcodegen generate` a
 
 ## Not in this change
 
-- iOS widgets still have no App Group entitlement.  `scripts/validate-ios-release.py` rejects that entitlement on the iPhone signature, and the Sep 27 rollout forbids copying the Mac entitlements file.  Widgets stay empty until the App ID is updated on purpose.
+- iOS widgets still have no App Group entitlement.  `scripts/test-ios-release.py` (which replaced `scripts/validate-ios-release.py` on 2026-10-17) fails if an iPhone target sets an entitlements file or an App Group, and the Sep 27 rollout forbids copying the Mac entitlements file.  Widgets stay empty until the App ID is updated on purpose.
 - Remote quit and tame still key off pid alone.  The panel quit path rechecks start time.  The phone path does not.
 - Issue #56's stat cards and a wired regimen schedule are still MiniMax's board item `c3b66968`.  The runner is not started from `HogStore`.
 - PR #44's `--upload-package` change is not on main.  Main still uses `--upload-app` and stages `AuthKey_<id>.p8`.  The open review threads on #44 are about the package command, which main does not run.

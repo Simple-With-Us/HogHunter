@@ -123,7 +123,7 @@ final class InfisicalSettingsTests: XCTestCase {
         return InfisicalSettings(
             client: client,
             store: store,
-            credentialProvider: { InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444") }
+            credentialProvider: { InfisicalCredential(clientId: "id", clientSecret: "secret", projectId: "00000000-1111-2222-3333-444444444444", mode: .machineIdentity) }
         )
     }
 
@@ -215,7 +215,7 @@ final class InfisicalSettingsTests: XCTestCase {
             switch request.url?.path {
             case "/api/v1/auth/universal-auth/login":
                 return (200, self.json(["accessToken": "test-token"]))
-            case "/api/v3/secrets/hoghunter.refreshInterval":
+            case "/api/v3/secrets/raw/hoghunter.refreshInterval":
                 // The cache must NOT have the new value yet: Infisical first.
                 StubURLProtocol.note(
                     store.string(for: "hoghunter.refreshInterval") ?? "<nil>",
@@ -238,14 +238,44 @@ final class InfisicalSettingsTests: XCTestCase {
         let calls = StubURLProtocol.takeRecorded()
         let patches = calls.filter { $0.method == "PATCH" }
         XCTAssertEqual(patches.count, 1)
-        XCTAssertEqual(patches[0].path, "/api/v3/secrets/hoghunter.refreshInterval")
+        XCTAssertEqual(patches[0].path, "/api/v3/secrets/raw/hoghunter.refreshInterval")
         XCTAssertEqual(patches[0].body?["secretValue"] as? String, "9")
         XCTAssertEqual(patches[0].body?["environment"] as? String, "prod")
+        XCTAssertEqual(patches[0].body?["secretPath"] as? String, "/")
         XCTAssertEqual(
             patches[0].body?["workspaceId"] as? String,
             "00000000-1111-2222-3333-444444444444"
         )
         XCTAssertEqual(store.string(for: "hoghunter.refreshInterval"), "9")
+        XCTAssertNil(settings.lastError)
+    }
+
+    @MainActor
+    func testWriteThroughFallsBackToPostOn404() async throws {
+        let store = InfisicalStore()
+        StubURLProtocol.handler = { [weak self] request in
+            guard let self else { return (500, Data()) }
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/v1/auth/universal-auth/login"):
+                return (200, self.json(["accessToken": "test-token"]))
+            case ("PATCH", "/api/v3/secrets/raw/hoghunter.refreshInterval"):
+                return (404, self.json(["message": "secret not found"]))
+            case ("POST", "/api/v3/secrets/raw/hoghunter.refreshInterval"):
+                return (200, self.json(["secret": ["secretKey": "hoghunter.refreshInterval"]]))
+            default:
+                return (500, Data())
+            }
+        }
+        let settings = makeSettings(store: store)
+
+        try await settings.set("5", forKey: "hoghunter.refreshInterval")
+
+        let calls = StubURLProtocol.takeRecorded()
+        let posts = calls.filter { $0.method == "POST" && $0.path?.contains("secrets/raw") == true }
+        XCTAssertEqual(posts.count, 1)
+        XCTAssertEqual(posts[0].body?["type"] as? String, "shared")
+        XCTAssertEqual(posts[0].body?["secretValue"] as? String, "5")
+        XCTAssertEqual(store.string(for: "hoghunter.refreshInterval"), "5")
         XCTAssertNil(settings.lastError)
     }
 
@@ -458,7 +488,8 @@ final class InfisicalSettingsTests: XCTestCase {
         credential = InfisicalCredential(
             clientId: "id",
             clientSecret: "secret",
-            projectId: "00000000-1111-2222-3333-444444444444"
+            projectId: "00000000-1111-2222-3333-444444444444",
+            mode: .machineIdentity
         )
         StubURLProtocol.handler = loginHandler()
         await settings.refreshIfDue()
@@ -488,4 +519,105 @@ final class InfisicalSettingsTests: XCTestCase {
         XCTAssertFalse(settings.isConfigured)
         XCTAssertEqual(reads, 1)
     }
+
+    @MainActor
+    func testAppGroupStoragePathResolves() {
+        let appGroupURL = InfisicalSettings.appGroupStorageURL
+        XCTAssertNotNil(appGroupURL)
+        XCTAssertTrue(appGroupURL?.path.contains("group.com.simplewithus.hoghunter") ?? false)
+        XCTAssertEqual(appGroupURL?.lastPathComponent, "infisical.json")
+
+        let appSupportURL = InfisicalSettings.applicationSupportStorageURL
+        XCTAssertTrue(appSupportURL.path.contains("HogHunter"))
+        XCTAssertEqual(appSupportURL.lastPathComponent, "infisical.json")
+    }
+
+    @MainActor
+    func testCredentialSerializationAndPermissions() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let testFile = tempDir.appendingPathComponent("infisical.json")
+        let cred = InfisicalCredential(clientId: "test-id", clientSecret: "test-sec", projectId: "11111111-2222-3333-4444-555555555555")
+        let data = try JSONEncoder().encode(cred)
+        try data.write(to: testFile, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: testFile.path)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: testFile.path)
+        let perms = attrs[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.intValue, 0o600)
+
+        let readData = try Data(contentsOf: testFile)
+        let decoded = try JSONDecoder().decode(InfisicalCredential.self, from: readData)
+        XCTAssertEqual(decoded.clientId, "test-id")
+        XCTAssertEqual(decoded.effectiveProjectId, "11111111-2222-3333-4444-555555555555")
+    }
+
+    @MainActor
+    func testMaintainKeysAndDefaults() {
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepShutdownSimulators], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepXcodeDerivedData], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepXcodeDeviceSupport], "false")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepCoreSimulatorCaches], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepCleanmymacCli], "false")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepCoolifyRemote], "false")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepJanitorWorktreeRetire], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainStepJanitorCacheReclaim], "true")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainIntervalWatchSec], "300")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainIntervalJanitorSec], "1800")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainIntervalFullSec], "14400")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainHistoryMaxRuns], "500")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainCleanBudgetSec], "600")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainCoolifySshHost], "")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorMaxLoadHard], "250")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorLowFreeGib], "80")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainJanitorRetireMinDays], "7")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainWatchDiskFreeWarnGb], "25")
+        XCTAssertEqual(InfisicalDefaults.values[InfisicalKey.maintainWatchSwapUsedPct], "90")
+
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainStepShutdownSimulators))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainStepXcodeDerivedData))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainIntervalWatchSec))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainCoolifySshHost))
+        XCTAssertTrue(InfisicalKey.allNonSecret.contains(InfisicalKey.maintainJanitorRetireMinDays))
+    }
+
+    func testServiceTokenMetadataAndExplicitFolderTransport() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.handler = { request in
+            if request.url?.path == "/api/v2/service-token" {
+                return (200, self.json([
+                    "projectId": "00000000-1111-2222-3333-444444444444",
+                    "workspace": "00000000-1111-2222-3333-444444444444",
+                    "scopes": [["environment": "prod", "secretPath": "/settings"]],
+                    "permissions": ["read", "write"],
+                ]))
+            }
+            if request.httpMethod == "GET" { return (200, self.json(["secrets": []])) }
+            if request.httpMethod == "PATCH" { return (404, self.json([:])) }
+            return (200, self.json([:]))
+        }
+        let client = InfisicalClient(session: makeSession())
+        let metadata = try await client.tokenMetadata(token: "synthetic-service-token")
+        XCTAssertEqual(metadata.scopes.first?.secretPath, "/settings")
+        XCTAssertEqual(metadata.permissions, ["read", "write"])
+        _ = try await client.fetchSecrets(accessToken: "synthetic-service-token", environment: "prod",
+            projectId: metadata.projectId, secretPath: "/settings")
+        try await client.upsertSecret(accessToken: "synthetic-service-token", environment: "prod",
+            key: "synthetic-key", value: "synthetic-value", projectId: metadata.projectId, secretPath: "/settings")
+        let requests = StubURLProtocol.takeRecorded()
+        XCTAssertEqual(requests.map(\.method), ["GET", "GET", "PATCH", "POST"])
+        XCTAssertEqual(requests[1].query["secretPath"], "/settings")
+        XCTAssertEqual(requests[1].query["recursive"], "false")
+        XCTAssertEqual(requests[1].query["include_imports"], "false")
+        XCTAssertEqual(requests[2].body?["secretPath"] as? String, "/settings")
+        XCTAssertEqual(requests[3].body?["secretPath"] as? String, "/settings")
+    }
+
+    // The Maintain store's Infisical override and write-through tests live in
+    // MaintainInfisicalTests.swift, where the settings owner is configured
+    // with a stub instead of the app's shared instance.
 }
+

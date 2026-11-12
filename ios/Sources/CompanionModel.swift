@@ -12,6 +12,7 @@ struct SavedMac: Codable, Equatable {
     var token: String
     var remoteHost: String? = nil
     var remotePort: Int? = nil
+    var useTLS: Bool? = nil
 }
 
 struct DiscoveredMac: Identifiable, Equatable, Sendable {
@@ -75,6 +76,10 @@ enum CompanionClientError: Error, Equatable, LocalizedError {
 final class CompanionModel {
     private(set) var discovered: [DiscoveredMac] = []
     private(set) var snapshot: CompanionSnapshot?
+    /// True when the Mac's snapshot schema is newer or older than this build
+    /// understands.  The version rides every snapshot but nothing read it, so
+    /// a Mac ahead of the phone silently showed whatever decoded.
+    private(set) var snapshotVersionMismatch = false
     private(set) var phase: Phase = .looking
     private(set) var saved: SavedMac?
     var codeDraft = ""
@@ -86,6 +91,14 @@ final class CompanionModel {
     /// Set when a control call (exclusions, view, quit, tame) did not go
     /// through, so the dashboard can say so instead of silently doing nothing.
     var controlError: String?
+    /// True while a confirmed server action is out.
+    var isRunningServerAction = false
+    /// The answer to the last server action, shown in a sheet.
+    var serverActionOutcome: ServerActionOutcome?
+    /// True while a server refresh request is out.
+    var isRefreshingServer = false
+    /// Why the last server refresh did not start, or nil.
+    var serverRefreshNote: String?
     var showCleanDialogRequested = false
     /// When the current Clean request arrived.  The root view only builds the
     /// dashboard when the phase is `.live`, so a link that lands while the Mac
@@ -96,6 +109,14 @@ final class CompanionModel {
     /// find the Mac and fetch a snapshot before the dashboard exists, so this
     /// is generous -- but short enough that a link is not replayed much later.
     static let cleanRequestLifetime = CleanRequest.lifetime
+
+    /// Records a fetched snapshot, flagging a schema this build does not
+    /// understand.  The banner, not a silent decode, answers a version the
+    /// phone has never seen.
+    private func adoptSnapshot(_ fetched: CompanionSnapshot) {
+        snapshot = fetched
+        snapshotVersionMismatch = (fetched.version != CompanionService.version)
+    }
 
     /// Record a `hoghunter://clean` link as asking for the confirmation now.
     func requestCleanDialog() {
@@ -162,6 +183,13 @@ final class CompanionModel {
     /// `controlError`: the maintain screen is pushed over the dashboard, and two
     /// alerts on one error cannot both present.
     var maintainError: String?
+    /// Why the last step or threshold change did not go through.  Its own
+    /// field, so the run alert and this one never fight for the screen.
+    var maintainSettingsError: String?
+    private(set) var maintainSettingsInFlight = 0
+    var isApplyingMaintainSettings: Bool { maintainSettingsInFlight > 0 }
+    private(set) var cleanSettingsInFlight = 0
+    var isApplyingCleanSettings: Bool { cleanSettingsInFlight > 0 }
     var statusLine = "Looking for Hog Hunter on this Wi-Fi."
     var isDemoMode = false
 
@@ -171,8 +199,18 @@ final class CompanionModel {
     var remotePortDraft = "24240"
     var remoteTokenDraft = ""
     var remoteNameDraft = ""
+    var remoteUseTLS = false
     var remoteConnectError: String?
     var isConnectingRemote = false
+
+    /// Whether this saved Mac or remote connection uses HTTPS/TLS.
+    func isUsingTLS(for saved: SavedMac?) -> Bool {
+        guard let saved else { return remoteUseTLS }
+        if let explicit = saved.useTLS { return explicit }
+        if let port = saved.remotePort, port == 443 { return true }
+        if let host = saved.remoteHost, host.lowercased().hasPrefix("https://") { return true }
+        return false
+    }
     /// True while the Mac is showing its "Pair this iPhone?" alert.
     var isWaitingForApproval = false
     /// False when this iPhone has no Wi-Fi path, so Bonjour cannot find a
@@ -221,7 +259,17 @@ final class CompanionModel {
         guard !started else { return }
         started = true
         if ProcessInfo.processInfo.arguments.contains("-HogHunterSample") {
+            // An explicitly requested fixture never sends control traffic.
+            isDemoMode = true
             snapshot = Self.sample
+            if ProcessInfo.processInfo.arguments.contains("-HogHunterIssueActions") {
+                // Built from the fixture, not from `snapshot`: reading
+                // `snapshot` on the right of `snapshot?.x =` overlaps the write
+                // access, and a Debug build traps on it (exclusivity checking),
+                // which is what sent this frame to the home screen.
+                let issues = Self.sampleIssuesWithActions + (Self.sample.flaggedIssues ?? [])
+                snapshot?.flaggedIssues = issues
+            }
             phase = .live
             saved = SavedMac(peerID: "sample", name: "This Mac", token: "SAMPLE")
             seedScreenshotCleaner()
@@ -233,12 +281,24 @@ final class CompanionModel {
             return
         }
         saved = loadSaved()
+        // A pre-Keychain blob keeps its token copy until a save strips it.
+        // Strip it now, so the secret lives in one place after one launch.
+        if let current = saved,
+           let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let blob = try? JSONDecoder().decode(SavedMac.self, from: data),
+           !blob.token.isEmpty,
+           CompanionKeychain.readToken(peerID: current.peerID) == current.token {
+            persistSaved()
+        }
         startBrowser()
         startPathMonitor()
         poll = Task { [weak self] in
+            // Jittered so a roomful of phones paired to one Mac do not poll
+            // in lockstep and hammer the same second.
             while !Task.isCancelled {
                 await self?.refresh()
-                try? await Task.sleep(for: .seconds(3))
+                let jitter = Double.random(in: 2.5...3.5)
+                try? await Task.sleep(for: .seconds(jitter))
             }
         }
     }
@@ -310,8 +370,8 @@ final class CompanionModel {
 
     func submitCode() async {
         guard case let .code(peerID) = phase, let mac = discovered.first(where: { $0.id == peerID }) else { return }
-        let token = codeDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
-        guard token.count >= 8 else {
+        let token = CompanionToken.normalizeCode(codeDraft)
+        guard token.count == 8 else {
             codeError = "Enter the 8 character code from Hog Hunter Settings on your Mac."
             codeFailure = .other
             return
@@ -323,7 +383,7 @@ final class CompanionModel {
             let next = try await Self.fetch(endpoint: mac.endpoint, token: credential)
             saved = SavedMac(peerID: mac.id, name: mac.name, token: credential)
             persistSaved()
-            snapshot = next
+            adoptSnapshot(next)
             codeError = nil
             codeFailure = nil
             pairingDismissed = false
@@ -337,10 +397,10 @@ final class CompanionModel {
     /// Trades the typed pairing code for this phone's own token, so the Mac
     /// can list it and cut it off alone.  A Mac that predates tokens answers
     /// 404; the code itself then stays the credential, as it always was.
-    private static func credential(forCode code: String, endpoint: NWEndpoint) async throws -> String {
+    private static func credential(forCode code: String, endpoint: NWEndpoint, useTLS: Bool? = nil) async throws -> String {
         let name = await deviceName()
         do {
-            return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name)
+            return try await CompanionConnection.enroll(endpoint: endpoint, code: code, deviceName: name, useTLS: useTLS)
         } catch CompanionClientError.tooOld {
             return code
         } catch CompanionClientError.untrustedNetwork {
@@ -357,14 +417,14 @@ final class CompanionModel {
         case .unauthorized?:
             return "That code does not match this Mac."
         case .busy?:
-            return "The Mac is already showing a pairing request.  Answer it there, then try again."
+            return "The Mac is already showing a pairing request.\u{00A0} Answer it there, then try again."
         case .timedOut?:
-            return "The Mac did not answer in time.  Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
+            return "The Mac did not answer in time.\u{00A0} Check that Hog Hunter is open on the Mac with Share With iPhone on, then try again."
         case .throttled?, .forbidden?, .rejected?, .tooOld?, .untrustedNetwork?:
             return describe(error)
         default:
             if let hint = transportHint(error) { return hint }
-            return "The Mac did not answer.  Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
+            return "The Mac did not answer.\u{00A0} Check that Share With iPhone is on, Hog Hunter is open on the Mac, and both devices share the same Wi-Fi (or the Mac is reachable over Tailscale)."
         }
     }
 
@@ -377,7 +437,7 @@ final class CompanionModel {
             return
         }
         guard let mac = discovered.first(where: { $0.id == peerID }) else {
-            codeError = "That Mac is no longer on this Wi-Fi.  Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
+            codeError = "That Mac is no longer on this Wi-Fi.\u{00A0} Keep Hog Hunter open on it, or use Connect by Tailscale or Address."
             codeFailure = .other
             return
         }
@@ -390,7 +450,7 @@ final class CompanionModel {
             let next = try await Self.fetch(endpoint: mac.endpoint, token: token)
             saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
             persistSaved()
-            snapshot = next
+            adoptSnapshot(next)
             phase = .live
         } catch {
             codeError = Self.approvalMessage(for: error)
@@ -398,10 +458,10 @@ final class CompanionModel {
         }
     }
 
-    private static func approve(endpoint: NWEndpoint) async throws -> String {
+    private static func approve(endpoint: NWEndpoint, useTLS: Bool? = nil) async throws -> String {
         let name = await deviceName()
         return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await CompanionConnection.requestPair(endpoint: endpoint, deviceName: name) }
+            group.addTask { try await CompanionConnection.requestPair(endpoint: endpoint, deviceName: name, useTLS: useTLS) }
             group.addTask {
                 try await Task.sleep(for: approvalTimeout)
                 throw CompanionClientError.timedOut
@@ -423,12 +483,12 @@ final class CompanionModel {
     private static func approvalMessage(for error: Error) -> String {
         switch error as? CompanionClientError {
         case .forbidden(let reason)?: return reason
-        case .busy?: return "The Mac is already showing a pairing request.  Answer it there, then try again."
-        case .timedOut?: return "No one answered on the Mac.  Try again, or type the code from Hog Hunter Settings."
+        case .busy?: return "The Mac is already showing a pairing request.\u{00A0} Answer it there, then try again."
+        case .timedOut?: return "No one answered on the Mac.\u{00A0} Try again, or type the code from Hog Hunter Settings."
         case .throttled?, .tooOld?, .rejected?, .untrustedNetwork?: return describe(error)
         default:
             if let hint = transportHint(error) { return hint }
-            return "The Mac did not answer.  Check that Hog Hunter is open and Share With iPhone is on."
+            return "The Mac did not answer.\u{00A0} Check that Hog Hunter is open and Share With iPhone is on."
         }
     }
 
@@ -441,16 +501,16 @@ final class CompanionModel {
         case .posix(let code):
             switch code {
             case .ECONNREFUSED:
-                return "The Mac refused the connection.  Open Hog Hunter on it and turn on Share With iPhone in Settings."
+                return "The Mac refused the connection.\u{00A0} Open Hog Hunter on it and turn on Share With iPhone in Settings."
             case .ETIMEDOUT:
-                return "Nothing answered at that address.  Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
+                return "Nothing answered at that address.\u{00A0} Check the address and the port, and that Tailscale is connected on both devices if you connect that way."
             case .EHOSTUNREACH, .EHOSTDOWN, .ENETUNREACH, .ENETDOWN:
-                return "That address cannot be reached from here.  If you connect over Tailscale, check it is connected on both devices."
+                return "That address cannot be reached from here.\u{00A0} If you connect over Tailscale, check it is connected on both devices."
             default:
                 return nil
             }
         case .dns:
-            return "That name did not resolve.  Check the spelling of the Tailscale name or domain."
+            return "That name did not resolve.\u{00A0} Check the spelling of the Tailscale name or domain."
         default:
             return nil
         }
@@ -468,6 +528,9 @@ final class CompanionModel {
 
     func forget() {
         resetCleaner()
+        if let peerID = saved?.peerID {
+            CompanionKeychain.deleteToken(peerID: peerID)
+        }
         saved = nil
         snapshot = nil
         codeDraft = ""
@@ -524,7 +587,7 @@ final class CompanionModel {
             return CompanionQuitResponse(status: "failed", pid: pid, name: row.name, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, force: force)
+            let resp = try await CompanionConnection.triggerQuit(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, force: force, useTLS: isUsingTLS(for: saved))
             Task { await refresh() }
             return resp
         } catch {
@@ -543,7 +606,7 @@ final class CompanionModel {
                 pid: pid,
                 name: row.name,
                 isTamed: action == "tame",
-                message: action == "tame" ? "Process priority lowered to background QoS." : "Process priority restored to normal.",
+                message: action == "tame" ? "Slowed down so it uses less of the Mac." : "Back to normal speed.",
                 error: nil
             )
         }
@@ -551,7 +614,7 @@ final class CompanionModel {
             return CompanionTameResponse(status: "failed", pid: pid, name: row.name, isTamed: false, message: nil, error: "Not connected to Mac.")
         }
         do {
-            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, action: action)
+            let resp = try await CompanionConnection.triggerTame(endpoint: endpoint, token: saved.token, pid: pid, rowId: row.id, action: action, useTLS: isUsingTLS(for: saved))
             Task { await refresh() }
             return resp
         } catch {
@@ -575,9 +638,152 @@ final class CompanionModel {
             return CompanionSampleResponse(status: "failed", name: row.name, error: "Not connected to Mac.")
         }
         do {
-            return try await CompanionConnection.triggerSample(endpoint: endpoint, token: saved.token, rowId: row.id)
+            return try await CompanionConnection.triggerSample(endpoint: endpoint, token: saved.token, rowId: row.id, useTLS: isUsingTLS(for: saved))
         } catch {
             return CompanionSampleResponse(status: "failed", name: row.name, error: Self.describe(error))
+        }
+    }
+
+    /// The address server actions go to.  A phone at home usually polls over
+    /// Bonjour, which the Mac refuses for these, so a saved Tailscale address
+    /// wins here even while the local one is in use for everything else.  Nil
+    /// when this phone has no way to reach the Mac over Tailscale.
+    func serverControlEndpoint(for saved: SavedMac) -> NWEndpoint? {
+        if let host = saved.remoteHost, let port = NWEndpoint.Port(rawValue: UInt16(saved.remotePort ?? 24240)) {
+            let remote = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
+            if CompanionPeer.isTailscaleEndpoint(remote, usesTLS: isUsingTLS(for: saved)) { return remote }
+        }
+        guard let active = activeEndpoint(for: saved),
+              CompanionPeer.isTailscaleEndpoint(active, usesTLS: isUsingTLS(for: saved)) else { return nil }
+        return active
+    }
+
+    /// Whether this phone can offer server actions as if they would work.  The
+    /// Mac still decides from the socket.
+    var serverControlsReachable: Bool {
+        if isDemoMode && ProcessInfo.processInfo.arguments.contains("-HogHunterSample") { return true }
+        guard let saved else { return false }
+        return serverControlEndpoint(for: saved) != nil
+    }
+
+    /// Runs one server action the person has confirmed.  One at a time on the
+    /// phone, as on the Mac.  The answer lands in `serverActionOutcome`.
+    func runServerAction(_ action: CompanionServerActionRequest, rowName: String) async {
+        guard !isRunningServerAction else { return }
+        isRunningServerAction = true
+        defer { isRunningServerAction = false }
+        if isDemoMode {
+            try? await Task.sleep(for: .seconds(1))
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: Self.sampleServerAnswer(action, rowName: rowName))
+            return
+        }
+        guard let saved, let endpoint = serverControlEndpoint(for: saved) else {
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "tailscaleRequired", error: CompanionServerControl.tailscaleOnlyNote))
+            return
+        }
+        do {
+            let response = try await CompanionConnection.triggerServerAction(endpoint: endpoint, token: saved.token, action: action, useTLS: false)
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: response)
+        } catch {
+            // Not knowing is not the same as nothing having happened.
+            let text = "The Mac did not answer, so the outcome is not known.\u{00A0} Check the server before trying again.\u{00A0} \(Self.describe(error))"
+            serverActionOutcome = ServerActionOutcome(title: rowName, response: CompanionServerActionResponse(status: "unknown", error: text))
+        }
+        await refresh()
+    }
+
+    /// Asks the Mac to read the server again, then re-polls the snapshot while
+    /// the read lands.  Needs no confirmation: it changes nothing anywhere.
+    func refreshServer() async {
+        guard !isRefreshingServer else { return }
+        isRefreshingServer = true
+        defer { isRefreshingServer = false }
+        serverRefreshNote = nil
+        if isDemoMode {
+            try? await Task.sleep(for: .seconds(1))
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved), CompanionPeer.isTrustedEndpoint(endpoint) else {
+            serverRefreshNote = Self.controlNetworkNote
+            await refresh()
+            return
+        }
+        let started = ContinuousClock.now
+        do {
+            let response = try await CompanionConnection.triggerServerRefresh(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
+            if !response.isStarted { serverRefreshNote = response.displayText }
+        } catch {
+            serverRefreshNote = "The Mac did not answer, so the server was not refreshed.\u{00A0} \(Self.describe(error))"
+        }
+        // Whatever the Mac said, the snapshot is read again: a pull still
+        // re-polls.  Only a started read is worth waiting for, and a read over
+        // SSH takes a few seconds, so poll at 3 and 6 seconds from the start.
+        guard serverRefreshNote == nil else {
+            await refresh()
+            return
+        }
+        for checkpoint in Self.serverRefreshCheckpoints {
+            let remaining = checkpoint - (ContinuousClock.now - started)
+            if remaining > .zero { try? await Task.sleep(for: remaining) }
+            await refresh()
+        }
+    }
+
+    /// When the phone polls after a started refresh, each measured from the tap.
+    static let serverRefreshCheckpoints: [Duration] = [.seconds(3), .seconds(6)]
+
+    /// The Flagged Issues the screenshot lane shows with their buttons.  Kept
+    /// out of the sample snapshot, so the other frames stay as they were.
+    static let sampleIssuesWithActions: [CompanionFlaggedIssue] = [
+        CompanionFlaggedIssue(
+            id: CompanionFlaggedIssue.quitIssueID(forRow: "node"),
+            title: "Runaway CPU Hog: node",
+            message: "Using 310% of one core.",
+            priority: 0,
+            priorityText: "Critical",
+            host: "Mac",
+            category: "CPU",
+            action: CompanionIssueAction.quit.rawValue
+        ),
+        CompanionFlaggedIssue(
+            id: "mac.disk.low",
+            title: "Mac Boot Drive Space Low",
+            message: "21.4 GB remaining (91% used).",
+            priority: 1,
+            priorityText: "High",
+            host: "Mac",
+            category: "Storage",
+            action: CompanionIssueAction.clean.rawValue
+        ),
+        CompanionFlaggedIssue(
+            id: "server.unreachable",
+            title: "Remote Server Unreadable",
+            message: "The connection timed out.",
+            priority: 1,
+            priorityText: "High",
+            host: CompanionFlaggedIssue.serverHost,
+            category: "Service",
+            action: CompanionIssueAction.retry.rawValue
+        ),
+    ]
+
+    /// What finished server actions look like in demo mode and the screenshot lane.
+    static func sampleServerAnswer(_ action: CompanionServerActionRequest, rowName: String) -> CompanionServerActionResponse {
+        switch action {
+        case .process(_, "sample"):
+            return CompanionServerActionResponse(status: "acted", message: "Sampled \(rowName) for 3 seconds", name: rowName, sampleText: "{\n  \"cpu_percent\" : 42.5,\n  \"duration_seconds\" : 3,\n  \"rss_bytes\" : 922746880,\n  \"state\" : \"running\"\n}")
+        case .process, .workload:
+            return CompanionServerActionResponse(status: "acted", message: "Done: \(rowName).", name: rowName)
+        case .maintain(let mode, let strategies, _):
+            let scan = mode == "scan"
+            let rows = strategies.map { id in
+                CompanionServerMaintenanceRow(id: id, title: ServerActionOutcome.strategyTitle(id), detail: scan ? "12 eligible records; 0 cleanup attempts" : "12 eligible records; 12 cleanup attempts")
+            }
+            return CompanionServerActionResponse(
+                status: "acted",
+                message: scan ? "Read-only scan completed; eligible items are listed below." : "Selected server maintenance completed.",
+                maintenance: CompanionServerMaintenanceSummary(mode: mode, status: scan ? "planned" : "ran", strategies: rows, removedBytesText: scan ? "0 KB" : "3.1 GB", observedChangeText: scan ? "0 KB" : "+3.4 GB")
+            )
         }
     }
 
@@ -600,7 +806,7 @@ final class CompanionModel {
             return
         }
         do {
-            let res = try await CompanionConnection.triggerMaintainRun(endpoint: endpoint, token: saved.token)
+            let res = try await CompanionConnection.triggerMaintainRun(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             if res.status != "started" {
                 maintainError = res.error ?? res.message ?? "The Mac did not start a run."
             }
@@ -609,6 +815,78 @@ final class CompanionModel {
         }
         // The Mac marks the run as going just after it answers.
         try? await Task.sleep(for: .milliseconds(600))
+        await refresh()
+    }
+
+    /// Sends a step or threshold change to the Mac.  The Mac checks every
+    /// value and applies the change whole or not at all; a refusal lands in
+    /// `maintainSettingsError`.
+    func updateMaintainSettings(_ update: CompanionMaintainSettingsRequest) async {
+        maintainSettingsError = nil
+        if isDemoMode {
+            guard var maintain = snapshot?.maintain else { return }
+            for (id, enabled) in update.stepEnabled ?? [:] {
+                if let index = maintain.stepSettings?.firstIndex(where: { $0.stepId == id }) {
+                    maintain.stepSettings?[index].isEnabled = enabled
+                }
+            }
+            if let value = update.lowFreeGiB { maintain.tuning?.lowFreeGiB = value }
+            if let value = update.worktreeRetireMinDays { maintain.tuning?.worktreeRetireMinDays = value }
+            if let value = update.pm2LogsCapMB { maintain.tuning?.pm2LogsCapMB = value }
+            snapshot?.maintain = maintain
+            return
+        }
+        guard controlsReachable else {
+            maintainSettingsError = Self.controlNetworkNote
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            maintainSettingsError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        maintainSettingsInFlight += 1
+        defer { maintainSettingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerMaintainSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
+            if res.status != "ok" {
+                maintainSettingsError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            maintainSettingsError = Self.describe(error)
+        }
+        // The Mac saves the change just after it answers.
+        try? await Task.sleep(for: .milliseconds(600))
+        await refresh()
+    }
+
+    /// Sends the temp file minimum to the Mac.  A refusal lands in
+    /// `cleanerError`, inside the cleaner screen.
+    func updateTempFileMinimumHours(_ hours: Double) async {
+        cleanerError = nil
+        let update = CompanionCleanSettingsRequest(tempFileMinimumHours: hours)
+        if isDemoMode {
+            snapshot?.storage?.tempFileMinimumHours = hours
+            return
+        }
+        guard controlsReachable else {
+            cleanerError = Self.controlNetworkNote
+            return
+        }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            cleanerError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        cleanSettingsInFlight += 1
+        defer { cleanSettingsInFlight -= 1 }
+        do {
+            let res = try await CompanionConnection.triggerCleanSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
+            if res.status != "ok" {
+                cleanerError = res.error ?? "The Mac did not accept that change."
+            }
+        } catch {
+            cleanerError = Self.describe(error)
+        }
+        try? await Task.sleep(for: .milliseconds(400))
         await refresh()
     }
 
@@ -645,6 +923,10 @@ final class CompanionModel {
             if let value = update.alertsEnabled { settings.alertsEnabled = value }
             if let value = update.alertThresholdPercent { settings.alertThresholdPercent = value }
             if let value = update.alertSustainedMinutes { settings.alertSustainedMinutes = value }
+            if let value = update.appearance { settings.appearance = value }
+            if let value = update.backgroundRefreshInterval { settings.backgroundRefreshInterval = value }
+            if let value = update.menuBarLabelMode { settings.menuBarLabelMode = value }
+            if let value = update.launchesAtLogin { settings.launchesAtLogin = value }
             if let url = update.webhookURL {
                 settings.webhookConfigured = !url.isEmpty
                 settings.webhookHost = url.isEmpty ? nil : URL(string: url)?.host
@@ -671,7 +953,7 @@ final class CompanionModel {
         settingsInFlight += 1
         defer { settingsInFlight -= 1 }
         do {
-            let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update)
+            let res = try await CompanionConnection.triggerSettingsUpdate(endpoint: endpoint, token: saved.token, update: update, useTLS: isUsingTLS(for: saved))
             if res.status == "ok" {
                 settingsNotice = res.message
             } else {
@@ -704,8 +986,8 @@ final class CompanionModel {
             }
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, toggleCategory: id)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, toggleCategory: id, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -724,8 +1006,8 @@ final class CompanionModel {
             }
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, addPath: trimmed)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, addPath: trimmed, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -740,8 +1022,8 @@ final class CompanionModel {
             snapshot?.storage = storage
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, removePath: path)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerExclusionsUpdate(endpoint: endpoint, token: token, removePath: path, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -751,8 +1033,8 @@ final class CompanionModel {
             snapshot?.window = window
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, window: window)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, window: window, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -762,8 +1044,8 @@ final class CompanionModel {
             snapshot?.grouping = grouping
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, grouping: grouping)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, grouping: grouping, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
@@ -773,21 +1055,103 @@ final class CompanionModel {
             snapshot?.cpuScale = scale
             return
         }
-        await sendControl { endpoint, token in
-            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale)
+        await sendControl { endpoint, token, useTLS in
+            let res = try await CompanionConnection.triggerViewUpdate(endpoint: endpoint, token: token, cpuScale: scale, useTLS: useTLS)
             return (res.status == "ok", res.message)
         }
     }
 
-    /// Runs one edit on the Mac and refreshes.  A failure lands in
-    /// `controlError` for the dashboard to show, never in a silent catch.
-    private func sendControl(_ call: (_ endpoint: NWEndpoint, _ token: String) async throws -> (ok: Bool, message: String?)) async {
+    /// Counts the sort requests the phone has sent.  Two taps can overlap,
+    /// so each request carries the generation it was made in and a reply for
+    /// an older one is dropped: the Mac never ends on a sort the person has
+    /// already moved past.
+    private var sortGeneration: Int = 0
+    /// The sort request in flight, so a newer one cancels it instead of
+    /// racing it to the Mac.
+    private var sortTask: Task<Void, Never>?
+
+    /// Sets the Mac's list sort and the direction the list runs in, so the
+    /// phone's list and the Mac's list agree about which app is on top.
+    ///
+    /// A newer request cancels the one before it and takes the sort with it,
+    /// so the last tap is the sort the Mac ends on.
+    func switchSort(_ sort: String, ascending: Bool) async {
+        // The generation moves first, so the request being cancelled already
+        // counts as superseded and cannot report itself as a failure.
+        sortGeneration += 1
+        let generation = sortGeneration
+        sortTask?.cancel()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performSort(sort, ascending: ascending, generation: generation)
+        }
+        sortTask = task
+        await task.value
+    }
+
+    /// One sort request.  The generation is checked before the request and
+    /// after the reply, so a superseded request never reaches the Mac, never
+    /// becomes an error the dashboard shows, and never touches the snapshot.
+    private func performSort(_ sort: String, ascending: Bool, generation: Int) async {
+        guard generation == sortGeneration else { return }
+        if isDemoMode {
+            var settings = snapshot?.settings
+            settings?.sort = sort
+            settings?.sortAscending = ascending
+            snapshot?.settings = settings
+            return
+        }
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             controlError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
             return
         }
         do {
-            let outcome = try await call(endpoint, saved.token)
+            // Checked again right before the request: a newer request has
+            // taken the sort, so this one never reaches the Mac.
+            guard generation == sortGeneration else { return }
+            let res = try await CompanionConnection.triggerViewUpdate(
+                endpoint: endpoint,
+                token: saved.token,
+                sort: sort,
+                sortAscending: ascending,
+                useTLS: isUsingTLS(for: saved)
+            )
+            // A newer request owns the sort now, so this reply is dropped.
+            guard generation == sortGeneration else { return }
+            if res.status != "ok" {
+                controlError = res.message ?? "The Mac did not accept that change."
+            }
+            await refresh()
+            guard generation == sortGeneration else { return }
+            // The Mac's reply names the sort it is now using, and it applies
+            // the change after it answers, so the reply is the newer word on
+            // the sort than the snapshot that was fetched just now.
+            applyMacSort(res.sort, ascending: res.sortAscending)
+        } catch {
+            guard generation == sortGeneration else { return }
+            controlError = Self.describe(error)
+            await refresh()
+        }
+    }
+
+    /// Records the sort the Mac says it is now using, so the phone's list
+    /// agrees with the Mac before the next snapshot arrives.
+    private func applyMacSort(_ sort: String, ascending: Bool) {
+        var settings = snapshot?.settings
+        settings?.sort = sort
+        settings?.sortAscending = ascending
+        snapshot?.settings = settings
+    }
+
+    /// Runs one edit on the Mac and refreshes.  A failure lands in
+    /// `controlError` for the dashboard to show, never in a silent catch.
+    private func sendControl(_ call: (_ endpoint: NWEndpoint, _ token: String, _ useTLS: Bool?) async throws -> (ok: Bool, message: String?)) async {
+        guard let saved, let endpoint = activeEndpoint(for: saved) else {
+            controlError = "Not connected to your Mac.\u{00A0} Wait for Hog Hunter to find it, then try again."
+            return
+        }
+        do {
+            let outcome = try await call(endpoint, saved.token, isUsingTLS(for: saved))
             if !outcome.ok {
                 controlError = outcome.message ?? "The Mac did not accept that change."
             }
@@ -823,6 +1187,24 @@ final class CompanionModel {
         return nil
     }
 
+    /// True when the active link is one the Mac takes controls on: the local
+    /// network or Tailscale.  Anything else answers 403, so the phone does
+    /// not offer buttons that cannot work.
+    var controlsReachable: Bool {
+        // Only the inert launch fixture may present controls without an endpoint.
+        if isDemoMode && ProcessInfo.processInfo.arguments.contains("-HogHunterSample") { return true }
+        guard let saved, let endpoint = activeEndpoint(for: saved) else { return false }
+        return CompanionPeer.isTrustedEndpoint(endpoint)
+    }
+
+    /// Why a control button is hidden.  The network reason when the Mac opted
+    /// in but this link is not one it takes controls on, else the opt-in note.
+    static let controlNetworkNote = "Controls work only on your local network or over Tailscale.\u{00A0} Connect that way, then try again."
+
+    func controlOffNote(optedIn: Bool, optInNote: String) -> String {
+        optedIn ? Self.controlNetworkNote : optInNote
+    }
+
     private var remoteConnectTask: Task<Void, Never>?
 
     func startRemoteConnect() {
@@ -840,18 +1222,44 @@ final class CompanionModel {
     }
 
     func connectRemote() async {
-        let host = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        var rawHost = remoteHostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawHost.isEmpty else {
+            remoteConnectError = "Enter a Tailscale MagicDNS name, IP address, or domain."
+            return
+        }
+        var explicitTLS: Bool? = remoteUseTLS ? true : nil
+        if rawHost.lowercased().hasPrefix("https://") {
+            explicitTLS = true
+            rawHost = String(rawHost.dropFirst("https://".count))
+        } else if rawHost.lowercased().hasPrefix("http://") {
+            explicitTLS = false
+            rawHost = String(rawHost.dropFirst("http://".count))
+        }
+        if let slashIdx = rawHost.firstIndex(of: "/") {
+            rawHost = String(rawHost[..<slashIdx])
+        }
+
+        var resolvedPort = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? (explicitTLS == true ? 443 : Self.defaultPort)
+        // A bare IPv6 literal keeps all its groups; it takes a port only in
+        // brackets (see `CompanionPeer.splitHostAndPort`).
+        let split = CompanionPeer.splitHostAndPort(rawHost)
+        let host = split.host
+        if let typedPort = split.port { resolvedPort = typedPort }
         guard !host.isEmpty else {
             remoteConnectError = "Enter a Tailscale MagicDNS name, IP address, or domain."
             return
         }
-        let portNum = Int(remotePortDraft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Self.defaultPort
-        let typed = remoteTokenDraft.uppercased().filter { CompanionToken.alphabet.contains($0) }
-        guard typed.isEmpty || typed.count >= 8 else {
-            remoteConnectError = "The Pairing Code is 8 characters.  Leave it blank to approve on the Mac instead."
+        if resolvedPort == 443 {
+            explicitTLS = true
+        }
+
+        let rawDraft = remoteTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = rawDraft.isEmpty ? "" : CompanionToken.normalizeCode(rawDraft)
+        guard typed.isEmpty || typed.count == 8 else {
+            remoteConnectError = "The Pairing Code is 8 characters.\u{00A0} Leave it blank to approve on the Mac instead."
             return
         }
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(portNum)) else {
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(resolvedPort)) else {
             remoteConnectError = "Invalid port number."
             return
         }
@@ -873,21 +1281,21 @@ final class CompanionModel {
             if typed.isEmpty {
                 isWaitingForApproval = true
                 defer { isWaitingForApproval = false }
-                token = try await Self.approve(endpoint: endpoint)
+                token = try await Self.approve(endpoint: endpoint, useTLS: explicitTLS)
             } else {
-                token = try await Self.credential(forCode: typed, endpoint: endpoint)
+                token = try await Self.credential(forCode: typed, endpoint: endpoint, useTLS: explicitTLS)
             }
             guard !Task.isCancelled else { return }
-            let fetched = try await Self.fetch(endpoint: endpoint, token: token)
+            let fetched = try await Self.fetch(endpoint: endpoint, token: token, useTLS: explicitTLS)
             guard !Task.isCancelled else { return }
             let trimmedName = remoteNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayName = trimmedName.isEmpty ? fetched.hostName : trimmedName
-            let peerID = "remote-\(host):\(portNum)"
-            saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: portNum)
+            let peerID = "remote-\(host):\(resolvedPort)"
+            saved = SavedMac(peerID: peerID, name: displayName, token: token, remoteHost: host, remotePort: resolvedPort, useTLS: explicitTLS)
             persistSaved()
             pairingDismissed = false
             codeFailure = nil
-            snapshot = fetched
+            adoptSnapshot(fetched)
             phase = .live
             statusLine = "\(displayName) (Remote)"
             isRemoteSheetPresented = false
@@ -901,7 +1309,7 @@ final class CompanionModel {
             if let hint = Self.transportHint(error) {
                 remoteConnectError = hint
             } else {
-                remoteConnectError = "Could not reach \(host) on port \(portNum).  Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale is connected on both devices."
+                remoteConnectError = "Could not reach \(host) on port \(resolvedPort).\u{00A0} Check that Hog Hunter is open on the Mac, Share With iPhone is on, and Tailscale or Cloudflare Tunnel is connected."
             }
         }
     }
@@ -930,7 +1338,9 @@ final class CompanionModel {
         // memory), so comparing bytes cannot suppress the reload.  Write
         // every poll the container can actually hold, and rate limit the reload.
         let containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil
-        let data = try? CompanionJSON.encode(fetched)
+        // The widget draws nothing from the server, and this copy outlives the
+        // screen in a shared container, so server internals stay out of it.
+        let data = try? CompanionJSON.encode(fetched.withoutServerDetail())
         guard let defaults = sharedWidgetDefaults(), let data else { return }
         defaults.set(data, forKey: "last_snapshot")
         let cleanKeys = [
@@ -952,6 +1362,13 @@ final class CompanionModel {
         WidgetCenter.shared.reloadTimelines(ofKind: "HogHunterWidgets")
     }
 
+    /// Counts the fetches the phone has made, so the newest snapshot is the
+    /// one on screen and a slow older fetch cannot undo it.
+    private var refreshGeneration: Int = 0
+    /// When the on-screen snapshot last refreshed.  A failing poll leaves
+    /// the old snapshot up; past 30s the status says Reconnecting instead.
+    private var lastSuccessfulRefresh = Date.distantPast
+
     func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
             if didBrowse, let saved, saved.remoteHost == nil, discovered.first(where: { $0.id == saved.peerID }) == nil {
@@ -963,11 +1380,19 @@ final class CompanionModel {
             return
         }
         if case .code = phase { return }
+        // Counts fetches, so a slower older fetch cannot write an older
+        // snapshot over a newer one.
+        refreshGeneration += 1
+        let generation = refreshGeneration
         do {
-            let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token)
+            let fetched = try await Self.fetch(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
+            // A newer fetch already brought a newer snapshot: this one is
+            // older, so it does not go on screen.
+            guard generation == refreshGeneration else { return }
             pairingDismissed = false
             codeFailure = nil
-            snapshot = fetched
+            lastSuccessfulRefresh = Date()
+            adoptSnapshot(fetched)
             phase = .live
             statusLine = saved.remoteHost != nil ? "\(saved.name) (Remote)" : saved.name
             storeSnapshotForWidgets(fetched)
@@ -992,10 +1417,15 @@ final class CompanionModel {
             if snapshot == nil {
                 phase = .offline
                 if let host = saved.remoteHost {
-                    statusLine = "The Mac at \(host) did not answer.  Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
+                    statusLine = "The Mac at \(host) did not answer.\u{00A0} Check Hog Hunter is open there with Share With iPhone on, and Tailscale is connected on both devices if you connect that way."
                 } else {
                     statusLine = "The Mac did not answer."
                 }
+            } else if Date().timeIntervalSince(lastSuccessfulRefresh) > 30 {
+                // Polls keep failing but an older snapshot is on screen: say
+                // so, or the phone presents stale readings as live ones.  The
+                // 30s grace covers transient Wi-Fi drops without flicker.
+                statusLine = "\(saved.name) · Reconnecting…"
             }
         }
     }
@@ -1016,7 +1446,7 @@ final class CompanionModel {
               let endpoint = activeEndpoint(for: current) else { return }
         lastUpgradeAttempt = Date()
         do {
-            let token = try await CompanionConnection.enroll(endpoint: endpoint, code: current.token, deviceName: await Self.deviceName())
+            let token = try await CompanionConnection.enroll(endpoint: endpoint, code: current.token, deviceName: await Self.deviceName(), useTLS: isUsingTLS(for: current))
             // Pairing may have changed while the Mac answered.
             guard var latest = saved, latest.peerID == current.peerID, latest.token == current.token else { return }
             latest.token = token
@@ -1039,7 +1469,7 @@ final class CompanionModel {
                 isCleaning: true,
                 phase: "snapshot",
                 progress: 0.15,
-                statusText: "Creating APFS safety snapshot…",
+                statusText: "Saving a safety copy…",
                 currentItem: nil,
                 itemsCleaned: 0,
                 totalItems: 28,
@@ -1090,9 +1520,14 @@ final class CompanionModel {
             return
         }
         // A deep link can reach this only after the person taps Run Safe
-        // Clean.  Refuse here too when the Mac has not opted in.
+        // Clean.  Refuse here too when the Mac has not opted in, or when this
+        // link is not one the Mac takes controls on.
         guard snapshot?.remoteCleanAllowed == true else {
             controlError = CleanLinkPolicy.cleanOffNote
+            return
+        }
+        guard controlsReachable else {
+            controlError = Self.controlNetworkNote
             return
         }
         guard let saved, let endpoint = activeEndpoint(for: saved) else { return }
@@ -1115,7 +1550,7 @@ final class CompanionModel {
         }
 
         do {
-            let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token)
+            let res = try await CompanionConnection.triggerClean(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
             lastCleanResult = res
             defaults?.set("Cleaned", forKey: "clean_status")
             defaults?.set(Date().timeIntervalSince1970, forKey: "last_clean_date")
@@ -1196,13 +1631,35 @@ final class CompanionModel {
         statusLine = "Can't see \(saved?.name ?? "your Mac") on this Wi-Fi."
     }
 
+    /// The pairing token lives in the Keychain under the Mac's peer ID; the
+    /// UserDefaults blob carries everything else.  A blob that still holds a
+    /// token is a pre-Keychain install: the token moves to the Keychain on
+    /// first read.  A blob with no token and nothing in the Keychain means
+    /// the Keychain did not survive (a restore to a new device drops
+    /// ThisDeviceOnly items), so the phone re-pairs instead of failing.
     private func loadSaved() -> SavedMac? {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return nil }
-        return try? JSONDecoder().decode(SavedMac.self, from: data)
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              var stored = try? JSONDecoder().decode(SavedMac.self, from: data) else { return nil }
+        if let token = CompanionKeychain.readToken(peerID: stored.peerID), !token.isEmpty {
+            stored.token = token
+            return stored
+        }
+        // Pre-Keychain install: the blob still holds the token.  Move it
+        // over; the strip of the blob copy happens below in start().
+        guard !stored.token.isEmpty else { return nil }
+        CompanionKeychain.writeToken(stored.token, peerID: stored.peerID)
+        return stored
     }
 
     private func persistSaved() {
-        guard let saved, let data = try? JSONEncoder().encode(saved) else { return }
+        guard var saved else { return }
+        // The Keychain takes the token first.  When it accepts it, the blob
+        // keeps everything but the token; when it refuses, the blob keeps
+        // the token too, so a Keychain hiccup never logs the phone out.
+        if CompanionKeychain.writeToken(saved.token, peerID: saved.peerID) {
+            saved.token = ""
+        }
+        guard let data = try? JSONEncoder().encode(saved) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
     }
 
@@ -1229,10 +1686,10 @@ final class CompanionModel {
     /// not answer".  Passed through to the connection so both limits agree.
     private static let snapshotFetchTimeout: TimeInterval = 10
 
-    private static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
+    private static func fetch(endpoint: NWEndpoint, token: String, useTLS: Bool? = nil) async throws -> CompanionSnapshot {
         try await withThrowingTaskGroup(of: CompanionSnapshot.self) { group in
             group.addTask {
-                try await CompanionConnection.fetch(endpoint: endpoint, token: token, timeout: Self.snapshotFetchTimeout)
+                try await CompanionConnection.fetch(endpoint: endpoint, token: token, timeout: Self.snapshotFetchTimeout, useTLS: useTLS)
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(Self.snapshotFetchTimeout))
@@ -1301,7 +1758,15 @@ final class CompanionModel {
             excludedPaths: [
                 "/Users/jay/Code/HogHunter",
                 "/Users/jay/Documents/CriticalArchive"
-            ]
+            ],
+            categoryTotals: [
+                CompanionStorageCategoryTotal(id: "applicationSupport", title: "Application Support", bytes: 18_400_000_000, text: "18.4 GB"),
+                CompanionStorageCategoryTotal(id: "bundle", title: "App bundle", bytes: 12_100_000_000, text: "12.1 GB"),
+                CompanionStorageCategoryTotal(id: "caches", title: "Caches", bytes: 6_300_000_000, text: "6.3 GB"),
+                CompanionStorageCategoryTotal(id: "containers", title: "Containers", bytes: 3_900_000_000, text: "3.9 GB"),
+                CompanionStorageCategoryTotal(id: "logs", title: "Logs", bytes: 820_000_000, text: "820 MB"),
+            ],
+            tempFileMinimumHours: 72
         ),
         network: [
             CompanionNetworkRow(
@@ -1348,12 +1813,112 @@ final class CompanionModel {
             webhookConfigured: true,
             webhookHost: "hooks.example.com",
             webhookStatus: "Delivered (200) at 9:41:07 AM",
-            notificationsDenied: false
+            notificationsDenied: false,
+            launchesAtLogin: true
         ),
         remoteMaintainAllowed: true,
         // Relative to launch, so the sample reads "3 hours ago", not a year ago.
-        maintain: sampleMaintain(now: Date())
+        maintain: sampleMaintain(now: Date()),
+        remoteServerStatusAllowed: true,
+        server: sampleServer(now: Date()),
+        flaggedIssues: [
+            CompanionFlaggedIssue(
+                id: "server.disk.extra.warning",
+                title: "Server Data Volume Filling Up",
+                message: "86% used on /mnt/data.",
+                priority: 2,
+                priorityText: "Warning",
+                host: CompanionFlaggedIssue.serverHost,
+                category: "Storage"
+            ),
+        ],
+        flaggedIssuesCoverServer: true,
+        remoteServerControlAllowed: true
     )
+
+    /// A busy but healthy server, for the sample snapshot and Demo Mode.  The
+    /// names are made up: this data can end up in a store screenshot.
+    static func sampleServer(now: Date) -> CompanionServerStatus {
+        let reading = now.addingTimeInterval(-90)
+        return CompanionServerStatus(
+            state: CompanionServerState.ok.rawValue,
+            host: "web-01",
+            generatedAt: reading,
+            fetchedAt: now.addingTimeInterval(-20),
+            headline: CompanionServerHeadline(
+                host: "web-01",
+                cpuText: "38%",
+                cpuSeverity: "calm",
+                memoryText: "71%",
+                memorySeverity: "calm",
+                diskText: "61% used",
+                diskSeverity: "calm",
+                extraDiskText: "86% used",
+                extraDiskSeverity: "elevated"
+            ),
+            cpu: CompanionServerCPU(
+                percent: 38.4,
+                percentText: "38.4%",
+                severity: "calm",
+                cores: 8,
+                loadText: "2.41",
+                history: [24, 27, 31, 29, 36, 44, 52, 48, 41, 37, 33, 30, 34, 39, 46, 51, 43, 38, 36, 35, 38, 40, 37, 38]
+            ),
+            memory: CompanionServerMeter(percent: 71, percentText: "71%", detail: "22.7 GB of 32.0 GB", severity: "calm"),
+            swap: CompanionServerMeter(percent: 12, percentText: "12%", detail: "491 MB of 4.0 GB swapped", severity: "calm"),
+            pressure: CompanionServerPressure(
+                sampledAt: reading,
+                durationSeconds: 2,
+                swapInText: "0 KB/s",
+                swapOutText: "12 KB/s",
+                memoryStallsText: "0.2%"
+            ),
+            devices: [
+                CompanionServerDevice(id: "root", title: "Disk (/)", mount: "/", freeText: "117 GB", totalText: "300 GB", usedPercent: 61, usedText: "61% used", severity: "calm"),
+                CompanionServerDevice(id: "data", title: "Data Volume (/mnt/data)", mount: "/mnt/data", freeText: "143 GB", totalText: "1024 GB", usedPercent: 86, usedText: "86% used", severity: "elevated"),
+                // A device whose size the server does not report: free space and a dash.
+                CompanionServerDevice(id: "tmp", title: "Tmpfs (/tmp)", mount: "/tmp", freeText: "15.2 GB"),
+            ],
+            databases: [
+                CompanionServerSizeRow(id: "orders", name: "Orders", bytesText: "18.4 GB", changeText: "↑1.2%", changePercent: 1.2),
+                CompanionServerSizeRow(id: "analytics", name: "Analytics", bytesText: "6.7 GB", changeText: "~0%", changePercent: 0),
+                // New this week, so there is no day of history to compare with.
+                CompanionServerSizeRow(id: "sessions", name: "Sessions", bytesText: "412 MB"),
+            ],
+            directories: [
+                CompanionServerSizeRow(id: "/var/lib/docker", name: "/var/lib/docker", bytesText: "84.1 GB", changeText: "↑3.4%", changePercent: 3.4),
+                CompanionServerSizeRow(id: "/var/log", name: "/var/log", bytesText: "2.3 GB", changeText: "↓-8.1%", changePercent: -8.1),
+            ],
+            storageDiagnostics: CompanionServerStorageDiagnostics(
+                sampledAt: reading,
+                durationSeconds: 3,
+                categoriesComplete: true,
+                categories: [
+                    CompanionServerStorageCategory(id: "images", title: "Images", sizeText: "41.6 GB", reclaimableText: "12.2 GB"),
+                    CompanionServerStorageCategory(id: "build_cache", title: "Build Cache", sizeText: "9.8 GB", reclaimableText: "9.8 GB"),
+                    CompanionServerStorageCategory(id: "volumes", title: "Volumes", sizeText: "27.3 GB", reclaimableText: "1.1 GB"),
+                ],
+                usesContainerd: false
+            ),
+            tools: [
+                CompanionServerTool(id: "docker", name: "Docker", state: "running", stateText: "Running", count: 1),
+                CompanionServerTool(id: "postgres", name: "Postgres", state: "running", stateText: "Running", count: 4),
+                CompanionServerTool(id: "backup", name: "Backups", state: "unknown", stateText: "Unknown", count: 0, reason: "The backup log is not readable by the collector."),
+            ],
+            processes: [
+                CompanionServerProcess(id: "a1f0c2d4e6b81735", name: "postgres", owner: "postgres", container: "orders-db", cpuText: "118%", memoryText: "6.2 GB", swapText: "120 MB", isTamed: false, actions: ["quit", "forceQuit", "tame", "sample"]),
+                CompanionServerProcess(id: "b2e1d3c5f7a92846", name: "node", owner: "app", container: "storefront-api", cpuText: "64%", memoryText: "1.8 GB", isTamed: false, actions: ["quit", "forceQuit", "tame", "sample"]),
+                CompanionServerProcess(id: "c3d2e4b6a8f03957", name: "ffmpeg", owner: "media", cpuText: "42%", memoryText: "880 MB", isTamed: true, actions: ["quit", "forceQuit", "untame", "sample"]),
+                CompanionServerProcess(id: "d4c3f5a7b9e14a68", name: "dockerd", owner: "root", cpuText: "6%", memoryText: "512 MB", isTamed: false, protectionReason: "Host infrastructure", actions: []),
+            ],
+            processCount: 214,
+            workloads: [
+                CompanionServerWorkload(id: "e5b4a6f8c0d25b79", name: "Storefront API", type: "application", status: "running", isHealthy: true, cpuText: "64%", memoryText: "1.8 GB", actions: ["stop", "restart"]),
+                CompanionServerWorkload(id: "f6a5b7c9d1e36c80", name: "Orders Database", type: "database", status: "running", isHealthy: true, cpuText: "118%", memoryText: "6.2 GB", protectionReason: "Protected database", actions: []),
+                CompanionServerWorkload(id: "07f6c8dae2f47d91", name: "Nightly Reports", type: "service", status: "exited", isHealthy: false, actions: ["restart"]),
+            ]
+        )
+    }
 
     /// A healthy Maintain whose last full run ended `endedSecondsAgo`
     /// before `now`, for the sample snapshot and Demo Mode.
@@ -1381,7 +1946,21 @@ final class CompanionModel {
                 CompanionMaintainStep(stepId: "coolify_remote", title: "Remote server maintenance", statusLabel: "Skipped", reason: "No remote servers are set up.", bytesFreed: 0),
             ],
             recentRuns: sampleRecentRuns(ended: ended),
-            watch: sampleWatch(now: now)
+            watch: sampleWatch(now: now),
+            stepSettings: [
+                CompanionMaintainStepSetting(stepId: "resource_sample", title: "Check Disk and Memory", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "hoghunter_reclaim", title: "Hog Hunter Disk Reclaim", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "janitor_worktree_retire", title: "Retire Old Merged Git Worktrees", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "janitor_cache_reclaim", title: "Reclaim Caches Under Low Disk", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "pm2_logs", title: "Cap Oversized PM2 Logs", isEnabled: true),
+                CompanionMaintainStepSetting(stepId: "npm_cache", title: "Trim npm Download Cache", isEnabled: false),
+                CompanionMaintainStepSetting(stepId: "coolify_remote", title: "Remote Server Maintenance", isEnabled: false, isRemoteServer: true),
+            ],
+            tuning: CompanionMaintainTuning(lowFreeGiB: 80, worktreeRetireMinDays: 7, pm2LogsCapMB: 50),
+            customScripts: [
+                CompanionMaintainScript(name: "prune-docker.sh", isEnabled: true, mode: "owned", scope: "local"),
+                CompanionMaintainScript(name: "Hog Hunter Maintenance", isEnabled: true, mode: "observed", scope: "local"),
+            ]
         )
     }
 

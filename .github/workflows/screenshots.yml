@@ -10,11 +10,16 @@ on:
 
 jobs:
   screenshots:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Set Up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.15'
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -34,14 +39,28 @@ jobs:
       - name: Find built app
         id: find-app
         run: |
-          APP_PATH=$(find build-ios -name "*.app" -type d | head -1)
-          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          # Match the built product only: a bare "*.app" search also matches
+          # dependency artifacts (e.g. Sparkle's Updater.app under
+          # SourcePackages), which once made the lane install and launch the
+          # wrong bundle.
+          APP_PATH=$(find build-ios -path "*/Build/Products/*" -name "HogHunter.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: HogHunter.app not found under build-ios/Build/Products"
+            find build-ios -name "*.app" -type d | head -20 || true
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
           echo "Found app: $APP_PATH"
 
       - name: Capture screenshots
         run: |
           set -x
           mkdir -p screenshots
+          OCR_DIR=$(mktemp -d "$RUNNER_TEMP/hoghunter-screenshot-ocr.XXXXXX")
+          trap 'rm -rf "$OCR_DIR"' EXIT
+          export HOGHUNTER_SCREENSHOT_OCR_BINARY="$OCR_DIR/screenshot-text"
+          python3 scripts/ios_screenshot_checks.py --prepare-ocr "$HOGHUNTER_SCREENSHOT_OCR_BINARY" \
+            --report screenshots/ocr-compile.json
           APP_PATH="${{ steps.find-app.outputs.app_path }}"
           BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")
           echo "Bundle ID: $BUNDLE_ID"
@@ -54,6 +73,35 @@ jobs:
           
           # Use existing simulators instead of creating new ones
           # Map to actual available devices
+          # Pick the newest iOS runtime that has available devices, so a
+          # missing device model can be created instead of skipped.
+          RUNTIME_ID=$(xcrun simctl list devices -j | python3 -c "
+          import json, re, sys
+          devices = json.load(sys.stdin)['devices']
+          def version_key(rt):
+              m = re.search(r'iOS-(\d+)-(\d+)', rt)
+              return tuple(int(x) for x in m.groups()) if m else (0,)
+          candidates = [rt for rt, devs in devices.items()
+                        if 'iOS' in rt and any(d.get('isAvailable', False) for d in devs)]
+          candidates.sort(key=version_key)
+          sys.exit(1 if not candidates else print(candidates[-1]))
+          ")
+          if [ -z "$RUNTIME_ID" ]; then
+            echo "ERROR: no iOS runtime with available devices found on this runner"
+            exit 1
+          fi
+          echo "Using runtime: $RUNTIME_ID"
+          # Track simulators created by this run so they are deleted even if
+          # a later per-device step exits early.
+          CREATED_UDIDS=""
+          cleanup_created() {
+            rm -rf "$OCR_DIR"
+            for id in $CREATED_UDIDS; do
+              xcrun simctl shutdown "$id" >/dev/null 2>&1 || true
+              xcrun simctl delete "$id" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup_created EXIT
           for DEVICE_PATTERN in "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 11 Pro Max"; do
             echo "=== Looking for: $DEVICE_PATTERN ==="
             UDID=$(xcrun simctl list devices available -j | python3 -c "
@@ -67,48 +115,147 @@ jobs:
                       sys.exit(0)
           ")
             if [ -z "$UDID" ]; then
-              echo "WARNING: No available simulator found for $DEVICE_PATTERN, skipping"
-              continue
-            fi
-            echo "Using simulator $UDID for $DEVICE_PATTERN"
-            xcrun simctl boot "$UDID" || true
-            sleep 15
-            xcrun simctl install "$UDID" "$APP_PATH"
-            xcrun simctl launch "$UDID" "$BUNDLE_ID" || echo "Launch may have failed, continuing"
-            sleep 8
-            SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
-            xcrun simctl io "$UDID" screenshot "screenshots/${SAFE_NAME}.png" || echo "Screenshot failed for $DEVICE_PATTERN"
-            # Once per run: the embedded widget, the cold-start confirm, and
-            # hoghunter://clean via simctl openurl.  Same checks as
-            # scripts/capture-app-screenshots.sh.
-            if [[ ! -f screenshots/clean-deep-link.png ]]; then
-              if ! find "$APP_PATH" -name 'HogHunterWidgets.appex' -type d | grep -q .; then
-                echo "ERROR: HogHunterWidgets.appex is missing from $APP_PATH"
+              # Resolve the human-readable device name to its CoreSimulator
+              # identifier; fall back to the name itself (simctl accepts both).
+              DEVICE_TYPE_ID=$(xcrun simctl list devicetypes | sed -n "s/^${DEVICE_PATTERN} (\(.*\))$/\1/p" | head -1)
+              if [ -z "$DEVICE_TYPE_ID" ]; then
+                DEVICE_TYPE_ID="$DEVICE_PATTERN"
+              fi
+              echo "No existing simulator for $DEVICE_PATTERN; creating one on $RUNTIME_ID"
+              if ! UDID=$(xcrun simctl create "HH-screenshots-$(echo "$DEVICE_PATTERN" | tr ' ' '-')" "$DEVICE_TYPE_ID" "$RUNTIME_ID"); then
+                echo "ERROR: could not create a $DEVICE_PATTERN simulator (device type or runtime missing)"
                 exit 1
               fi
-              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterWidgetPreview
+              CREATED_UDIDS="$CREATED_UDIDS $UDID"
+            fi
+            echo "Using simulator $UDID for $DEVICE_PATTERN"
+            # Capture one device's screenshot. Returns 0 on success, 1 on any
+            # failure so the caller can retry once after erasing the
+            # simulator. Uses globals APP_PATH and BUNDLE_ID.
+            capture_device() {
+            local UDID="$1"
+            local DEVICE_PATTERN="$2"
+            local SAFE_NAME="$3"
+            # Reuse an already booted device; still require actual bootstatus readiness.
+            if ! python3 - "$UDID" <<'PYBOOT'
+          import sys
+          sys.path.insert(0, "scripts")
+          from ios_screenshot_checks import boot_simulator
+          problem = boot_simulator(sys.argv[1], timeout=120)
+          if problem:
+              print("ERROR: " + problem)
+          sys.exit(1 if problem else 0)
+          PYBOOT
+            then
+              return 1
+            fi
+            # Baseline frame of the device *without* the app: wait for a
+            # rendered frame (not a black pre-SpringBoard frame), then
+            # require the launch to visibly change the screen -- otherwise
+            # the shot is the home screen or a pairing screen
+            # ("Looking for Your Mac") instead of the app.
+            BASELINE_SHOT=$(mktemp /tmp/hoghunter-baseline-XXXXXX.png)
+            BASELINE_OK=0
+            for _ in $(seq 1 3); do
               sleep 5
-              xcrun simctl io "$UDID" screenshot "screenshots/widget-small.png"
-              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample -HogHunterCleanConfirm
-              sleep 5
-              xcrun simctl io "$UDID" screenshot "screenshots/clean-cold-start.png"
-              xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
-              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample
-              sleep 4
-              xcrun simctl openurl "$UDID" "hoghunter://clean"
+              xcrun simctl io "$UDID" screenshot "$BASELINE_SHOT" || true
+              if python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_problem; problem = screenshot_problem(sys.argv[1]); print("BASELINE: %s" % (problem or "rendered frame")); sys.exit(0 if problem is None else 1)' "$BASELINE_SHOT"; then
+                BASELINE_OK=1
+                break
+              fi
+            done
+            if [ "$BASELINE_OK" -ne 1 ]; then
+              echo "ERROR: simulator for $DEVICE_PATTERN never rendered a baseline frame"
+              rm -f "$BASELINE_SHOT"
+              return 1
+            fi
+            # Fresh app state every attempt: a reinstall preserves the data
+            # container, and stale state has been seen to leave the app
+            # unable to foreground.
+            xcrun simctl uninstall "$UDID" "$BUNDLE_ID" 2>/dev/null || true
+            if ! xcrun simctl install "$UDID" "$APP_PATH"; then
+              echo "ERROR: failed to install $BUNDLE_ID on $DEVICE_PATTERN"
+              rm -f "$BASELINE_SHOT"
+              return 1
+            fi
+            local LAUNCH_PID
+            # -HogHunterSample: sample-state flag so the app shows the live
+            # dashboard, not the "Looking for Your Mac" onboarding screen.
+            if ! LAUNCH_PID=$(xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample); then
+              echo "ERROR: failed to launch $BUNDLE_ID on $DEVICE_PATTERN"
+              rm -f "$BASELINE_SHOT"
+              return 1
+            fi
+            echo "Launched $BUNDLE_ID (pid $LAUNCH_PID) on $DEVICE_PATTERN"
+            # Poll until the app is visibly foregrounded: each attempt
+            # re-asserts foreground (a no-op when already frontmost) and
+            # requires the frame to differ from the pre-launch baseline.
+            FOREGROUNDED=0
+            for ATTEMPT in $(seq 1 10); do
               sleep 3
-              xcrun simctl io "$UDID" screenshot "screenshots/clean-deep-link.png"
-              python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_problem; paths = ["screenshots/widget-small.png", "screenshots/clean-cold-start.png", "screenshots/clean-deep-link.png"]; bad = [(p, screenshot_problem(p)) for p in paths]; bad = [(p, problem) for p, problem in bad if problem]; [print("ERROR: %s: %s" % item) for item in bad]; [print("OK %s" % p) for p in paths if p not in [item[0] for item in bad]]; sys.exit(1 if bad else 0)'
+              TRY_SHOT=$(mktemp /tmp/hoghunter-try-XXXXXX.png)
+              xcrun simctl io "$UDID" screenshot "$TRY_SHOT" || true
+              if python3 -c 'import sys; sys.path.insert(0, "scripts"); from ios_screenshot_checks import screenshot_unchanged_problem; problem = screenshot_unchanged_problem(sys.argv[1], sys.argv[2]); print("CHECK: %s" % (problem or "foreground confirmed")); sys.exit(0 if problem is None else 1)' "$BASELINE_SHOT" "$TRY_SHOT"; then
+                if ! mv "$TRY_SHOT" "screenshots/${SAFE_NAME}.png"; then
+                  echo "ERROR: failed to save device screenshot on $DEVICE_PATTERN"
+                  rm -f "$TRY_SHOT" "$BASELINE_SHOT"
+                  return 1
+                fi
+                FOREGROUNDED=1
+                break
+              fi
+              echo "Attempt $ATTEMPT/10: app not foregrounded on $DEVICE_PATTERN, retrying"
+              rm -f "$TRY_SHOT"
+              xcrun simctl launch "$UDID" "$BUNDLE_ID" -HogHunterSample >/dev/null || true
+            done
+            rm -f "$BASELINE_SHOT"
+            if [ "$FOREGROUNDED" -ne 1 ]; then
+              echo "ERROR: $BUNDLE_ID never reached the foreground on $DEVICE_PATTERN after 30s; still showing the pre-launch screen"
+              return 1
+            fi
+            echo "Captured screenshots/${SAFE_NAME}.png"
+            # Shared scene checks reject alert overlays; URL routing is reported
+            # separately and runs last on this simulator.
+            if [[ ! -f screenshots/deep-link-verification.json ]]; then
+              python3 scripts/ios_capture_scenes.py --udid "$UDID" --bundle-id "$BUNDLE_ID" \
+                --app-path "$APP_PATH" --output screenshots || return 2
+            fi
+            return 0
+            }
+            SAFE_NAME=$(echo "$DEVICE_PATTERN" | tr ' ' '_' | tr -d '()')
+            if capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
+              :
+            else
+              CAPTURE_STATUS=$?
+              if [ "$CAPTURE_STATUS" -eq 2 ]; then
+                echo "ERROR: required scene verification failed; evidence retained without erasing the simulator"
+                exit 1
+              fi
+              echo "First capture attempt failed on $DEVICE_PATTERN; erasing simulator and retrying once"
+              rm -f screenshots/widget-small.png screenshots/clean-cold-start.png screenshots/clean-deep-link.png screenshots/cleaner-quick.png screenshots/cleaner-partial.png screenshots/scene-verification.json screenshots/deep-link-verification.json
+              xcrun simctl shutdown "$UDID" || true
+              xcrun simctl erase "$UDID"
+              if ! capture_device "$UDID" "$DEVICE_PATTERN" "$SAFE_NAME"; then
+                echo "ERROR: failed to capture $DEVICE_PATTERN after erase-and-retry"
+                exit 1
+              fi
             fi
             xcrun simctl shutdown "$UDID" || true
           done
           
           echo "=== Screenshots captured ==="
           ls -lh screenshots/
+          # Fail loudly when the set is incomplete: a green run must mean
+          # three real device shots, never a partial set.
+          DEVICE_SHOTS=$(find screenshots -maxdepth 1 -type f -name 'iPhone_*.png' | wc -l | tr -d ' ')
+          if [ "$DEVICE_SHOTS" -lt 3 ]; then
+            echo "ERROR: only $DEVICE_SHOTS device screenshot(s) captured, need at least 3"
+            exit 1
+          fi
+          echo "OK: $DEVICE_SHOTS device screenshots captured"
 
       - name: Upload screenshots
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: hoghunter-screenshots-${{ inputs.version }}

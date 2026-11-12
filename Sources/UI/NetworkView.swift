@@ -12,15 +12,18 @@ struct NetworkView: View {
 
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
+    private let cachedIconProvider: (String?) -> NSImage?
 
     init(
         bundleResolver: @escaping (pid_t) -> (bundleId: String?, name: String),
         bandwidth: BandwidthStore,
+        cachedIconProvider: @escaping (String?) -> NSImage? = { _ in nil },
         embeddedInPanel: Bool = false,
         isTabActive: Bool = true
     ) {
         _store = StateObject(wrappedValue: NetworkStore(bundleResolver: bundleResolver))
         _bandwidth = ObservedObject(wrappedValue: bandwidth)
+        self.cachedIconProvider = cachedIconProvider
         self.embeddedInPanel = embeddedInPanel
         self.isTabActive = isTabActive
     }
@@ -116,7 +119,7 @@ struct NetworkView: View {
                 Picker("Sort", selection: $sortOrder) {
                     Text("Established").tag(NetworkSort.established)
                     Text("Remote Hosts").tag(NetworkSort.remoteHosts)
-                    Text("Open Sockets").tag(NetworkSort.open)
+                    Text("Open Connections").tag(NetworkSort.open)
                 }
                 .pickerStyle(.menu)
                 .frame(width: 140)
@@ -125,24 +128,23 @@ struct NetworkView: View {
                     sortAscending.toggle()
                 } label: {
                     Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
-                        .font(.system(size: 10.5, weight: .bold))
+                        .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.primary)
-                        .frame(width: 20, height: 18)
+                        .frame(width: 44, height: 44)
                         .background(
-                            RoundedRectangle(cornerRadius: 4)
+                            RoundedRectangle(cornerRadius: 8)
                                 .fill(Color(nsColor: .controlBackgroundColor))
-                                .shadow(color: .black.opacity(0.06), radius: 1, y: 0.5)
                         )
                 }
                 .buttonStyle(.plain)
-                .help(sortAscending ? "Sort lowest first (ascending)" : "Sort highest first (descending)")
+                .help(sortAscending ? "Sort lowest first" : "Sort highest first")
                 .accessibilityLabel(sortAscending ? "Sort lowest first" : "Sort highest first")
             }
         }
     }
 
     private var subtitle: String {
-        guard case .completed(let at) = store.state else { return "Snapshotting…" }
+        guard case .completed(let at) = store.state else { return "Reading Connections…" }
         return "Updated \(Self.relative.localizedString(for: at, relativeTo: Date()))"
     }
 
@@ -156,7 +158,7 @@ struct NetworkView: View {
             switch store.state {
             case .idle, .scanning:
                 ProgressView().scaleEffect(0.6)
-                Text("Reading lsof…")
+                Text("Reading Connections…")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             case .completed:
@@ -220,7 +222,7 @@ struct NetworkView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if store.usages.isEmpty {
-                Text("Snapshotting…")
+                Text("Reading Connections…")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -228,7 +230,7 @@ struct NetworkView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(sortedUsages) { usage in
-                            NetworkRowView(usage: usage)
+                            NetworkRowView(usage: usage, icon: cachedIconProvider(usage.bundleId))
                         }
                     }
                     .padding(.vertical, 2)
@@ -244,22 +246,22 @@ struct NetworkView: View {
     private var columnLegend: some View {
         HStack(spacing: 4) {
             Image(systemName: "info.circle")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-            Text("Connections column is established/open.  Hosts is distinct remote machines.")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text("Connections column is established/open.\u{00A0} Hosts is distinct remote machines.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
-        .help("Established / open sockets for the process, and how many distinct remote hosts it is talking to.  An app with a lot of hosts is usually a chat or sync client; one with many established sockets and no host variety is usually a local service or a stuck retry loop.")
+        .help("Established and open connections for the process, and how many remote computers it is talking to.\u{00A0} An app with a lot of computers is usually a chat or sync client.\u{00A0} Many connections and only one computer is usually a local service or a stuck retry.")
         .accessibilityElement(children: .combine)
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 4) {
             columnLegend
-            Text("The list is an lsof snapshot of who is holding which connection, refreshed every 10 seconds.  The two cards above are the whole machine's bandwidth, read from the kernel's interface counters.")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+            Text("This list shows which app holds each connection, and it refreshes every 10 seconds.\u{00A0} The two cards above are this Mac's download and upload speed.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
                 // `maxWidth: .infinity` is load-bearing, not cosmetic: without
                 // it these long strings report their *unwrapped* width as their
                 // ideal size, and the whole Network tab measured 747 pt inside a
@@ -267,9 +269,9 @@ struct NetworkView: View {
                 // for a second every time the tab was opened.
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("macOS publishes no per-process byte counter, so Hog Hunter cannot rank apps by bytes moved.  Activity Monitor's Network tab can — it uses private APIs.")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+            Text("macOS does not report how many bytes each app moves, so Hog Hunter cannot rank apps by data used.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -326,7 +328,7 @@ struct BandwidthCard: View {
         .help(help)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
-        .accessibilityValue("Download \(HogFormat.rate(down)), Upload \(HogFormat.rate(up)).  \(footnote)")
+        .accessibilityValue("Download \(HogFormat.rate(down)), Upload \(HogFormat.rate(up)).\u{00A0} \(footnote)")
     }
 
     private func rateLabel(_ bytesPerSecond: Double, arrow: String, word: String) -> some View {
@@ -343,6 +345,7 @@ struct BandwidthCard: View {
 
 struct NetworkRowView: View {
     let usage: NetworkUsage
+    var icon: NSImage? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -373,7 +376,7 @@ struct NetworkRowView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
-            .help("\(usage.establishedSockets) established of \(usage.openSockets) open sockets, across \(usage.remoteHostCount) distinct remote hosts.")
+            .help("\(usage.establishedSockets) established of \(usage.openSockets) open connections, across \(usage.remoteHostCount) remote computers.")
             .accessibilityElement(children: .combine)
         }
         .padding(.horizontal, 10)
@@ -386,19 +389,16 @@ struct NetworkRowView: View {
         .accessibilityLabel("\(usage.name), \(usage.establishedSockets) established of \(usage.openSockets) open connections across \(usage.remoteHostCount) hosts")
     }
 
+    @ViewBuilder
     private var iconView: some View {
-        Group {
-            if let bundleId = usage.bundleId,
-               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId),
-               let icon = NSWorkspace.shared.icon(forFile: url.path) as NSImage? {
-                Image(nsImage: icon)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.secondary)
-            }
+        if let icon {
+            Image(nsImage: icon)
+                .resizable()
+                .scaledToFit()
+        } else {
+            Image(systemName: "app.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(.secondary)
         }
     }
 }

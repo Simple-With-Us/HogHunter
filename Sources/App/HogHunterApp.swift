@@ -11,14 +11,13 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     /// One app, one menu bar item, one set of timers.
     ///
     /// Without this a second launch starts a second Hog Hunter.  That is not
-    /// cosmetic: macOS grants Full Disk Access per binary *and* pid, so two
-    /// copies probe protected paths independently and the owner gets the same
-    /// permission prompt twice, with denying one leaving the other asking.
+    /// cosmetic: two copies probe protected paths independently and can
+    /// request access separately.
     ///
     /// Checked in `willFinishLaunching`, before any window or timer exists, so
     /// the loser never gets far enough to own anything.
     func applicationWillFinishLaunching(_ notification: Notification) {
-        let isRunningTests = NSClassFromString("XCTestCase") != nil
+        let isRunningTests = ApplicationRunMode.current == .unitTests
         let handOver = SingleInstance.shouldHandOver(
             argumentStrings: ProcessInfo.processInfo.arguments,
             isRunningTests: isRunningTests,
@@ -38,6 +37,13 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         NSApp.terminate(nil)
+        exit(0)
+    }
+
+    /// History writes are queued off the main actor, and termination does not wait for utility
+    /// queues.  Without this drain the newest size observations are lost on an immediate quit.
+    func applicationWillTerminate(_ notification: Notification) {
+        SizeGrowthHistory.shared.flushPersistence()
     }
 
     private func screenshotLog(_ message: String) {
@@ -46,6 +52,12 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ApplicationRunMode.current != .unitTests else { return }
+
+        // Sparkle self-update starts first: a build whose Info.plist carries
+        // the feed updates itself hourly in the background.  A build without
+        // the feed is a silent no-op (see AutoUpdateAvailability).
+        if ApplicationRunMode.current.allowsLiveProbes { AppUpdater.shared.start() }
         // Headless UI smoke test.  Runs before anything else touches the app so
         // it is not racing the sampler, the bandwidth timer, or the screenshot
         // hook.  See UISmokeTest for why this exists.
@@ -58,8 +70,9 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
             self.screenshotLog("presenting Settings NSWindow directly")
+            let contentSize = NSSize(width: SettingsView.windowWidth, height: SettingsView.windowHeight)
             let win = NSWindow(
-                contentRect: NSRect(x: 200, y: 200, width: 560, height: 680),
+                contentRect: NSRect(origin: NSPoint(x: 200, y: 200), size: contentSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -68,12 +81,11 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             let store = HogStore()
             let rootView = SettingsView()
                 .environmentObject(store)
-                .frame(width: 560, height: 480)
             win.contentViewController = NSHostingController(rootView: rootView)
-            win.setContentSize(NSSize(width: 560, height: 480))
+            win.setContentSize(contentSize)
             // Headless runners presented this window title-bar-only (440x38) because
             // the tab content had no ideal height; never let it shrink below the UI.
-            win.contentMinSize = NSSize(width: 560, height: 480)
+            win.contentMinSize = contentSize
             win.center()
             // Register with the activation manager via its existing API (the
             // windowOpened() member this called was never defined) so the app
@@ -87,9 +99,10 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
             self.screenshotWindow = win
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let win = self?.screenshotWindow else { return }
-                if let content = win.contentView, content.frame.height < 300 {
+                if let content = win.contentView,
+                   content.frame.width < contentSize.width || content.frame.height < contentSize.height {
                     self?.screenshotLog("content laid out too small (\(content.frame.size)); resizing")
-                    win.setContentSize(NSSize(width: 560, height: 480))
+                    win.setContentSize(contentSize)
                 }
                 self?.screenshotLog("post-layout: frame=\(win.frame) content=\(win.contentView?.frame.size ?? .zero)")
             }
@@ -100,10 +113,24 @@ class HogHunterAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct HogHunterApp: App {
+    static var isRunningUnderTest: Bool {
+        ApplicationRunMode.current == .unitTests
+    }
+
+    static var isHarnessLaunch: Bool {
+        ApplicationRunMode.current == .uiHarness
+    }
+
+    static var shouldInsertMenuBarExtra: Bool {
+        !isRunningUnderTest && !isHarnessLaunch
+    }
+
     @NSApplicationDelegateAdaptor(HogHunterAppDelegate.self) private var appDelegate
-    @StateObject private var store = HogStore()
+    @StateObject private var store = HogStore(startImmediately: ApplicationRunMode.current.allowsLiveProbes)
+    @ObservedObject private var updater = AppUpdater.shared
 
     init() {
+        guard ApplicationRunMode.current.allowsLiveProbes else { return }
         // Sentry first, so early-launch crashes are captured.  A build
         // without a baked-in DSN is a silent no-op.  See SentryTelemetry.
         SentryTelemetry.start()
@@ -115,35 +142,27 @@ struct HogHunterApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra {
-            HogHunterPanel()
+        MenuBarExtra(isInserted: .constant(Self.shouldInsertMenuBarExtra)) {
+            // The menu bar window is the only quick view now.  Detaching put a
+            // second copy of the same readings in a floating window beside the
+            // dashboard window that already showed them, and there was no
+            // reason for the small one to exist on its own.
+            HogHunterPanel(isQuickView: true)
                 .environmentObject(store)
         } label: {
-            HStack(spacing: 5) {
-                Image("HogProfile")
-                    .renderingMode(.original)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 15)
-                if store.menuBarLabelMode == .sparkline {
-                    CpuSparklineView(samples: store.recentCpuPercents)
-                }
-                Text(store.menuBarLabel)
-                    .monospacedDigit()
-            }
-            .help(store.menuBarHelp)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Hog Hunter")
-            .accessibilityValue(store.menuBarAccessibilityValue)
+            // The label observes only the menu-bar picture.  Reading the
+            // store here rebuilt a status-item bitmap on every sample.
+            MenuBarStatusLabel(status: store.menuBarStatus)
         }
         .menuBarExtraStyle(.window)
+        .commands { commands }
 
         Settings {
             SettingsView()
                 .environmentObject(store)
         }
 
-        // Storage and Network are tabs of the menu bar panel.  These scenes stay
+        // Storage and Network are homes in the dashboard.  These scenes stay
         // for the Window menu's benefit; nothing in the UI points at them.
         Window("Storage", id: "hoghunter.storage") {
             StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() }, maintainStore: store.maintain)
@@ -153,10 +172,23 @@ struct HogHunterApp: App {
         Window("Network", id: "hoghunter.network") {
             NetworkView(
                 bundleResolver: { pid in store.lookup(pid: pid) },
-                bandwidth: store.bandwidth
+                bandwidth: store.bandwidth,
+                cachedIconProvider: { store.cachedIcon(bundleIdentifier: $0) }
             )
             .environmentObject(store)
         }
         .defaultSize(width: 540, height: 560)
     }
+
+    /// "Check For Updates…" sits after About in the app menu.  It is greyed
+    /// out while Sparkle is busy, and on a build that cannot update itself
+    /// (Settings ▸ About says why).
+    var commands: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check For Updates…") { updater.checkForUpdates() }
+                .disabled(!updater.canCheckForUpdates)
+        }
+    }
 }
+
+

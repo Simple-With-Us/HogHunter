@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Darwin
 
 /// Reads the on-disk footprint of every installed app and groups the bytes
 /// by bundle id.  The scanner is intentionally pure: it takes its inputs
@@ -23,9 +24,37 @@ final class StorageScanner: @unchecked Sendable {
     static let perTargetTimeBudget: TimeInterval = 3.0
 
     private let fileManager: FileManager
+    // One scanner may serve overlapping callers; nested per-app helpers share the same pass.
+    private let scanLock = NSRecursiveLock()
+    typealias EnumeratorProvider = (URL, [URLResourceKey]?, FileManager.DirectoryEnumerationOptions,
+                                    ((URL, Error) -> Bool)?) -> FileManager.DirectoryEnumerator?
+    private let enumeratorProvider: EnumeratorProvider?
+    private let injectedMountPaths: [String]?
+    private var mountPaths: [String]
+    private var completedSizes: [String: UInt64] = [:]
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, mountPaths: [String]? = nil,
+         enumeratorProvider: EnumeratorProvider? = nil) {
         self.fileManager = fileManager
+        self.enumeratorProvider = enumeratorProvider
+        self.injectedMountPaths = mountPaths
+        self.mountPaths = mountPaths ?? MountedDriveStore.cachedMountRecords().map(\.path)
+    }
+
+    private func enumerate(at url: URL, includingPropertiesForKeys keys: [URLResourceKey]?,
+                           options: FileManager.DirectoryEnumerationOptions,
+                           errorHandler: ((URL, Error) -> Bool)? = nil) -> FileManager.DirectoryEnumerator? {
+        if let enumeratorProvider { return enumeratorProvider(url, keys, options, errorHandler) }
+        return fileManager.enumerator(at: url, includingPropertiesForKeys: keys, options: options, errorHandler: errorHandler)
+    }
+
+    private func automaticURL(_ url: URL) -> URL? {
+        DirectorySizeWalker.automaticCanonicalPath(url.path, mountPaths: mountPaths)
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    private func unavailableSize(_ url: URL) -> (bytes: UInt64, approximate: Bool) {
+        (completedSizes[url.path] ?? 0, true)
     }
 
     // MARK: - Public entry points
@@ -38,6 +67,10 @@ final class StorageScanner: @unchecked Sendable {
     /// use it to set `isRunning` without spawning NSWorkspace here, so the
     /// scanner stays pure and the UI can refresh cheaply.
     func installedApps(runningBundleIds: Set<String>) -> [StorageUsage] {
+        scanLock.lock()
+        defer { scanLock.unlock() }
+        // Mount changes between automatic passes must be visible to the next preflight.
+        mountPaths = injectedMountPaths ?? MountedDriveStore.cachedMountRecords().map(\.path)
         let roots = Self.installedAppRoots()
         var seen: [String: InstalledApp] = [:] // key: bundleId ?? appName
         for root in roots {
@@ -71,6 +104,8 @@ final class StorageScanner: @unchecked Sendable {
     /// Walks a single app's footprint and returns its rows.  Public so tests
     /// and on-demand refresh can target one app at a time.
     func scan(app: InstalledApp, isRunning: Bool) -> StorageUsage {
+        scanLock.lock()
+        defer { scanLock.unlock() }
         var shared = ScanShared()
         return scan(app: app, isRunning: isRunning, shared: &shared)
     }
@@ -79,6 +114,8 @@ final class StorageScanner: @unchecked Sendable {
     /// container claimed by an earlier app is neither re-walked nor
     /// re-counted.
     func scan(app: InstalledApp, isRunning: Bool, shared: inout ScanShared) -> StorageUsage {
+        scanLock.lock()
+        defer { scanLock.unlock() }
         var slices: [StorageSlice] = []
 
         // The bundle itself, walked recursively.  An .app is a directory.
@@ -148,7 +185,7 @@ final class StorageScanner: @unchecked Sendable {
             for groupID in app.groupContainers {
                 let directURL = groupContainersBase.appendingPathComponent(groupID, isDirectory: true)
                 var isDir: ObjCBool = false
-                if fileManager.fileExists(atPath: directURL.path, isDirectory: &isDir), isDir.boolValue {
+                if let safeURL = automaticURL(directURL), fileManager.fileExists(atPath: safeURL.path, isDirectory: &isDir), isDir.boolValue {
                     checkedGroupContainerURLs.insert(directURL)
                 }
             }
@@ -158,7 +195,9 @@ final class StorageScanner: @unchecked Sendable {
                 // The Group Containers directory is listed once per pass, not
                 // once per installed app.
                 if shared.groupContainersListing == nil {
-                    shared.groupContainersListing = try? fileManager.contentsOfDirectory(at: groupContainersBase, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+                    if let safeBase = automaticURL(groupContainersBase) {
+                        shared.groupContainersListing = try? fileManager.contentsOfDirectory(at: safeBase, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+                    }
                 }
                 if let contents = shared.groupContainersListing {
                     for item in contents {
@@ -166,7 +205,7 @@ final class StorageScanner: @unchecked Sendable {
                         for suffix in candidateSuffixes where !suffix.isEmpty {
                             if folderName == suffix || folderName.hasSuffix("." + suffix) {
                                 var isDir: ObjCBool = false
-                                if fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
+                                if let safeURL = automaticURL(item), fileManager.fileExists(atPath: safeURL.path, isDirectory: &isDir), isDir.boolValue {
                                     checkedGroupContainerURLs.insert(item)
                                 }
                             }
@@ -259,8 +298,10 @@ final class StorageScanner: @unchecked Sendable {
         ] {
             let url = URL(fileURLWithPath: path, isDirectory: true)
             var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-                roots.append(url)
+            let mounts = MountedDriveStore.cachedMountRecords().map(\.path)
+            if let safe = DirectorySizeWalker.automaticCanonicalPath(url.path, mountPaths: mounts),
+               FileManager.default.fileExists(atPath: safe, isDirectory: &isDir), isDir.boolValue {
+                roots.append(URL(fileURLWithPath: safe))
             }
         }
         return roots
@@ -269,15 +310,19 @@ final class StorageScanner: @unchecked Sendable {
     /// Recursively enumerates `.app` bundles under `root`.  Skips symlinks to
     /// avoid double-counting the same `.app` under multiple parents.
     func appURLs(under root: URL) -> [URL] {
+        scanLock.lock()
+        defer { scanLock.unlock() }
+        guard let safeRoot = automaticURL(root) else { return [] }
         let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey]
-        guard let enumerator = fileManager.enumerator(
-            at: root,
-            includingPropertiesForKeys: keys,
+        guard let enumerator = enumerate(
+            at: safeRoot,
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return [] }
 
         var out: [URL] = []
         for case let url as URL in enumerator {
+            guard automaticURL(url) != nil else { enumerator.skipDescendants(); continue }
             if url.pathExtension == "app" {
                 let values = try? url.resourceValues(forKeys: Set(keys))
                 if let isLink = values?.isSymbolicLink, isLink { continue }
@@ -293,8 +338,10 @@ final class StorageScanner: @unchecked Sendable {
     /// display name, executable name, and application-group identifiers.  Returns
     /// sensible fallbacks when the plist is missing or the bundle is malformed.
     func readInfo(at url: URL) -> (bundleId: String?, name: String, executable: String?, applicationGroups: [String]) {
+        scanLock.lock()
+        defer { scanLock.unlock() }
         let infoURL = url.appendingPathComponent("Contents/Info.plist")
-        guard let data = try? Data(contentsOf: infoURL),
+        guard let safeInfo = automaticURL(infoURL), let data = try? Data(contentsOf: safeInfo),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         else {
             // Bundle-shaped directory without an Info.plist is rare.  Use the
@@ -362,8 +409,11 @@ final class StorageScanner: @unchecked Sendable {
     /// slice) when the path is missing or is a plain file — the caller maps
     /// missing files to `nil` and skips them.
     func directoryBytes(at directory: URL) -> (bytes: UInt64, approximate: Bool) {
+        scanLock.lock()
+        defer { scanLock.unlock() }
+        guard let safeDirectory = automaticURL(directory) else { return unavailableSize(directory) }
         var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
+        guard fileManager.fileExists(atPath: safeDirectory.path, isDirectory: &isDir), isDir.boolValue else {
             return (0, false)
         }
         let keys: Set<URLResourceKey> = [
@@ -378,20 +428,36 @@ final class StorageScanner: @unchecked Sendable {
         var count = 0
         var hitCap = false
         var hitDeadline = false
+        var enumerationFailed = false
 
-        guard let enumerator = fileManager.enumerator(
-            at: directory,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsPackageDescendants]
+        guard let enumerator = enumerate(
+            at: safeDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsPackageDescendants],
+            errorHandler: { _, _ in enumerationFailed = true; return false }
         ) else {
-            return (0, false)
+            return unavailableSize(directory)
         }
 
         for case let url as URL in enumerator {
             if Date() >= deadline { hitDeadline = true; break }
             count += 1
             if count > Self.perDirectoryFileCap { hitCap = true; break }
-            guard let values = try? url.resourceValues(forKeys: keys) else { continue }
+            // Descendant symlinks are leaves; only roots go through target resolution.
+            guard DirectorySizeWalker.automaticAccessPolicy(mountPaths: mountPaths)(url.path) else {
+                enumerator.skipDescendants()
+                return unavailableSize(directory)
+            }
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else {
+                enumerationFailed = true
+                continue
+            }
+            if info.st_mode & S_IFMT == S_IFLNK { enumerator.skipDescendants(); continue }
+            guard let values = try? url.resourceValues(forKeys: keys) else {
+                enumerationFailed = true
+                continue
+            }
             if values.isDirectory == true { continue }
             if values.isRegularFile != true { continue }
             let allocated = (values.fileAllocatedSize ?? 0)
@@ -399,20 +465,31 @@ final class StorageScanner: @unchecked Sendable {
             bytes &+= allocated > 0 ? UInt64(allocated) : UInt64(logical)
         }
 
+        if enumerationFailed { return unavailableSize(directory) }
+        if !hitCap && !hitDeadline { completedSizes[directory.path] = bytes }
         return (bytes, hitCap || hitDeadline)
     }
 
     /// Bytes for a single file (used for `Preferences/*.plist` and
     /// `Cookies/*.binarycookies`, which are individual files).
     func fileOrZeroBytes(at url: URL) -> (bytes: UInt64, approximate: Bool) {
+        scanLock.lock()
+        defer { scanLock.unlock() }
+        guard let safeURL = automaticURL(url) else { return unavailableSize(url) }
         var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+        guard fileManager.fileExists(atPath: safeURL.path, isDirectory: &isDir), !isDir.boolValue else {
             return (0, false)
         }
         let keys: Set<URLResourceKey> = [.fileAllocatedSizeKey, .fileSizeKey]
-        guard let values = try? url.resourceValues(forKeys: keys) else { return (0, false) }
-        if let allocated = values.fileAllocatedSize, allocated > 0 { return (UInt64(allocated), false) }
-        if let logical = values.fileSize { return (UInt64(logical), false) }
+        guard let values = try? safeURL.resourceValues(forKeys: keys) else { return unavailableSize(url) }
+        if let allocated = values.fileAllocatedSize, allocated > 0 {
+            completedSizes[url.path] = UInt64(allocated)
+            return (UInt64(allocated), false)
+        }
+        if let logical = values.fileSize {
+            completedSizes[url.path] = UInt64(logical)
+            return (UInt64(logical), false)
+        }
         return (0, false)
     }
 

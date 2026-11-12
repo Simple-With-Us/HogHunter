@@ -52,7 +52,7 @@ final class StorageStore: ObservableObject {
     /// Starts a scan if none is in flight.  Called on first `onAppear`, after
     /// a manual refresh, and on the periodic timer.
     func refresh() {
-        guard !inflight else { return }
+        guard ApplicationRunMode.current != .uiHarness, !inflight else { return }
         inflight = true
         state = .scanning
         let scanner = self.scanner

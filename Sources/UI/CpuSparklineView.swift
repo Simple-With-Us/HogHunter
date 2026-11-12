@@ -1,12 +1,24 @@
+#if os(macOS)
+import AppKit
+#endif
 import SwiftUI
 
 /// Micro-sparkline tracking recent machine CPU pressure for the macOS menu bar and header.
 struct CpuSparklineView: View {
     let samples: [Double]
-    var width: CGFloat = 36
+    /// A fixed width, for the menu bar item.  `nil` lets the graph take the
+    /// width it is offered, so a graph in a panel is never a small graph in a
+    /// large space.
+    var width: CGFloat?
     var height: CGFloat = 14
 
     var body: some View {
+        #if os(macOS)
+        Image(nsImage: Self.makeImage(samples: samples, width: width ?? 36, height: height))
+            .frame(height: height)
+            .frame(width: width)
+            .frame(maxWidth: width == nil ? .infinity : nil)
+        #else
         Canvas { context, size in
             guard samples.count >= 2 else {
                 // Draw simple idle baseline
@@ -43,7 +55,7 @@ struct CpuSparklineView: View {
             } else if latest >= 60 {
                 color = Color(red: 0.80, green: 0.52, blue: 0.10)
             } else {
-                color = Color.primary.opacity(0.85)
+                color = .primary.opacity(0.85)
             }
 
             context.fill(areaPath, with: .color(color.opacity(0.18)))
@@ -55,13 +67,170 @@ struct CpuSparklineView: View {
             let dotRect = CGRect(x: lastX - 2, y: lastY - 2, width: 4, height: 4)
             context.fill(Path(ellipseIn: dotRect), with: .color(color))
         }
-        .frame(width: width, height: height)
+        .frame(height: height)
+        .frame(width: width)
+        .frame(maxWidth: width == nil ? .infinity : nil)
+        #endif
     }
 
+    #if !os(macOS)
     private func yCoordinate(for percent: Double, height: CGFloat) -> CGFloat {
         let clamped = max(0, min(100, percent))
         // Invert Y coordinate so 100% is near the top (with 1pt inset)
         let usableHeight = height - 2
         return (height - 1) - CGFloat(clamped / 100.0) * usableHeight
     }
+    #endif
+
+    #if os(macOS)
+    // MARK: - AppKit Rasterization for macOS Menu Bar
+
+    static let sparklinePointSize = NSSize(width: 36, height: 14)
+    static let hogPointSize = NSSize(width: 58, height: 16)
+
+    /// Status-bar bitmap of the sparkline.  Calm lines are template images.
+    static func makeImage(samples: [Double], width: CGFloat = 36, height: CGFloat = 14) -> NSImage {
+        renderSparkline(
+            samples: MenuBarQuantize.sparkline(samples),
+            width: width,
+            height: height,
+            appearance: .current
+        )
+    }
+
+    static func renderSparkline(
+        samples: [Int],
+        width: CGFloat = 36,
+        height: CGFloat = 14,
+        appearance: MenuBarChrome
+    ) -> NSImage {
+        let monochrome = !MenuBarPicture.Graphic.sparkline(samples: samples, showIcon: false).bakesAppearance
+        let values = samples.map(Double.init)
+        let image = MenuBarBitmap.rasterize(
+            size: NSSize(width: width, height: height),
+            appearance: appearance
+        ) { rect in
+            drawSparkline(in: rect, samples: values, monochrome: monochrome)
+        }
+        image.isTemplate = monochrome
+        return image
+    }
+
+    /// Hog icon plus sparkline, one bitmap, so the status item does not drop a subview.
+    static func makeHogAndSparklineImage(
+        samples: [Double],
+        sparklineWidth: CGFloat = 36,
+        sparklineHeight: CGFloat = 14
+    ) -> NSImage {
+        renderHogAndSparkline(
+            samples: MenuBarQuantize.sparkline(samples),
+            appearance: .current,
+            sparklineWidth: sparklineWidth,
+            sparklineHeight: sparklineHeight
+        )
+    }
+
+    static func renderHogAndSparkline(
+        samples: [Int],
+        appearance: MenuBarChrome,
+        sparklineWidth: CGFloat = 36,
+        sparklineHeight: CGFloat = 14
+    ) -> NSImage {
+        let hogWidth: CGFloat = 18
+        let hogHeight: CGFloat = 15
+        let spacing: CGFloat = 4
+        let totalWidth = hogWidth + spacing + sparklineWidth
+        let totalHeight = hogPointSize.height
+        let values = samples.map(Double.init)
+        let image = MenuBarBitmap.rasterize(
+            size: NSSize(width: totalWidth, height: totalHeight),
+            appearance: appearance
+        ) { _ in
+            let hogRect = NSRect(x: 0, y: (totalHeight - hogHeight) / 2.0, width: hogWidth, height: hogHeight)
+            if let hog = NSImage(named: NSImage.Name("HogProfile")) ?? Bundle.main.image(forResource: "HogProfile") {
+                hog.draw(in: hogRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            }
+            let sparklineRect = NSRect(
+                x: hogWidth + spacing,
+                y: (totalHeight - sparklineHeight) / 2.0,
+                width: sparklineWidth,
+                height: sparklineHeight
+            )
+            drawSparkline(in: sparklineRect, samples: values, monochrome: false)
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    static func drawSparkline(in rect: NSRect, samples: [Double], monochrome: Bool = false) {
+        guard samples.count >= 2 else {
+            let baselineY = rect.minY + 1.0
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.minX, y: baselineY))
+            path.line(to: NSPoint(x: rect.maxX, y: baselineY))
+            path.lineWidth = 1.0
+            let baseline = monochrome
+                ? NSColor.black.withAlphaComponent(0.4)
+                : NSColor.secondaryLabelColor.withAlphaComponent(0.4)
+            baseline.setStroke()
+            path.stroke()
+            return
+        }
+
+        let step = rect.width / CGFloat(max(1, samples.count - 1))
+        let usableHeight = max(1.0, rect.height - 2.0)
+
+        func yFor(percent: Double) -> CGFloat {
+            let clamped = max(0.0, min(100.0, percent))
+            return rect.minY + 1.0 + CGFloat(clamped / 100.0) * usableHeight
+        }
+
+        let linePath = NSBezierPath()
+        let areaPath = NSBezierPath()
+
+        let firstY = yFor(percent: samples[0])
+        let startPoint = NSPoint(x: rect.minX, y: firstY)
+        linePath.move(to: startPoint)
+
+        areaPath.move(to: NSPoint(x: rect.minX, y: rect.minY))
+        areaPath.line(to: startPoint)
+
+        for (index, sample) in samples.enumerated().dropFirst() {
+            let x = rect.minX + CGFloat(index) * step
+            let y = yFor(percent: sample)
+            let pt = NSPoint(x: x, y: y)
+            linePath.line(to: pt)
+            areaPath.line(to: pt)
+        }
+
+        areaPath.line(to: NSPoint(x: rect.maxX, y: rect.minY))
+        areaPath.close()
+
+        let latest = samples.last ?? 0
+        let color: NSColor
+        if monochrome {
+            color = NSColor.black.withAlphaComponent(0.85)
+        } else if latest >= 85 {
+            color = NSColor(red: 0.75, green: 0.18, blue: 0.16, alpha: 1.0)
+        } else if latest >= 60 {
+            color = NSColor(red: 0.80, green: 0.52, blue: 0.10, alpha: 1.0)
+        } else {
+            color = NSColor.labelColor.withAlphaComponent(0.85)
+        }
+
+        color.withAlphaComponent(0.18).setFill()
+        areaPath.fill()
+
+        color.setStroke()
+        linePath.lineWidth = 1.25
+        linePath.stroke()
+
+        let lastX = rect.maxX
+        let lastY = yFor(percent: latest)
+        let dotRect = NSRect(x: lastX - 2.0, y: lastY - 2.0, width: 4.0, height: 4.0)
+        let dotPath = NSBezierPath(ovalIn: dotRect)
+        color.setFill()
+        dotPath.fill()
+    }
+    #endif
 }

@@ -1,0 +1,23 @@
+# Public TestFlight Group Only
+
+HH-217 makes the iPhone companion's TestFlight setup one group and one policy, on the owner's ruling of Nov 4 2026:  iOS TestFlight external testing uses public groups only, and there is no internal test group at all.  The lane never creates one, never requires one, never fails because one is missing, and never names one as the expected path.
+
+What the code did before is the opposite in three places.  The tester policy had two values and the default was "internal-group", so an app that said nothing about its testers got an internal all-builds group.  The standing-tester sync created that group when it was missing and added every standing email that was an App Store Connect user to it, through a "create first" path that only an internal group needed.  The readiness check counted the members of the internal all-builds group, so for an app that is set up correctly with the public group it reported zero testers, and the caller then blamed export compliance for a build that was never stuck on it (Nov 3 2026, HH-209).  The owner ruled out the internal group, so the second value is gone rather than defaulted away.
+
+The change is in four files.
+
+`scripts/ios-fleet/tester-policy.mjs` holds one policy.  The default is "public-group", an unknown value falls back to it, and "internal-group" no longer resolves to a policy at all:  `resolveTesterPolicy` returns null for it and `testerPolicyRefusal` returns the reason.  A request is never read as the public policy instead, because a silent swap would hide the very request the owner ruled out.  The list plan no longer has a fatal branch:  no policy manages the standing list, so a malformed or oversized list is a warning about the list and never a reason to stop the build reaching the group.
+
+`scripts/ios-fleet/asc-api.mjs` refuses the legacy value before any App Store Connect call and exits 2 with the reason on stderr, so a request for an internal group stops the lane with a readable message instead of doing something else quietly.  The code that created an internal group is gone, along with the count that read one, and the sync and the readiness check now work only on the public group.  The sync still adds the standing testers, through the public group, and still assigns the build to it and submits it for Beta App Review.
+
+`scripts/ios-fleet/ship-testflight.sh` refuses the same value before an upload, so a legacy registry stops the ship with a readable message rather than shipping a build that can never reach a group.  Its readiness message now names the public group, which is the only way in.
+
+`.github/workflows/ios-testflight.yml` still passes the policy from apps.json, because that is how a legacy value reaches the lane and gets refused out loud.  The step is a warning either way, so the TestFlight upload itself still succeeds.
+
+One thing was deliberately left alone.  An App Store Connect app record that still carries an internal group from before keeps it:  the lane does not delete it, does not use it, and its absence is never a failure.  Deleting a group is not something a ship does on its own, and the ruling is about what the lane uses, not about what it may destroy.
+
+A legacy "internal-group" in an existing apps.json fails closed with a readable message rather than crashing the lane.  The ship script stops before it uploads anything, and the workflow's tester-sync step exits 2 with the reason in the log.  This repository's apps.json names "public-group", so the end-to-end public flow is unchanged:  one external group with its public link on, the standing people in it, every new build assigned to it and submitted for Beta App Review, and the public link as the way in.
+
+One defect turned up on the way and was fixed in the same change.  The standing-tester sync called its warning helper before the helper was declared, so a malformed or oversized standing tester list would have thrown a ReferenceError before the build was assigned to the group.  It never showed, because the list was empty and an empty list is not a failure.  The helper now sits above its first use.
+
+The rules are tested where they already were.  `node --test scripts/ios-fleet/tester-policy.test.mjs` covers the default policy being the public group, the internal policy being refused with a reason, the standing-tester sync targeting the public group, and this repository's own apps.json naming the public group.  The refusal was also proved on the command line:  `node scripts/ios-fleet/asc-api.mjs ensure-standing-testers <appleId> <build> --policy internal-group` stops with exit 2 and the message before any App Store Connect call, and the same command with `--policy public-group` passes the gate and goes on to read the beta groups.

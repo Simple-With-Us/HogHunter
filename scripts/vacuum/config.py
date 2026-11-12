@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from copy import deepcopy
@@ -9,6 +10,17 @@ from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = REPO_ROOT / "config" / "robotic-vacuum.json"
+
+# The watchdog that kills a wedged tick.  It lives in this package because
+# both sides need it: maintain.py arms the watchdog, and the engine derives
+# the reclaim step's own budget from it.  The two numbers used to live in
+# different files, where a change to one could leave the other too small --
+# and a reclaim step that overruns the watchdog gets cut off mid-work, which
+# is how a tick reported zero bytes while the cleaner had already done most
+# of its job.
+TICK_WATCHDOG_SEC = 900.0
+MIN_RETIRE_DAYS = 1
+MAX_RETIRE_DAYS = 90
 
 # Step metadata: default enabled, which triggers include the step.
 STEP_CATALOG: dict[str, dict[str, Any]] = {
@@ -31,6 +43,10 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
     "simctl_delete_unavailable": {
         "title": "Remove unavailable Simulator runtimes",
         "triggers": ["full"],
+    },
+    "shutdown_simulators": {
+        "title": "Shut down Xcode Simulators",
+        "triggers": ["full", "janitor"],
     },
     "npm_cache": {
         "title": "Trim npm download cache",
@@ -99,7 +115,8 @@ STEP_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
-DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
+DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/Maintain"
+LEGACY_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
 # How many runs history.json keeps.  Every run is a record, the five minute watch tick included (about 290 a day, with
 # about 55 janitor and full runs), and the Mac's Recent Runs line counts "checks today" from this file.  The cap has to
 # reach back past local midnight (see test_default_cap_reaches_back_past_midnight), so a janitor or full run also stays
@@ -107,18 +124,19 @@ DEFAULT_DATA_DIR = "~/Library/Application Support/HogHunter/RoboticVacuum"
 DEFAULT_HISTORY_MAX_RUNS = 500
 DEFAULT_HOUSEKEEPER_LOCK = "~/.claude-disk-janitor/.housekeeper.lock"
 
-# Lane doctor settings (see vacuum/lanes.py).  The only setting is where the doctor is installed, a machine-local
-# path like hoghunter_clean.  The report age, schema, timeout, and age limits are code constants in lanes.py, and
-# numeric keys in a `lanes` config block are ignored.
+# Lane doctor settings (see vacuum/lanes.py).  The doctor path is machine-local; merged-worktree retention is a
+# validated runtime setting.  Report age, schema, doctor timeout, and dependency age remain code constants.
 DEFAULT_LANES: dict[str, Any] = {
     # Argv, never a shell.  A leading ~ means the Vacuum's home.  HOGHUNTER_LANE_DOCTOR_COMMAND overrides it.
     "doctor_command": ["~/apps/lane", "ls", "--json"],
+    # Merged worktree retention.  The other lane safety gates remain fixed in code.
+    "retire_min_days": 7,
 }
 
 # Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
 # docs/DEV-CLEANUP-PLAYBOOK.md: it re-downloads only when that device is attached again.  The CleanMyMac CLI is
 # MacPaw closed-source software: invoke-only when installed, never vendored, and only with the owner's opt-in.
-DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support", "cleanmymac_cli"})
+DEFAULT_OFF_STEPS: frozenset[str] = frozenset({"xcode_device_support", "cleanmymac_cli", "coolify_remote"})
 
 # Seat suffixes the keep regex protects in flat lanes (~/apps/<prefix>-<suffix>).  Order is part of the pattern.
 KEEP_SEAT_SUFFIXES: tuple[str, ...] = (
@@ -197,9 +215,35 @@ def default_repos(home: Path) -> list[str]:
     return repos
 
 
-def load_config(path: Path | None = None, home: Path | None = None) -> dict[str, Any]:
+def migrate_legacy_support_if_needed(home: Path) -> Path:
+    """Pre-rename builds used RoboticVacuum/.  Move JSON state once so history survives.
+
+    Idempotent per file: the Swift migrator may move status/history/config before the
+    first Python tick, so we must still pick up scheduler-state.json and alert-state.json.
+    """
+    new_root = expand_path(DEFAULT_DATA_DIR, home)
+    legacy_root = expand_path(LEGACY_DATA_DIR, home)
+    if not legacy_root.is_dir():
+        return new_root
+    new_root.mkdir(parents=True, exist_ok=True)
+    for name in ("status.json", "history.json", "config.json", "scheduler-state.json", "alert-state.json"):
+        src = legacy_root / name
+        dest = new_root / name
+        if src.is_file() and not dest.exists():
+            try:
+                src.rename(dest)
+            except OSError:
+                pass
+    return new_root
+
+
+def load_config(path: Path | None = None, home: Path | None = None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     home = home or Path.home()
-    path = path or (expand_path("~/Library/Application Support/HogHunter/RoboticVacuum/config.json", home))
+    migrate_legacy_support_if_needed(home)
+    if path is None:
+        maintain_config = expand_path(f"{DEFAULT_DATA_DIR}/config.json", home)
+        legacy_config = expand_path(f"{LEGACY_DATA_DIR}/config.json", home)
+        path = maintain_config if maintain_config.is_file() else legacy_config
     base: dict[str, Any] = {}
     if DEFAULT_POLICY.is_file():
         base = json.loads(DEFAULT_POLICY.read_text(encoding="utf-8"))
@@ -207,6 +251,8 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
         user = json.loads(path.read_text(encoding="utf-8"))
         base = _deep_merge(base, user)
     if not str(base.get("data_dir") or "").strip():
+        base["data_dir"] = DEFAULT_DATA_DIR
+    elif str(base.get("data_dir") or "").strip() == LEGACY_DATA_DIR:
         base["data_dir"] = DEFAULT_DATA_DIR
     if not str(base.get("housekeeper_lock") or "").strip():
         base["housekeeper_lock"] = DEFAULT_HOUSEKEEPER_LOCK
@@ -223,7 +269,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
     lanes = base.get("lanes")
     base["lanes"] = _deep_merge(DEFAULT_LANES, lanes if isinstance(lanes, dict) else {})
     janitor = base.setdefault("janitor", {})
-    env_max_load = os.environ.get("JANITOR_MAX_LOAD")
+    env_max_load = (os.environ if env is None else env).get("JANITOR_MAX_LOAD")
     if env_max_load:
         try:
             janitor["max_load_hard"] = float(env_max_load)
@@ -232,6 +278,165 @@ def load_config(path: Path | None = None, home: Path | None = None) -> dict[str,
     steps = base.setdefault("steps", {})
     for step_id in STEP_CATALOG:
         steps.setdefault(step_id, {"enabled": step_id not in DEFAULT_OFF_STEPS})
+    if not str(base.get("coolify_ssh_host") or "").strip():
+        steps.setdefault("coolify_remote", {})["enabled"] = False
+    apply_env_overrides(base, env)
+    return base
+
+
+def _parse_bool(val: str) -> bool | None:
+    cleaned = val.strip().lower()
+    if cleaned in ("true", "1", "on"):
+        return True
+    if cleaned in ("false", "0", "off"):
+        return False
+    return None
+
+
+def _parse_int(val: str) -> int | None:
+    try:
+        return int(float(val.strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_retire_min_days(value: Any) -> int | None:
+    """Parse the canonical 1..90 whole-day value used by Swift and Python settings."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        parsed = int(value)
+    elif isinstance(value, str):
+        if not value or not value.isascii() or not all("0" <= char <= "9" for char in value):
+            return None
+        try:
+            parsed = int(value)
+        except ValueError:  # includes Python's digit-count safety limit
+            return None
+        if value != str(parsed):
+            return None
+    else:
+        return None
+    return parsed if MIN_RETIRE_DAYS <= parsed <= MAX_RETIRE_DAYS else None
+
+
+def _parse_float(val: str) -> float | None:
+    try:
+        return float(val.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Apply environment and Infisical knob overrides over loaded config.
+
+    Supports both hoghunter.maintain.* and HOGHUNTER_MAINTAIN_* environment keys.  Step toggles,
+    cadence intervals, and threshold limits take precedence when present in the environment."""
+    env = os.environ if env is None else env
+
+    # Step toggles
+    steps = base.setdefault("steps", {})
+    for step_id in STEP_CATALOG:
+        candidates = (
+            f"hoghunter.maintain.step.{step_id}",
+            f"HOGHUNTER_MAINTAIN_STEP_{step_id.upper()}",
+        )
+        for key in candidates:
+            if key in env:
+                val = _parse_bool(env[key])
+                if val is not None:
+                    steps.setdefault(step_id, {})["enabled"] = val
+
+    for k, v in env.items():
+        step_id = None
+        if k.startswith("hoghunter.maintain.step."):
+            step_id = k[len("hoghunter.maintain.step."):]
+        elif k.startswith("HOGHUNTER_MAINTAIN_STEP_"):
+            step_id = k[len("HOGHUNTER_MAINTAIN_STEP_"):].lower()
+        if step_id and step_id not in STEP_CATALOG:
+            val = _parse_bool(v)
+            if val is not None:
+                steps.setdefault(step_id, {})["enabled"] = val
+
+    # Intervals (cadence)
+    intervals = base.setdefault("intervals_seconds", {})
+    for key in ("hoghunter.maintain.interval.watchSec", "HOGHUNTER_MAINTAIN_INTERVAL_WATCH_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                intervals["watch"] = val
+    for key in ("hoghunter.maintain.interval.janitorSec", "HOGHUNTER_MAINTAIN_INTERVAL_JANITOR_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                intervals["janitor"] = val
+    for key in ("hoghunter.maintain.interval.fullSec", "HOGHUNTER_MAINTAIN_INTERVAL_FULL_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                intervals["full"] = val
+
+    # History max runs
+    for key in ("hoghunter.maintain.historyMaxRuns", "HOGHUNTER_MAINTAIN_HISTORY_MAX_RUNS"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                base["history_max_runs"] = val
+
+    # Clean budget
+    for key in ("hoghunter.maintain.cleanBudgetSec", "HOGHUNTER_MAINTAIN_CLEAN_BUDGET_SEC"):
+        if key in env:
+            val = _parse_int(env[key])
+            if val is not None:
+                base["hoghunter_clean_budget_sec"] = val
+
+    # Coolify SSH host
+    for key in ("hoghunter.maintain.coolifySshHost", "HOGHUNTER_MAINTAIN_COOLIFY_SSH_HOST"):
+        if key in env:
+            base["coolify_ssh_host"] = env[key].strip()
+
+    # Janitor thresholds
+    janitor = base.setdefault("janitor", {})
+    for key in ("hoghunter.maintain.janitor.maxLoadHard", "HOGHUNTER_MAINTAIN_JANITOR_MAX_LOAD_HARD"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                janitor["max_load_hard"] = val
+    for key in ("hoghunter.maintain.janitor.lowFreeGib", "HOGHUNTER_MAINTAIN_JANITOR_LOW_FREE_GIB"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                janitor["low_free_gib"] = val
+
+    # Merged worktree retention.  An explicitly invalid override fails safe to
+    # the built-in seven-day default rather than accepting a stale file value.
+    retire_keys = (
+        "hoghunter.maintain.janitor.retireMinDays",
+        "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
+    )
+    for key in retire_keys:
+        if key in env:
+            lanes = base.setdefault("lanes", {})
+            lanes["retire_min_days"] = parse_retire_min_days(env[key]) or 7
+            break
+
+    # Resource watch thresholds
+    resource_watch = base.setdefault("resource_watch", {})
+    for key in ("hoghunter.maintain.watch.diskFreeWarnGb", "HOGHUNTER_MAINTAIN_WATCH_DISK_FREE_WARN_GB"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                resource_watch["disk_free_warn_gb"] = val
+    for key in ("hoghunter.maintain.watch.swapUsedPct", "HOGHUNTER_MAINTAIN_WATCH_SWAP_USED_PCT"):
+        if key in env:
+            val = _parse_float(env[key])
+            if val is not None:
+                resource_watch["swap_used_pct"] = val
+
     return base
 
 
