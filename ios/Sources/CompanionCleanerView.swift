@@ -4,10 +4,17 @@ import SwiftUI
 /// Mac, tick what to clean, confirm, and read the history.  The Mac does the
 /// scanning and the cleaning; this screen shows what it found and sends back
 /// short references to the items the person ticked, never paths.
+/// Where the temp file stepper starts before the Mac has said what it holds.
+private enum TempFileSafetyDefaults {
+    static let hours: Double = 72
+}
+
 struct CleanerView: View {
     @Bindable var model: CompanionModel
     @State private var showConfirm = false
     @State private var expanded: Set<String> = []
+    @State private var tempHoursDraft: Int = Int(TempFileSafetyDefaults.hours)
+    @State private var pendingTempHours: Int?
 
     private var snapshot: CompanionSnapshot? { model.snapshot }
     private var hostName: String { snapshot?.hostName ?? "your Mac" }
@@ -33,6 +40,7 @@ struct CleanerView: View {
                 }
             }
             tierSection
+            tempFileSection
             statusSection
             if scanMatchesTier, let report {
                 ForEach(report.categories) { category in
@@ -57,7 +65,7 @@ struct CleanerView: View {
             isPresented: $showConfirm,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(iPhoneStorage.format(bytes: model.selectedCleanBytes)) (\(tierTitle))", role: .destructive) {
+            Button("Clean Selected — \(iPhoneStorage.format(bytes: model.selectedCleanBytes)) Estimated", role: .destructive) {
                 Task { await model.cleanSelection() }
             }
             Button("Cancel", role: .cancel) {}
@@ -66,6 +74,24 @@ struct CleanerView: View {
                 sizeText: iPhoneStorage.format(bytes: model.selectedCleanBytes),
                 itemCount: model.selectedCleanRefs.count
             ))
+        }
+        .confirmationDialog(
+            "Change the Temp File Minimum to \(pendingTempHours ?? 0) Hours?",
+            isPresented: Binding(
+                get: { pendingTempHours != nil },
+                set: { if !$0 { pendingTempHours = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let hours = pendingTempHours {
+                Button("Set to \(hours) Hours") {
+                    pendingTempHours = nil
+                    Task { await model.updateTempFileMinimumHours(Double(hours)) }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingTempHours = nil }
+        } message: {
+            Text("\(hostName) will list temp files in /tmp once they have sat untouched for this long.\u{00A0} A shorter time lists more files in the next scan.\u{00A0} Nothing is removed until you clean.")
         }
         .alert(
             "Could Not Continue",
@@ -91,8 +117,8 @@ struct CleanerView: View {
             .pickerStyle(.segmented)
             .disabled(isBusy)
             Text(isExtreme
-                 ? "Deep scan of AI agent bloat, leftovers & large files."
-                 : "Safe major clutter removal.\u{00A0} Protected by APFS snapshot & Trash Put-Back.")
+                 ? "Also reviews old leftovers and large files.\u{00A0} Nothing is removed until you choose it."
+                 : "Removes everyday clutter.\u{00A0} Hog Hunter saves a safety copy first, and Trash items can be put back.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -111,6 +137,57 @@ struct CleanerView: View {
                 }
                 .padding(.vertical, 4)
             }
+        }
+    }
+
+    // MARK: - Temp file safety
+
+    private var tempHoursOnMac: Int? {
+        snapshot?.storage?.tempFileMinimumHours.map { Int($0) }
+    }
+
+    /// The Mac's Settings > Cleaner > Temp File Safety.  Shown only when the Mac
+    /// sends it, and changed under the same opt-in as the cleaner.
+    @ViewBuilder
+    private var tempFileSection: some View {
+        if let onMac = tempHoursOnMac {
+            let range = Int(CompanionCleanLimits.tempFileHoursRange.lowerBound)...Int(CompanionCleanLimits.tempFileHoursRange.upperBound)
+            Section {
+                Stepper(value: $tempHoursDraft, in: range) {
+                    HStack {
+                        Text("Leave Files Newer Than")
+                        Spacer()
+                        Text("\(tempHoursDraft) hours")
+                            .font(.body.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
+                HStack(spacing: 8) {
+                    ForEach([24, 72, 168, 720], id: \.self) { hours in
+                        Button("\(hours)") { tempHoursDraft = hours }
+                            .buttonStyle(.bordered)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .accessibilityLabel("\(hours) hours")
+                            .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
+                    }
+                    Spacer()
+                    Text("Presets, in hours")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if tempHoursDraft != onMac {
+                    Button("Apply \(tempHoursDraft) Hours") { pendingTempHours = tempHoursDraft }
+                        .font(.subheadline.weight(.semibold))
+                        .disabled(!canClean || isBusy || model.isApplyingCleanSettings)
+                }
+            } header: {
+                Text("Temp File Safety")
+            } footer: {
+                Text("Temp files appear in a scan after at least \(onMac) untouched hours on \(hostName).\u{00A0} Choose 1 to 8,760 whole hours.")
+            }
+            .onAppear { tempHoursDraft = onMac }
+            .onChange(of: onMac) { _, value in tempHoursDraft = value }
         }
     }
 
@@ -137,13 +214,20 @@ struct CleanerView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(iPhoneStorage.format(bytes: model.selectedCleanBytes))
                             .font(.title2.weight(.bold).monospacedDigit())
-                        Text("ready to reclaim")
+                        Text("estimated to move or remove")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     Text("\(report.totalText) total discovered across \(report.totalItems) items")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if report.isPartial == true {
+                        Label("Partial scan; listed sizes are lower bounds", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                        if let categories = report.incompleteCategories, !categories.isEmpty {
+                            Text("Incomplete: " + categories.joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
                     if let scanned = report.scannedAt {
                         Text("Scanned \(CompanionRelative.text(for: scanned)) on \(hostName).")
                             .font(.caption2)
@@ -157,7 +241,7 @@ struct CleanerView: View {
                         systemImage: "sparkles"
                     )
                     .font(.subheadline.weight(.semibold))
-                    Text("\(hostName) scans for \(isExtreme ? "everything in Standard plus leftovers, AI artifacts and large files" : "caches, logs, trash and developer junk").\u{00A0} Nothing is deleted until you confirm.")
+                    Text("\(hostName) scans for \(isExtreme ? "everything in Standard plus leftovers and large files" : "caches, logs, the Trash, and developer clutter").\u{00A0} Nothing is deleted until you confirm.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -167,10 +251,19 @@ struct CleanerView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                    Text("Reclaimed \(last.formattedBytesReclaimed) (\(last.itemsRemoved) items).")
+                    Text("Estimated moved/removed: \(last.formattedBytesReclaimed) (\(last.itemsRemoved) items).")
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.primary)
                 }
+            }
+
+            if report?.isPartial == true {
+                Button("Scan Deeper") { model.beginCleanScan(depth: "deeper") }
+                    .disabled(!canClean || isBusy || !tierReady)
+            }
+            if let last = model.lastCleanResult, !isCleaningNow {
+                Text(CleanerSpaceObservation.text(last.observedFreeBytesChange)).font(.caption).foregroundStyle(.secondary)
+                Text("The Trash, local snapshots, and other writes change free space.").font(.caption).foregroundStyle(.secondary)
             }
 
             Button {
@@ -232,12 +325,7 @@ struct CleanerView: View {
                             Text(category.title)
                                 .font(.body.weight(.medium))
                             if category.isExtremeOnly {
-                                Text("EXTREME ONLY")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.purple)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.purple.opacity(0.12)))
+                                StatusChip(text: "Extreme Only", tone: .caution)
                             }
                         }
                         Text("\(category.totalText) in \(category.itemCount) \(category.itemCount == 1 ? "item" : "items")\(selectedCount > 0 ? ", \(selectedCount) selected" : "")")
@@ -266,6 +354,7 @@ struct CleanerView: View {
                         .foregroundStyle(selectedCount > 0 ? Color.accentColor : Color.secondary)
                 }
                 .buttonStyle(.borderless)
+                .frame(minWidth: 44, minHeight: 44)
                 .disabled(category.items.isEmpty || isBusy)
                 .accessibilityLabel(allSelected ? "Deselect all in \(category.title)" : "Select all in \(category.title)")
             }
@@ -329,18 +418,20 @@ struct CleanerView: View {
         VStack(spacing: 8) {
             HStack {
                 Button("Select All") { model.selectAllCleanItems() }
+                    .frame(minHeight: 44)
                 Text("•").foregroundStyle(.tertiary)
                 Button("Deselect All") { model.deselectAllCleanItems() }
+                    .frame(minHeight: 44)
                 Spacer()
             }
-            .font(.caption)
+            .font(.body)
             .disabled(isBusy)
             Button {
                 showConfirm = true
             } label: {
                 HStack {
                     Spacer()
-                    Text(isCleaningNow ? "Cleaning Mac…" : "Reclaim \(iPhoneStorage.format(bytes: model.selectedCleanBytes))")
+                    Text(isCleaningNow ? "Cleaning Mac…" : "Clean Selected — \(iPhoneStorage.format(bytes: model.selectedCleanBytes)) Estimated")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
                 }
@@ -367,15 +458,10 @@ struct CleanerView: View {
                 ForEach(history) { record in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack {
-                            Text("Freed \(record.sizeText)")
+                            Text("Estimated moved/removed: \(record.sizeText)")
                                 .font(.subheadline.weight(.semibold))
                             if record.source == "iPhone" {
-                                Text("FROM IPHONE")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(Color.accentColor)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                StatusChip(text: "From iPhone", tone: .neutral)
                             }
                             Spacer()
                             Text(CompanionRelative.text(for: record.cleanedAt))

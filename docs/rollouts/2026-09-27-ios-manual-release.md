@@ -110,7 +110,7 @@ the controls without a Mac.
 Assign the eligible build to the existing external group, submit beta review
 when required, and verify that the public TestFlight link offers the approved
 build before advertising installation.  Leave
-[HogHunter #22](https://github.com/jaywedgeworth22/HogHunter/issues/22) and board
+[HogHunter #22](https://github.com/Simple-With-Us/HogHunter/issues/22) and board
 `1dd567c8c0054e708882ee69e91c2652` open until that external release is verified.
 
 ## Checks requiring no signing credentials

@@ -3,6 +3,30 @@ import Darwin
 @testable import HogHunter
 
 final class MountedDriveTests: XCTestCase {
+    func testStorageBrowserIncludesInternalDiskWithoutExternalDrives() {
+        let rows = StorageDriveList.rows(boot: DiskSpace(freeBytes: 20, totalBytes: 100), external: [])
+        XCTAssertEqual(rows.map(\.path), ["/"])
+        XCTAssertEqual(rows.first?.name, "Internal")
+        XCTAssertEqual(rows.first?.usedPercent, 80)
+    }
+
+    func testStorageBrowserKeepsUnavailableInternalDiskVisible() {
+        let rows = StorageDriveList.rows(boot: nil, external: [])
+        XCTAssertEqual(rows.map(\.path), ["/"])
+        XCTAssertEqual(rows.first?.severity, .unavailable)
+        XCTAssertNil(rows.first?.availableBytes)
+    }
+
+    func testStorageBrowserDoesNotCountAPFSBootAliasesOrDuplicateMountsTwice() {
+        let backup = MountedDriveUsage(name: "Backup", path: "/Volumes/Backup", totalBytes: 100, availableBytes: 20)
+        let root = MountedDriveUsage(name: "Root", path: "/", totalBytes: 100, availableBytes: 20)
+        let data = MountedDriveUsage(name: "Data", path: "/System/Volumes/Data", totalBytes: 100, availableBytes: 20)
+        let rows = StorageDriveList.rows(boot: DiskSpace(freeBytes: 10, totalBytes: 100),
+                                         external: [root, backup, data, backup])
+        XCTAssertEqual(rows.map(\.path), ["/", "/Volumes/Backup"])
+        XCTAssertEqual(rows.first?.availableBytes, 10)
+    }
+
     func testCapacityNormalizationDoesNotInventMissingSpace() {
         let missing = MountedDriveUsage(name: "Backup", path: "/Volumes/Backup", totalBytes: 100, availableBytes: nil)
         XCTAssertNil(missing.usedPercent)
@@ -70,6 +94,80 @@ final class MountedDriveTests: XCTestCase {
                              blocks: UInt64 = 100, availableBlocks: UInt64 = 20) -> MountedDriveMountRecord {
         MountedDriveMountRecord(path: path, source: source, flags: flags, blockSize: blockSize,
                                blocks: blocks, availableBlocks: availableBlocks)
+    }
+
+    // MARK: - Discovery eligibility (all physical volumes, not name-keyed)
+
+    private func identity(_ internalDisk: Bool, _ proto: String?, _ volumeName: String? = nil) -> WholeDiskIdentity? {
+        WholeDiskIdentity(isInternal: internalDisk, deviceProtocol: proto, volumeName: volumeName)
+    }
+
+    func testDiscoveryIncludesAdditionalInternalAndExternalPhysicalVolumes() {
+        let mounts = [
+            mountRecord(path: "/Volumes/External", source: "/dev/disk4s2"),
+            mountRecord(path: "/Volumes/StorageHD", source: "/dev/disk0s5"),
+        ]
+        let rows = MountedDriveStore.discover(mounts: mounts) { bsd in
+            switch bsd {
+            case "disk4s2": return identity(false, "USB", "External")
+            case "disk0s5": return identity(true, "PCI-Express", "StorageHD")
+            default: return nil
+            }
+        }
+        XCTAssertEqual(rows.map(\.path), ["/Volumes/External", "/Volumes/StorageHD"])
+        XCTAssertEqual(rows.map(\.name), ["External", "StorageHD"])
+        XCTAssertEqual(rows.compactMap(\.usage).count, 2)
+    }
+
+    func testDiscoveryAcceptsEveryPhysicalBusAndRejectsVirtualOrUnknownDisks() {
+        let buses = ["USB", "FireWire", "Thunderbolt", "PCI-Express", "Apple Fabric", "SATA", "SAS", "ATA", "Secure Digital"]
+        for (index, bus) in buses.enumerated() {
+            for internalDisk in [false, true] {
+                let path = "/Volumes/Drive\(index)\(internalDisk ? "i" : "e")"
+                let rows = MountedDriveStore.discover(mounts: [mountRecord(path: path, source: "/dev/disk\(index)s1")]) { _ in
+                    identity(internalDisk, bus)
+                }
+                XCTAssertEqual(rows.count, 1, "\(bus) internal=\(internalDisk)")
+            }
+        }
+        for proto in ["Disk Image", "Virtual Interface", ""] as [String?] {
+            let rows = MountedDriveStore.discover(mounts: [mountRecord()]) { _ in identity(false, proto) }
+            XCTAssertTrue(rows.isEmpty, "protocol \(proto ?? "nil")")
+        }
+        let noProtocol = MountedDriveStore.discover(mounts: [mountRecord()]) { _ in identity(false, nil) }
+        XCTAssertTrue(noProtocol.isEmpty)
+        let uninspectable = MountedDriveStore.discover(mounts: [mountRecord()]) { _ in nil }
+        XCTAssertTrue(uninspectable.isEmpty)
+    }
+
+    func testDiscoveryKeepsBootAliasesHiddenAndNetworkMountsOut() {
+        let mounts = [
+            mountRecord(path: "/", source: "/dev/disk0s1"),
+            mountRecord(path: "/System/Volumes/Data", source: "/dev/disk0s2"),
+            mountRecord(path: "/Volumes/.timemachine/snapshot", source: "/dev/disk4s9"),
+            mountRecord(path: "/Volumes/Hidden", source: "/dev/disk7s1", flags: UInt32(MNT_LOCAL | MNT_DONTBROWSE)),
+            mountRecord(path: "/Volumes/Network", source: "/dev/disk8s1", flags: 0),
+        ]
+        let rows = MountedDriveStore.discover(mounts: mounts) { _ in identity(true, "PCI-Express") }
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    func testDiscoveryListsOneRowPerDiskAndFallsBackToMountName() {
+        let mounts = [
+            mountRecord(path: "/Volumes/Backup", source: "/dev/disk4s2"),
+            mountRecord(path: "/Volumes/BackupAlias", source: "/dev/disk4s2"),
+            mountRecord(path: "/Volumes/Named", source: "/dev/disk9s1"),
+            mountRecord(path: "/Volumes/EmptyName", source: "/dev/disk9s2"),
+        ]
+        let rows = MountedDriveStore.discover(mounts: mounts) { bsd in
+            switch bsd {
+            case "disk9s1": return identity(false, "USB", "Real Name")
+            case "disk9s2": return identity(false, "USB", "")
+            default: return identity(false, "USB")
+            }
+        }
+        XCTAssertEqual(rows.map(\.path), ["/Volumes/Backup", "/Volumes/Named", "/Volumes/EmptyName"])
+        XCTAssertEqual(rows.map(\.name), ["Backup", "Real Name", "EmptyName"])
     }
 
     @MainActor

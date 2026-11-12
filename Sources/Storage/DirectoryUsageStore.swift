@@ -19,6 +19,39 @@ struct DirectoryUsageRow: Identifiable, Equatable {
     var statusText = "Waiting to measure"
     var nextAttempt = Date.distantPast
     var hasResolvedPath = false
+    var requiresManualMeasurement = false
+}
+
+extension DirectoryUsageRow {
+    /// The one-line status beside a directory:  what the Mac's own rows show
+    /// and what the phone shows under the same directory.
+    ///
+    /// It lives here rather than in a view, because the two surfaces have to
+    /// agree and only one of them can reach a view.
+    var statusLine: String {
+        if scanStartedAt != nil, progressEntries > 0 {
+            return "\(HogFormat.memory(UInt64(max(0, progressBytes)))) scanned · \(progressEntries) entries · \(statusText.lowercased())"
+        }
+        if statusText == "Complete", let sampledAt = sampledAt {
+            return "walk began " + DirectoryUsageRow.timestamp(sampledAt)
+        }
+        return statusText
+    }
+
+    /// The Mac's stamp for a moment:  "Oct 22, 2:03pm".
+    static func timestamp(_ date: Date) -> String {
+        stampFormatter.string(from: date)
+            .replacingOccurrences(of: "AM", with: "am")
+            .replacingOccurrences(of: "PM", with: "pm")
+    }
+
+    private static let stampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "America/Chicago")
+        formatter.dateFormat = "MMM d, h:mma"
+        return formatter
+    }()
 }
 
 @MainActor
@@ -35,7 +68,8 @@ final class DirectoryUsageStore: ObservableObject {
     private(set) var isMeasurementEnabled = true
     private let host: String
     private let allowsMeasurement: Bool
-    private let executor = DirectorySizeExecutor()
+    private let executor: DirectorySizeExecutor
+    private var manualMeasurementIDs = Set<String>()
     private var nextIndex = 0
     private var pending: Pending?
 
@@ -54,13 +88,15 @@ final class DirectoryUsageStore: ObservableObject {
          candidates: [(title: String, path: String)]? = nil,
          host: String = "mac-local", now: @escaping () -> Date = Date.init,
          probe: Probe? = nil, pressure: @escaping () -> Pressure = { DirectoryUsageStore.currentPressure() },
-         idlePressure: @escaping () -> Pressure = { DirectoryUsageStore.currentIdlePressure() }) {
+         idlePressure: @escaping () -> Pressure = { DirectoryUsageStore.currentIdlePressure() },
+         executor: DirectorySizeExecutor = DirectorySizeExecutor()) {
         self.history = history
         self.probe = probe
         self.now = now
         self.host = host
         self.pressure = pressure
         self.idlePressure = idlePressure
+        self.executor = executor
         allowsMeasurement = candidates != nil || ApplicationRunMode.current.allowsLiveProbes
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let defaults = [("Code", "\(home)/Code"), ("Coding Lanes", "\(home)/apps/lanes"),
@@ -99,6 +135,15 @@ final class DirectoryUsageStore: ObservableObject {
     /// The app owns this continuation separately from any view-triggered work.
     func refreshWhenIdle() async {
         await refreshIfNeeded(background: true)
+    }
+
+    /// This click authorizes one walk; it never enables recurring protected-volume reads.
+    func measureNow(id: String) async {
+        guard !isRefreshing, let index = rows.firstIndex(where: { $0.id == id }) else { return }
+        manualMeasurementIDs.insert(id)
+        rows[index].requiresManualMeasurement = true
+        rows[index].nextAttempt = .distantPast
+        await refreshIfNeeded()
     }
 
     /// Short, fair bursts.  Cancellation retains the cursor but queues no more I/O.
@@ -167,7 +212,8 @@ final class DirectoryUsageStore: ObservableObject {
                                       hasResolvedRoot: bytes != nil))
                 }
             } else {
-                executor.advance(path: path, startedAt: start, pressured: currentPressure == .reduced) { request.put($0) }
+                executor.advance(path: path, startedAt: start, pressured: currentPressure == .reduced,
+                                 allowExternal: manualMeasurementIDs.contains(request.id)) { request.put($0) }
             }
             // One slice at a time, with idle time between bursts, especially under pressure.
             try? await Task.sleep(for: .milliseconds(currentPressure == .reduced ? 250 : 30))
@@ -199,9 +245,12 @@ final class DirectoryUsageStore: ObservableObject {
         if let failure = result.failure {
             rows[index].isUnavailable = true
             rows[index].percentChange = nil
-            rows[index].statusText = failure + "; retry in one minute"
+            let retry = result.retryAutomatically && !manualMeasurementIDs.contains(id)
+            rows[index].requiresManualMeasurement = !retry
+            rows[index].statusText = retry ? failure + "; retry in one minute" : failure
             rows[index].scanStartedAt = nil
-            rows[index].nextAttempt = now().addingTimeInterval(60)
+            rows[index].nextAttempt = retry ? now().addingTimeInterval(60) : .distantFuture
+            manualMeasurementIDs.remove(id)
         } else if result.isComplete {
             // The source time is the start of this observation, never the later cache/write time.
             history.record(host: host, metric: "directory", path: result.path, bytes: result.bytes, sampledAt: result.startedAt)
@@ -220,7 +269,9 @@ final class DirectoryUsageStore: ObservableObject {
             rows[index].completedAt = result.finishedAt
             rows[index].scanStartedAt = nil
             rows[index].statusText = "Complete"
-            rows[index].nextAttempt = Self.nextScheduledAttempt(startedAt: result.startedAt, now: now())
+            rows[index].nextAttempt = rows[index].requiresManualMeasurement
+                ? .distantFuture : Self.nextScheduledAttempt(startedAt: result.startedAt, now: now())
+            manualMeasurementIDs.remove(id)
         } else {
             rows[index].nextAttempt = .distantPast
         }

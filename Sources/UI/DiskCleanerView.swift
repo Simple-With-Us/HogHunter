@@ -25,8 +25,8 @@ struct DiskCleanerView: View {
                 extremeDisclaimerBanner
             }
             heroHeader
-            Text("Temp files appear after at least \(store.tempFilePolicy.hoursLabel) untouched hours · Settings > Cleaner")
-                .font(.system(size: 10))
+            Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             regimenSection
@@ -66,7 +66,7 @@ struct DiskCleanerView: View {
             isPresented: $store.showConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes())) (\(store.selectedTier.title))", role: .destructive) {
+            Button("Clean Selected (\(store.selectedTier.title))", role: .destructive) {
                 store.cleanSelected(createSnapshot: true)
             }
             Button("Cancel", role: .cancel) {}
@@ -194,15 +194,10 @@ struct DiskCleanerView: View {
 
             Spacer()
 
-            Text(store.selectedTier.badge)
-                .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(store.selectedTier == .extreme ? Color.orange.opacity(0.18) : Color.blue.opacity(0.15))
-                )
-                .foregroundStyle(store.selectedTier == .extreme ? Color.orange : Color.blue)
+            ContrastChip(
+                text: store.selectedTier.badge,
+                tone: store.selectedTier == .extreme ? .caution : .neutral
+            )
         }
         .padding(.horizontal, 2)
     }
@@ -270,7 +265,7 @@ struct DiskCleanerView: View {
                             Text("\(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(store.totalSelectedBytes()))")
                                 .font(.system(size: 22, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.primary)
-                            Text("ready to reclaim")
+                            Text("selected (estimated)")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
@@ -300,10 +295,20 @@ struct DiskCleanerView: View {
                         .frame(width: 152)
                 }
 
+                if report.isPartial {
+                    HStack {
+                        Text("Partial scan.\u{00A0} Some folders were not measured, so these sizes are a minimum.")
+                            .font(.system(size: 12)).foregroundStyle(.primary)
+                        Spacer()
+                        Button("Scan Deeper") { store.scan(depth: .deeper) }
+                    }
+                    Text("A deeper scan restarts with larger limits; slow or unavailable locations can still remain partial.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
                 if let last = store.lastCleanup {
-                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)) — freed \(last.formattedBytesReclaimed)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                    Text("Last cleanup \(CleanupHistoryStore.relativeDate(for: last.cleanedAt)).\u{00A0} Moved or removed \(last.formattedBytesReclaimed), estimated.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -312,12 +317,12 @@ struct DiskCleanerView: View {
 
         case .cleaning(let progress, let currentItem):
             VStack(spacing: 8) {
-                if currentItem.contains("snapshot") {
+                if DiskCleaner.isSafetyCopyProgress(currentItem) {
                     HStack(spacing: 8) {
                         ProgressView()
                             .scaleEffect(0.7)
-                        Text("Creating APFS safety snapshot (this can take 15–30s)…")
-                            .font(.system(size: 11, weight: .medium))
+                        Text("Saving a safety copy.\u{00A0} This can take 15 to 30 seconds.")
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -333,7 +338,7 @@ struct DiskCleanerView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    if currentItem.contains("snapshot") {
+                    if DiskCleaner.isSafetyCopyProgress(currentItem) {
                         Text("Working…")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
@@ -354,14 +359,18 @@ struct DiskCleanerView: View {
                     .foregroundStyle(.green)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Reclaimed \(result.formattedBytesReclaimed)!")
+                    Text("\(result.formattedBytesReclaimed) moved or removed (estimated)")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Cleaned \(result.itemsRemoved) items safely.")
+                    Text("Cleaned \(result.itemsRemoved) items.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
+                    Text(freeSpaceObservation(result))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("The Trash and local snapshots can still hold space.\u{00A0} Other apps change free space too.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
                     if !result.errors.isEmpty {
-                        Text("\(result.errors.count) items could not be deleted (system locked).")
+                        Text("\(result.errors.count) cleanup issues reported.")
                             .font(.system(size: 10))
                             .foregroundStyle(.orange)
                     }
@@ -397,9 +406,8 @@ struct DiskCleanerView: View {
         }
     }
 
-    /// Free space on the startup volume, and how much of it this clean would
-    /// hand back.  `DiskSpace` is the same reading the panel's Storage card
-    /// uses, so the two can never disagree.
+    /// Current startup-volume availability uses the same metric as the Storage card.
+    /// Item sizes do not forecast a free-space gain because undo protections retain blocks.
     private var volumeGauge: some View {
         VStack(alignment: .trailing, spacing: 4) {
             Text("Startup Volume")
@@ -413,7 +421,7 @@ struct DiskCleanerView: View {
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
-        .help("Reclaiming everything selected would take free space from this to the number below.  macOS counts purgeable space as available, so a healthy disk can look nearly full here and still be fine.")
+        .help("Available space includes macOS purgeable capacity.\u{00A0} Selected item sizes do not predict a free-space gain: Trash and safety snapshots can retain blocks.")
     }
 
     private var volumeSpace: DiskSpace? { DiskSpace.current() }
@@ -427,8 +435,14 @@ struct DiskCleanerView: View {
 
     private var volumeDetail: String {
         guard let volumeSpace else { return "" }
-        let after = max(0, volumeSpace.freeBytes) + store.totalSelectedBytes()
-        return "→ \(HogFormat.memory(after)) of \(HogFormat.memory(volumeSpace.totalBytes))"
+        return "of \(HogFormat.memory(volumeSpace.totalBytes)) total"
+    }
+
+    private func freeSpaceObservation(_ result: CleanResult) -> String {
+        guard let delta = result.observedFreeBytesChange else { return "Available-space change could not be measured." }
+        if delta == 0 { return "No available-space change observed during this run." }
+        let direction = delta > 0 ? "increased" : "decreased"
+        return "Available space \(direction) by \(HogFormat.memory(UInt64(delta.magnitude))) during this run."
     }
 
     // MARK: - Content Body
@@ -505,8 +519,7 @@ struct DiskCleanerView: View {
             Button {
                 store.showConfirmation = true
             } label: {
-                let selectedBytes = store.totalSelectedBytes()
-                Text("Reclaim \(store.selectionIsApproximate() ? "at least " : "")\(HogFormat.memory(selectedBytes))")
+                Text("Clean Selected")
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 4)
             }

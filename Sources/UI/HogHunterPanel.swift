@@ -4,7 +4,9 @@ import SwiftUI
 
 @MainActor
 private enum DashboardMountedDrives {
-    static let shared = MountedDriveStore()
+    /// The same store the companion snapshot reads, so the panel and the
+    /// phone always agree about what is mounted.
+    static let shared = MountedDriveStore.shared
 }
 
 enum PanelTab: String, CaseIterable, Identifiable {
@@ -25,21 +27,47 @@ struct HogHunterPanel: View {
     @Environment(\.openSettings) private var openSettings
     @State private var selectedTab: PanelTab = .overview
     @AppStorage("dashboardHostScope") private var hostScopeRawValue = HostScope.mac.rawValue
+    enum StorageSubTab: String, CaseIterable, Identifiable {
+        case apps = "Installed Apps"
+        case clean = "Disk Cleaner"
+        case drives = "Drives & Folders"
+
+        var id: String { rawValue }
+    }
+
     @ObservedObject private var mountedDrives: MountedDriveStore
     @State private var driveReadAttempted = false
+    @State private var mountedDrivePage = 0
     @State private var pendingQuit: HogRow?
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
+    @State private var storageSubTab: StorageSubTab = .apps
+    private var storageViewTabBinding: Binding<StorageTab> {
+        Binding(
+            get: {
+                storageSubTab == .clean ? .diskCleaner : .appStorage
+            },
+            set: { newTab in
+                if newTab == .diskCleaner {
+                    storageSubTab = .clean
+                } else if newTab == .appStorage {
+                    storageSubTab = .apps
+                }
+            }
+        )
+    }
     @State private var beakX: CGFloat = HogHunterPanel.panelWidth - 55
     @State private var panelInstanceId = UUID()
     private var directoryUsage: DirectoryUsageStore { store.directoryUsage }
     let isQuickView: Bool
 
     init(isQuickView: Bool = false, initialTab: PanelTab = .overview,
+         initialStorageSubTab: StorageSubTab = .apps,
          mountedDrives: MountedDriveStore? = nil) {
         self.isQuickView = isQuickView
         _mountedDrives = ObservedObject(wrappedValue: mountedDrives ?? DashboardMountedDrives.shared)
         _selectedTab = State(initialValue: initialTab)
+        _storageSubTab = State(initialValue: initialStorageSubTab)
         _hasVisitedStorage = State(initialValue: initialTab == .storage)
         _hasVisitedNetwork = State(initialValue: initialTab == .network)
     }
@@ -78,9 +106,7 @@ struct HogHunterPanel: View {
                     Text(pageTitle)
                         .font(.system(size: 20, weight: .semibold))
                     if store.isStale {
-                        Text("Sampling behind")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.orange)
+                        lateReadingsControl
                     }
                     Spacer(minLength: 8)
                 }
@@ -99,31 +125,48 @@ struct HogHunterPanel: View {
                         }
                     }
                     if hasVisitedStorage || selectedTab == .storage {
-                        GeometryReader { stage in
-                            VStack(alignment: .leading, spacing: 10) {
-                                capacityCards
-                                if externalDrives.count > 1 || timeMachineDrives.count > 1 {
-                                    ScrollView {
-                                        VStack(alignment: .leading, spacing: 6) {
-                                            if externalDrives.count > 1 {
-                                                driveDetails("External Drives", drives: externalDrives)
-                                            }
-                                            if timeMachineDrives.count > 1 {
-                                                driveDetails("Time Machine Drives", drives: timeMachineDrives)
-                                            }
-                                        }
-                                    }
-                                    .frame(height: min(100, 24 + CGFloat(externalDrives.count + timeMachineDrives.count) * 16))
+                        VStack(alignment: .leading, spacing: 12) {
+                            capacityCards
+
+                            Picker("Storage Section", selection: $storageSubTab) {
+                                ForEach(StorageSubTab.allCases) { tab in
+                                    Text(tab.rawValue).tag(tab)
                                 }
-                                ScrollView { CodingDirectoriesView(store: directoryUsage) }
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: min(260, max(200, stage.size.height * 0.4)))
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            // A clean in flight lives in the Disk Cleaner view's
+                            // store, so switching sub-tabs mid-clean would destroy
+                            // it and cancel the clean while the companion snapshot
+                            // still reports cleaning.  The picker waits instead.
+                            .disabled(store.activeCleanProgress?.isCleaning == true)
+
+                            ZStack {
                                 StorageView(runningBundleIds: { store.runningBundleIdsSnapshot() },
                                             maintainStore: store.maintain, embeddedInPanel: true,
-                                            isTabActive: selectedTab == .storage && hostScope == .mac,
-                                            includesMaintenance: false, autoScanCleaner: false)
-                                    .frame(maxHeight: .infinity)
+                                            isTabActive: selectedTab == .storage && hostScope == .mac && storageSubTab != .drives,
+                                            externalTab: storageViewTabBinding,
+                                            initialTab: .appStorage,
+                                            includesMaintenance: false, autoScanCleaner: true,
+                                            showModePicker: false)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .opacity(storageSubTab == .drives ? 0 : 1)
+                                    .allowsHitTesting(storageSubTab != .drives)
+                                    .accessibilityHidden(storageSubTab == .drives)
+
+                                if storageSubTab == .drives {
+                                    ScrollView {
+                                        VStack(alignment: .leading, spacing: 14) {
+                                            mountedDriveList
+                                            Divider()
+                                            CodingDirectoriesView(store: directoryUsage)
+                                        }
+                                        .padding(.vertical, 4)
+                                    }
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
                             }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         .opacity(selectedTab == .storage && hostScope == .mac ? 1 : 0)
                         .allowsHitTesting(selectedTab == .storage && hostScope == .mac)
@@ -166,12 +209,11 @@ struct HogHunterPanel: View {
     /// instead of a gear in the header.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("Hog Hunter")
-                .font(.system(size: 17, weight: .bold))
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
+            // No wordmark here: the window's title bar already says "Hog
+            // Hunter", and the rail starts with the host it is about.
             scopeTabs
                 .padding(.horizontal, 6)
+                .padding(.top, 6)
                 .padding(.bottom, 8)
             ForEach(PanelTab.allCases) { tab in
                 sectionButton(tab)
@@ -270,10 +312,9 @@ struct HogHunterPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
             case .activity:
-                // The card below carries the server's overall CPU and memory,
-                // so the message says only what the snapshot cannot answer:
-                // the per-process detail.
-                Text("Remote per-process detail is unavailable; the server's overall CPU and memory are shown below.")
+                // The card below carries the server's CPU and memory, the
+                // processes it is running and the workloads they belong to.
+                Text("The server's busiest processes, and the Coolify workloads they belong to.")
                     .foregroundStyle(.secondary)
             case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
@@ -282,8 +323,11 @@ struct HogHunterPanel: View {
                 Text("Server disks, app databases and largest directories")
                     .font(.headline)
             case .maintenance:
-                Text("Server tool status")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Server Status")
+                        .font(.headline)
+                    remoteMaintenanceCard
+                }
             case .overview:
                 EmptyView()
             }
@@ -293,8 +337,36 @@ struct HogHunterPanel: View {
         }
     }
 
+    /// The one action the server scope can take.
+    ///
+    /// The server scope used to be display-only: the owner could read the
+    /// server's CPU, memory and disks but could not act on them.  The remote
+    /// maintenance step is the step that belongs to the server, and it is the
+    /// same step the Mac's Maintenance tab runs, against the same configured
+    /// host.
+    private var remoteMaintenanceCard: some View {
+        RemoteMaintenanceCard(maintain: store.maintain)
+    }
+
     private var activityContent: some View {
         VStack(alignment: .leading, spacing: 9) {
+            // The quick view's card caps at three.  Every flagged issue is
+            // listed here, with the same per-issue actions, so View-all lands
+            // on the whole set rather than on a tab that hides them.
+            if !store.flaggedIssues.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Flagged Issues")
+                        .font(.system(size: 11, weight: .semibold))
+                    ForEach(store.flaggedIssues) { issue in
+                        flaggedIssueRow(issue)
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+            }
             HStack(spacing: 10) {
                 cpuHistoryCard.frame(width: 170)
                 Meter(title: "Memory", value: store.pulse.memoryPercent,
@@ -321,6 +393,10 @@ struct HogHunterPanel: View {
                       caption: store.memorySizeCaption,
                       severity: Severity.forPressure(store.pulse.pressure),
                       accessibilityDetail: store.memoryCaption)
+                    // The memory meter keeps its size; the CPU graph takes
+                    // the rest of the width, because a graph squeezed into
+                    // half a card is not worth having.
+                    .frame(width: 260)
             }
             .frame(height: 94)
             pillRow(memoryPills + thermalPills)
@@ -345,204 +421,724 @@ struct HogHunterPanel: View {
                 Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
                     .foregroundStyle(.secondary)
             }
+            captions
+            // The server is a separate thing from this Mac's readings, so it
+            // sits at the bottom of the window with a rule above it rather
+            // than tucked under Top Activity as if it were one more row.
             if !store.maintain.vpsStore.configuredHost.isEmpty {
+                Divider()
+                    .padding(.top, 4)
                 Text("Server").font(.headline)
                 serverStrip
             }
-            captions
         }
     }
 
-    /// The menu bar window has two sizes.  Quick is the glanceable strip:
-    /// the numbers and the busy apps, read at a glance.  Summary is the same
-    /// readings with the history, the meters and the volume cards, which
-    /// makes the window grow a long way.
-    private enum QuickViewMode: String, CaseIterable, Identifiable {
-        case quick = "Quick"
-        case summary = "Summary"
-        var id: String { rawValue }
-    }
-
-    /// Which size the menu bar window is showing.
-    @State private var quickMode: QuickViewMode = .quick
     /// True while the pointer is over the activity list, which opens it up.
     @State private var activityHovered = false
 
+    /// Shared by the menu bar and the dashboard.  Clicking it reads the Mac again.
+    private var lateReadingsControl: some View {
+        let age = max(0, Int(Date().timeIntervalSince(store.pulse.sampledAt)))
+        return Button {
+            _ = store.tick()
+        } label: {
+            ContrastChip(text: "Readings Are Late", tone: .caution)
+        }
+        .buttonStyle(.plain)
+        .help("The last reading is \(age) seconds old.\u{00A0} Click to read again.")
+        .accessibilityLabel("Readings are late")
+        .accessibilityHint("Reads the Mac again")
+    }
+
+    /// Consolidated drop-down menu bar window.  Combines system alerts/flagged issues,
+    /// graphical CPU meters, RAM usage, storage of all kinds (Mac internal/external and
+    /// Server root / fleet-extra), and active hogs in a single high-density view.
     private var quickView: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text("Hog Hunter").font(.headline)
+        VStack(alignment: .leading, spacing: 9) {
+            // Header
+            HStack(spacing: 6) {
+                Image("HogProfile")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 16, height: 14)
+                Text("Hog Hunter")
+                    .font(.system(size: 13, weight: .semibold))
+                if store.isStale {
+                    lateReadingsControl
+                }
                 Spacer()
-                if store.isStale { Text("Sampling behind").foregroundStyle(.orange) }
                 settingsMenu
             }
-            quickModeToggle
-            if quickMode == .summary {
-                quickSummary
-            } else {
-                quickGlance
+
+            // Area for prioritized flagged issues / system alerts
+            flaggedIssuesSection
+
+            // Scrollable consolidated telemetry
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 9) {
+                    cpuSection
+                    ramSection
+                    storageSection
+                    activitySection
+                }
+                .padding(.trailing, 2)
+            }
+            .frame(maxHeight: 520)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Button("Open Dashboard") {
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Spacer()
+
+                Button("Clean…") {
+                    DetachedWindowManager.shared.openCleaner(store: store)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .font(.system(size: 11))
-        .padding(16)
-        .frame(width: Self.panelWidth)
-        .background(DockedPanelShape(beakX: beakX, isDocked: true)
-            .fill(Color(nsColor: .windowBackgroundColor)))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .padding(.top, 18)
+        .frame(width: Self.panelWidth, height: Self.panelHeight)
+        .background(
+            DockedPanelShape(beakX: beakX, isDocked: true)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            DockedPanelShape(beakX: beakX, isDocked: true)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1)
+        )
         .background(MenuBarAnchorFinder { x in beakX = x })
     }
 
-    /// Quick or Summary, at the top of the menu bar window.
-    private var quickModeToggle: some View {
-        HStack(spacing: 4) {
-            ForEach(QuickViewMode.allCases) { mode in
-                Button {
-                    quickMode = mode
-                } label: {
-                    Text(mode.rawValue)
-                        .font(.system(size: 10, weight: quickMode == mode ? .semibold : .regular))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 3)
-                        .background(quickMode == mode ? Color.accentColor.opacity(0.16) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 5))
+    // MARK: - Flagged Issues Section
+
+    private var flaggedIssuesSection: some View {
+        let issues = store.flaggedIssues
+        return Group {
+            if issues.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 11))
+                    Text("All Systems Calm")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("0 alerts")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(quickMode == mode ? [.isSelected] : [])
-                .accessibilityLabel(mode.rawValue)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.green.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.green.opacity(0.25), lineWidth: 1)
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Image(systemName: issues.first?.priority.systemImage ?? "exclamationmark.triangle.fill")
+                            .foregroundStyle(issues.first?.priority.color ?? .orange)
+                            .font(.system(size: 11))
+                        Text("Flagged Issues")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer()
+                        Text("\(issues.count) \(issues.count == 1 ? "alert" : "alerts")")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Show top 2 to 5 prioritized issues
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(issues.prefix(3))) { issue in
+                            flaggedIssueRow(issue)
+                        }
+                    }
+                    if issues.count > 3 {
+                        Button("View all \(issues.count) alerts") {
+                            DetachedWindowManager.shared.openActivity(store: store)
+                        }
+                        .buttonStyle(.link)
+                        .font(.system(size: 9.5))
+                        .padding(.top, 2)
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke((issues.first?.priority.color ?? Color.secondary).opacity(0.35), lineWidth: 1)
+                )
             }
         }
     }
 
-    /// The glanceable strip: the numbers, the volumes, and the busy apps.
-    private var quickGlance: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text("CPU").fontWeight(.medium)
+    private func flaggedIssueRow(_ issue: FlaggedIssue) -> some View {
+        HStack(alignment: .top, spacing: 5) {
+            Text(issue.priority.badgeText)
+                .font(.system(size: 8, weight: .bold))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1.5)
+                .background(issue.priority.color.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
+                .foregroundStyle(issue.priority.color)
+
+            HStack(spacing: 2) {
+                Image(systemName: issue.host.systemImage)
+                    .font(.system(size: 8))
+                Text(issue.host.rawValue)
+                    .font(.system(size: 8.5, weight: .medium))
+            }
+            .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(issue.title)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .lineLimit(1)
+                Text(issue.message)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 4)
+
+            if let action = issue.actionTitle {
+                Button(action) {
+                    handleIssueAction(issue)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .font(.system(size: 8.5))
+            }
+        }
+    }
+
+    private func handleIssueAction(_ issue: FlaggedIssue) {
+        switch issue.actionTitle {
+        case "Clean":
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        case "Retry":
+            store.maintain.vpsStore.fetch(force: true)
+        case "Quit":
+            if let hog = store.rows.first(where: { CompanionFlaggedIssue.quitIssueID(forRow: $0.id) == issue.id }) {
+                pendingQuit = hog
+            }
+        default:
+            DetachedWindowManager.shared.openDetachedWindow(store: store)
+        }
+    }
+
+    // MARK: - CPU Section (Mac & Server side by side)
+
+    /// The two machines, side by side, each with its own graph.
+    ///
+    /// They used to stack, and the Mac's graph was a sparkline pinned to 36
+    /// points inside a full-width row, so it read as a small drawing in a
+    /// large space.  Now each machine has half the width and a bar graph
+    /// that fills it, and the two can be read against each other.
+    private var cpuSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                Text("CPU")
+                    .font(.system(size: 10.5, weight: .semibold))
                 Spacer()
+            }
+
+            HStack(alignment: .top, spacing: 6) {
+                macCPUColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverCPUColumn
+                }
+            }
+
+            if let topHog = store.rows.first {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                    Text("Top: \(topHog.name) (\(HogFormat.cpu(topHog.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount)))")
+
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private var macCPUColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Image(systemName: "laptopcomputer")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Mac")
+                    .font(.system(size: 9.5, weight: .medium))
+                Spacer(minLength: 2)
                 Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
+                    .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Severity.forMachineCpu(store.pulse.cpuPercent).color)
             }
-            HStack {
-                Text("Memory").fontWeight(.medium)
-                Spacer()
-                Text(store.memorySizeCaption)
-            }
-            HStack {
-                Text("Internal Storage").fontWeight(.medium)
-                Spacer(minLength: 6)
-                Text(quickInternalText)
-                    .lineLimit(1)
-            }
-            HStack {
-                Text("External").fontWeight(.medium)
-                Spacer(minLength: 6)
-                Text(quickExternalText)
-                    .foregroundStyle(quickExternalColor)
-                    .lineLimit(1)
-            }
-            HStack {
-                Text("Time Machine").fontWeight(.medium)
-                Spacer(minLength: 6)
-                Text(quickTimeMachineText)
-                    .foregroundStyle(quickTimeMachineColor)
-                    .lineLimit(1)
-            }
-            Divider()
-            quickActivityList
-            if !store.maintain.vpsStore.configuredHost.isEmpty {
-                quickServerButton
-            }
-            openDashboardButton
+
+            CpuHistoryBarsView(history: store.cpuMinuteHistory, height: 26)
+
+            Text("\(store.pulse.coreCount) cores · \(HogFormat.percent(store.pulse.cpuPercent / 100)) total")
+                .font(.system(size: 8.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
+        .padding(5)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity)
     }
 
-    /// The long form: the history, the meters, the volumes and the busy apps.
-    private var quickSummary: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            cpuHistoryCard
-            Meter(title: "Memory", value: store.pulse.memoryPercent,
-                  caption: store.memorySizeCaption,
-                  severity: Severity.forPressure(store.pulse.pressure),
-                  accessibilityDetail: store.memoryCaption)
-            pillRow(memoryPills + thermalPills)
-            capacityCards
-            Divider()
-            Text("Top Activity").font(.system(size: 11, weight: .semibold))
-            quickActivityList
-            if !store.maintain.vpsStore.configuredHost.isEmpty {
-                quickServerButton
-            }
-            openDashboardButton
-        }
+    /// The marker shown beside the server's readings while refresh is
+    /// failing: the numbers on screen are the last good reading, not the
+    /// server's state now.
+    private var serverStaleChip: some View {
+        Text("Stale")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.orange)
     }
 
-    /// The busy apps.  Three rows to glance at, and hovering the list opens
-    /// it up to more of them with room to scroll, so the same window can be
-    /// read when a glance is not enough.  Each row carries the CPU it is
-    /// using and the memory it is holding.
-    private var quickActivityList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
-                    HogActivityRow(
-                        name: row.name,
-                        cpuText: HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
-                                               coreCount: store.pulse.coreCount),
-                        memoryText: HogFormat.memory(row.memoryBytes)
-                    )
+    private var serverCPUColumn: some View {
+        let cpu = store.maintain.vpsStore.snapshot?.cpu
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .lineLimit(1)
+                if store.maintain.vpsStore.isStale {
+                    serverStaleChip
                 }
-                if store.rows.isEmpty {
-                    Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                Spacer(minLength: 2)
+                if let cpu {
+                    Text(String(format: "%.0f%%", cpu.pct))
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(cpu.severity.color)
+                } else {
+                    Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                }
+            }
+
+            CpuHistoryBarsView(history: store.maintain.vpsStore.cpuHistory, height: 26)
+
+            if let cpu {
+                Text("\(cpu.cores) cores · Load \(String(format: "%.2f", cpu.load1))")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(store.maintain.vpsStore.isLoading ? "Connecting to server…" : "No reading yet")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(5)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - RAM Usage Section (Mac & Server)
+
+    private var ramSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "memorychip")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                Text("RAM Usage")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Spacer()
+            }
+
+            // Mac on the left half, server on the right half.
+            HStack(alignment: .top, spacing: 6) {
+                macRAMColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverRAMColumn
+                }
+            }
+        }
+    }
+
+    private var macRAMColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Image(systemName: "laptopcomputer")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text("Mac")
+                        .font(.system(size: 9.5, weight: .medium))
+                    Spacer()
+                    Text(store.memorySizeCaption)
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                    Text(store.pulse.pressure == .unknown ? "unavailable" : store.pulse.pressure.label)
+                        .font(.system(size: 8, weight: .bold))
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Severity.forPressure(store.pulse.pressure).color.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
+                        .foregroundStyle(Severity.forPressure(store.pulse.pressure).color)
+                        .help(store.pulse.pressure == .unknown ? "No memory-pressure reading right now." : "How hard the Mac is working to find free memory.")
+                }
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Severity.forPressure(store.pulse.pressure).color)
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(store.pulse.memoryPercent / 100.0))))
+                    }
+                }
+                .frame(height: 4)
+
+                if store.pulse.swapUsedBytes > 0 {
+                    HStack {
+                        Text("Swap: \(HogFormat.memory(store.pulse.swapUsedBytes))")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
+            }
+            .padding(5)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var serverRAMColumn: some View {
+        Group {
+            if let mem = store.maintain.vpsStore.snapshot?.memory {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text("Server")
+                            .font(.system(size: 9.5, weight: .medium))
+                        if store.maintain.vpsStore.isStale {
+                            serverStaleChip
+                        }
+                        Spacer()
+                        Text(String(format: "%.0f%% (%@ / %@)", mem.usedPercentage, HogFormat.memory(UInt64(max(0, mem.usedBytes))), HogFormat.memory(UInt64(max(0, mem.totalBytes)))))
+                            .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(mem.severity.color)
+                    }
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(mem.severity.color)
+                                .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(mem.usedPercentage / 100.0))))
+                        }
+                    }
+                    .frame(height: 4)
+
+                    if let swap = store.maintain.vpsStore.snapshot?.swap {
+                        HStack {
+                            Text("Swap: \(String(format: "%.0f%%", swap.usedPercentage)) (\(HogFormat.memory(UInt64(max(0, swap.usedBytes)))))")
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+                }
+                .padding(5)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            } else {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text("Server")
+                            .font(.system(size: 9.5, weight: .medium))
+                        Spacer()
+                        Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    }
+                    Text(store.maintain.vpsStore.isLoading ? "Connecting to server…" : "No reading yet")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(5)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: - Storage Section (Mac Internal/External & Server Root/Fleet-Extra)
+
+    private var storageSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                Text("Storage (All Volumes)")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Spacer()
+            }
+
+            // Mac on the left half, server on the right half.
+            HStack(alignment: .top, spacing: 6) {
+                macStorageColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverStorageColumn
+                }
+            }
+        }
+    }
+
+    private var macStorageColumn: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Mac Internal Boot Drive
+            if let disk = store.diskSpace {
+                quickStorageRow(
+                    name: "Mac (Internal /)",
+                    icon: "laptopcomputer",
+                    freeBytes: disk.freeBytes,
+                    usedFraction: disk.usedFraction
+                )
+            }
+
+            // Every mounted Mac drive, whatever it is named
+            ForEach(pagedMountedDrives) { drive in
+                quickStorageRow(
+                    name: "Mac (\(drive.name))",
+                    icon: "externaldrive",
+                    freeBytes: UInt64(max(0, drive.availableBytes ?? 0)),
+                    usedFraction: (drive.usedPercent ?? 0) / 100.0
+                )
+            }
+
+            mountedDrivePageControls
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var serverStorageColumn: some View {
+        let vps = store.maintain.vpsStore
+        return VStack(alignment: .leading, spacing: 4) {
+            // Server Root /
+            if let root = vps.snapshot?.rootDevice {
+                quickStorageRow(
+                    name: vps.isStale ? "Server (Root /) · Stale" : "Server (Root /)",
+                    icon: "server.rack",
+                    freeBytes: UInt64(max(0, root.freeBytes)),
+                    usedFraction: root.usedFraction
+                )
+            }
+
+            // Server Fleet Extra /mnt/fleet-extra
+            if let extra = vps.snapshot?.fleetExtraDevice {
+                quickStorageRow(
+                    name: vps.isStale ? "Server (/mnt/fleet-extra) · Stale" : "Server (/mnt/fleet-extra)",
+                    icon: "externaldrive.connected.to.line.below",
+                    freeBytes: UInt64(max(0, extra.freeBytes)),
+                    usedFraction: extra.usedFraction
+                )
+            }
+
+            if vps.snapshot?.rootDevice == nil, vps.snapshot?.fleetExtraDevice == nil {
+                Text(vps.isLoading ? "Connecting to server…" : "No server disk reading yet")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func quickStorageRow(name: String, icon: String, freeBytes: UInt64, usedFraction: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+                Text(name)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+                Spacer()
+                if let fraction = usedFraction {
+                    Text("\(HogFormat.memory(freeBytes)) free (\(Int(fraction * 100))%)")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Severity.forDisk(fraction).color)
+                } else {
+                    Text("\(HogFormat.memory(freeBytes)) free")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
-        }
-        .frame(height: quickActivityHeight)
-        .onHover { inside in
-            withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
-        }
-    }
-
-    /// How many activity rows the list shows: three until the pointer is over
-    /// it, then more, with the rest a scroll away.
-    private var activityRowLimit: Int {
-        activityHovered ? 8 : 3
-    }
-
-    private var quickActivityHeight: CGFloat {
-        let visible = min(activityRowLimit, max(store.rows.count, 1))
-        return CGFloat(visible) * 15 + 4
-    }
-
-    /// The server's headline, which opens the dashboard on the server scope.
-    private var quickServerButton: some View {
-        Button {
-            hostScope = .server
-            DetachedWindowManager.shared.openDetachedWindow(store: store)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Server").fontWeight(.semibold)
-                if let snapshot = store.maintain.vpsStore.snapshot {
-                    Text(snapshot.host).lineLimit(1)
-                    HStack {
-                        Text("CPU \(snapshot.headline?.cpuText ?? "—")")
-                        Text("RAM \(snapshot.headline?.memoryText ?? "—")")
-                        Spacer()
-                        Text(snapshot.relativeTimeString())
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                    if let fraction = usedFraction {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Severity.forDisk(fraction).color)
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(fraction))))
                     }
-                    .foregroundStyle(.secondary)
-                } else {
-                    Text("No readings yet").foregroundStyle(.secondary)
                 }
             }
+            .frame(height: 3.5)
         }
-        .buttonStyle(.plain)
     }
 
-    private var openDashboardButton: some View {
-        Button("Open Dashboard") {
-            DetachedWindowManager.shared.openDetachedWindow(store: store)
+    // MARK: - Activity Section
+
+    @StateObject private var serverActivityControl = ServerControl()
+
+    /// The server's processes, as its own collector saw them.
+    private var serverProcesses: [VPSProcess] {
+        store.maintain.vpsStore.snapshot?.processes ?? []
+    }
+
+    private var activitySection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Top Activity")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Spacer()
+            }
+
+            // Mac on the left half, server on the right half, so the two
+            // lists read against each other with no toggle in between.
+            HStack(alignment: .top, spacing: 6) {
+                macActivityColumn
+                if !store.maintain.vpsStore.configuredHost.isEmpty {
+                    serverActivityColumn
+                }
+            }
+            .onHover { inside in
+                withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
+            }
+
+            if let outcome = serverActivityControl.lastOutcome {
+                Text(outcome.message).font(.system(size: 9)).foregroundStyle(.secondary)
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .frame(maxWidth: .infinity)
+    }
+
+    private var macActivityColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Image(systemName: "laptopcomputer")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Mac")
+                    .font(.system(size: 9.5, weight: .medium))
+                Spacer()
+                Text("\(store.rows.count) processes")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
+                HStack(spacing: 6) {
+                    Text(row.name)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
+                    Text(HogFormat.memory(row.memoryBytes))
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if store.rows.isEmpty {
+                Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var serverActivityColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Server")
+                    .font(.system(size: 9.5, weight: .medium))
+                Spacer()
+                Text("\(serverProcesses.count) processes")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(serverProcesses.prefix(activityRowLimit)) { process in
+                HStack(spacing: 6) {
+                    Text(process.name)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .lineLimit(1)
+                    if let container = process.container, !container.isEmpty {
+                        Text(container)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Text(String(format: "%.0f%%", process.cpuPercent))
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(process.cpuPercent >= 100 ? .orange : .primary)
+                    Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
+                                         control: serverActivityControl)
+                }
+            }
+            if serverProcesses.isEmpty {
+                Text("No processes in the server's latest reading.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var activityRowLimit: Int {
+        activityHovered ? 6 : 3
     }
 
     /// One wording for every volume: how much of it is spoken for, and how
@@ -557,91 +1153,116 @@ struct HogHunterPanel: View {
                                   freeBytes: diskSpace.freeBytes)
     }
 
-    private var capacityCards: some View {
-        HStack(alignment: .top, spacing: 8) {
-            capacityCard("Internal", value: quickInternalText,
-                         percent: store.diskSpace.map { $0.usedFraction * 100 })
-            capacityCard("External", value: externalCapacityText,
-                         percent: externalDrives.count == 1 ? externalDrives[0].usedPercent : nil)
-            capacityCard("Time Machine", value: timeMachineCapacityText,
-                         percent: timeMachineDrives.count == 1 ? timeMachineDrive?.usedPercent : nil)
-        }
+    /// Internal plus one card per mounted drive, each card under the drive's
+    /// own name.  No card is keyed to a fixed drive name, so a Mac with no
+    /// Time Machine destination - or a backup volume that is renamed or
+    /// repurposed - shows exactly the drives it actually has, and nothing
+    /// reads "Not identified" for a drive that is simply gone.
+    private var mountedDrivePageCount: Int {
+        max(1, (mountedDrives.rows.count + 4) / 5)
     }
 
-    private var timeMachineDrives: [MountedDriveUsage] {
-        mountedDrives.rows.filter { $0.name.localizedCaseInsensitiveContains("Time Machine") }
+    static func clampedMountedDrivePage(_ page: Int, count: Int) -> Int {
+        min(max(0, page), max(1, (count + 4) / 5) - 1)
     }
 
-    private var timeMachineDrive: MountedDriveUsage? {
-        timeMachineDrives.first
+    private var currentMountedDrivePage: Int {
+        Self.clampedMountedDrivePage(mountedDrivePage, count: mountedDrives.rows.count)
     }
 
-    private var externalDrives: [MountedDriveUsage] {
-        // Every mounted Time Machine destination belongs in the Time Machine card, not
-        // the External one, so match on the name rather than the single selected id.
-        mountedDrives.rows.filter { !$0.name.localizedCaseInsensitiveContains("Time Machine") }
+    private var pagedMountedDrives: [MountedDriveUsage] {
+        Array(mountedDrives.rows.dropFirst(currentMountedDrivePage * 5).prefix(5))
     }
 
-    private var externalCapacityText: String {
-        if externalDrives.count > 1 {
-            return selectedTab == .storage ? "\(externalDrives.count) drives · details below"
-                : "\(externalDrives.count) drives · see Storage"
-        }
-        return externalDrives.first.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var timeMachineCapacityText: String {
-        if timeMachineDrives.count > 1 {
-            return selectedTab == .storage ? "\(timeMachineDrives.count) destinations · details below"
-                : "\(timeMachineDrives.count) destinations · see Storage"
-        }
-        return timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var unrecognizedDriveText: String {
-        (!driveReadAttempted || mountedDrives.isRefreshing) && mountedDrives.rows.isEmpty
-            ? "Reading…" : "Not identified"
-    }
-
-    private var quickExternalText: String {
-        if externalDrives.count > 1 {
-            let highest = externalDrives.compactMap(\.usedPercent).max()
-            return highest.map { "\(externalDrives.count) drives · up to \(Int($0.rounded()))% used" }
-                ?? "\(externalDrives.count) drives · see Storage"
-        }
-        return externalDrives.first.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var quickExternalColor: Color {
-        guard let highest = externalDrives.compactMap(\.usedPercent).max() else { return .secondary }
-        return Severity.forDisk(highest / 100).color
-    }
-
-    private var quickTimeMachineText: String {
-        if timeMachineDrives.count > 1 {
-            let highest = timeMachineDrives.compactMap(\.usedPercent).max()
-            return highest.map { "\(timeMachineDrives.count) backups · up to \(Int($0.rounded()))% used" }
-                ?? "\(timeMachineDrives.count) backups · see Storage"
-        }
-        return timeMachineDrive.map(quickDriveText) ?? unrecognizedDriveText
-    }
-
-    private var quickTimeMachineColor: Color {
-        guard let highest = timeMachineDrives.compactMap(\.usedPercent).max() else { return .secondary }
-        return Severity.forDisk(highest / 100).color
-    }
-
-    private func driveDetails(_ title: String, drives: [MountedDriveUsage]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 11, weight: .semibold))
-            ForEach(drives) { drive in
-                HStack {
-                    Text(drive.name).lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(capacityAmountsText(drive)).lineLimit(1)
-                }
-                .font(.system(size: 10))
+    @ViewBuilder private var mountedDrivePageControls: some View {
+        if mountedDrivePageCount > 1 {
+            HStack {
+                Button("Previous") { mountedDrivePage = currentMountedDrivePage - 1 }
+                    .disabled(currentMountedDrivePage == 0)
+                Spacer()
+                Text("Drives \(currentMountedDrivePage * 5 + 1)-\(min((currentMountedDrivePage + 1) * 5, mountedDrives.rows.count)) of \(mountedDrives.rows.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Next") { mountedDrivePage = currentMountedDrivePage + 1 }
+                    .disabled(currentMountedDrivePage == mountedDrivePageCount - 1)
             }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    private var capacityCards: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: 3)
+        return VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                capacityCard("Internal", value: quickInternalText,
+                             percent: store.diskSpace.map { $0.usedFraction * 100 })
+                ForEach(pagedMountedDrives) { drive in
+                    capacityCard(drive.name, value: quickDriveText(drive),
+                                 percent: drive.usedPercent)
+                }
+                if mountedDrives.rows.isEmpty, !driveReadAttempted || mountedDrives.isRefreshing {
+                    capacityCard("External", value: "Reading…", percent: nil)
+                }
+            }
+            mountedDrivePageControls
+        }
+    }
+
+    /// The mounted volumes, each with the path it is mounted at.
+    ///
+    /// The prior layout listed the drives with their mount paths and a
+    /// severity bar.  The redesigned panel shows capacity cards only, so a
+    /// drive that was nearly full looked the same as one with room to spare,
+    /// and the path a drive was mounted at was hidden in a tooltip.
+    private var mountedDriveList: some View {
+        let drives = StorageDriveList.rows(boot: store.diskSpace, external: mountedDrives.rows)
+        return Group {
+            if !drives.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Mounted Drives").font(.system(size: 11, weight: .semibold))
+                    ForEach(drives) { drive in
+                        mountedDriveRow(drive)
+                    }
+                }
+            }
+        }
+    }
+
+    private func mountedDriveRow(_ drive: MountedDriveUsage) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Label(drive.name, systemImage: drive.path == "/" ? "internaldrive" : "externaldrive")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(drive.usedPercent.map { String(format: "%.0f%% used", $0) } ?? "unavailable")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(driveSeverityColor(drive.severity))
+            }
+            Text(drive.path)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let percent = drive.usedPercent {
+                ProgressView(value: percent, total: 100)
+                    .tint(driveSeverityColor(drive.severity))
+            }
+            Text(capacityAmountsText(drive))
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .help(drive.path)
+    }
+
+    private func driveSeverityColor(_ severity: MountedDriveUsage.Severity) -> Color {
+        switch severity {
+        case .normal: return .green
+        case .warning: return .orange
+        case .critical: return .red
+        case .unavailable: return .secondary
         }
     }
 
@@ -662,6 +1283,7 @@ struct HogHunterPanel: View {
     private func capacityCard(_ title: String, value: String, percent: Double?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
             Text(value).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
             if let percent { ProgressView(value: percent, total: 100) }
         }
@@ -695,6 +1317,9 @@ struct HogHunterPanel: View {
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { break }
             }
+        }
+        .onChange(of: mountedDrives.rows.count) { _ in
+            mountedDrivePage = currentMountedDrivePage
         }
         .onChange(of: selectedTab) { tab in
             if tab == .storage { hasVisitedStorage = true }
@@ -735,12 +1360,11 @@ struct HogHunterPanel: View {
 
     // MARK: - Metrics
 
-    /// The menu-bar quick view has a fixed width and a content-fitting height.
-    static let panelWidth: CGFloat = 360
-    /// The maximum expected quick-view height, including an optional server
-    /// summary.  The Summary mode of the menu bar window is taller than this
-    /// on purpose and is not measured against it.
-    static let panelHeight: CGFloat = 470
+    /// The menu-bar quick view has a fixed width and a content-fitting height.  It is twice as wide as it once was so the Mac sits on the left half and the server on the right half of every section.
+    static let panelWidth: CGFloat = 720
+    /// The maximum expected quick-view height for the consolidated menu bar
+    /// window with graphical CPU meters, RAM, storage of all kinds and alerts.
+    static let panelHeight: CGFloat = 640
     static let dashboardWidth: CGFloat = 900
     static let dashboardHeight: CGFloat = 700
     static let dashboardMinimumWidth: CGFloat = 860
@@ -775,9 +1399,9 @@ struct HogHunterPanel: View {
             ? "1 process is included."
             : "\(count) processes are included."
         let forced = count == 1
-            ? "Force Quit ends 1 process immediately.  Unsaved work is lost."
-            : "Force Quit ends \(count) processes immediately.  Unsaved work is lost."
-        return "Asks \(row.name) to quit.  It may show a save prompt or refuse.  \(included)"
+            ? "Force Quit ends 1 process immediately.\u{00A0} Unsaved work is lost."
+            : "Force Quit ends \(count) processes immediately.\u{00A0} Unsaved work is lost."
+        return "Asks \(row.name) to quit.\u{00A0} It may show a save prompt or refuse.\u{00A0} \(included)"
             + "\n\n" + forced
     }
 
@@ -917,7 +1541,7 @@ struct HogHunterPanel: View {
                 text: text,
                 severity: severity,
                 help: isCharging ? "Charging (\(pct)%)." : isBattery
-                    ? "Running on battery (\(pct)%).  High CPU processes increase discharge rate."
+                    ? "Running on battery (\(pct)%).\u{00A0} High CPU processes increase discharge rate."
                     : "Battery at \(pct)%."
             ))
         }
@@ -1010,7 +1634,7 @@ struct HogHunterPanel: View {
     private var controls: some View {
         HStack(alignment: .bottom, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("TIME")
+                Text("Time")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
                 SegmentedToggleGroup(
@@ -1021,7 +1645,7 @@ struct HogHunterPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("SHOW")
+                Text("Show")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
                 SegmentedToggleGroup(
@@ -1032,7 +1656,7 @@ struct HogHunterPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("SORT")
+                Text("Sort")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(.secondary)
                 SegmentedToggleGroup(
@@ -1101,7 +1725,7 @@ struct HogHunterPanel: View {
     private var emptyMessage: String {
         if !store.hasBaseline { return "Measuring…" }
         if store.window == .now { return "Nothing heavy right now." }
-        return "No history yet.  Leave Hog Hunter open to build it."
+        return "No history yet.\u{00A0} Leave Hog Hunter open to build it."
     }
 
     // MARK: - Footer
@@ -1114,7 +1738,7 @@ struct HogHunterPanel: View {
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            Text("CPU % relative to all \(max(1, store.pulse.coreCount)) cores")
+            Text(store.scaleLegend)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
         }
@@ -1270,6 +1894,13 @@ final class MenuBarAnchorView: NSView {
         }
         guard let window = self.window else { return }
 
+        // Configure window transparency so the triangular beak and rounded
+        // corners are transparent outside the DockedPanelShape, connecting
+        // seamlessly to the menu bar status button like CodeCaps.
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+
         moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window,
@@ -1306,6 +1937,9 @@ final class MenuBarAnchorView: NSView {
 
     func resolveAnchor() {
         guard let window = self.window, window.frame.width > 0 else { return }
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
         let winW = window.frame.width
         let anchor = Self.findStatusItemMidX()
 

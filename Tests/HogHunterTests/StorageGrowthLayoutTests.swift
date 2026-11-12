@@ -6,6 +6,18 @@ import XCTest
 
 @MainActor
 final class StorageGrowthLayoutTests: XCTestCase {
+    func testMountedDrivePageStaysClampedAfterRemovalAndReplug() {
+        var page = HogHunterPanel.clampedMountedDrivePage(2, count: 12)
+        XCTAssertEqual(page, 2)
+        page = HogHunterPanel.clampedMountedDrivePage(page, count: 3)
+        XCTAssertEqual(page, 0)
+        page = HogHunterPanel.clampedMountedDrivePage(page, count: 12)
+        XCTAssertEqual(page, 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(2, count: 0), 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(-1, count: 12), 0)
+        XCTAssertEqual(HogHunterPanel.clampedMountedDrivePage(2, count: 6), 1)
+    }
+
     private var dashboardStageWidth: CGFloat { HogHunterPanel.dashboardWidth - 154 - 24 - 36 }
 
     func testCompactRowsAndServerContentRenderWithinPanelWidth() async throws {
@@ -60,7 +72,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
                      "/root/.config/muse", "/root/.minimax", "/root/.minimax-code",
                      "/root/.npm", "/root/.cache"]
         let toolNames = ["Claude Code", "Codex", "Muse", "MiniMax Code", "Fleet CLI", "Fleet Listener",
-                         "Fleet Recall", "Shellular", "Docker", "Caddy", "PostgreSQL", "Redis"]
+                         "Fleet Recall", "Shellular", "Docker", "PostgreSQL", "Redis"]
         let states: [VPSToolStatus.State] = [.running, .stopped, .absent, .unknown]
         let snapshot = VPSStatusSnapshot(
             generatedAt: ISO8601DateFormatter().string(from: now), host: "fleet-hetzner-nbg1",
@@ -120,6 +132,113 @@ final class StorageGrowthLayoutTests: XCTestCase {
         try render(host, size: CGSize(width: width, height: 170), name: "hh165-external-drives")
     }
 
+    /// The capacity cards must follow the drives that are actually mounted,
+    /// whatever they are named: no fixed "Time Machine" slot.  A Mac with no
+    /// backup destination - or none, or three, or a backup volume renamed to
+    /// ordinary storage - renders the drives it has and nothing else.
+    func testCapacityCardsFollowMountedDrivesOfAnyName() async throws {
+        var driveSets: [[MountedDriveCandidate]] = [
+            // No external drives at all.
+            [],
+            // One ordinary external drive, no backup destination.
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 143_000_000_000)],
+            // A backup volume named without a space, plus repurposed storage:
+            // names that must not be classified, filtered or dropped.
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 143_000_000_000),
+             MountedDriveCandidate(name: "TimeMachine500GB", path: "/Volumes/TimeMachine500GB", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 47_000_000_000),
+             MountedDriveCandidate(name: "Storage", path: "/Volumes/Storage", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 500_000_000_000, availableBytes: 490_000_000_000)],
+        ]
+        driveSets.append((0..<12).map { index in
+            MountedDriveCandidate(name: "Drive \(index)", path: "/Volumes/Drive\(index)",
+                isLocal: true, isHidden: false, isExternalPhysical: true,
+                totalBytes: 500_000_000_000, availableBytes: 100_000_000_000)
+        })
+        for (index, candidates) in driveSets.enumerated() {
+            let mounted = MountedDriveStore(probe: { candidates })
+            await mounted.refresh()
+            XCTAssertEqual(mounted.rows.count, candidates.count)
+            let suite = "hh-capacity-cards-\(UUID().uuidString)"
+            let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+            preferences.set("This Mac", forKey: "dashboardHostScope")
+            defer { preferences.removePersistentDomain(forName: suite) }
+            let store = populatedStore(preferences)
+
+            let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: mounted)
+                .environmentObject(store).defaultAppStorage(preferences))
+            quick.appearance = NSAppearance(named: .aqua)
+            let quickSize = quick.fittingSize
+            XCTAssertEqual(quickSize.width, HogHunterPanel.panelWidth, accuracy: 1)
+            XCTAssertGreaterThan(quickSize.height, 200)
+            XCTAssertLessThanOrEqual(quickSize.height, HogHunterPanel.panelHeight)
+            try render(quick, size: CGSize(width: HogHunterPanel.panelWidth, height: HogHunterPanel.panelHeight), name: "hh-capacity-quick-\(index)")
+
+            let overviewSize = CGSize(width: HogHunterPanel.dashboardWidth, height: HogHunterPanel.dashboardHeight)
+            let overview = NSHostingView(rootView: HogHunterPanel(mountedDrives: mounted)
+                .environmentObject(store).defaultAppStorage(preferences)
+                .frame(width: overviewSize.width, height: overviewSize.height))
+            overview.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(overview.fittingSize.width, overviewSize.width + 1)
+            try render(overview, size: overviewSize, name: "hh-capacity-cards-\(index)")
+        }
+    }
+
+    /// The glance view puts the Mac on the left half and the server on the
+    /// right half of every section.  This draws it with a server attached and
+    /// checks that the panel keeps its fixed width and height ceiling.
+    func testQuickViewSplitsMacLeftAndServerRight() async throws {
+        let json = """
+        {"generated_at": "2026-10-18T19:15:03Z", "host": "fleet-hetzner-nbg1",
+         "devices": {"root": {"mount": "/", "free_bytes": 61000000000, "note": "301GB disk: OS"},
+                     "fleet_extra": {"mount": "/mnt/fleet-extra", "free_bytes": 62000000000, "note": "246GB disk"}},
+         "cpu": {"pct": 24.8, "load1": 3.07, "cores": 16},
+         "memory": {"total_bytes": 32853925888, "used_bytes": 9095159808, "available_bytes": 23758766080},
+         "processes": [
+           {"pid": 11, "name": "node", "cpu_percent": 88.0, "memory_bytes": 2100000000, "container": "botfleet"},
+           {"pid": 12, "name": "postgres", "cpu_percent": 41.0, "memory_bytes": 900000000},
+           {"pid": 13, "name": "dockerd", "cpu_percent": 6.0, "memory_bytes": 300000000}]}
+        """.data(using: .utf8)!
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: json)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hoghunter-split-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        try Data(#"{"coolify_ssh_host": "fleet-hetzner-nbg1"}"#.utf8)
+            .write(to: directory.appendingPathComponent("config.json"))
+        let maintain = MaintainStore(supportDirectory: directory, repoRoot: directory,
+                                     launcher: { _ in XCTFail("no launch"); return true },
+                                     vpsFetcher: { _ in snapshot })
+        maintain.vpsStore.fetch(force: true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNotNil(maintain.vpsStore.snapshot)
+
+        let drives = MountedDriveStore(probe: {
+            [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
+                                   isHidden: false, isExternalPhysical: true,
+                                   totalBytes: 1_000_000_000_000, availableBytes: 622_000_000_000)]
+        })
+        await drives.refresh()
+        let suite = "hh219-split-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = populatedStore(preferences, maintain: maintain)
+
+        let quick = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences))
+        quick.appearance = NSAppearance(named: .aqua)
+        let size = quick.fittingSize
+        XCTAssertEqual(size.width, HogHunterPanel.panelWidth, accuracy: 1)
+        XCTAssertLessThanOrEqual(size.height, HogHunterPanel.panelHeight)
+        try render(quick, size: size, name: "hh219-quick-split")
+    }
+
     func testQuickViewAndInitialStorageRenderWithMountedDrives() async throws {
         let drives = MountedDriveStore(probe: {
             [MountedDriveCandidate(name: "External", path: "/Volumes/External", isLocal: true,
@@ -148,7 +267,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         let quickSize = quick.fittingSize
         XCTAssertEqual(quickSize.width, HogHunterPanel.panelWidth, accuracy: 1)
         XCTAssertGreaterThan(quickSize.height, 200)
-        XCTAssertLessThan(quickSize.height, HogHunterPanel.panelHeight)
+        XCTAssertLessThanOrEqual(quickSize.height, HogHunterPanel.panelHeight)
         try render(quick, size: quickSize, name: "hh174-quick-external")
 
         for (name, size) in [
@@ -194,10 +313,10 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
     }
 
-    private func populatedStore(_ preferences: UserDefaults) -> HogStore {
+    private func populatedStore(_ preferences: UserDefaults, maintain: MaintainStore? = nil) -> HogStore {
         let store = HogStore(historyURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("hh174-populated-layout-\(UUID().uuidString).sqlite"),
-            defaults: preferences, startImmediately: false)
+            defaults: preferences, maintain: maintain, startImmediately: false)
         XCTAssertFalse(store.tick(), "the layout test host must never start the real sampler")
         var pulse = MachinePulse.empty
         pulse.cpuPercent = 68

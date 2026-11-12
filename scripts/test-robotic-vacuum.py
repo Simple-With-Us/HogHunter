@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -598,6 +599,14 @@ class TestRunOutcome(unittest.TestCase):
         self.assertEqual(run_outcome([_step("a", ran), _step("b", failed)]), RunOutcome.PARTIAL)
         self.assertEqual(run_outcome([_step("a", skipped), _step("b", failed)]), RunOutcome.FAILED)
         self.assertEqual(run_outcome([_step("b", failed)]), RunOutcome.FAILED)
+        lock_skip = _step("housekeeper_lock", skipped)
+        self.assertEqual(run_outcome([_step("b", failed), lock_skip]), RunOutcome.FAILED)
+        self.assertEqual(run_outcome([_step("a", ran), _step("b", failed), lock_skip]), RunOutcome.PARTIAL)
+        from vacuum.scheduler import run_skipped_for_lock
+        broken = RunRecord("broken", TriggerKind.FULL, started_at=1,
+                           steps=[_step("b", failed), lock_skip])
+        broken.finish()
+        self.assertFalse(run_skipped_for_lock(broken))
         # The sampler only reads the host.  It never counts as the work that rescued a run.
         self.assertEqual(run_outcome([_step("resource_sample", ran), _step("b", failed)]), RunOutcome.FAILED)
         self.assertEqual(
@@ -640,7 +649,7 @@ class TestRunOutcome(unittest.TestCase):
         clean = RunRecord("y", TriggerKind.WATCH, started_at=time.time())
         clean.steps.append(_step("housekeeper_lock", StepStatus.SKIPPED, "held"))
         clean.finish(0, summary="watch skipped; lock held")
-        self.assertEqual((clean.exit_code, clean.outcome, clean.summary), (0, "ok", "watch skipped; lock held"))
+        self.assertEqual((clean.exit_code, clean.outcome, clean.summary), (0, "skipped", "watch skipped; lock held"))
         odd = RunRecord("z", TriggerKind.FULL, started_at=time.time())
         odd.steps.append(_step("a", StepStatus.FAILED))
         odd.finish(0)
@@ -884,7 +893,7 @@ class TestHogHunterReclaimStep(_EngineHome):
         out = self.run_step((0, _report(applied_count=600, applied_bytes=1_200_000, budget_exhausted=True, remaining_count=1110), "", False))
         freed, reason, status = out[0]
         self.assertEqual((freed, status), (1_200_000, StepStatus.RAN))
-        self.assertIn("1110 left for the next run", reason)
+        self.assertIn("1110 discovered candidates left for the next run", reason)
 
     def test_a_cleaner_that_overruns_its_hard_stop_fails_with_a_reason(self):
         (freed, reason, status), _call = self.run_step((-1, "", "", True))
@@ -982,6 +991,274 @@ class TestHogHunterReclaimStep(_EngineHome):
         step = next(s for s in record.steps if s.step_id == "janitor_cache_reclaim")
         self.assertEqual(step.status, StepStatus.RAN)
         self.assertEqual(step.bytes_freed, 1234)
+
+
+class TestMaintenanceTimingAndIncomplete(_EngineHome):
+    SAMPLE = {"disk_sample_ok": True, "disk_free_gb": 8.0, "load1": 0, "swap_used_pct": 0}
+
+    def test_planning_and_both_checkpoints_count_once_including_failure(self):
+        from vacuum.engine import VacuumEngine
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                now = [0.0]
+                def advance(seconds):
+                    now[0] += seconds
+                def checkpoint(record):
+                    advance(2)
+                def plan(*args, **kwargs):
+                    advance(7)
+                    if failed:
+                        raise ValueError("invalid synthetic plan")
+                    return janitor.RetirePlan(ok=True)
+                def dispatch(*args, **kwargs):
+                    advance(3)
+                    return 100, "synthetic apply", StepStatus.RAN
+                engine = VacuumEngine(self.cfg, home=self.home, monotonic=lambda: now[0], on_step=checkpoint)
+                with patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+                     patch("vacuum.engine.plan_retire_worktrees", side_effect=plan), \
+                     patch.object(engine, "_dispatch", side_effect=dispatch):
+                    record = engine.run_single_step("janitor_worktree_retire")
+                self.assertEqual(len(record.steps), 1)
+                step = record.steps[0]
+                self.assertEqual(step.duration_ms, 11000 if failed else 14000)
+                self.assertEqual(record.overhead_duration_ms, 0)
+                self.assertEqual((record.current_step, record.current_target), ("", ""))
+                self.assertEqual(step.status, StepStatus.FAILED if failed else StepStatus.RAN)
+
+    def test_outside_sampling_is_measured_as_overhead(self):
+        from vacuum.engine import VacuumEngine
+        now = [0.0]
+        def sample():
+            now[0] += 5
+            return self.SAMPLE
+        def dispatch(*args):
+            now[0] += 3
+            return 0, "no eligible files", StepStatus.RAN
+        engine = VacuumEngine(self.cfg, home=self.home, monotonic=lambda: now[0])
+        with patch("vacuum.engine.sample_mac", side_effect=sample), patch.object(engine, "_dispatch", side_effect=dispatch):
+            record = engine.run_single_step("pm2_logs")
+        self.assertEqual(record.steps[0].duration_ms, 3000)
+        self.assertEqual(record.overhead_duration_ms, 5000)
+
+    def test_backwards_monotonic_clock_is_not_hidden_by_overhead_clamp(self):
+        self.engine._monotonic = lambda: 1
+        record = RunRecord("r", TriggerKind.JANITOR, started_at=1)
+        with self.assertRaisesRegex(ValueError, "clock moved backwards"):
+            self.engine._finish_record(record, 2)
+        self.assertEqual(record.ended_at, 0)
+
+    def test_truncated_scans_retain_work_but_never_report_complete(self):
+        self.fake_cleaner()
+        for count, freed in ((0, 0), (2, 4096)):
+            with self.subTest(count=count):
+                report = _report(applied_count=count, actionable_count=count, applied_bytes=freed,
+                                 scan_truncated=True, budget_exhausted=True, remaining_count=0)
+                with patch.object(sys, "platform", "darwin"), \
+                     patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+                     patch("vacuum.engine._run_in_own_group", return_value=(0, report, "", False)):
+                    record = self.engine.run_single_step("hoghunter_reclaim")
+                step = record.steps[0]
+                self.assertEqual((record.outcome, record.exit_code, record.bytes_freed), ("partial", 0, freed))
+                self.assertEqual(step.status, StepStatus.RAN)
+                self.assertTrue(step.incomplete)
+                self.assertIn(f"removed {count} of", step.reason)
+                self.assertIn("unscanned remainder unknown", step.reason)
+                self.assertIn("0 discovered candidates", step.reason)
+                self.assertIn("incomplete (hoghunter_reclaim)", record.summary)
+                again = RunRecord.from_dict(json.loads(json.dumps(record.as_dict())))
+                self.assertTrue(again.steps[0].incomplete)
+                self.assertEqual(again.overhead_duration_ms, record.overhead_duration_ms)
+
+    def test_actual_cleaner_json_flags_and_observed_delta_feed_partial_outcome(self):
+        # Exercise the actual producer/consumer contract from merged main;
+        # all discovery, observations and apply are synthetic, with no scan.
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("hh208_cleaner_contract", str(REPO / "scripts/hoghunter-clean"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cleaner = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: cleaner}):
+            loader.exec_module(cleaner)
+        candidate = cleaner.Candidate("synthetic", str(self.home / "synthetic"), 9_000_000_000, "synthetic")
+        def scan(*args, skip=()):
+            cleaner._SCAN_BUDGET_EXHAUSTED = True
+            return [candidate]
+        def apply(item):
+            item.applied = True
+        before = cleaner.Band(8, 99, 0, 0, False, cpu_idle_pct=100)
+        after = cleaner.Band(8.25, 99, 0, 0, False, cpu_idle_pct=100)
+        output = io.StringIO()
+        with patch.object(cleaner, "scan", side_effect=scan), \
+             patch.object(cleaner, "apply_candidate", side_effect=apply), \
+             patch.object(cleaner, "read_band", side_effect=[before, after]), \
+             patch.object(cleaner, "budget_left", return_value=600), \
+             patch.object(cleaner.shutil, "which", return_value=None), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cleaner.main(["--clean", "--json", "--budget-sec=600"]), 0)
+        produced = json.loads(output.getvalue())
+        self.assertEqual((produced["scan_truncated"], produced["budget_exhausted"], produced["budget_spent"]),
+                         (True, True, False))
+        self.assertEqual(produced["remaining_count"], 0)
+        self.assertEqual(produced["applied_bytes"], 9_000_000_000)
+        self.assertEqual(produced["disk_free_delta_gb"], 0.25)
+        self.fake_cleaner()
+        with patch.object(sys, "platform", "darwin"), \
+             patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+             patch("vacuum.engine._run_in_own_group", return_value=(0, output.getvalue(), "", False)):
+            record = self.engine.run_single_step("hoghunter_reclaim")
+        self.assertEqual(record.outcome, "partial")
+        self.assertEqual(record.bytes_freed, 268_435_456)
+        self.assertTrue(record.steps[0].incomplete)
+        self.assertIn("1 step(s) incomplete", record.summary)
+
+    def test_mixed_failure_and_incomplete_keep_failure_and_byte_evidence(self):
+        record = RunRecord("r", TriggerKind.FULL, started_at=1, steps=[
+            StepResult("reclaim", "Reclaim", StepStatus.RAN, bytes_freed=1024, incomplete=True),
+            StepResult("other", "Other", StepStatus.FAILED, reason="synthetic refusal")])
+        record.finish()
+        self.assertEqual((record.outcome, record.exit_code, record.bytes_freed), ("partial", 0, 1024))
+        self.assertIn("failed (other)", record.summary)
+        self.assertIn("incomplete (reclaim)", record.summary)
+        record.steps[0] = StepResult("resource_sample", "Sample", StepStatus.RAN, incomplete=True)
+        record.finish()
+        self.assertEqual((record.outcome, record.exit_code), ("failed", 1))
+
+    def test_old_records_default_to_complete_and_unknown_overhead(self):
+        record = RunRecord.from_dict({"run_id": "old", "trigger": "janitor", "started_at": 1,
+                                      "steps": [{"step_id": "old", "status": "ran"}]})
+        self.assertFalse(record.steps[0].incomplete)
+        self.assertIsNone(record.overhead_duration_ms)
+        self.assertEqual(record.outcome, "ok")
+
+    def test_incomplete_host_observation_is_visible_without_fabricated_pressure(self):
+        sample = {**self.SAMPLE, "sample_complete": False, "disk_sample_ok": False}
+        with patch("vacuum.engine.sample_mac", return_value=sample):
+            record, hits, cleaned = self.engine.run_watch_tick({}, None)
+        self.assertEqual(hits, [])
+        self.assertFalse(cleaned)
+        self.assertEqual(record.outcome, "partial")
+        self.assertTrue(record.steps[0].incomplete)
+        self.assertIn("unknown", record.steps[0].reason)
+
+    def test_watch_sample_is_inside_lock_and_counted_once_as_overhead(self):
+        from vacuum.engine import VacuumEngine
+        now = [0.0]
+        def sample():
+            self.assertTrue(self.engine.lock_path.is_dir())
+            now[0] += 4
+            return {**self.SAMPLE, "disk_free_gb": 100}
+        self.engine = VacuumEngine(self.cfg, home=self.home, monotonic=lambda: now[0])
+        with patch("vacuum.engine.sample_mac", side_effect=sample):
+            record, hits, cleaned = self.engine.run_watch_tick({}, None)
+        self.assertEqual(record.overhead_duration_ms, 4000)
+        self.assertEqual(sum(s.duration_ms for s in record.steps), 0)
+        self.assertEqual((hits, cleaned, record.outcome), ([], False, "ok"))
+
+    def test_watch_lock_skip_never_starts_probe_or_advances_cooldown(self):
+        from vacuum.lock import HousekeeperLock
+        from vacuum.scheduler import run_skipped_for_lock
+        state = {"last_clean_at": 100}
+        with HousekeeperLock(self.engine.lock_path):
+            # Emulate a peer rather than the holder's re-entrant child.
+            with patch.dict(os.environ, {"HOUSEKEEPER_LOCK_OWNER": "0"}), \
+                 patch("vacuum.engine.sample_mac") as sample:
+                record, hits, cleaned = self.engine.run_watch_tick(state, None)
+        sample.assert_not_called()
+        self.assertTrue(run_skipped_for_lock(record))
+        self.assertEqual((hits, cleaned, state), ([], False, {"last_clean_at": 100}))
+
+    def test_nested_watch_observations_merge_once_and_preserve_each_phase(self):
+        for step_id in self.cfg["steps"]:
+            self.cfg["steps"][step_id] = {"enabled": step_id == "hoghunter_reclaim"}
+        for initial_complete in (False, True):
+            for after_disk_ok, after_complete in ((False, False), (True, False), (True, True)):
+                with self.subTest(initial_complete=initial_complete, after_disk_ok=after_disk_ok,
+                                  after_complete=after_complete):
+                    before = {**self.SAMPLE, "sample_complete": initial_complete}
+                    nested = {**self.SAMPLE, "sample_complete": False}
+                    after = {**self.SAMPLE, "sample_complete": after_complete,
+                             "disk_sample_ok": after_disk_ok, "disk_free_gb": 9 if after_disk_ok else 0}
+                    state = {}
+                    with patch("vacuum.engine.sample_mac", side_effect=[before, nested, after]), \
+                         patch.object(self.engine, "_dispatch", return_value=(512, "synthetic applied work", StepStatus.RAN)):
+                        record, hits, cleaned = self.engine.run_watch_tick(state, None)
+                    probes = [s for s in record.steps if s.step_id == "resource_sample"]
+                    self.assertEqual(len(probes), 1)
+                    self.assertEqual(len(record.steps), 2)
+                    self.assertTrue(probes[0].incomplete)
+                    for phase in ("watch check", "cleanup preflight", "after cleanup"):
+                        self.assertEqual(probes[0].reason.count(phase + ":"), 1)
+                    self.assertIn("threshold hit", probes[0].reason)
+                    self.assertIn("after cleanup: host observation " + ("complete" if after_complete else "incomplete")
+                                  + "; disk reading " + ("available" if after_disk_ok else "unknown"), probes[0].reason)
+                    self.assertEqual(state["prev_disk_free_gb"], 9 if after_disk_ok else before["disk_free_gb"])
+                    self.assertTrue(hits)
+                    self.assertTrue(cleaned)
+                    self.assertEqual((record.outcome, record.exit_code, record.bytes_freed), ("partial", 0, 512))
+                    self.assertIn("1 step(s) incomplete (resource_sample)", record.summary)
+
+    def test_complete_scan_with_failed_deletes_preserves_partial_and_failed_rules(self):
+        self.fake_cleaner()
+        for applied, expected_status, expected_outcome, expected_exit in (
+                (2, StepStatus.RAN, "partial", 0), (0, StepStatus.FAILED, "failed", 1)):
+            with self.subTest(applied=applied):
+                report = _report(applied_count=applied, actionable_count=applied + 3, failed_count=3,
+                                 applied_bytes=1024 if applied else 0, scan_truncated=False, budget_exhausted=False)
+                with patch.object(sys, "platform", "darwin"), \
+                     patch("vacuum.engine.sample_mac", return_value=self.SAMPLE), \
+                     patch("vacuum.engine._run_in_own_group", return_value=(0, report, "", False)):
+                    record = self.engine.run_single_step("hoghunter_reclaim")
+                self.assertEqual((record.outcome, record.exit_code), (expected_outcome, expected_exit))
+                self.assertEqual(record.bytes_freed, 1024 if applied else 0)
+                self.assertEqual(record.steps[0].status, expected_status)
+                self.assertTrue(record.steps[0].incomplete, "cleanup incomplete is broader than scan incomplete")
+                self.assertIn("3 could not be removed", record.steps[0].reason)
+                self.assertNotIn("scan incomplete", record.steps[0].reason)
+
+
+class TestPressureProbeBudget(unittest.TestCase):
+    def test_probe_clamps_to_remaining_shared_deadline_and_uses_owned_runner(self):
+        from vacuum import budget, pressure
+        now = [0.0]
+        deadline = budget.WorkBudget(3, lambda: now[0])
+        # run_process is the real owned runner; only its actual spawn is mocked.
+        proc = Mock(pid=123, returncode=0)
+        proc.communicate.return_value = ("ok", "")
+        with budget.scope(deadline), patch.object(pressure.sys, "platform", "darwin"), \
+             patch.object(budget, "spawn", return_value=proc), patch.object(budget, "unregister"):
+            self.assertEqual(pressure._run(["synthetic"]), "ok")
+            proc.communicate.assert_called_once_with(timeout=3)
+            now[0] = 4
+            self.assertEqual(pressure._run(["synthetic"]), "")
+            self.assertEqual(proc.communicate.call_count, 1)
+
+    def test_expired_probe_sample_reports_missing_observations(self):
+        from vacuum import budget, pressure
+        deadline = budget.WorkBudget(0)
+        with budget.scope(deadline), patch.object(pressure.sys, "platform", "darwin"), \
+             patch.object(budget, "spawn") as spawn:
+            sample = pressure.sample_mac()
+        spawn.assert_not_called()
+        self.assertFalse(sample["sample_complete"])
+        self.assertFalse(sample["disk_sample_ok"])
+
+    def test_unavailable_probe_is_a_missing_observation(self):
+        from vacuum import budget, pressure
+        with patch.object(pressure.sys, "platform", "darwin"), \
+             patch.object(budget, "run_process", side_effect=PermissionError("synthetic refusal")):
+            sample = pressure.sample_mac()
+        self.assertFalse(sample["sample_complete"])
+        self.assertFalse(sample["disk_sample_ok"])
+
+    def test_malformed_disk_sample_is_unknown_instead_of_zero_free_pressure(self):
+        from vacuum import pressure
+        df = "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/disk 100 20 invalid 20% /\n"
+        with patch.object(pressure.sys, "platform", "darwin"), \
+             patch.object(pressure, "_run", side_effect=[df, "total = 0M used = 0M", "load averages: 1 2 3"]):
+            sample = pressure.sample_mac()
+        self.assertFalse(sample["disk_sample_ok"])
+        self.assertFalse(sample["sample_complete"])
+        self.assertEqual(evaluate_hits(sample, None, {}), [])
 
 
 class TestCleanMyMacStep(_EngineHome):
@@ -1123,7 +1400,7 @@ class TestStepReasonsArePlural(_EngineHome):
                 # A clean ran a moment ago, so a hit is counted and nothing is cleaned.
                 record, _hits, cleaned = self.engine.run_watch_tick({"last_clean_at": time.time()}, None)
             self.assertFalse(cleaned)
-            self.assertEqual(record.steps[0].reason, expected)
+            self.assertTrue(record.steps[0].reason.endswith("; " + expected), record.steps[0].reason)
 
     def test_the_cleaner_reports_its_item_count_in_the_right_form(self):
         self.fake_cleaner()
@@ -1206,23 +1483,40 @@ class TestRunInOwnGroupErrors(unittest.TestCase):
         proc = Mock()
         proc.pid = 4242
         proc.communicate.side_effect = [OSError(errno.EIO, "Input/output error"), ("", "")]
-        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch("vacuum.engine.os.killpg") as killpg:
+        with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch("vacuum.engine.os.killpg") as killpg, patch("vacuum.budget.group_stopped", return_value=True):
             with self.assertRaises(OSError):
                 _run_in_own_group(["/bin/true"], 5)
-        killpg.assert_called_once_with(4242, signal.SIGKILL)
+        self.assertIn(unittest.mock.call(4242, signal.SIGKILL), killpg.call_args_list)
 
-    def test_a_missing_group_falls_back_to_killing_the_child(self):
+    def test_a_missing_group_is_reaped_without_a_second_pipe_read(self):
         from vacuum.engine import _run_in_own_group
 
         proc = Mock()
         proc.pid = 4242
-        proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("partial", "")]
+        proc.communicate.side_effect = subprocess.TimeoutExpired("x", 1, output=b"partial")
         with patch("vacuum.engine.subprocess.Popen", return_value=proc), patch(
             "vacuum.engine.os.killpg", side_effect=ProcessLookupError
         ):
             code, out, _err, timed_out = _run_in_own_group(["/bin/true"], 1)
-        proc.kill.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=5)
         self.assertEqual((code, out, timed_out), (-1, "partial", True))
+
+    def test_timeout_does_not_retry_a_broken_pipe_read_or_leave_registry(self):
+        from vacuum import budget
+        from vacuum.engine import _run_in_own_group
+        for read_error in (OSError(errno.EIO, "read failed"), ValueError("closed pipe")):
+            proc = Mock()
+            proc.pid = 4242
+            proc.communicate.side_effect = [subprocess.TimeoutExpired("x", 1, output=b"partial"), read_error]
+            with patch("vacuum.engine.subprocess.Popen", return_value=proc), \
+                 patch("vacuum.engine.os.killpg"), \
+                 patch("vacuum.budget.group_stopped", return_value=True):
+                code, out, _err, timed_out = _run_in_own_group(["unused"], 1)
+            self.assertEqual((code, out, timed_out), (-1, "partial", True))
+            proc.communicate.assert_called_once_with(timeout=1)
+            proc.wait.assert_called_once_with(timeout=5)
+            self.assertNotIn(proc.pid, budget._children)
+
 
 
 class TestSpotlightStep(_EngineHome):
@@ -1248,7 +1542,7 @@ class TestSpotlightStep(_EngineHome):
 
     def test_a_macos_refusal_is_a_skip_and_touches_no_daemon(self):
         for code in (errno.EPERM, errno.EACCES):
-            with self.denied_listing(code), patch("vacuum.engine.subprocess.run") as run:
+            with self.denied_listing(code), patch("vacuum.engine.work.run_process") as run:
                 freed, reason, status = self.engine._spotlight_journals()
             self.assertEqual((freed, status), (0, StepStatus.SKIPPED), code)
             self.assertIn("Full Disk Access", reason)
@@ -1261,7 +1555,7 @@ class TestSpotlightStep(_EngineHome):
         for step_id in self.cfg["steps"]:
             self.cfg["steps"][step_id] = {"enabled": step_id in ("spotlight_journals", "pm2_logs")}
         engine = VacuumEngine(self.cfg, home=self.home)
-        with self.denied_listing(errno.EPERM), patch("vacuum.engine.subprocess.run"), patch.object(
+        with self.denied_listing(errno.EPERM), patch("vacuum.engine.work.run_process"), patch.object(
             sys, "platform", "darwin"
         ), patch("vacuum.engine.sample_mac", return_value={"disk_free_gb": 100.0, "load1": 0.0, "swap_used_pct": 0.0}):
             record = engine.run(TriggerKind.FULL)
@@ -1270,7 +1564,7 @@ class TestSpotlightStep(_EngineHome):
         self.assertEqual((record.exit_code, record.outcome), (0, "ok"))
 
     def test_a_refusal_after_the_probe_is_still_a_skip(self):
-        with patch("vacuum.engine.subprocess.run"), patch.object(
+        with patch("vacuum.engine.work.run_process"), patch.object(
             Path, "mkdir", side_effect=PermissionError(errno.EPERM, "Operation not permitted")
         ):
             _freed, reason, status = self.engine._spotlight_journals()
@@ -1290,7 +1584,7 @@ class TestSpotlightStep(_EngineHome):
             self.engine._spotlight_journals()
 
     def test_with_access_it_resets_the_journals_and_counts_the_bytes(self):
-        with patch("vacuum.engine.subprocess.run") as run:
+        with patch("vacuum.engine.work.run_process") as run:
             freed, reason, status = self.engine._spotlight_journals()
         run.assert_called_once()
         self.assertEqual((freed, reason, status), (2000, "journals reset", StepStatus.RAN))
@@ -1548,10 +1842,46 @@ class TestTickWatchdog(unittest.TestCase):
     def test_the_watchdog_exits_the_process_when_the_tick_overruns(self):
         import maintain
 
-        with patch.object(maintain.os, "_exit", create=True) as exit_mock:
+        with patch.object(maintain.os, "_exit", create=True) as exit_mock, patch.object(maintain.work_budget, "terminate_all", return_value=True):
             with patch.object(maintain.time, "sleep"):
                 maintain._watchdog_exit(0.01)
         exit_mock.assert_called_once_with(3)
+
+    def test_watchdog_retains_serialization_until_owned_groups_have_stopped(self):
+        import maintain
+
+        events = []
+        def terminate():
+            events.append("terminate")
+            return events.count("terminate") > 1
+        with patch.object(maintain.work_budget, "terminate_all", side_effect=terminate), \
+             patch.object(maintain.housekeeper_lock, "force_release", side_effect=lambda: events.append("release")), \
+             patch.object(maintain.os, "_exit", side_effect=lambda code: events.append("exit")), \
+             patch.object(maintain.time, "sleep"):
+            maintain._watchdog_exit(0.01)
+        self.assertEqual(events, ["terminate", "terminate", "exit"])
+
+    def test_a_hard_exit_keeps_owner_until_death_then_allows_immediate_recovery(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with tempfile.TemporaryDirectory() as td:
+            lock_path = Path(td) / ".housekeeper.lock"
+            code = (
+                "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+                "from vacuum.lock import HousekeeperLock; import maintain; "
+                "holder = HousekeeperLock(Path(sys.argv[2])); holder.__enter__(); "
+                "maintain._watchdog_exit(0.01)"
+            )
+            child = subprocess.run(
+                [sys.executable, "-c", code, str(REPO / "scripts"), str(lock_path)],
+                capture_output=True, text=True, timeout=15,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": td, "LC_ALL": "C"},
+            )
+            self.assertEqual(child.returncode, 3, child.stderr)
+            self.assertTrue(owner_path_for(lock_path).is_file())
+            with HousekeeperLock(lock_path):
+                self.assertTrue(lock_path.is_dir())
+            self.assertFalse(lock_path.exists())
 
     def test_a_zero_budget_arms_nothing(self):
         import maintain
@@ -1757,6 +2087,37 @@ class TestPartialRunRecord(unittest.TestCase):
         self.assertEqual(partial["run_id"], self.seen[-1].run_id)
         self.assertTrue(partial["steps"])
 
+    def test_a_peer_lock_skip_cannot_erase_or_hide_the_holders_checkpoint(self):
+        holder = RunRecord("holder", TriggerKind.FULL, started_at=100)
+        holder.current_step = "pressure_apps_deps"
+        holder.current_target = "lane/build"
+        holder.steps.append(StepResult("cache", "Cache", StepStatus.RAN, bytes_freed=123))
+        holder.bytes_freed = 123
+        self.store.write_partial_run(holder)
+        peer = RunRecord("peer", TriggerKind.WATCH, started_at=200)
+        peer.steps.append(StepResult("housekeeper_lock", "Lock", StepStatus.SKIPPED))
+        peer.finish()
+        self.store.append_run(peer)
+        self.store.clear_partial_run(peer.run_id)
+        self.assertEqual(self.store.load_partial_run()["run_id"], "holder")
+        self.assertIsNone(self.store.last_run_for("watch"))
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=201)
+        self.assertEqual(status["partial_run"]["run_id"], "holder")
+        self.assertEqual(status["partial_run"]["current_step"], "pressure_apps_deps")
+        self.assertEqual(status["partial_run"]["bytes_freed"], 123)
+
+    def test_legacy_ok_lock_skip_does_not_replace_the_completed_cadence(self):
+        done = RunRecord("done", TriggerKind.FULL, started_at=100)
+        done.finish()
+        self.store.append_run(done)
+        peer = RunRecord("peer", TriggerKind.FULL, started_at=200)
+        peer.steps.append(StepResult("housekeeper_lock", "Lock", StepStatus.SKIPPED))
+        peer.finish()
+        peer.outcome = "ok"  # Older writers used ok for this skipped run.
+        self.store.append_run(peer)
+        self.assertEqual(self.store.last_run_for("full")["run_id"], "done")
+
     def test_a_dry_run_writes_no_partial_record(self):
         # The dry-run contract: a plan reports what it would do and writes
         # nothing.  A plan has reclaimed nothing, so there is nothing to
@@ -1778,6 +2139,14 @@ class TestPartialRunRecord(unittest.TestCase):
             status = build_status(self.store, self.cfg, now=time.time())
         self.assertIsNotNone(status["partial_run"])
         self.assertEqual(status["partial_run"]["run_id"], record.run_id)
+
+    def test_a_finished_run_leaves_no_partial_in_the_status(self):
+        record, _hits, _cleaned = self.run_watch()
+        self.store.append_run(record)
+        self.store.clear_partial_run()
+        with patch("vacuum.alerts.launchd_loaded", return_value=False):
+            status = build_status(self.store, self.cfg, now=time.time())
+        self.assertIsNone(status["partial_run"])
 
     def test_a_partial_older_than_a_completed_run_is_ignored(self):
         # A run that finishes through a path that never clears the partial
@@ -1803,14 +2172,6 @@ class TestPartialRunRecord(unittest.TestCase):
         with patch("vacuum.alerts.launchd_loaded", return_value=False):
             status = build_status(self.store, self.cfg, now=time.time())
         self.assertEqual(status["partial_run"]["run_id"], "killed-run")
-
-    def test_a_finished_run_leaves_no_partial_in_the_status(self):
-        record, _hits, _cleaned = self.run_watch()
-        self.store.append_run(record)
-        self.store.clear_partial_run()
-        with patch("vacuum.alerts.launchd_loaded", return_value=False):
-            status = build_status(self.store, self.cfg, now=time.time())
-        self.assertIsNone(status["partial_run"])
 
 
 class TestTickBudget(unittest.TestCase):
@@ -1869,8 +2230,1490 @@ class TestTickBudget(unittest.TestCase):
         self.assertEqual(out.stdout.strip(), "False", out.stderr)
 
 
+class TestHousekeeperLock(unittest.TestCase):
+    """The lock that keeps two reclaimers off the same files.
+
+    The owner file is what makes a killed holder recoverable at once.  The
+    watchdog in scripts/maintain.py exits with os._exit, which skips the
+    lock's __exit__, so the lock directory used to survive a killed tick and
+    every tick after it reported "peer holds lock" until the two hour stale
+    window expired.  The Hog Hunter vacuum had not completed a tick in six
+    days because of it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.tmp.name) / ".housekeeper.lock"
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+
+    def tearDown(self):
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+        self.tmp.cleanup()
+
+    def _owner_record(self, pid=None, host=None, start=None):
+        """A well formed owner record: the shape this protocol publishes.
+
+        The tests below used to write a bare ``{"pid": ...}``, which is not a
+        record any implementation of this protocol accepts:  it names no
+        host, no start time and no lock.  A record the readers reject is not
+        evidence of anything, so those cases were passing without testing
+        what they claimed to test.
+        """
+        import socket
+
+        from vacuum.lock import _process_start_token
+
+        if pid is None:
+            pid = 999999
+        if host is None:
+            host = socket.gethostname()
+        if start is None:
+            # A pid that is not alive has no start time of its own, so a
+            # placeholder stands in for it:  the record only has to be well
+            # formed, and a dead pid is proven gone without reading a token.
+            start = _process_start_token(pid) or "Mon Jan  1 00:00:00 2024"
+        return {
+            "pid": pid,
+            "host": host,
+            "acquired_at": time.time(),
+            "lock": str(self.lock_path),
+            "start": start,
+        }
+
+    def _write_owner_record(self, **kwargs):
+        from vacuum.lock import owner_path_for
+
+        owner_path_for(self.lock_path).write_text(json.dumps(self._owner_record(**kwargs)))
+
+    def _live_process_pid(self):
+        """The pid of a live process that is not this one.
+
+        The "our own pid" guard decides the case before the start token is
+        ever read, so a reused-pid case needs a holder that is somebody
+        else.
+        """
+        child = subprocess.Popen(["sleep", "30"])
+
+        def cleanup():
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+        self.addCleanup(cleanup)
+        return child.pid
+
+    def test_exact_utc_token_still_checks_acquisition_time(self):
+        from vacuum import lock
+
+        token = "Tue Nov  3 12:00:00 2026"
+        started = lock._start_token_epoch(token)
+        owner = self._owner_record(pid=12345, start=token)
+        self.lock_path.mkdir()
+        owner_path = lock.owner_path_for(self.lock_path)
+        for recorded, acquired, sane, expected in [
+            (token, started - 10, True, True),
+            (token, started + 10, True, False),
+            (token, started - 10, False, False),
+            ("Sun Nov  1 12:00:00 2026", started - 10, False, True),
+        ]:
+            with self.subTest(acquired=acquired, sane=sane):
+                owner["acquired_at"] = acquired
+                owner["start"] = recorded
+                owner_path.write_text(json.dumps(owner))
+                # The acquisition matches its filesystem publication, except
+                # for the deliberate invalid-metadata fallback case.
+                mtime = acquired if sane else acquired + 100
+                os.utime(self.lock_path, (mtime, mtime))
+                os.utime(owner_path, (mtime + 1, mtime + 1))
+                with patch.object(lock, "_pid_alive", return_value=True), \
+                     patch.object(lock, "_process_start_token", return_value=token), \
+                     patch.object(lock.time, "time", return_value=started + 100):
+                    self.assertEqual(lock._owner_is_gone(owner, self.lock_path, owner_path), expected)
+
+    def test_acquire_writes_an_owner_file_beside_the_lock(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            owner = owner_path_for(self.lock_path)
+            self.assertTrue(owner.is_file(), "the owner file records who holds the lock")
+            data = json.loads(owner.read_text())
+            self.assertEqual(data["pid"], os.getpid())
+
+    def test_the_owner_record_has_exactly_the_shape_the_protocol_publishes(self):
+        # All four implementations of this protocol publish the SAME shape.
+        # A record one of them calls malformed and the other calls usable
+        # leaves them with conflicting ownership decisions about one lock.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            data = json.loads(owner_path_for(self.lock_path).read_text())
+            self.assertEqual(
+                set(data),
+                {"pid", "host", "acquired_at", "lock", "start"},
+                "every implementation of this protocol publishes the same shape",
+            )
+
+    def test_the_owner_record_carries_the_start_time_of_this_process(self):
+        # The start time travels with the pid, because a pid the kernel has
+        # since handed to somebody else would otherwise look exactly like a
+        # live holder.
+        from vacuum.lock import HousekeeperLock, _process_start_token, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            data = json.loads(owner_path_for(self.lock_path).read_text())
+            self.assertEqual(
+                data["start"],
+                _process_start_token(os.getpid()),
+                "the record carries the start time of the process that holds the lock",
+            )
+
+    def test_the_owner_record_is_private_to_the_user(self):
+        # The record names a pid and a host and sits in a shared directory.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            owner = owner_path_for(self.lock_path)
+            self.assertEqual(
+                owner.stat().st_mode & 0o777,
+                0o600,
+                "the owner record is private to the user",
+            )
+
+    def test_the_lock_directory_stays_empty_for_the_shell_rmdir(self):
+        # ~/apps/mac-auto-cleanup.sh releases the lock with a plain rmdir, and
+        # rmdir refuses a directory that has anything in it.  An owner file
+        # inside the lock would make the shell's release silently fail and
+        # leak the lock forever.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            self.assertEqual(list(self.lock_path.iterdir()), [])
+            self.assertTrue(owner_path_for(self.lock_path).is_file())
+
+    def test_release_removes_the_owner_file(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            pass
+        self.assertFalse(owner_path_for(self.lock_path).exists())
+        self.assertFalse(self.lock_path.exists())
+
+    def test_a_lock_whose_owner_is_gone_is_taken_over_at_once(self):
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        # A pid above the system maximum cannot name a live process, so this
+        # is what a lock left behind by a killed tick looks like.
+        self._write_owner_record(pid=999999)
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir(), "the dead owner's lock was taken over")
+
+    def test_a_lock_whose_owner_is_alive_is_refused(self):
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=os.getpid())
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_reused_pid_is_taken_over_at_once(self):
+        # The kernel hands a pid to somebody else once the original exits, and
+        # a reused pid that is ALIVE looks exactly like a live holder.  The
+        # start time is what tells the two apart.
+        from vacuum.lock import HousekeeperLock
+
+        pid = self._live_process_pid()
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=pid, start="Mon Jan  1 00:00:00 2024")
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(
+                self.lock_path.is_dir(),
+                "a reused pid is taken over at once, not after the stale window",
+            )
+
+    def test_a_live_holder_with_the_right_start_time_is_refused(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, _process_start_token
+
+        pid = self._live_process_pid()
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=pid, start=_process_start_token(pid))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_record_without_the_start_time_is_not_evidence(self):
+        # A record that is not the record this protocol publishes names no
+        # holder, so the age rule decides.
+        import socket
+
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner_path_for(self.lock_path).write_text(
+            json.dumps({"pid": 999999, "host": socket.gethostname()})
+        )
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_record_with_an_unknown_key_is_not_evidence(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        record = self._owner_record(pid=999999)
+        record["extra"] = "not part of the record"
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_record_with_a_boolean_pid_is_not_evidence(self):
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        record = self._owner_record(pid=999999)
+        record["pid"] = True
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_fresh_lock_with_no_owner_file_is_not_taken_over(self):
+        # The shell holder never writes an owner file, so a missing one is not
+        # proof of anything.  The age rule decides.
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_stale_lock_with_no_owner_file_is_still_taken_over(self):
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir())
+
+    def test_force_release_gives_the_lock_back(self):
+        from vacuum.lock import HousekeeperLock, force_release, owner_path_for
+
+        lock = HousekeeperLock(self.lock_path)
+        lock.__enter__()
+        self.assertTrue(self.lock_path.is_dir())
+
+        self.assertTrue(force_release(), "force_release releases the lock this process holds")
+        self.assertFalse(self.lock_path.exists())
+        self.assertFalse(owner_path_for(self.lock_path).exists())
+
+    def test_force_release_leaves_a_peers_lock_alone(self):
+        from vacuum.lock import HousekeeperLock, force_release
+
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=999999)
+
+        self.assertFalse(force_release(), "a lock this process does not hold is not released")
+        self.assertTrue(self.lock_path.is_dir())
+
+    def test_a_leftover_owner_file_does_not_unlock_a_fresh_lock(self):
+        # The shell holder never writes an owner file, so an owner file left
+        # beside the lock can name a pid that is long gone.  Reading it as the
+        # current holder would let a fresh, live lock be taken over.  The
+        # owner file only describes the holder when it is STRICTLY newer than
+        # the lock directory.
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner = owner_path_for(self.lock_path)
+        self._write_owner_record(pid=999999)
+        # The lock directory is newer than the owner file, so the owner file
+        # is a leftover from an earlier holder.
+        now = time.time()
+        os.utime(owner, (now - 600, now - 600))
+        os.utime(self.lock_path, (now, now))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_stale_lock_is_moved_aside_and_leaves_nothing_behind(self):
+        # The takeover is a rename, not a remove and a create: checking that
+        # a lock is stale and then removing it is two steps, and two
+        # reclaimers can interleave them so that both end up believing they
+        # hold it.  Moving it aside lets only one caller win.
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir())
+            leftovers = [p for p in Path(self.tmp.name).iterdir() if ".stale-" in p.name]
+            self.assertEqual(leftovers, [], "a taken-over stale lock leaves no moved-aside copy")
+
+    def test_a_fresh_lock_that_was_displaced_is_put_back(self):
+        # The move acts on whatever is at the path at that instant.  When a
+        # peer had already replaced the stale lock, that is the peer's fresh
+        # lock, and it is put back rather than removed.
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        lock = HousekeeperLock(self.lock_path)
+        self.assertFalse(lock._takeover(), "a fresh lock is not taken")
+        self.assertTrue(self.lock_path.is_dir(), "the displaced fresh lock was put back")
+
+    def test_a_non_empty_lock_is_put_back(self):
+        # The lock is a marker: a directory with contents in it is not the
+        # marker we made, so it is put back rather than removed.
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        (self.lock_path / "leftover.txt").write_text("not ours")
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        lock = HousekeeperLock(self.lock_path)
+        self.assertFalse(lock._takeover(), "a lock with contents in it is not taken")
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertTrue((self.lock_path / "leftover.txt").exists())
+
+    def test_the_put_back_refuses_an_occupied_path_and_leaves_the_peer_alone(self):
+        # os.rename onto an existing EMPTY directory SUCCEEDS and replaces it,
+        # and the lock marker is an empty directory, so a put-back built on a
+        # plain rename replaces a third reclaimer's fresh lock while that
+        # reclaimer still believes it holds the lock and sweeps at the same
+        # time.  The refusal has to be the atomic one.
+        from vacuum.lock import HousekeeperLock
+
+        aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-test")
+        aside.mkdir(parents=True)
+        self.lock_path.mkdir(parents=True)
+        # The peer's lock is an empty marker, and the inode is what tells the
+        # two apart: a replaced directory has a new one.
+        peer_inode = self.lock_path.stat().st_ino
+
+        lock = HousekeeperLock(self.lock_path)
+        lock._put_back(aside)
+
+        self.assertEqual(
+            self.lock_path.stat().st_ino,
+            peer_inode,
+            "the peer's lock must not have been replaced",
+        )
+        self.assertTrue(aside.is_dir(), "the moved-aside copy stays where it is")
+
+    def test_the_put_back_moves_onto_a_free_path(self):
+        from vacuum.lock import HousekeeperLock
+
+        aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-test")
+        aside.mkdir(parents=True)
+
+        lock = HousekeeperLock(self.lock_path)
+        lock._put_back(aside)
+
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertFalse(aside.exists())
+
+    def test_the_put_back_never_goes_through_os_rename(self):
+        # os.rename is the primitive that replaces an empty directory, so a
+        # put-back that used it would still have the window even with a check
+        # in front of it.
+        #
+        # This is a macOS property.  The atomic no-replace rename is
+        # renamex_np, which only macOS has, and the fallback on any other
+        # platform is a check followed by a rename.  The lock this file
+        # guards runs on the Mac; the suite also runs on Linux in CI, where
+        # the assertion below does not hold and the weaker fallback is used.
+        from vacuum import lock as lock_module
+
+        if lock_module._renamex_np() is None:
+            self.skipTest("the atomic no-replace rename is macOS-only")
+
+        calls = []
+        real_rename = lock_module.os.rename
+
+        def spy(src, dst, *args, **kwargs):
+            calls.append((str(src), str(dst)))
+            return real_rename(src, dst, *args, **kwargs)
+
+        aside = self.lock_path.with_name(f"{self.lock_path.name}.stale-test")
+        aside.mkdir(parents=True)
+        lock_module.os.rename = spy
+        try:
+            lock = lock_module.HousekeeperLock(self.lock_path)
+            lock._put_back(aside)
+        finally:
+            lock_module.os.rename = real_rename
+
+        self.assertEqual(calls, [], "the put-back must not go through os.rename")
+        self.assertTrue(self.lock_path.is_dir(), "the put-back still moved the copy back")
+
+    def test_the_owner_file_is_only_removed_when_it_names_the_moved_holder(self):
+        # The owner file belongs to the holder we moved aside.  Removing it
+        # when it names somebody else takes away the new holder's own file.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        owner = owner_path_for(self.lock_path)
+        self._write_owner_record(pid=999999)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        with HousekeeperLock(self.lock_path):
+            data = json.loads(owner.read_text())
+            self.assertEqual(data["pid"], os.getpid(), "the new holder's own owner file is in place")
+
+    def test_only_one_of_two_takers_wins_the_stale_lock(self):
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        old = time.time() - (121 * 60)
+        os.utime(self.lock_path, (old, old))
+
+        with HousekeeperLock(self.lock_path):
+            # The re-entrancy token would let a second attempt through, so it
+            # is cleared to model a second, independent reclaimer.
+            os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+            with self.assertRaises(LockHeld):
+                with HousekeeperLock(self.lock_path):
+                    pass
+
+    def test_a_fresh_lock_whose_owner_died_a_minute_ago_is_taken_over(self):
+        # A tick killed a minute ago leaves a *fresh* directory behind.  The
+        # age rule alone would refuse it, and the vacuum would keep reporting
+        # "peer holds lock" until the two hour window expired -- which is the
+        # six day wedge the owner file was added to undo.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=999999)
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir(), "the dead owner's fresh lock was taken over")
+
+    def test_an_owner_file_with_an_unreadable_pid_does_not_break_the_acquire(self):
+        # The owner file is read by a peer that wants to know whether the
+        # holder is still alive.  A pid that cannot be read is no owner at
+        # all, and reading it must not raise out of the lock.
+        from vacuum.lock import HousekeeperLock, LockHeld, owner_path_for
+
+        self.lock_path.mkdir(parents=True)
+        record = self._owner_record(pid=999999)
+        record["pid"] = "not-a-pid"
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_an_owner_file_with_an_unreadable_pid_does_not_break_the_release(self):
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        lock = HousekeeperLock(self.lock_path)
+        lock.__enter__()
+        record = self._owner_record(pid=os.getpid())
+        record["pid"] = None
+        owner_path_for(self.lock_path).write_text(json.dumps(record))
+        lock.__exit__(None, None, None)
+        self.assertFalse(self.lock_path.exists())
+
+    def test_the_owner_file_is_published_with_a_replace(self):
+        # The owner file is published with a replace rather than written in
+        # place, so a reader never sees half of it.
+        from vacuum import lock as lock_module
+
+        owner = lock_module.owner_path_for(self.lock_path)
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        calls = []
+        real_replace = lock_module.os.replace
+
+        def spy(src, dst, *args, **kwargs):
+            calls.append((str(src), str(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        lock_module.os.replace = spy
+        try:
+            lock_module._write_owner(owner, self.lock_path)
+        finally:
+            lock_module.os.replace = real_replace
+
+        self.assertTrue(calls, "the owner file is published with a replace")
+        src, dst = calls[-1]
+        self.assertEqual(dst, str(owner))
+        self.assertEqual(Path(src).parent, owner.parent, "the temp file is beside the owner file")
+        self.assertFalse(Path(src).exists(), "the temp file is gone")
+        self.assertEqual(json.loads(owner.read_text())["pid"], os.getpid())
+
+    def test_a_failed_owner_publish_leaves_the_owner_file_untouched(self):
+        from vacuum import lock as lock_module
+
+        owner = lock_module.owner_path_for(self.lock_path)
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        owner.write_text(json.dumps({"pid": 1, "host": "keep-me"}))
+
+        real_replace = lock_module.os.replace
+
+        def boom(src, dst, *args, **kwargs):
+            raise OSError("publish failed")
+
+        lock_module.os.replace = boom
+        try:
+            lock_module._write_owner(owner, self.lock_path)
+        finally:
+            lock_module.os.replace = real_replace
+
+        self.assertEqual(
+            json.loads(owner.read_text()).get("host"),
+            "keep-me",
+            "a failed publish must leave the owner file exactly as it was",
+        )
+
+    def test_a_lock_held_on_another_host_is_not_taken_over_at_once(self):
+        # A pid only means something on the machine that owns it, so a lock
+        # held on another host may only be taken over once the stale window
+        # has passed.
+        from vacuum.lock import HousekeeperLock, LockHeld
+
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=999999, host="some-other-machine")
+
+        with self.assertRaises(LockHeld):
+            with HousekeeperLock(self.lock_path):
+                pass
+
+    def test_a_lock_whose_owner_is_gone_on_this_host_is_still_taken_over_at_once(self):
+        from vacuum.lock import HousekeeperLock
+
+        self.lock_path.mkdir(parents=True)
+        self._write_owner_record(pid=999999)
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.lock_path.is_dir(), "a dead holder on this host is taken over")
+
+    def test_a_failed_removal_leaves_the_owner_file_so_the_lock_is_still_recoverable(self):
+        # The lock directory goes first and the owner file second.  The
+        # other order strands the lock: a removal that fails after the
+        # owner file is gone leaves a lock that nobody owns and that
+        # nothing can take over until the whole stale window has passed.
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        with HousekeeperLock(self.lock_path):
+            (self.lock_path / "leftover.txt").write_text("not ours")
+
+        # The lock directory has something in it, so it cannot be removed.
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertTrue(
+            owner_path_for(self.lock_path).is_file(),
+            "a lock that could not be removed keeps its owner file",
+        )
+
+    def test_a_takeover_that_replaces_the_canonical_lock_between_the_check_and_the_removal_keeps_the_new_holders_lock(self):
+        # The check and the removal are two steps, and a takeover can slip
+        # between them: the check says "this is the lock I took", a new
+        # holder replaces the path with its own lock, and the removal then
+        # takes the NEW holder's lock away while that holder goes on
+        # believing it holds the lock.
+        from vacuum import lock as lock_module
+
+        lock = lock_module.HousekeeperLock(self.lock_path)
+        lock.__enter__()
+
+        real_rmdir = lock_module.os.rmdir
+        injected = {"done": False}
+
+        def spy(path):
+            if not injected["done"]:
+                injected["done"] = True
+                # The takeover: a new holder replaces the canonical lock
+                # with its own, right here in the window.
+                self.lock_path.mkdir(parents=True, exist_ok=True)
+                lock_module.owner_path_for(self.lock_path).write_text(
+                    json.dumps({
+                        "pid": 999999,
+                        "host": socket.gethostname(),
+                        "acquired_at": time.time(),
+                        "lock": str(self.lock_path),
+                        "start": "Mon Jan  1 00:00:00 2024",
+                    })
+                )
+            return real_rmdir(path)
+
+        lock_module.os.rmdir = spy
+        try:
+            lock.__exit__(None, None, None)
+        finally:
+            lock_module.os.rmdir = real_rmdir
+
+        self.assertTrue(
+            self.lock_path.is_dir(),
+            "the new holder's lock must not be lost by the release",
+        )
+        owner = lock_module.owner_path_for(self.lock_path)
+        self.assertTrue(owner.is_file(), "the new holder's owner file must survive too")
+        self.assertEqual(json.loads(owner.read_text())["pid"], 999999)
+
+
+# A contender that tries to take the housekeeper lock the way a peer does.
+# It writes a marker first, so the parent knows it is running, and it
+# reports whether it got the lock.  It never releases the lock it took: the
+# question is whether the lock survived the race.
+CONTENDER_SCRIPT = """
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+from vacuum.lock import HousekeeperLock, LockHeld
+lock_path = Path(sys.argv[1])
+report = Path(sys.argv[2])
+Path(sys.argv[4]).write_text("started")
+result = {"acquired": False, "error": None}
+try:
+    lock = HousekeeperLock(lock_path)
+    lock.__enter__()
+    result["acquired"] = True
+except LockHeld as exc:
+    result["error"] = str(exc)
+except Exception as exc:
+    result["error"] = repr(exc)
+report.write_text(json.dumps(result))
+os._exit(0)
+"""
+
+# A process that takes the mutation guard and holds it for a while, the way
+# the shell side does while it is clearing the lock.
+GUARD_HOLDER_SCRIPT = """
+import fcntl, os, sys, time
+path = sys.argv[1]
+ready = sys.argv[2]
+seconds = float(sys.argv[3])
+fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(ready, "w").write("held")
+time.sleep(seconds)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+
+
+class TestHousekeeperLockGuard(unittest.TestCase):
+    """The mutation guard that every writer of the housekeeper protocol shares.
+
+    The same guard is taken by HogHunter's Python lock and Swift lock, and
+    by AFC's `mac-auto-cleanup.sh` and `mac-resource-watch.py`.  It is a
+    plain file beside the lock directory, held with an exclusive `flock`
+    over the whole critical section, and it is never deleted.
+
+    The tests here use a REAL second process, because the whole point of
+    the guard is that it works across processes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.tmp.name) / ".housekeeper.lock"
+        self.guard_path = self.lock_path.with_name(self.lock_path.name + ".guard")
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+
+    def tearDown(self):
+        os.environ.pop("HOUSEKEEPER_LOCK_OWNER", None)
+        self.tmp.cleanup()
+
+    def _child_env(self) -> dict:
+        env = dict(os.environ)
+        env.pop("HOUSEKEEPER_LOCK_OWNER", None)
+        return env
+
+    def test_the_guard_is_a_sibling_file_beside_the_lock(self):
+        from vacuum.lock import HousekeeperLock
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.guard_path.is_file(), "the guard is a plain file")
+            self.assertFalse(self.guard_path.is_dir(), "the guard is not a directory")
+            self.assertEqual(self.guard_path.parent, self.lock_path.parent)
+            self.assertEqual(self.guard_path.name, self.lock_path.name + ".guard")
+            self.assertEqual(
+                list(self.lock_path.iterdir()),
+                [],
+                "the guard is a sibling, never inside the lock",
+            )
+
+    def test_the_guard_file_is_never_deleted(self):
+        from vacuum.lock import HousekeeperLock
+
+        with HousekeeperLock(self.lock_path):
+            self.assertTrue(self.guard_path.is_file())
+        self.assertTrue(
+            self.guard_path.is_file(),
+            "the guard file is never deleted: deleting it would split the flock",
+        )
+
+    def test_a_contender_cannot_publish_an_owner_file_while_the_guard_is_held(self):
+        # The guard is the cross-process mutex for the whole housekeeper
+        # protocol.  A contender that tries to take the lock while another
+        # process holds the guard has to wait, and it must not publish an
+        # owner file while it waits.
+        import fcntl
+
+        from vacuum.lock import HousekeeperLock, owner_path_for
+
+        self.guard_path.parent.mkdir(parents=True, exist_ok=True)
+        report = Path(self.tmp.name) / "contender.json"
+        started = Path(self.tmp.name) / "contender.started"
+        fd = os.open(str(self.guard_path), os.O_RDWR | os.O_CREAT, 0o600)
+        child = None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    CONTENDER_SCRIPT,
+                    str(self.lock_path),
+                    str(report),
+                    str(REPO / "scripts"),
+                    str(started),
+                ],
+                env=self._child_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.time() + 30
+            while time.time() < deadline and not started.exists():
+                time.sleep(0.02)
+            self.assertTrue(started.exists(), "the contender started")
+            # Give the contender time to reach the guard.
+            time.sleep(0.5)
+            self.assertFalse(
+                owner_path_for(self.lock_path).exists(),
+                "a contender must not publish an owner file while the guard is held",
+            )
+            self.assertFalse(report.exists(), "a contender must wait for the guard")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        if child is not None:
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
+        self.assertTrue(
+            report.exists(),
+            "the contender goes through once the guard is free",
+        )
+        data = json.loads(report.read_text())
+        self.assertTrue(data["acquired"], data)
+
+    def test_the_release_waits_for_a_guard_another_process_holds(self):
+        # The release holds the guard across its ownership check and its
+        # removal, so a peer that holds the guard holds the release up.
+        from vacuum.lock import HousekeeperLock
+
+        self.guard_path.parent.mkdir(parents=True, exist_ok=True)
+        # The lock is taken first, so the only thing the release has to wait
+        # for is the guard.
+        lock = HousekeeperLock(self.lock_path)
+        lock.__enter__()
+        ready = Path(self.tmp.name) / "holder.ready"
+        holder = subprocess.Popen(
+            [sys.executable, "-c", GUARD_HOLDER_SCRIPT, str(self.guard_path), str(ready), "2"],
+            env=self._child_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline and not ready.exists():
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "the other process holds the guard")
+
+            started = time.time()
+            lock.__exit__(None, None, None)
+            elapsed = time.time() - started
+        finally:
+            try:
+                holder.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=10)
+        self.assertGreaterEqual(
+            elapsed,
+            1.0,
+            "the release must wait for the guard another process holds",
+        )
+
+
+class TestCadenceSelection(unittest.TestCase):
+    """One cadence per tick.
+
+    A tick used to run every due cadence back to back in the same process.
+    Measured on this host 2026-10-21: watch took 279s and janitor 117s, and
+    a full reclaim has a 600s budget plus a 180s grace, so a tick with all
+    three due wanted 1176s against a 900s watchdog.  The watchdog killed the
+    tick, and the kill leaked the housekeeper lock.
+    """
+
+    def _store(self, td: str, intervals: dict) -> "VacuumStore":
+        home = Path(td)
+        data = home / "rv"
+        data.mkdir(parents=True)
+        cfg = load_config(home=home)
+        cfg["data_dir"] = str(data)
+        cfg["intervals_seconds"] = intervals
+        return VacuumStore(cfg, home=home)
+
+    def test_only_one_cadence_is_selected(self):
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 1, "janitor": 1, "full": 1})
+            now = time.time()
+            selected = select_cadences(store, store.cfg, now=now)
+            self.assertEqual(len(selected), 1, selected)
+
+    def test_the_most_overdue_cadence_wins(self):
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            # The watch ran a moment ago, the janitor long ago, the full never.
+            store.touch_scheduler("last_watch", now - 310)
+            store.touch_scheduler("last_janitor", now - 3600)
+            store.touch_scheduler("last_full", now - 40000)
+            selected = select_cadences(store, store.cfg, now=now)
+            self.assertEqual(selected, ["full"], selected)
+
+    def test_a_tie_goes_to_the_longest_interval(self):
+        # The four-hourly full reclaim must not be pushed aside by the
+        # five-minute watch every time the two come due together.
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            store.touch_scheduler("last_watch", now - 300)
+            store.touch_scheduler("last_janitor", now - 1800)
+            store.touch_scheduler("last_full", now - 14400)
+            selected = select_cadences(store, store.cfg, now=now)
+            self.assertEqual(selected, ["full"], selected)
+
+    def test_a_cadence_that_is_not_due_is_not_selected(self):
+        from vacuum.scheduler import select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            store.touch_scheduler("last_watch", now)
+            store.touch_scheduler("last_janitor", now)
+            store.touch_scheduler("last_full", now)
+            self.assertEqual(select_cadences(store, store.cfg, now=now), [])
+
+    def test_a_skipped_cadence_stays_due_and_grows_more_overdue(self):
+        # Nothing waits long: a cadence the tick did not run keeps its
+        # overdue time growing, so it is the next one to be picked.  The
+        # simulation below walks the real intervals and asserts that every
+        # cadence gets a turn, so no one of them is starved.
+        from vacuum.scheduler import overdue_seconds, select_cadences
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 300, "janitor": 1800, "full": 14400})
+            now = time.time()
+            store.touch_scheduler("last_watch", now - 300)
+            store.touch_scheduler("last_janitor", now - 1800)
+            store.touch_scheduler("last_full", now - 14400)
+
+            # The full reclaim has been waiting longest and has the longest
+            # interval, so it is the one that runs.
+            self.assertEqual(select_cadences(store, store.cfg, now=now), ["full"])
+
+            ran = []
+            clock = now
+            for _ in range(120):
+                clock += 300
+                selected = select_cadences(store, store.cfg, now=clock)
+                if not selected:
+                    continue
+                kind = selected[0]
+                ran.append(kind)
+                store.touch_scheduler(f"last_{kind}", clock)
+
+            self.assertIn("watch", ran, "the watch tick keeps running")
+            self.assertIn("janitor", ran, "the janitor is not starved by the watch")
+            self.assertIn("full", ran, "the full reclaim is not starved")
+            # The janitor is due every 1800s and a tick is 300s, so it must
+            # run at least once in a 120 tick window.
+            self.assertGreaterEqual(ran.count("janitor"), 1, ran)
+            self.assertGreaterEqual(ran.count("full"), 1, ran)
+
+    def test_the_dry_run_reports_the_cadence_the_real_tick_would_pick(self):
+        from vacuum.scheduler import run_dry_tick
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td, {"watch": 1, "janitor": 1, "full": 1})
+            now = time.time()
+            result = run_dry_tick(store, now=now)
+            self.assertEqual(len(result["selected"]), 1, result["selected"])
+            self.assertEqual(len(result["records"]), 1, "the dry run plans one cadence, like the real tick")
+
+
+class TestCadenceOccupancy(unittest.TestCase):
+    """One cadence per tick, and what that means for the cadences it leaves behind.
+
+    A tick runs at most one cadence.  The other due cadences wait their
+    turn, and a cadence that is waiting is not a cadence that has failed:
+    the alert layer must not send an overdue banner for it, and the status
+    must not call it overdue either.  The two surfaces read the same fact,
+    so they must not disagree about it.
+    """
+
+    INTERVALS = {"watch": 300, "janitor": 1800, "full": 14400}
+
+    def _store(self, td: str) -> "VacuumStore":
+        home = Path(td)
+        data = home / "rv"
+        data.mkdir(parents=True)
+        cfg = load_config(home=home)
+        cfg["data_dir"] = str(data)
+        cfg["intervals_seconds"] = dict(self.INTERVALS)
+        cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+        return VacuumStore(cfg, home=home)
+
+    def _watch_run(self, store: VacuumStore, ended_at: float, failed: bool = False) -> None:
+        """A finished watch run, the way the history keeps it."""
+        step = StepResult(
+            "resource_sample",
+            "Resource sample",
+            StepStatus.FAILED if failed else StepStatus.RAN,
+            reason="no answer" if failed else "",
+        )
+        record = RunRecord(
+            run_id="watch-1",
+            trigger=TriggerKind.WATCH,
+            started_at=ended_at - 1,
+            ended_at=ended_at,
+            steps=[step],
+        )
+        if failed:
+            record.exit_code = 1
+            record.outcome = RunOutcome.FAILED.value
+        store.append_run(record)
+
+    def _scenario(self, store: VacuumStore, now: float, watch_failed: bool = False) -> None:
+        """A watch cadence that is overdue, and a janitor that occupies the tick.
+
+        The watch last ran well over its own interval ago, so it is
+        overdue by the rule the alert layer uses, and it is due now.  The
+        janitor is due as well and more overdue, so it is the cadence that
+        takes the tick and the watch is the one that waits.
+        """
+        self._watch_run(store, ended_at=now - 1000, failed=watch_failed)
+        store.touch_scheduler("last_watch", now - 1000)
+        store.touch_scheduler("last_janitor", now - 3600)
+        store.touch_scheduler("last_full", now)
+
+    def _tick(self, store: VacuumStore, now: float):
+        """Run one tick with the engine stubbed out, and return the result."""
+        from vacuum.scheduler import run_scheduler_tick
+
+        def fake_run(self, trigger, band="cheap", dry_run=False):
+            record = RunRecord(run_id="tick-1", trigger=trigger, started_at=now, ended_at=now)
+            record.steps = [StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED)]
+            return record
+
+        with patch("vacuum.engine.VacuumEngine.run", fake_run):
+            with patch("vacuum.alerts.notify_macos") as notify:
+                with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                    result = run_scheduler_tick(store, now=now)
+        return result, notify
+
+    def _messages(self, notify) -> list:
+        return [call.args[1] for call in notify.call_args_list]
+
+    # MARK: - The alert layer
+
+    def test_a_cadence_another_cadence_occupied_is_not_reported_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            _result, notify = self._tick(store, now)
+            messages = self._messages(notify)
+            self.assertFalse(
+                any("pressure check" in m for m in messages),
+                f"a cadence that waited its turn must not be reported overdue: {messages}",
+            )
+
+    def test_a_cadence_whose_last_run_failed_is_still_reported_overdue(self):
+        # A cadence that broke is not a cadence that waited.  The banner has
+        # to keep saying so.
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now, watch_failed=True)
+            _result, notify = self._tick(store, now)
+            messages = self._messages(notify)
+            self.assertTrue(
+                any("pressure check" in m for m in messages),
+                f"a cadence whose last run failed must still be reported: {messages}",
+            )
+
+    # MARK: - The status the panel reads
+
+    def test_the_status_does_not_call_a_skipped_cadence_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            result, _notify = self._tick(store, now)
+            status = result["status"]
+            self.assertNotEqual(
+                status["health"],
+                "overdue",
+                "the panel must not call a waiting cadence overdue while the banner stays quiet",
+            )
+
+    def test_the_status_publishes_a_next_run_that_is_not_in_the_past(self):
+        # The published next run must never be a time that has gone by: the
+        # panel shows it, and a time in the past reads as "this never runs".
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            result, _notify = self._tick(store, now)
+            status = result["status"]
+            self.assertGreater(
+                float(status["next_run_at"]["watch"]),
+                now,
+                "the published next run of a waiting cadence must not be in the past",
+            )
+
+    def test_the_status_still_calls_a_failed_cadence_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now, watch_failed=True)
+            result, _notify = self._tick(store, now)
+            status = result["status"]
+            self.assertEqual(
+                status["health"],
+                "overdue",
+                "a cadence whose last run failed must still be reported overdue",
+            )
+
+    def test_the_status_records_the_cadence_that_occupied_the_tick(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            result, _notify = self._tick(store, now)
+            occupancy = result["status"]["tick_occupancy"]
+            self.assertEqual(occupancy["occupied"], "janitor", occupancy)
+            self.assertIn("watch", occupancy["skipped"], occupancy)
+            self.assertIn("occupied the tick", occupancy["skipped"]["watch"], occupancy)
+
+
+class TestOccupancyClaimFallback(unittest.TestCase):
+    """A reader that joined no tick still has to see the same truth.
+
+    The tick hands the occupancy to the surfaces it builds.  Every other
+    reader -- the status command, and a manual run that publishes a status
+    afterwards -- has to learn it from the store, and it has to learn the
+    same thing, or the panel and the banner disagree about the same fact.
+    The claim expires, because a scheduler that stopped ticking is a
+    different thing from a cadence that is waiting its turn.
+    """
+
+    INTERVALS = {"watch": 300, "janitor": 1800, "full": 14400}
+
+    def _store(self, td: str) -> "VacuumStore":
+        home = Path(td)
+        data = home / "rv"
+        data.mkdir(parents=True)
+        cfg = load_config(home=home)
+        cfg["data_dir"] = str(data)
+        cfg["intervals_seconds"] = dict(self.INTERVALS)
+        cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+        return VacuumStore(cfg, home=home)
+
+    def _watch_run(self, store: VacuumStore, ended_at: float) -> None:
+        step = StepResult("resource_sample", "Resource sample", StepStatus.RAN)
+        record = RunRecord(
+            run_id="watch-1",
+            trigger=TriggerKind.WATCH,
+            started_at=ended_at - 1,
+            ended_at=ended_at,
+            steps=[step],
+        )
+        store.append_run(record)
+
+    def _scenario(self, store: VacuumStore, now: float) -> None:
+        """A watch cadence that is overdue, and a janitor that occupies the tick."""
+        self._watch_run(store, ended_at=now - 1000)
+        store.touch_scheduler("last_watch", now - 1000)
+        store.touch_scheduler("last_janitor", now - 3600)
+        store.touch_scheduler("last_full", now)
+
+    def _tick(self, store: VacuumStore, now: float):
+        from vacuum.scheduler import run_scheduler_tick
+
+        def fake_run(self, trigger, band="cheap", dry_run=False):
+            record = RunRecord(run_id="tick-1", trigger=trigger, started_at=now, ended_at=now)
+            record.steps = [StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED)]
+            return record
+
+        with patch("vacuum.engine.VacuumEngine.run", fake_run):
+            with patch("vacuum.alerts.notify_macos"):
+                with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                    return run_scheduler_tick(store, now=now)
+
+    def test_a_reader_that_joined_no_tick_does_not_call_a_waiting_cadence_overdue(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            status = build_status(store, store.cfg)
+            self.assertNotEqual(
+                status["health"],
+                "overdue",
+                "a reader that joined no tick must not call a waiting cadence overdue",
+            )
+
+    def test_a_reader_that_joined_no_tick_publishes_a_next_run_that_is_not_in_the_past(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            status = build_status(store, store.cfg)
+            self.assertGreater(
+                float(status["next_run_at"]["watch"]),
+                now,
+                "the published next run of a waiting cadence must not be in the past",
+            )
+
+    def test_an_expired_claim_brings_the_overdue_report_back(self):
+        # A claim that a cadence was waiting only stays believable while a
+        # tick could still arrive to service it.  Once it expires, the
+        # cadence reads overdue again, because that is what a scheduler that
+        # stopped ticking looks like.
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            occupancy = dict(store.scheduler_state().get("tick_occupancy") or {})
+            occupancy["at"] = now - 100000
+            store.merge_scheduler_state({"tick_occupancy": occupancy})
+            status = build_status(store, store.cfg)
+            self.assertEqual(
+                status["health"],
+                "overdue",
+                "an expired claim must not keep a cadence quiet forever",
+            )
+
+    def test_the_alert_reader_agrees_with_the_status_reader(self):
+        # The alert reader builds its view the way the command line does,
+        # from the claim in the store, and it has to reach the same answer
+        # the status reader reaches.
+        from vacuum.scheduler import current_occupancy, occupancy_view
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            view = occupancy_view(store, current_occupancy(store, store.cfg))
+            with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                decisions = evaluate_alerts(view, store.cfg)
+            messages = [d.message for d in decisions if d.should_notify]
+            self.assertFalse(
+                any("pressure check" in m for m in messages),
+                f"a cadence that waited its turn must not raise a banner: {messages}",
+            )
+
+    def test_a_fresh_claim_outlives_a_tick_that_ran_late(self):
+        # The claim survives two tick periods, so a tick that ran late does
+        # not make a waiting cadence look overdue.
+        from vacuum.scheduler import current_occupancy, occupancy_claim_lifetime
+
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store(td)
+            now = time.time()
+            self._scenario(store, now)
+            self._tick(store, now)
+            occupancy = dict(store.scheduler_state().get("tick_occupancy") or {})
+            occupancy["at"] = now - (occupancy_claim_lifetime(store.cfg) - 1)
+            store.merge_scheduler_state({"tick_occupancy": occupancy})
+            self.assertIsNotNone(
+                current_occupancy(store, store.cfg, now=now),
+                "a claim inside its lifetime must still be believable",
+            )
+# A fixed host sample, so nothing here reads the disk or the load of the machine the tests run on.
+SAMPLE = {
+    "at": 1_800_000_000,
+    "disk_sample_ok": True,
+    "disk_free_gb": 100.0,
+    "disk_used_pct": 50.0,
+    "swap_total_gb": 0.0,
+    "swap_used_gb": 0.0,
+    "swap_used_pct": 0.0,
+    "load1": 0.0,
+    "load5": 0.0,
+    "load15": 0.0,
+}
+
+
+class _RunStepCase(unittest.TestCase):
+    """A store in a throwaway home, with the housekeeper lock and the data dir inside it.
+
+    Everything here is hermetic: the home is a temp folder, the host sample is a fixed dictionary, and the
+    dispatcher is stubbed, so no step can reach this Mac and nothing is deleted anywhere.
+    """
+
+    def setUp(self) -> None:
+        self.home = Path(tempfile.mkdtemp(prefix="hhrunstep-"))
+        self.addCleanup(shutil.rmtree, str(self.home), True)
+        data = self.home / "rv"
+        data.mkdir()
+        self.cfg = load_config(home=self.home)
+        self.cfg["data_dir"] = str(data)
+        self.cfg["housekeeper_lock"] = str(self.home / ".housekeeper.lock")
+        self.store = VacuumStore(self.cfg, home=self.home)
+        self.dispatched: list[str] = []
+
+    def stub_dispatch(self, status: StepStatus = StepStatus.RAN):
+        """A dispatcher that records the step ids it is asked for and does nothing else."""
+        calls: list[str] = self.dispatched
+
+        def fake_dispatch(engine, step_id, *args, **kwargs):
+            calls.append(step_id)
+            return 0, "stubbed", status
+
+        return fake_dispatch
+
+    def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        """Run maintain.main() against the throwaway store.  Returns (exit code, stdout, stderr)."""
+        import maintain
+        from vacuum.engine import VacuumEngine
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(maintain.VacuumStore, "open", return_value=self.store):
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch("vacuum.script_registry.bootstrap_registry"):
+                    with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+                            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                    code = maintain.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_nothing_written(self) -> None:
+        """No history, no status, no scheduler state."""
+        self.assertFalse(self.store.history_path.exists(), "history was written")
+        self.assertFalse(self.store.status_path.exists(), "status was written")
+        self.assertEqual(self.store.scheduler_state(), {}, "scheduler state was written")
+
+
+class TestRunStepCli(_RunStepCase):
+    """`maintain.py --run-step STEP_ID` runs exactly one step, so a server-scoped page can reach it.
+
+    The scope of the Hog Hunter panel is display-only for servers, so the one step that acts on a remote
+    host (coolify_remote) could not be run from it.  This is the entry point the Mac side calls.
+    """
+
+    def test_an_unknown_step_exits_two_and_writes_nothing(self) -> None:
+        code, out, err = self.run_cli(["--run-step", "not_a_step"])
+        self.assertEqual(code, 2)
+        self.assertIn("Unknown maintain step: not_a_step", err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.dispatched, [], "an unknown step must not run anything")
+        self.assert_nothing_written()
+
+    def test_a_step_whose_toggle_is_off_exits_two_and_names_the_step(self) -> None:
+        self.store.cfg["steps"]["pm2_logs"] = {"enabled": False}
+        code, out, err = self.run_cli(["--run-step", "pm2_logs"])
+        self.assertEqual(code, 2)
+        self.assertIn("Cap oversized PM2 logs", err)
+        self.assertIn("off", err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.dispatched, [], "a step that is off must not run")
+        self.assert_nothing_written()
+
+    def test_a_step_that_ships_off_is_refused_until_the_owner_turns_it_on(self) -> None:
+        """coolify_remote ships off, and it is the step the server-scoped page needs."""
+        self.assertFalse(step_enabled(self.store.cfg, "coolify_remote"))
+        code, out, err = self.run_cli(["--run-step", "coolify_remote"])
+        self.assertEqual(code, 2)
+        self.assertIn("Remote server maintenance is off", err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.dispatched, [])
+        self.assert_nothing_written()
+
+    def test_an_enabled_step_runs_that_one_step_and_is_appended_to_history(self) -> None:
+        code, out, err = self.run_cli(["--run-step", "pm2_logs", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.dispatched, ["pm2_logs"], "exactly one step, the one that was named")
+        history = self.store.load_history()
+        self.assertEqual(len(history), 1)
+        record = history[0]
+        self.assertEqual([s["step_id"] for s in record["steps"]], ["pm2_logs"])
+        self.assertEqual(record["trigger"], "manual")
+        self.assertTrue(self.store.status_path.exists(), "the status must be published")
+        payload = json.loads(out)
+        self.assertEqual(payload["run_id"], record["run_id"])
+
+    def test_a_step_turned_on_runs(self) -> None:
+        self.store.cfg["steps"]["coolify_remote"] = {"enabled": True}
+        code, _out, err = self.run_cli(["--run-step", "coolify_remote"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.dispatched, ["coolify_remote"])
+
+    def test_a_dry_run_writes_nothing(self) -> None:
+        code, out, err = self.run_cli(["--run-step", "pm2_logs", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual([r["steps"][0]["step_id"] for r in payload["records"]], ["pm2_logs"])
+        self.assert_nothing_written()
+
+    def test_a_single_step_run_does_not_advance_the_scheduler_clock(self) -> None:
+        """A manual step is not a cadence, so it must not make one look like it has already run."""
+        self.store.touch_scheduler("last_full", 1000.0)
+        before = self.store.scheduler_state()
+        code, _out, err = self.run_cli(["--run-step", "pm2_logs"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store.scheduler_state(), before)
+        self.assertEqual(self.store.scheduler_state().get("last_full"), 1000.0)
+
+    def test_run_step_and_run_now_cannot_be_combined(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli(["--run-step", "pm2_logs", "--run-now", "full"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.dispatched, [])
+
+    def test_a_dry_run_still_refuses_the_other_flags(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli(["--run-step", "pm2_logs", "--dry-run", "--status"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.dispatched, [])
+
+
+class TestRunSingleStep(_RunStepCase):
+    """The engine side of the single-step run: the lock, one step, and nothing else."""
+
+    def engine(self):
+        from vacuum.engine import VacuumEngine
+
+        return VacuumEngine(self.cfg, home=self.home)
+
+    def test_it_runs_only_the_named_step(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                record = engine.run_single_step("pm2_logs")
+        self.assertEqual(self.dispatched, ["pm2_logs"])
+        self.assertEqual([s.step_id for s in record.steps], ["pm2_logs"])
+        self.assertEqual(record.exit_code, 0)
+
+    def test_a_step_that_is_off_is_skipped_and_never_dispatched(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        self.cfg["steps"]["pm2_logs"] = {"enabled": False}
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                record = engine.run_single_step("pm2_logs")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+        self.assertEqual(record.exit_code, 2)
+
+    def test_a_heavy_step_skipped_under_extreme_load_is_not_a_successful_run(self) -> None:
+        """Nothing ran, so the run is not a success:  the exit code has to say so.
+
+        A heavy step is refused when the host is under extreme load, and the refusal is
+        a skip rather than a failure.  The run still ends with an exit code of zero,
+        which is how `maintain.py --run-step` told the owner that nothing had run.
+        """
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        self.cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch("vacuum.engine.janitor_pressure_mode", return_value="hard"):
+                with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                    record = engine.run_single_step("janitor_worktree_retire")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+        self.assertNotEqual(record.exit_code, 0)
+        self.assertIn("host under extreme load", record.summary)
+
+    def test_the_cli_reports_a_load_skipped_step_as_a_failure(self) -> None:
+        """`--run-step` hands back the run's exit code, so a load skip must not read as success."""
+        import maintain
+        from vacuum.engine import VacuumEngine
+
+        self.cfg["steps"]["janitor_worktree_retire"] = {"enabled": True}
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(maintain.VacuumStore, "open", return_value=self.store):
+            with patch.object(maintain, "bootstrap_registry"):
+                with patch("vacuum.script_registry.bootstrap_registry"):
+                    with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+                            with patch("vacuum.engine.janitor_pressure_mode", return_value="hard"):
+                                with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                        code = maintain.main(["--run-step", "janitor_worktree_retire"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.dispatched, [])
+
+    def test_a_peer_holding_the_lock_is_reported_as_skipped(self) -> None:
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        Path(self.cfg["housekeeper_lock"]).mkdir(parents=True)
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", self.stub_dispatch()):
+                record = engine.run_single_step("pm2_logs")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(record.summary, "skipped; peer holds lock")
+        self.assertEqual([s.step_id for s in record.steps], ["housekeeper_lock"])
+        self.assertEqual(record.exit_code, 0)
+
+    def test_a_dry_run_hands_the_step_the_plan_only_flag(self) -> None:
+        """The dispatcher takes (pressure, band, sample, mode, dry_run), so the last argument is the flag."""
+        from vacuum.engine import VacuumEngine
+
+        engine = self.engine()
+        seen: list[tuple[str, object]] = []
+
+        def fake_dispatch(engine_self, step_id, *args, **kwargs):
+            seen.append((step_id, args[-1]))
+            return 0, "dry run; no changes", StepStatus.SKIPPED
+
+        with patch("vacuum.engine.sample_mac", return_value=SAMPLE):
+            with patch.object(VacuumEngine, "_dispatch", fake_dispatch):
+                record = engine.run_single_step("pm2_logs", dry_run=True)
+        self.assertEqual(seen, [("pm2_logs", True)])
+        self.assertEqual(record.steps[0].status, StepStatus.SKIPPED)
+
+
 def load_tests(loader, tests, pattern):
-    """CI runs only this file, so load the lane doctor tests beside the others."""
+    """CI runs this file, including lane and hermetic server maintenance coverage."""
     import importlib.util
 
     path = Path(__file__).resolve().parent / "test-vacuum-lanes.py"
@@ -1879,6 +3722,12 @@ def load_tests(loader, tests, pattern):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     tests.addTests(loader.loadTestsFromModule(module))
+    server_path = Path(__file__).resolve().parent / "server-maintenance" / "test_maintain.py"
+    server_spec = importlib.util.spec_from_file_location("test_server_maintenance", server_path)
+    server_module = importlib.util.module_from_spec(server_spec)
+    sys.modules[server_spec.name] = server_module
+    server_spec.loader.exec_module(server_module)
+    tests.addTests(loader.loadTestsFromModule(server_module))
     return tests
 
 

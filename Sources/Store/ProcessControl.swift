@@ -126,12 +126,20 @@ enum ProcessControl {
     }
 
     /// Throttles every live member to background QoS and nice level 20.
+    /// Both calls must land: a nice change without the matching background
+    /// scheduling class would report success for a half-tamed process.
     @discardableResult
     static func tame(members: [ProcessKey], fallbackName: String) -> QuitOutcome {
         apply(to: members, fallbackName: fallbackName, pastTense: "tamed") { pid in
-            _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), PRIO_DARWIN_BG)
-            let res = setpriority(PRIO_PROCESS, id_t(pid), 20)
-            return res == 0 ? .asked : .failed(String(cString: strerror(errno)))
+            errno = 0
+            let darwinRes = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), PRIO_DARWIN_BG)
+            let darwinErr = errno
+            errno = 0
+            let niceRes = setpriority(PRIO_PROCESS, id_t(pid), 20)
+            let niceErr = errno
+            guard darwinRes == 0 else { return .failed(String(cString: strerror(darwinErr))) }
+            guard niceRes == 0 else { return .failed(String(cString: strerror(niceErr))) }
+            return .asked
         }
     }
 
@@ -139,9 +147,15 @@ enum ProcessControl {
     @discardableResult
     static func untame(members: [ProcessKey], fallbackName: String) -> QuitOutcome {
         apply(to: members, fallbackName: fallbackName, pastTense: "restored") { pid in
-            _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), 0)
-            let res = setpriority(PRIO_PROCESS, id_t(pid), 0)
-            return res == 0 ? .asked : .failed(String(cString: strerror(errno)))
+            errno = 0
+            let darwinRes = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), 0)
+            let darwinErr = errno
+            errno = 0
+            let niceRes = setpriority(PRIO_PROCESS, id_t(pid), 0)
+            let niceErr = errno
+            guard darwinRes == 0 else { return .failed(String(cString: strerror(darwinErr))) }
+            guard niceRes == 0 else { return .failed(String(cString: strerror(niceErr))) }
+            return .asked
         }
     }
 

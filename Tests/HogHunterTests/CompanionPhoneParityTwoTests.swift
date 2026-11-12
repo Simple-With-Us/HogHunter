@@ -140,15 +140,30 @@ final class CompanionSettingsValidatorTests: XCTestCase {
     }
 
     func testValuesOutsideWhatTheMacOffersAreRefused() {
+        // The Mac's own rule for an interval is a second or more, and that is
+        // the rule the validator uses:  a value the Mac holds is never
+        // refused, so a value below a second is what has to be refused here.
         let bad: [CompanionSettingsUpdateRequest] = [
-            .init(refreshInterval: 0), .init(refreshInterval: 1), .init(refreshInterval: 7), .init(refreshInterval: 3600),
-            .init(refreshInterval: .nan),
+            .init(refreshInterval: 0), .init(refreshInterval: 0.5), .init(refreshInterval: -1),
+            .init(refreshInterval: .nan), .init(refreshInterval: .infinity),
+            .init(backgroundRefreshInterval: 0), .init(backgroundRefreshInterval: 0.5),
+            .init(backgroundRefreshInterval: .nan),
             .init(alertThresholdPercent: 50), .init(alertThresholdPercent: 125), .init(alertThresholdPercent: 1050),
             .init(alertThresholdPercent: .infinity), .init(alertThresholdPercent: .nan), .init(alertThresholdPercent: -300),
             .init(alertSustainedMinutes: 0), .init(alertSustainedMinutes: 31), .init(alertSustainedMinutes: -5),
         ]
         for request in bad {
             guard case .failure = validate(request) else { return XCTFail("accepted \(request)") }
+        }
+    }
+
+    func testAnIntervalTheMacHoldsIsAcceptedEvenWhenItIsNotOnThePickers() throws {
+        // The Mac's own settings window offers a small set, but a value can
+        // reach the Mac from elsewhere, and then the phone offers it back.
+        // The Mac must not refuse a value it is already using.
+        for interval in [1.0, 7.0, 3600.0] {
+            XCTAssertEqual(try validate(.init(refreshInterval: interval)).get().refreshInterval, interval)
+            XCTAssertEqual(try validate(.init(backgroundRefreshInterval: interval)).get().backgroundRefreshInterval, interval)
         }
     }
 
@@ -352,7 +367,7 @@ final class CompanionSettingsRouteTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
 
-        let refused = store.performRemoteSettings(.init(refreshInterval: 7))
+        let refused = store.performRemoteSettings(.init(refreshInterval: 0))
         XCTAssertEqual(refused.status, 400)
         let decoded = try JSONDecoder().decode(CompanionSettingsUpdateResponse.self, from: refused.body)
         XCTAssertEqual(decoded.status, "rejected")
@@ -583,6 +598,29 @@ final class SampleReportTests: XCTestCase {
         XCTAssertEqual(SampleReport.summary(of: ""), [])
     }
 
+    func testTheSummaryFoldsTheHomeDirectoryToTilde() {
+        let home = NSHomeDirectory()
+        let body = "Sort by top of stack, same collapsed (when >= 5):\n        1 foo \(home)/Library/Caches/x  (in bar)  99\n\nBinary Images:\n"
+        let lines = SampleReport.summary(of: body)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertFalse(lines[0].contains(home))
+        XCTAssertTrue(lines[0].contains("~/Library/Caches/x"))
+    }
+
+    func testASampleThatCannotStartSaysSoWithoutSystemText() {
+        let done = expectation(description: "sample finishes")
+        // No process can hold this pid (macOS pids stay below 100000), so
+        // `sample` fails at once without touching a live process.
+        SampleReport.run(name: "ghost", pid: 999_999, seconds: 1) { outcome in
+            guard case .failed(let message) = outcome else {
+                return XCTFail("sampling a pid that cannot exist must fail, got \(outcome)")
+            }
+            XCTAssertEqual(message, "Sampling ghost did not finish.\u{00A0} Try again.")
+            done.fulfill()
+        }
+        waitForExpectations(timeout: 30)
+    }
+
     func testOnlyTheTailOfAHugeReportIsRead() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("hoghunter-sample-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -795,5 +833,100 @@ final class CompanionQueryParsingTests: XCTestCase {
                 _ = server.syncOnQueue { server.disposition(for: request, peer: lan) }
             }
         }
+    }
+}
+
+// MARK: - Unknown companion values are refused
+
+/// Tightening: an unknown toggleCategory, window, grouping, or cpuScale is
+/// refused with 400 instead of being silently ignored behind an "ok" the Mac
+/// never honored.  The sort refusal predates this change and keeps its text.
+@MainActor
+final class CompanionUnknownValueRejectionTests: XCTestCase {
+    private func makeStore() -> (HogStore, String) {
+        let suite = "hoghunter.tests.unknownvalues.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = HogStore(defaults: defaults, infisical: IsolatedInfisical.make(), startImmediately: false)
+        return (store, suite)
+    }
+
+    private func cleanup(_ suite: String) {
+        UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+    }
+
+    private func viewRefusal(_ body: Data) throws -> String {
+        let decoded = try JSONDecoder().decode(CompanionViewUpdateResponse.self, from: body)
+        XCTAssertEqual(decoded.status, "rejected")
+        return try XCTUnwrap(decoded.error)
+    }
+
+    func testAnUnknownToggleCategoryIsRefusedAndAppliesNothing() throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let before = CleanerExclusions.load()
+        let probePath = "/tmp/hoghunter-unknown-value-probe-\(UUID().uuidString)"
+        let reply = store.performRemoteExclusionsUpdate(.init(toggleCategory: "noSuchCategory", addPath: probePath))
+        XCTAssertEqual(reply.status, 400)
+        let decoded = try JSONDecoder().decode(CompanionExclusionsUpdateResponse.self, from: reply.body)
+        XCTAssertEqual(decoded.status, "rejected")
+        XCTAssertTrue(decoded.message?.contains("category") ?? false, decoded.message ?? "no message")
+        XCTAssertEqual(CleanerExclusions.load(), before, "a refused change must not write anything, not even its valid half")
+    }
+
+    func testAnUnknownWindowIsRefused() throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let reply = store.performRemoteViewUpdate(.init(window: "Last Week"))
+        XCTAssertEqual(reply.status, 400)
+        XCTAssertEqual(try viewRefusal(reply.body), "The window must be Now, Past Hour, or Past 24 Hours.")
+    }
+
+    func testAnUnknownGroupingIsRefused() throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let reply = store.performRemoteViewUpdate(.init(grouping: "Everything"))
+        XCTAssertEqual(reply.status, 400)
+        XCTAssertEqual(try viewRefusal(reply.body), "The grouping must be Apps or Processes.")
+    }
+
+    func testAnUnknownCpuScaleIsRefused() throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let reply = store.performRemoteViewUpdate(.init(cpuScale: "Sideways"))
+        XCTAssertEqual(reply.status, 400)
+        XCTAssertEqual(try viewRefusal(reply.body), "The CPU scale must be Per Core or Share of Machine.")
+    }
+
+    func testAnUnknownSortKeepsItsRefusalText() throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let reply = store.performRemoteViewUpdate(.init(sort: "program"))
+        XCTAssertEqual(reply.status, 400)
+        XCTAssertEqual(try viewRefusal(reply.body), "The sort must be CPU or Memory.")
+    }
+
+    func testOneBadViewFieldRejectsTheWholeChange() async throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let reply = store.performRemoteViewUpdate(.init(window: "Past Hour", sort: "program"))
+        XCTAssertEqual(reply.status, 400)
+        XCTAssertEqual(try viewRefusal(reply.body), "The sort must be CPU or Memory.")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(store.window, .now, "a refused change must not move the Mac at all")
+    }
+
+    func testKnownViewValuesAreStillAccepted() async throws {
+        let (store, suite) = makeStore()
+        defer { cleanup(suite) }
+        let reply = store.performRemoteViewUpdate(.init(window: "Now", grouping: "Apps", cpuScale: "Per Core", sort: "Memory"))
+        XCTAssertEqual(reply.status, 200)
+        let decoded = try JSONDecoder().decode(CompanionViewUpdateResponse.self, from: reply.body)
+        XCTAssertEqual(decoded.status, "ok")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(store.window, .now)
+        XCTAssertEqual(store.grouping, .apps)
+        XCTAssertEqual(store.cpuScale, .perCore)
+        XCTAssertEqual(store.sort, .memory)
     }
 }

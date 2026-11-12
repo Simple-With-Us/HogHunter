@@ -11,9 +11,7 @@
 # tooling that an agent can use to read, lint, and reason about the repo
 # (XcodeGen project generation, docs / scripts) without attempting a build.
 #
-# Required Cursor dashboard secrets (org-wide):
-#   - INFISICAL_CLIENT_ID
-#   - INFISICAL_CLIENT_SECRET
+# Optional Cursor dashboard secret: INFISICAL_HOGHUNTER_READ_TOKEN.
 
 set -euo pipefail
 
@@ -41,18 +39,6 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
 fi
 
 echo "==> Node: $(node --version)  npm: $(npm --version)"
-
-# ── Infisical CLI (official Linux install) ────────────────
-if ! command -v infisical >/dev/null 2>&1; then
-  echo "==> Installing Infisical CLI."
-  curl -fsSL https://infisical.com/install.sh | bash -s -- >/dev/null
-fi
-
-if ! command -v infisical >/dev/null 2>&1; then
-  echo "==> WARN: infisical CLI not available; start script will fall back to API fetch." >&2
-else
-  echo "==> Infisical CLI: $(infisical --version 2>/dev/null || echo installed)"
-fi
 
 # ── xcodegen (project.yml is the project source of truth) ─
 if ! command -v xcodegen >/dev/null 2>&1; then

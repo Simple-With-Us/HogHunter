@@ -16,8 +16,13 @@ enum ApplicationRunMode: Equatable {
     }
 
     static func detect(arguments: [String], environment: [String: String], xctestLoaded: Bool) -> Self {
-        if xctestLoaded || environment["XCTestConfigurationFilePath"] != nil
-            || environment["XCTestBundlePath"] != nil || arguments.contains("-XCTest") {
+        if xctestLoaded
+            || environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+            || environment["XCTestSessionIdentifier"] != nil
+            || environment["XCInjectBundleInto"] != nil
+            || arguments.contains("-XCTest")
+            || arguments.contains(where: { $0.hasSuffix(".xctest") }) {
             return .unitTests
         }
         if arguments.contains("-HogHunterScreenshot") || arguments.contains("-HogHunterUISmoke") {

@@ -8,7 +8,8 @@ backward-compatible alias for installed launchd jobs and shims.
 Usage:
   maintain.py --tick scheduler          # every 5 min from launchd
   maintain.py --run-now full|janitor|watch
-  maintain.py --dry-run [--tick scheduler | --run-now full|janitor|watch|pressure]
+  maintain.py --run-step STEP_ID         # run exactly one step, by id
+  maintain.py --dry-run [--tick scheduler | --run-now full|janitor|watch|pressure | --run-step STEP_ID]
                                         # plan only: prints JSON, deletes and records nothing
   maintain.py --status [--json]
   maintain.py --check-alerts
@@ -58,6 +59,13 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 # still happen below, after the watchdog is up.
 from vacuum.config import TICK_WATCHDOG_SEC  # noqa: E402
 
+# vacuum.lock is a leaf module too: standard library only, no vacuum imports.
+# The watchdog needs it because `os._exit` skips `finally` and `atexit`, so a
+# killed tick used to leave the housekeeper lock behind and every tick after
+# it did nothing for two hours.
+from vacuum import lock as housekeeper_lock  # noqa: E402
+from vacuum import budget as work_budget  # noqa: E402
+
 _watchdog_armed = False
 
 
@@ -69,6 +77,23 @@ def _watchdog_exit(seconds: float) -> None:
         "exiting so the next tick can run\n"
     )
     sys.stderr.flush()
+    # Stop/reap owned process groups before handing serialization back.
+    # A dead parent is not proof its deleting child is gone.  If a kernel
+    # operation cannot yet be killed, keep the owner alive and hold the lock
+    # rather than let the next cleaner overlap it.
+    while True:
+        try:
+            stopped = work_budget.terminate_all()
+        except Exception:
+            stopped = False
+        if stopped:
+            break
+        sys.stderr.write("[hoghunter] waiting for owned cleanup processes to stop; lock retained\n")
+        sys.stderr.flush()
+        time.sleep(1)
+    # Keep the owner record until this PID actually dies.  Releasing here
+    # would let a peer enter while the main thread can still unlink files.
+    # The next reader recovers a well-formed dead-PID owner immediately.
     os._exit(3)
 
 
@@ -138,6 +163,11 @@ def _build_parser(quiet: bool = False) -> _MaintainParser:
         ),
     )
     parser.add_argument("--run-now", choices=["watch", "janitor", "full", "pressure"], help="Run one cadence immediately")
+    parser.add_argument(
+        "--run-step",
+        metavar="STEP_ID",
+        help="Run exactly one step, by id.  The step's own toggle decides whether it runs.",
+    )
     parser.add_argument("--status", action="store_true", help="Print health and last run summary")
     parser.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON (with --status)")
     parser.add_argument("--check-alerts", action="store_true", help="Evaluate alerts and notify")
@@ -210,10 +240,16 @@ if _tick_timeout is not None:
     _start_tick_watchdog(_tick_timeout)
 
 from vacuum.alerts import NO_NOTIFY_ENV, evaluate_alerts, notify_macos  # noqa: E402
-from vacuum.config import STEP_CATALOG, load_config  # noqa: E402
+from vacuum.config import STEP_CATALOG, load_config, step_enabled  # noqa: E402
 from vacuum.engine import VacuumEngine  # noqa: E402
 from vacuum.models import TriggerKind  # noqa: E402
-from vacuum.scheduler import build_status, run_scheduler_tick, run_skipped_for_lock  # noqa: E402
+from vacuum.scheduler import (  # noqa: E402
+    build_status,
+    current_occupancy,
+    occupancy_view,
+    run_scheduler_tick,
+    run_skipped_for_lock,
+)
 from vacuum.script_registry import bootstrap_registry  # noqa: E402
 from vacuum.store import VacuumStore  # noqa: E402
 
@@ -261,14 +297,53 @@ def _dry_run(store: VacuumStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_single_step(store: VacuumStore, args: argparse.Namespace) -> int:
+    """Run exactly one step, by id, and write the run the way --run-now writes it.
+
+    A dry run plans only: it prints the plan and writes nothing -- no history, no status, no scheduler
+    state.  A real run appends the record to history and publishes the status, and it never touches the
+    scheduler clock: a manual step is not a cadence, so it must not make one look like it has already run.
+    """
+    engine = VacuumEngine(store.cfg, store.home, on_step=store.write_partial_run)
+    record = engine.run_single_step(str(args.run_step), dry_run=args.dry_run)
+    if args.dry_run:
+        os.environ[NO_NOTIFY_ENV] = "1"
+        print(json.dumps({"dry_run": True, "plan": engine.plan, "records": [record.as_dict()]}, indent=2))
+        return 0
+    store.append_run(record)
+    store.clear_partial_run(record.run_id)
+    status = build_status(store, store.cfg)
+    store.publish_status(status)
+    if args.as_json:
+        print(json.dumps(record.as_dict(), indent=2))
+    else:
+        print(record.summary or f"run {record.run_id} exit={record.exit_code}")
+    return record.exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.run_step and args.run_now:
+        parser.error("--run-step and --run-now cannot be combined")
+
     if args.dry_run and (args.set_step or args.set_config or args.set_coolify_host or args.status or args.check_alerts):
-        parser.error("--dry-run only combines with --tick or --run-now")
+        parser.error("--dry-run only combines with --tick, --run-now or --run-step")
+
+    if args.run_step and args.run_step not in STEP_CATALOG:
+        # Refused before the store is opened, so an unknown step leaves nothing behind at all.
+        print(f"Unknown maintain step: {args.run_step}", file=sys.stderr)
+        return 2
 
     store = VacuumStore.open()
+
+    if args.run_step and not step_enabled(store.cfg, args.run_step):
+        # The toggle is the one on/off control for a step, so an explicit run must not work around it.
+        title = str(STEP_CATALOG[str(args.run_step)].get("title", args.run_step))
+        print(f"{title} is off. Turn it on first.", file=sys.stderr)
+        return 2
+
     bootstrap_registry(store.home, REPO_ROOT, store.cfg)
 
     if args.set_coolify_host is not None:
@@ -307,6 +382,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config {key} -> {val}")
         return 0
 
+    if args.run_step:
+        return _run_single_step(store, args)
+
     if args.dry_run:
         return _dry_run(store, args)
 
@@ -318,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.run_now:
-        engine = VacuumEngine(store.cfg, store.home)
+        engine = VacuumEngine(store.cfg, store.home, on_step=store.write_partial_run)
         if args.run_now == "watch":
             state = store.scheduler_state()
             watch_scratch: dict[str, object] = {}
@@ -340,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
             store.append_run(record)
             if not run_skipped_for_lock(record):
                 store.touch_scheduler(f"last_{args.run_now if args.run_now != 'pressure' else 'full'}")
+        store.clear_partial_run(record.run_id)
         status = build_status(store, store.cfg)
         store.publish_status(status)
         if args.as_json:
@@ -349,7 +428,11 @@ def main(argv: list[str] | None = None) -> int:
         return record.exit_code
 
     if args.check_alerts:
-        alerts = evaluate_alerts(store, store.cfg)
+        # The same view the tick uses, so a cadence that is only waiting its
+        # turn does not raise a banner here either.
+        alerts = evaluate_alerts(
+            occupancy_view(store, current_occupancy(store, store.cfg)), store.cfg
+        )
         for alert in alerts:
             if alert.should_notify:
                 notify_macos("Hog Hunter", alert.message)

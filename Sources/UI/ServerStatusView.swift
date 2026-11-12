@@ -52,11 +52,7 @@ struct VPSStatusStripView: View {
 
                 Spacer(minLength: 6)
 
-                if let snapshot = store.snapshot {
-                    Text(snapshot.relativeTimeString())
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
+                trailingTime
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
@@ -75,22 +71,45 @@ struct VPSStatusStripView: View {
             )
         }
         .buttonStyle(.plain)
-        .help("Remote server status.  Click for the full report.")
+        .help("Remote server status.\u{00A0} Click for the full report.")
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Opens the server tab")
     }
 
-    /// What a screen reader says.  The numbers are in the label, not only in
-    /// the drawing: the whole point of the strip is that the server's state is
-    /// readable without looking closely at a row of percentages.
-    private var accessibilityLabel: String {
-        Self.stripLabel(snapshot: store.snapshot)
+    /// The snapshot's age, marked stale while refresh is failing so an old
+    /// reading never presents as live.  Its own view, not an inline
+    /// conditional in the body: the strip's body is already at the edge of
+    /// what the compiler will type-check in reasonable time.
+    @ViewBuilder
+    private var trailingTime: some View {
+        if let snapshot = store.snapshot {
+            if store.isStale {
+                Text("Stale · \(snapshot.relativeTimeString())")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            } else {
+                Text(snapshot.relativeTimeString())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
     }
 
-    /// The strip's spoken label, from the snapshot alone, so it can be pinned
-    /// by a test: the host, then each reading.
-    static func stripLabel(snapshot: VPSStatusSnapshot?) -> String {
+    /// What a screen reader says.  The numbers are in the label, not only in
+    /// the drawing: the whole point of the strip is that the server's state is
+    /// readable without looking closely at a row of percentages.  The
+    /// reading's age and staleness are in it too: the strip's label replaces
+    /// the child views' own text, so anything the marker shows visually has
+    /// to be said here or a screen reader never hears it.
+    private var accessibilityLabel: String {
+        Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale)
+    }
+
+    /// The strip's spoken label, so it can be pinned by a test: the host,
+    /// then each reading, then how old the reading is and whether it is
+    /// stale.
+    static func stripLabel(snapshot: VPSStatusSnapshot?, isStale: Bool = false) -> String {
         guard let snapshot, let headline = snapshot.headline else {
             return "Remote server status"
         }
@@ -98,6 +117,9 @@ struct VPSStatusStripView: View {
         if let cpu = headline.cpuText { parts.append("CPU \(cpu)") }
         if let memory = headline.memoryText { parts.append("RAM \(memory)") }
         if let disk = headline.diskText { parts.append("disk \(disk)") }
+        if let extra = headline.extraDiskText { parts.append("fleet-extra \(extra)") }
+        parts.append("read \(snapshot.relativeTimeString())")
+        if isStale { parts.append("stale") }
         return parts.joined(separator: ", ")
     }
 
@@ -109,6 +131,9 @@ struct VPSStatusStripView: View {
                 metric("CPU", headline.cpuText, headline.cpuSeverity)
                 metric("RAM", headline.memoryText, headline.memorySeverity)
                 metric("Disk", headline.diskText, headline.diskSeverity)
+                if let extra = headline.extraDiskText {
+                    metric("Extra", extra, headline.extraDiskSeverity)
+                }
             }
         }
     }

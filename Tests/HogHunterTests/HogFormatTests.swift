@@ -102,13 +102,14 @@ final class HogFormatTests: XCTestCase {
         XCTAssertEqual(HogFormat.percent(0.5), "50%")
     }
 
-    // MARK: - Locale pinning
+    // MARK: - Decimal separator
 
     /// The formatter must always use `.` as the decimal separator and never
     /// introduce a thousands separator, so a French or German Mac prints
     /// `1.5 GB` and matches Activity Monitor instead of `1,5 GB` or `1.500 MB`.
-    /// Foundation's `String(format:)` does this when given an explicit locale,
-    /// which is what every HogFormat entry point now does.
+    /// `HogFormat` gets this by passing no locale at all: plain
+    /// `String(format:)` is the non-localized C path, which always prints
+    /// `.` and never touches ICU (HOGHUNTER-G).
     func testOutputsUseDotDecimalAndNoThousandsSeparator() {
         XCTAssertFalse(HogFormat.cpu(12.5).contains(","))
         XCTAssertFalse(HogFormat.memory(1_610_612_736).contains(","))
@@ -123,6 +124,20 @@ final class HogFormatTests: XCTestCase {
     func testOutputsUsePlainDotAsTheDecimalPoint() {
         XCTAssertTrue(HogFormat.cpu(12.5).contains("."))
         XCTAssertTrue(HogFormat.memory(1_610_612_736).contains("."))
+    }
+
+    /// Regression for HOGHUNTER-G: cpu, memory and percent keep `.` as the
+    /// decimal separator (and stay byte-identical) now that `HogFormat`
+    /// passes no locale instead of a POSIX one.  `percent` prints no
+    /// fraction, so its check is the exact string and no comma separator.
+    func testCpuMemoryAndPercentUseDotDecimalSeparator() {
+        XCTAssertEqual(HogFormat.cpu(12.3), "12.3%")
+        XCTAssertEqual(HogFormat.memory(1_500_000_000), "1.4 GB")
+        XCTAssertEqual(HogFormat.memory(512 * 1_048_576), "512 MB")
+        XCTAssertEqual(HogFormat.percent(0.5), "50%")
+        XCTAssertFalse(HogFormat.cpu(12.3).contains(","))
+        XCTAssertFalse(HogFormat.memory(1_500_000_000).contains(","))
+        XCTAssertFalse(HogFormat.percent(0.5).contains(","))
     }
 
     // MARK: - Process counts

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreFoundation
 import Foundation
 
 /// Reads Maintain status from the on-disk store the Python engine maintains.
@@ -23,6 +24,10 @@ final class MaintainStore: ObservableObject {
     /// the cleaning runs out of the list within hours.
     @Published private(set) var history: [MaintainRun] = []
     @Published private(set) var stepToggles: [String: Bool] = [:]
+    /// True when the step toggles on disk and in Infisical match what the
+    /// panel shows.  A save takes a moment, and "Run Now" must not reach the
+    /// script before the step it runs is really on.
+    @Published private(set) var stepTogglesPersisted: Bool = true
     @Published private(set) var isRunningNow = false
     @Published var lastError: String?
 
@@ -31,6 +36,8 @@ final class MaintainStore: ObservableObject {
 
     // Maintenance tuning knobs
     @Published var lowFreeGiB: Double = 80.0
+    @Published var worktreeRetireMinDays: Int = 7
+    @Published private(set) var worktreeRetireDaysPersisted = true
     @Published var pm2LogsCapMB: Int = 50
     @Published var coolifySSHHost: String = ""
     @Published var customDerivedDataPath: String = ""
@@ -71,9 +78,9 @@ final class MaintainStore: ObservableObject {
         configURL = support.appendingPathComponent("config.json")
         MaintainStore.migrateLegacySupportIfNeeded(to: support, fileManager: fileManager)
         let root = repoRoot ?? MaintainStore.locateRepoRoot()
-        self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root)
         self.infisical = infisical ?? InfisicalSettings.shared
         self.infisicalStore = infisicalStore ?? InfisicalStore.shared
+        self.launcher = launcher ?? MaintainStore.pythonLauncher(repoRoot: root, infisicalStore: self.infisicalStore)
         self.vpsStore = VPSStatusStore(fetcher: vpsFetcher)
         NotificationCenter.default.addObserver(
             self,
@@ -160,13 +167,28 @@ final class MaintainStore: ObservableObject {
         // The config first: loadStepToggles walks visibleCatalog, which reads
         // coolifyHost, so the host has to be current before the toggles load.
         loadMaintainConfig()
-        stepToggles = loadStepToggles()
+        // A toggle still being saved is newer than the disk; keep it until the save lands.
+        if stepTogglesPersisted { stepToggles = loadStepToggles() }
         customScripts = MaintainRegistryStore.loadScripts()
     }
 
     private func loadMaintainConfig() {
         let json = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let lanes = json?["lanes"] as? [String: Any]
+        let fileRetireDays = Self.validRetireDays(lanes?["retire_min_days"]) ?? 7
+        let infisicalRetireText = infisical.isConfigured
+            ? infisicalStore.string(for: InfisicalKey.maintainJanitorRetireMinDays)
+            : nil
+        let retireDays = infisicalRetireText.map { Self.validRetireDays($0) ?? 7 } ?? fileRetireDays
+        if worktreeRetireDaysPersisted, worktreeRetireMinDays != retireDays {
+            worktreeRetireMinDays = retireDays
+        }
+        // Keep launchd's config-file fallback aligned with a value refreshed
+        // from Infisical while the app is open.
+        if worktreeRetireDaysPersisted, infisicalRetireText != nil, fileRetireDays != retireDays {
+            Self.writeRetireDays(retireDays, to: configURL)
+        }
         // Set even when the file or key is missing, so a host removed on disk
         // reads empty here too, as the old read-on-every-access getter did.
         // Infisical is the source of truth: a non-empty host there wins once
@@ -222,6 +244,81 @@ final class MaintainStore: ObservableObject {
         refresh()
     }
 
+    /// Writes the retention knob to Infisical first when configured, then
+    /// mirrors it to config.json for launchd's standalone Python scheduler.
+    func saveWorktreeRetireMinDays() {
+        guard CompanionMaintainLimits.worktreeRetireDaysRange.contains(worktreeRetireMinDays) else {
+            worktreeRetireMinDays = 7
+            return
+        }
+        worktreeRetireDaysPersisted = false
+        let value = worktreeRetireMinDays
+        let infisical = self.infisical
+        let previous = worktreeRetireTask
+        previous?.cancel()
+        worktreeRetireTask = Task { [weak self] in
+            // Coalesce rapid stepper input before starting a network write.
+            do {
+                try await Task.sleep(nanoseconds: 300_000_000)
+            } catch {
+                return
+            }
+            _ = await previous?.value
+            guard !Task.isCancelled, let self else { return }
+            if infisical.isConfigured {
+                do {
+                    try await infisical.set(
+                        String(value),
+                        forKey: InfisicalKey.maintainJanitorRetireMinDays,
+                        expectedGeneration: infisical.connectionGeneration
+                    )
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.lastError = Self.infisicalSaveFailure("the merged worktree retention", error: error)
+                    self.worktreeRetireDaysPersisted = true
+                    self.refresh()
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            Self.writeRetireDays(value, to: self.configURL)
+            self.lastError = nil
+            self.worktreeRetireDaysPersisted = true
+            self.refresh()
+        }
+    }
+
+    private var worktreeRetireTask: Task<Void, Never>?
+
+    private static func validRetireDays(_ value: Any?) -> Int? {
+        let parsed: Int?
+        if let number = value as? NSNumber {
+            guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let double = number.doubleValue
+            guard double.isFinite, double.rounded(.towardZero) == double else { return nil }
+            parsed = Int(exactly: double)
+        } else if let string = value as? String, let int = Int(string), string == String(int) {
+            parsed = int
+        } else {
+            parsed = nil
+        }
+        guard let parsed, CompanionMaintainLimits.worktreeRetireDaysRange.contains(parsed) else { return nil }
+        return parsed
+    }
+
+    private static func writeRetireDays(_ days: Int, to configURL: URL) {
+        try? FileManager.default.createDirectory(
+            at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        var json = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        var lanes = json["lanes"] as? [String: Any] ?? [:]
+        lanes["retire_min_days"] = days
+        json["lanes"] = lanes
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: configURL, options: .atomic)
+    }
+
     func setToolPath(toolId: String, path: String) {
         toolPaths[toolId] = path
         saveMaintainConfig()
@@ -265,8 +362,45 @@ final class MaintainStore: ObservableObject {
                 break
             case .success(false):
                 self.lastError = "Cleaning did not finish cleanly.\u{00A0} Check Logs for details."
-            case .failure(let error):
-                self.lastError = error.localizedDescription
+            case .failure:
+                self.lastError = "Cleaning could not be started.\u{00A0} Check Logs for details."
+            }
+            self.isRunningNow = false
+            self.refresh()
+        }
+    }
+
+    /// Runs one named step and nothing else.
+    ///
+    /// The server scope of the panel is display-only, so the owner had no way to
+    /// run the one step that acts on a remote host.  This calls the CLI's
+    /// `--run-step`, which takes the same housekeeper lock the scheduled tick
+    /// takes, so a step can never run over a tick.
+    ///
+    /// The step's own on/off toggle still governs it: the CLI refuses a step
+    /// that is off, so the panel enables the step first and the owner sees the
+    /// same switch the Mac's Maintenance tab has.
+    @discardableResult
+    func runStep(_ stepId: String) -> Task<Void, Never>? {
+        guard !isRunningNow else { return nil }
+        isRunningNow = true
+        lastError = nil
+        let launcher = self.launcher
+        return Task { [weak self] in
+            let outcome: Result<Bool, Error>
+            do {
+                outcome = .success(try await launcher(["--run-step", stepId]))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self else { return }
+            switch outcome {
+            case .success(true):
+                break
+            case .success(false):
+                self.lastError = "That step did not finish cleanly.\u{00A0} Check Logs for details."
+            case .failure:
+                self.lastError = "That step could not be started.\u{00A0} Check Logs for details."
             }
             self.isRunningNow = false
             self.refresh()
@@ -275,6 +409,10 @@ final class MaintainStore: ObservableObject {
 
     func setStepEnabled(_ stepId: String, enabled: Bool) {
         stepToggles[stepId] = enabled
+        // The toggle is not on the Mac's disk until the save lands, and the
+        // script refuses a step that is still off, so "Run Now" waits for the
+        // save rather than racing it.
+        stepTogglesPersisted = false
         let launcher = self.launcher
         let infisical = self.infisical
         Task { [weak self] in
@@ -293,6 +431,7 @@ final class MaintainStore: ObservableObject {
                     // over the local one and flip the toggle back with no word.
                     guard let self else { return }
                     self.lastError = Self.infisicalSaveFailure("that step setting", error: error)
+                    self.stepTogglesPersisted = true
                     self.refresh()
                     return
                 }
@@ -309,9 +448,10 @@ final class MaintainStore: ObservableObject {
                 self.lastError = nil
             case .success(false):
                 self.lastError = "Could not save that step setting."
-            case .failure(let error):
-                self.lastError = error.localizedDescription
+            case .failure:
+                self.lastError = "That step setting could not be saved.\u{00A0} Check Logs for details."
             }
+            self.stepTogglesPersisted = true
             self.refresh()
         }
     }
@@ -335,7 +475,7 @@ final class MaintainStore: ObservableObject {
     }
 
     /// The launcher the app uses: `/usr/bin/python3 scripts/maintain.py ...`.
-    nonisolated static func pythonLauncher(repoRoot: URL) -> Launcher {
+    nonisolated static func pythonLauncher(repoRoot: URL, infisicalStore: InfisicalStore = .shared) -> Launcher {
         { arguments in
             guard !isRunningUnderTest else { throw LauncherRefused() }
             let maintain = repoRoot.appendingPathComponent("scripts/maintain.py")
@@ -346,6 +486,13 @@ final class MaintainStore: ObservableObject {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
                 proc.arguments = [script.path] + arguments
                 var env = ProcessInfo.processInfo.environment
+                let infisicalSnapshot = infisicalStore.snapshot
+                if infisicalSnapshot.projectId != nil,
+                   infisicalSnapshot.projectId != InfisicalStore.localProjectId,
+                   let configured = infisicalSnapshot.values[InfisicalKey.maintainJanitorRetireMinDays],
+                   let days = Int(configured), String(days) == configured, (1...90).contains(days) {
+                    env["hoghunter.maintain.janitor.retireMinDays"] = configured
+                }
                 let home = FileManager.default.homeDirectoryForCurrentUser.path
                 let extraPaths = [
                     "/opt/homebrew/bin",
@@ -477,8 +624,8 @@ final class MaintainStore: ObservableObject {
         MaintainStepCatalogEntry(
             id: "coolify_remote",
             title: "Remote Server Maintenance",
-            description: "Performs remote Docker and system maintenance on configured host via SSH.",
-            tooltip: "Runs remote maintenance over SSH (e.g. using an SSH alias, IP, or user@host) to prune unused Docker containers, images, and container logs."
+            description: "Includes guarded server cache and rotated backup-log maintenance in this Mac’s maintenance schedule.",
+            tooltip: "Uses this Mac’s maintenance schedule over SSH when the server is under disk pressure; its own schedule is unchanged.\u{00A0} Defaults cover eligible package cache, rotated backup logs and unused build cache; image removal is an explicit manual choice in the server panel."
         ),
         MaintainStepCatalogEntry(
             id: "cleanmymac_cli",
@@ -594,8 +741,8 @@ final class MaintainStore: ObservableObject {
                     self.lastError = nil
                 case .success(false):
                     self.lastError = "Could not save remote server SSH host."
-                case .failure(let error):
-                    self.lastError = error.localizedDescription
+                case .failure:
+                    self.lastError = "That host could not be saved.\u{00A0} Check Logs for details."
                 }
                 self.refresh()
             }

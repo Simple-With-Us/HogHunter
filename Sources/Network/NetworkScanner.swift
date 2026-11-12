@@ -57,10 +57,9 @@ final class NetworkScanner: @unchecked Sendable {
 
         var description: String {
             switch self {
-            case .binaryMissing(let p): return "lsof binary missing at \(p)"
-            case .denied(let m): return "lsof denied: \(m)"
-            case .exit(let c, let m): return "lsof exit \(c): \(m)"
-            case .parseFailure(let m): return "lsof parse failure: \(m)"
+            case .binaryMissing: return "The connection list is missing."
+            case .denied: return "macOS denied the connection list."
+            case .exit, .parseFailure: return "Hog Hunter could not read open connections."
             }
         }
     }
@@ -81,12 +80,12 @@ final class NetworkScanner: @unchecked Sendable {
         do {
             let raw = try runLsof()
             return .snapshot(at: Date(), usages: Self.parse(rawOutput: raw, bundleResolver: bundleResolver))
-        } catch LsofError.binaryMissing(let path) {
-            return .unavailable(reason: "lsof binary missing at \(path).")
-        } catch LsofError.denied(let message) {
-            return .unavailable(reason: "lsof denied: \(message). Grant Full Disk Access to Hog Hunter.")
+        } catch LsofError.binaryMissing {
+            return .unavailable(reason: "The connection list is missing.")
+        } catch LsofError.denied {
+            return .unavailable(reason: "macOS denied the connection list. Grant Full Disk Access to Hog Hunter in System Settings.")
         } catch {
-            return .unavailable(reason: "\(error)")
+            return .unavailable(reason: "Hog Hunter could not read open connections.")
         }
     }
 

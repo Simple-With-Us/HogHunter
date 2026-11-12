@@ -206,7 +206,7 @@ final class CompanionServerHardeningTests: XCTestCase {
         let disposition = server.syncOnQueue { server.disposition(for: request, peer: peer, now: now ?? t0) }
         switch disposition {
         case .reply(let data): return CompanionHTTP.parseResponse(data)?.status
-        case .startClean, .startCleanScan, .startCleanReport, .startSample: return 202
+        case .startClean, .startCleanScan, .startCleanReport, .startSample, .startServerAction: return 202
         }
     }
 
@@ -307,6 +307,15 @@ final class CompanionServerHardeningTests: XCTestCase {
             XCTAssertEqual(status(server, probe, from: lan), 404)
         }
         XCTAssertEqual(status(server, CompanionHTTP.request(token: code), from: lan), 200)
+    }
+
+    func testRepeatPairRequestsWaitPerAddress() {
+        let server = makeServer()
+        for _ in 0..<8 { _ = status(server, CompanionHTTP.request(token: "WRONG234"), from: lan) }
+        let pairWait = server.syncOnQueue { server.pairThrottleWait(for: lan.key, now: t0) }
+        XCTAssertNotNil(pairWait, "repeat pair prompts from a guessing address must wait")
+        let otherWait = server.syncOnQueue { server.pairThrottleWait(for: tailnet.key, now: t0) }
+        XCTAssertNil(otherWait, "one noisy address must not slow another phone's pairing")
     }
 
     func testThrottledReplyShape() throws {

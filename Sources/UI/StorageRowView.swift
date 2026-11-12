@@ -110,6 +110,7 @@ struct StorageRowView: View {
     private var iconView: some View {
         Group {
             if let path = usage.path,
+               MetadataResolver.isSafeIconSource(URL(fileURLWithPath: path)),
                let icon = NSWorkspace.shared.icon(forFile: path) as NSImage? {
                 Image(nsImage: icon)
                     .resizable()

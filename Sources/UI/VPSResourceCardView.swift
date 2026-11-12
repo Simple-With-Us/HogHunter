@@ -28,6 +28,10 @@ enum VPSResourceSection: String {
     var showsDirectories: Bool { self == .all || self == .storage }
     /// Whether this section shows the tool states.
     var showsTools: Bool { self == .all || self == .maintenance }
+    /// Whether this section shows the Coolify workloads the server runs.
+    var showsCoolify: Bool { self == .all || self == .activity }
+    /// Whether this section shows the server's own processes.
+    var showsProcesses: Bool { self == .all || self == .activity }
 }
 
 /// Remote VPS resource-usage card showing CPU, RAM (including swap),
@@ -37,6 +41,7 @@ struct VPSResourceCardView: View {
     @Environment(\.openSettings) private var openSettings
     /// Which part of the snapshot this card shows.
     var section: VPSResourceSection = .all
+    @StateObject private var control = ServerControl()
 
     var body: some View {
         GroupBox {
@@ -55,6 +60,17 @@ struct VPSResourceCardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
+        .overlay(alignment: .bottomLeading) {
+            if let outcome = control.lastOutcome {
+                Text(outcome.message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                    .padding(4)
+            }
+        }
     }
 
     private var cardHeader: some View {
@@ -70,9 +86,11 @@ struct VPSResourceCardView: View {
             }
             Spacer()
             if let snapshot = store.snapshot {
-                Text("Snapshot \(snapshot.relativeTimeString())")
+                Text(store.isStale
+                     ? "Snapshot \(snapshot.relativeTimeString()) · Earlier Reading"
+                     : "Snapshot \(snapshot.relativeTimeString())")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(store.isStale ? Color.orange : Color.secondary)
             }
             Button {
                 store.fetch(force: true)
@@ -143,6 +161,9 @@ struct VPSResourceCardView: View {
                 if section.showsHeadline, let cpu = snapshot.cpu { cpuBox(cpu) }
                 if section.showsHeadline, let mem = snapshot.memory { memoryBox(mem) }
                 if section.showsDevices, let root = snapshot.rootDevice { deviceBox(root, title: "Disk (/)") }
+                if section.showsDevices, let fleetExtra = snapshot.fleetExtraDevice {
+                    deviceBox(fleetExtra, title: "Fleet Extra (/mnt/fleet-extra)", tooltip: fleetExtra.note)
+                }
                 if section.showsHeadline, let swap = snapshot.swap { swapBox(swap) }
                 if section.showsDevices, let tmp = snapshot.tmpDevice {
                     deviceBox(tmp, title: "Tmpfs (/tmp)", tooltip: tmp.note)
@@ -152,11 +173,26 @@ struct VPSResourceCardView: View {
                 }
             }
 
+            if section.showsHeadline, let pressure = snapshot.memoryPressure {
+                pagingReadings(pressure)
+            }
+            if section.showsHeadline, let diagnostics = snapshot.storageDiagnostics {
+                storageReadings(diagnostics)
+            }
+
             // A section only carries the readings it owns, so two sections
             // never show the same rows.
             let dbs = section.showsDatabases ? (snapshot.appDbs ?? [:]) : [:]
             let tools = section.showsTools ? (snapshot.toolStatuses ?? []) : []
             let dirs = section.showsDirectories ? (snapshot.largestDirs ?? []) : []
+            let workloads = section.showsCoolify ? (snapshot.coolify ?? []) : []
+            let processes = section.showsProcesses ? (snapshot.processes ?? []) : []
+            if !processes.isEmpty {
+                processesView(processes)
+            }
+            if !workloads.isEmpty {
+                coolifyView(workloads)
+            }
             if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
                 HStack(alignment: .top, spacing: 16) {
                     supportingReadings(dbs: dbs, tools: tools)
@@ -169,6 +205,54 @@ struct VPSResourceCardView: View {
                 if !dirs.isEmpty { largestDirsView(dirs) }
             }
         }
+    }
+
+    private func pagingReadings(_ pressure: VPSMemoryPressure) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(pressure.isFresh() ? "Paging Activity" : "Paging Activity · Earlier Reading")
+                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 12) {
+                Text("Swap in: " + pagingRate(pressure.swapInBytesPerSecond))
+                Text("Swap out: " + pagingRate(pressure.swapOutBytesPerSecond))
+                if let stalls = pressure.memoryFullAvg10, stalls.isFinite, stalls >= 0 {
+                    Text(String(format: "Memory stalls: %.1f%%", stalls))
+                }
+            }.font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
+            if let sampledAt = pressure.sampledAtDate {
+                Text("Measured " + sampledAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func storageReadings(_ diagnostics: VPSStorageDiagnostics) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(diagnostics.isFresh() ? "Container Storage" : "Container Storage · Earlier Reading")
+                .font(.system(size: 11, weight: .semibold))
+            if diagnostics.categories.status == "complete" {
+                ForEach(diagnostics.categories.items) { row in
+                    Text("\(row.title): \(HogFormat.memory(UInt64(max(0, row.sizeBytes)))); engine reclaimable \(HogFormat.memory(UInt64(max(0, row.engineReclaimableBytes))))")
+                }
+            } else {
+                Text("Docker storage totals unavailable")
+            }
+            if diagnostics.daemon.usesContainerd == true {
+                if diagnostics.blobs.status == "complete", let bytes = diagnostics.blobs.allocatedBytes {
+                    Text("Containerd blobs: " + HogFormat.memory(UInt64(max(0, bytes))))
+                } else {
+                    Text(diagnostics.blobs.status == "incomplete" ? "Containerd blob reading incomplete" : "Containerd blob reading unavailable")
+                }
+                Text("Containerd includes a separate image store; unpacked snapshots are not measured here.")
+            }
+            Text("Readings overlap; do not add them.\u{00A0} Engine reclaimable is not a cleanup recommendation.")
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(.secondary)
+    }
+
+    private func pagingRate(_ bytes: Double?) -> String {
+        guard let bytes, bytes.isFinite, bytes >= 0, bytes < Double(UInt64.max) else { return "unavailable" }
+        return HogFormat.memory(UInt64(bytes)) + "/s"
     }
 
     private func supportingReadings(dbs: [String: Int64], tools: [VPSToolStatus]) -> some View {
@@ -315,6 +399,15 @@ struct VPSResourceCardView: View {
                             Text(toolStatusLabel(tool.state))
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
+                            // An unknown state is only useful when it says
+                            // why it is unknown.  The reason is short enough
+                            // to read in place and long enough to act on.
+                            if tool.state == .unknown, let reason = tool.reason, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(2)
+                            }
                         }
                         if tool.state == .running, tool.count > 1 {
                             Text("\(tool.count)")
@@ -323,10 +416,97 @@ struct VPSResourceCardView: View {
                         }
                     }
                     .font(.system(size: 11))
-                    .help("\(tool.name): \(toolStatusLabel(tool.state))")
+                    .help("\(tool.name): \(toolStatusLabel(tool.state))\(tool.reason.map { " — \($0)" } ?? "")")
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("\(tool.name), \(toolStatusLabel(tool.state))")
-                    .accessibilityValue(tool.state == .running && tool.count > 1 ? "\(tool.count) processes" : "")
+                    .accessibilityValue(tool.state == .running && tool.count > 1 ? "\(tool.count) processes" : (tool.reason ?? ""))
+                }
+            }
+        }
+    }
+
+    /// The Coolify workloads this host runs, and how each is doing.
+    private func coolifyView(_ resources: [VPSCoolifyResource]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Coolify Workloads")
+                .font(.system(size: 11, weight: .semibold))
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(resources) { resource in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(resource.isHealthy ? Color.green : Color.orange)
+                            .frame(width: 6, height: 6)
+                        Text(resource.name)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        Text(resource.type)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 4)
+                        if let cpu = resource.cpuPercent {
+                            Text(String(format: "%.0f%%", cpu))
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        }
+                        if let memory = resource.memoryBytes {
+                            Text(HogFormat.memory(UInt64(max(0, memory))))
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        ServerWorkloadActions(resource: resource, host: store.configuredHost, control: control,
+                                              didAct: { store.fetch(force: true) })
+                    }
+                    .help("\(resource.name): \(resource.status)")
+                }
+            }
+        }
+    }
+
+    /// The server's own processes, and the one action the owner can take on
+    /// them.  The server stops a process by its identity, so a process that
+    /// changed since the reading is refused rather than signalled.
+    private func processesView(_ processes: [VPSProcess]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text("Top Processes")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("\(processes.count) processes")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(processes.prefix(12)) { process in
+                    HStack(spacing: 8) {
+                        Text(process.name)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        if let container = process.container, !container.isEmpty {
+                            Text(container)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        Text(String(format: "%.0f%%", process.cpuPercent))
+                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        if let memory = process.memoryBytes {
+                            Text(HogFormat.memory(UInt64(max(0, memory))))
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        if let swap = process.swapBytes {
+                            Text("Swap " + HogFormat.memory(UInt64(max(0, swap))))
+                                .font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        if process.isTamed { Text("Tamed").font(.system(size: 9)).foregroundStyle(.secondary) }
+                        ServerProcessActions(process: process, host: store.configuredHost, control: control,
+                                             didAct: { store.fetch(force: true) })
+                    }
+                }
+                if processes.isEmpty {
+                    Text("No processes in the server's latest reading.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
         }

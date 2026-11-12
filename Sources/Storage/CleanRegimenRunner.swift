@@ -1,3 +1,4 @@
+import Combine
 import CoreGraphics
 import Foundation
 
@@ -110,6 +111,7 @@ final class CleanRegimenRunner: ObservableObject {
     /// the whole disk and a test must never do that: a test that reaches the
     /// cleaning loop needs a scan it chose, not the real one.
     private let scanProvider: (CleanerExclusions) async -> CleanScanReport
+    private let exclusionsProvider: () -> CleanerExclusions
 
     /// How a chunk of items is cleaned.
     ///
@@ -133,14 +135,16 @@ final class CleanRegimenRunner: ObservableObject {
         lockProvider: @escaping () -> HousekeeperLock = { HousekeeperLock() },
         idleSeconds: @escaping () -> TimeInterval = { CleanRegimenRunner.systemIdleSeconds() },
         scanProvider: ((CleanerExclusions) async -> CleanScanReport)? = nil,
+        exclusionsProvider: @escaping () -> CleanerExclusions = { CleanerExclusions.load() },
         cleanProvider: (([CleanItem], CleanerExclusions, Bool) async -> CleanResult)? = nil
     ) {
         self.now = now
         self.lastRunDefaults = defaults
         self.lockProvider = lockProvider
         self.idleSeconds = idleSeconds
+        self.exclusionsProvider = exclusionsProvider
         self.scanProvider = scanProvider ?? { exclusions in
-            await cleaner.scan(tier: .standard, exclusions: exclusions)
+            await cleaner.scan(tier: .standard, exclusions: exclusions, depth: .deeper)
         }
         self.cleanProvider = cleanProvider ?? { items, exclusions, createSnapshot in
             await cleaner.clean(items: items, tier: .standard, createSnapshot: createSnapshot, exclusions: exclusions)
@@ -442,8 +446,14 @@ final class CleanRegimenRunner: ObservableObject {
         // racing over one file is how a half-deleted cache directory happens.
         // This is the same lock `scripts/vacuum/lock.py` takes, so the Swift
         // runner and the Python engine exclude each other.
+        //
+        // `acquire()` runs `/bin/ps` to read the owner's start token, and
+        // this runner is on the main actor, so the take happens on a detached
+        // task: a slow `ps` or a contended guard must not stall the UI.
+        // `release()` spawns no process, so the deferred give-back stays here.
         let lock = lockProvider()
-        guard lock.acquire() == .acquired else {
+        let outcome = await Task.detached(priority: .utility) { lock.acquire() }.value
+        guard outcome == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
             recordsRun = false
             finish(result, regimen: regimen)
@@ -456,18 +466,29 @@ final class CleanRegimenRunner: ObservableObject {
         // answer is the same either way, and the walk is the expensive part.
         guard !regimen.enabledRules.isEmpty else {
             result.skippedReason = "No cleaning rules are enabled."
+            recordsRun = false
             finish(result, regimen: regimen)
             return
         }
 
-        let exclusions = CleanerExclusions.load()
-        let scan = await scanProvider(exclusions)
+        let exclusions = exclusionsProvider()
+        // Disabled rules must not consume the bounded scan before enabled ones run.
+        let enabledCategories = Self.scanCategories(for: regimen.enabledRules)
+        var scanExclusions = exclusions
+        scanExclusions.excludedCategories.formUnion(CleanCategory.allCases
+            .filter { !enabledCategories.contains($0) }.map(\.rawValue))
+        let scan = await scanProvider(scanExclusions)
+        if scan.isPartial {
+            recordsRun = false
+            result.skippedReason = "Discovery was incomplete; the regimen will retry at the next check."
+        }
         // `CleanScanReport` groups by category rather than exposing a flat
         // item list, so flatten the selected items from each report.
         let scanned = scan.categories.flatMap { $0.items.filter(\.isSelected) }
         let decision = Self.pendingItems(from: scanned, rules: regimen.enabledRules)
         guard decision.skipReason == nil else {
-            result.skippedReason = decision.skipReason
+            result.skippedReason = result.skippedReason ?? decision.skipReason
+            recordsRun = false
             finish(result, regimen: regimen)
             return
         }
@@ -543,7 +564,7 @@ final class CleanRegimenRunner: ObservableObject {
             lastError = failures.first ?? result.errors.first
         }
         let reclaimed: String? = result.itemsRemoved > 0
-            ? "Reclaimed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items."
+            ? "Moved or removed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items (estimated)."
             : nil
         if result.cancelled {
             // The run was stopped, not refused.  The panel keeps both facts:
@@ -553,19 +574,19 @@ final class CleanRegimenRunner: ObservableObject {
             if !failures.isEmpty {
                 parts.append(Self.failureCountText(failures.count))
             }
-            lastSummary = parts.joined(separator: " ")
+            lastSummary = parts.joined(separator: "\u{00A0} ")
         } else if let reason = result.skippedReason {
             // A run that removed something and then skipped still removed it:
             // the snapshot gate fails AFTER the engine thinned local
             // snapshots, so the reclaim is real.  Showing only the reason
             // would claim the regimen did nothing while it was deleting.
-            lastSummary = [reclaimed, reason].compactMap { $0 }.joined(separator: " ")
+            lastSummary = [reclaimed, reason].compactMap { $0 }.joined(separator: "\u{00A0} ")
         } else if let reclaimed {
             // Some items were reclaimed and some were not.  The panel says
             // both, so a partial run does not read as a clean one.
             lastSummary = result.errors.isEmpty
                 ? reclaimed
-                : "\(reclaimed) \(Self.failureCountText(result.errors.count))"
+                : "\(reclaimed)\u{00A0} \(Self.failureCountText(result.errors.count))"
         } else if !result.errors.isEmpty {
             lastSummary = Self.failureCountText(result.errors.count)
         } else {
@@ -602,15 +623,29 @@ final class CleanRegimenRunner: ObservableObject {
     /// A category can answer to more than one name.  `userCaches` is the tree
     /// the `app-caches` rule sweeps, but regimens persisted before that rule
     /// existed carry `dev-caches`, and both must keep selecting it.
+    nonisolated static func scanCategories(for rules: Set<String>) -> Set<CleanCategory> {
+        Set(CleanCategory.allCases.filter { !ruleNames(for: $0).isDisjoint(with: rules) })
+    }
+
     nonisolated static func ruleNames(for item: CleanItem) -> Set<String> {
-        switch item.category {
+        ruleNames(for: item.category)
+    }
+
+    nonisolated private static func ruleNames(for category: CleanCategory) -> Set<String> {
+        switch category {
         case .userCaches: return ["dev-caches", "app-caches"]
         case .logsAndDiagnostics: return ["logs"]
         case .developer: return ["xcode-artifacts"]
-        case .trash: return ["temp-scratch"]
+        case .trash:
+            // No rule, so no regimen can reach it.  `DiskCleaner.clean` removes
+            // a Trash item permanently, and this category used to answer to
+            // temp-scratch, a default rule: an unattended run emptied ~/.Trash
+            // against the policy's neverEmptyTrash.  A person can still select
+            // Trash in the Disk Cleaner.
+            return []
         case .tempFiles:
-            // Own rule: Trash's temp-scratch toggle must not include or
-            // exclude /tmp items, which stay unselected by default.
+            // Own rule: /tmp items stay unselected by default, and turning on
+            // another rule must not include them.
             return ["tmp-files"]
         case .apfsSnapshots:
             // Own rule: an unattended regimen must not thin snapshots just
@@ -644,7 +679,7 @@ final class CleanRegimenRunner: ObservableObject {
     /// `nonisolated` because `ruleName(for:)` is, and a main-actor-isolated
     /// constant read from a nonisolated context is an error in Swift 6.
     nonisolated private static let canonicalRuleNames = [
-        "agent-state", "app-caches", "tmp-files", "temp-scratch", "snapshots",
+        "agent-state", "app-caches", "tmp-files", "snapshots",
         "logs", "xcode-artifacts", "ask-first",
     ]
 

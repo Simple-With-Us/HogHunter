@@ -1,6 +1,17 @@
 import XCTest
 @testable import HogHunter
 
+/// A value a sendable provider closure can write and a test can read afterwards.
+private final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { stored = value }
+    var value: Value {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+    }
+}
+
 /// Covers the runner that makes the regimen actually happen.
 ///
 /// The regimen was fully built and never ran: `CleanRegimenRunner` was never
@@ -164,22 +175,200 @@ final class CleanRegimenRunnerTests: XCTestCase {
     }
 
     func testARunThatFinishedStartsTheIntervalClock() async {
-        // The counterpart: a run that decided (here, "no rules enabled") is a
-        // run, and the next one is a full interval out.
+        // The counterpart to the runs that stepped aside: a run that cleaned
+        // is a run, and the next one is a full interval out.
         let key = "hoghunter.cleaner.regimen.lastRunAt"
         let now = Date()
         let defaults = makeDefaults()
-        let regimen = makeRegimen(enabled: true, intervalHours: 4)
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"])
+        regimen.createSnapshotBeforeClean = false
 
-        let runner = makeRunner(now: now, defaults: defaults)
+        let item = CleanItem(
+            category: .userCaches,
+            title: "TestCache",
+            subtitle: "~/Library/Caches/TestCache",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestCache").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .userCaches,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report },
+            cleanProvider: { _, _, _ in
+                CleanResult(bytesReclaimed: 1_000, itemsRemoved: 1, errors: [], cleanedAt: now)
+            }
+        )
         await runner.runNow(regimen: regimen)?.value
 
-        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertNil(runner.lastRun?.skippedReason)
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 1)
         XCTAssertEqual((defaults.object(forKey: key) as? Date)?.timeIntervalSince1970 ?? 0,
                        now.timeIntervalSince1970, accuracy: 1)
         XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
                        now.addingTimeInterval(4 * 3600).timeIntervalSince1970,
                        accuracy: 1)
+    }
+
+    func testARegimenNamingOnlyEngineRulesSaysSoAndNeverScans() async {
+        // Behaviour, not list membership: what a person sees and what runs.
+        let now = Date()
+        let scans = LockedBox(0)
+        let cleans = LockedBox(0)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in
+                scans.value += 1
+                return CleanScanReport(categories: [], totalBytes: 0, totalSelectedBytes: 0, scannedAt: now)
+            },
+            cleanProvider: { _, _, _ in
+                cleans.value += 1
+                return CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+        let regimen = makeRegimen(enabled: true, intervalHours: 4,
+                                  rules: ["stale-build-output", "duplicate-sim-runtimes", "tool-versions", "xcode-scratch"])
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(scans.value, 0, "the walk is the expensive part, and there is nothing to find")
+        XCTAssertEqual(cleans.value, 0)
+    }
+
+    func testAnUnattendedRunNeverHandsTheTrashToTheCleaner() async {
+        // The regression for neverEmptyTrash, end to end.  The scan is scripted
+        // to offer a selected Trash item beside a selected cache, as a real
+        // scan would if the category were ever scanned, and the run uses the
+        // default rules a person gets by turning the regimen on.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: CleanRegimen.defaultRules)
+        regimen.createSnapshotBeforeClean = false
+        func item(_ category: CleanCategory, _ title: String) -> CleanItem {
+            CleanItem(category: category, title: title, subtitle: title,
+                      url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-\(title)"),
+                      bytes: 10, fileCount: 1, lastModified: nil, isSelected: true, detail: nil)
+        }
+        func group(_ row: CleanItem) -> CleanCategoryReport {
+            CleanCategoryReport(category: row.category, items: [row], totalBytes: 10,
+                                selectedBytes: 10, itemCount: 1)
+        }
+        let report = CleanScanReport(
+            categories: [group(item(.trash, "trash")), group(item(.userCaches, "cache"))],
+            totalBytes: 20,
+            totalSelectedBytes: 20,
+            scannedAt: now,
+            tier: .standard
+        )
+        let cleaned = LockedBox<[CleanItem]>([])
+        let scanned = LockedBox<Set<String>>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { exclusions in
+                scanned.value = exclusions.excludedCategories
+                return report
+            },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 10, itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(cleaned.value.map(\.title), ["cache"], "the Trash must never reach the cleaner")
+        XCTAssertTrue(scanned.value.contains(CleanCategory.trash.rawValue),
+                      "a regimen does not even scan the Trash")
+    }
+
+    func testNoOpRunsDoNotStartTheIntervalClock() async {
+        // A run that cleaned nothing because there was nothing to do -- no
+        // enabled rules, or nothing matching them -- did not happen.
+        // Recording it would push a 24-hour regimen a whole day out for a
+        // no-op, so the stored clock stays where it was and the next check
+        // retries instead of waiting a full interval.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        let lastRun = now.addingTimeInterval(-5 * 3600)
+        defaults.set(lastRun, forKey: key)
+
+        // No enabled rules: returns before the scan.
+        let emptyRunner = makeRunner(now: now, defaults: defaults)
+        await emptyRunner.runNow(regimen: makeRegimen(enabled: true, intervalHours: 4))?.value
+
+        XCTAssertEqual(emptyRunner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(defaults.object(forKey: key) as? Date, lastRun,
+                       "an empty-rules run did not happen")
+        XCTAssertTrue(emptyRunner.isDue(
+            regimen: makeRegimen(enabled: true, intervalHours: 4),
+            lastRunAt: defaults.object(forKey: key) as? Date),
+                      "the run is still due, so the next check retries")
+        XCTAssertEqual(emptyRunner.nextRunDate?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(15 * 60).timeIntervalSince1970,
+                       accuracy: 1)
+
+        // Rules enabled but nothing matched: the scan ran, nothing applied.
+        let item = CleanItem(
+            category: .logsAndDiagnostics,
+            title: "TestLog",
+            subtitle: "~/Library/Logs/TestLog",
+            url: URL(fileURLWithPath: root.appendingPathComponent("TestLog").path),
+            bytes: 1_000,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+        let report = CleanScanReport(
+            categories: [CleanCategoryReport(
+                category: .logsAndDiagnostics,
+                items: [item],
+                totalBytes: 1_000,
+                selectedBytes: 1_000,
+                itemCount: 1
+            )],
+            totalBytes: 1_000,
+            totalSelectedBytes: 1_000,
+            scannedAt: now,
+            tier: .standard
+        )
+        let mismatchRunner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in report }
+        )
+        await mismatchRunner.runNow(
+            regimen: makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"]))?.value
+
+        XCTAssertEqual(mismatchRunner.lastRun?.skippedReason, "Nothing matched the enabled rules.")
+        XCTAssertEqual(defaults.object(forKey: key) as? Date, lastRun,
+                       "a no-match run did not happen")
+        XCTAssertTrue(mismatchRunner.isDue(
+            regimen: makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"]),
+            lastRunAt: defaults.object(forKey: key) as? Date),
+                      "the run is still due, so the next check retries")
     }
 
     func testACancelledRunDoesNotStartTheIntervalClock() async {
@@ -553,7 +742,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
         runner.finish(result, regimen: makeRegimen())
 
         XCTAssertEqual(runner.lastSummary,
-                       "Reclaimed 1 MB from 12 items. 1 item could not be removed.")
+                       "Moved or removed 1 MB from 12 items (estimated).\u{00A0} 1 item could not be removed.")
         XCTAssertFalse((runner.lastSummary ?? "").contains("/Users/jay"),
                        "the panel must not name a path")
     }
@@ -584,7 +773,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
         runner.finish(result, regimen: makeRegimen())
 
         XCTAssertEqual(runner.lastSummary,
-                       "The cleanup was stopped before it finished. 1 item could not be removed.")
+                       "The cleanup was stopped before it finished.\u{00A0} 1 item could not be removed.")
         XCTAssertFalse((runner.lastSummary ?? "").contains("/Users/jay"),
                        "the panel must not name a path")
     }
@@ -603,7 +792,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         XCTAssertEqual(
             runner.lastSummary,
-            "Reclaimed 1 MB from 3 items. The cleanup snapshot could not be created, so the rest of the regimen did not run."
+            "Moved or removed 1 MB from 3 items (estimated).\u{00A0} The cleanup snapshot could not be created, so the rest of the regimen did not run."
         )
     }
 

@@ -56,6 +56,8 @@ final class MaintainRunOutcomeTests: XCTestCase {
             (0, "ok", .ok),
             (0, nil, .ok),
             (0, "partial", .partial),
+            (0, "skipped", .skipped),
+            (1, "skipped", .failed),
             (0, "failed", .failed),
             (1, "failed", .failed),
             (1, nil, .failed),
@@ -75,11 +77,39 @@ final class MaintainRunOutcomeTests: XCTestCase {
         XCTAssertEqual(F.run("x", "full", ended: 1, exit: 3, outcome: "partial").resolvedOutcome, "failed", "a non-zero exit is always failed")
     }
 
-    func testOnlyPartialAndFailedCarryAMark() {
+    func testSkippedCarriesANeutralMarkDistinctFromFailures() {
+        XCTAssertEqual(CompanionMaintainRunResult.resolve(exitCode: 0, outcome: "skipped"), .skipped)
+        XCTAssertNotEqual(CompanionMaintainRunResult.skipped, .partial)
+        XCTAssertNotEqual(CompanionMaintainRunResult.skipped, .failed)
+    }
+
+    func testSkippedPartialAndFailedCarryAMark() {
+        XCTAssertEqual(CompanionMaintainRunResult.skipped.markLabel, "Skipped")
         XCTAssertNil(CompanionMaintainRunResult.ok.markLabel)
         XCTAssertEqual(CompanionMaintainRunResult.partial.markLabel, "Partial")
         XCTAssertEqual(CompanionMaintainRunResult.failed.markLabel, "Failed")
         XCTAssertNotEqual(CompanionMaintainRunResult.partial.markLabel, CompanionMaintainRunResult.failed.markLabel)
+    }
+
+    func testLegacyLockContentionIsSkippedRatherThanSuccessful() throws {
+        let run = try decode(#"{"run_id":"lock","trigger":"full","started_at":1,"ended_at":2,"bytes_freed":0,"exit_code":0,"steps":[{"step_id":"housekeeper_lock","title":"Lock","status":"skipped","reason":"held","bytes_freed":0,"duration_ms":0}]}"#)
+        XCTAssertEqual(run.resolvedOutcome, "skipped")
+        XCTAssertEqual(CompanionMaintain.recentRuns(from: [run]).first?.result, .skipped)
+    }
+
+    func testUnfinishedCheckpointDecodesWithoutLeakingIntoPlainSnapshot() throws {
+        let json = #"{"health":"healthy","launchd_loaded":true,"next_run_at":{},"intervals_seconds":{},"step_last_results":{},"history_count":0,"partial_run":{"run_id":"incomplete","trigger":"full","started_at":1,"ended_at":0,"bytes_freed":512,"exit_code":0,"steps":[],"current_step":"pressure_apps_deps","current_target":"/private/lane"}}"#
+        let status = try JSONDecoder().decode(MaintainStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.partialRun?.runId, "incomplete")
+        XCTAssertEqual(status.partialRun?.currentStep, "pressure_apps_deps")
+        XCTAssertEqual(status.partialRun?.currentTarget, "/private/lane")
+        XCTAssertEqual(status.partialRun?.bytesFreed, 512)
+        let plain = CompanionMaintain.status(from: status, history: [], isRunning: false, includeSteps: false)
+        XCTAssertEqual(plain?.isRunning, false, "a persisted checkpoint does not prove a process is active")
+        let wire = String(decoding: try CompanionJSON.encoder().encode(plain), as: UTF8.self)
+        XCTAssertFalse(wire.contains("/private/lane"))
+        XCTAssertFalse(wire.contains("pressure_apps_deps"))
+        XCTAssertFalse(wire.contains("incomplete"))
     }
 
     // MARK: Which runs are cleaning runs

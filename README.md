@@ -44,10 +44,9 @@ Build the phone app for the simulator with scheme `HogHunterIOS`.  TestFlight bu
 cd ~/apps/HogHunter
 xcodegen generate
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build
-open build/Build/Products/Release/HogHunter.app
 ```
 
-To build, sign, and install to `/Applications/Hog Hunter.app` in one step, use `scripts/install.sh` instead.  It signs Release builds with the "Developer ID Application" identity when one is in the keychain, falling back to an adhoc signature otherwise, then quits any running copy and relaunches the new one.  It installs to `/Applications` by default when a copy already lives there, otherwise to `~/Applications`; pass `--dest PATH` to pick a destination explicitly (for example `--dest ~/Applications`).  Pass `--dry-run` to see what it would do without touching anything, or `--no-launch` to install without opening the app.
+To build, sign, and install in one step, use `scripts/install.sh`.  It signs with the Developer ID Application identity of team CC8UTF7ATG and refuses to install without it, because macOS keeps privacy grants against that identity and an ad hoc build would lose them.  It then quits any running copy and relaunches the new one.  It installs to `/Applications` by default when a copy already lives there, otherwise to `~/Applications`; pass `--dest PATH` to pick a destination explicitly (for example `--dest ~/Applications`).  Pass `--dry-run` to see what it would do without touching anything, or `--no-launch` to install without opening the app.
 
 No LaunchAgent for CPU and memory sampling.  The menu bar app is the sampler; quitting it stops history.
 
@@ -77,4 +76,4 @@ Apache License 2.0.  See [LICENSE](LICENSE) for details.
 
 ## Notes
 
-Theme follows the system by default; Light and Dark are available in Settings.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.
+Theme follows the system by default; Light and Dark are available in Settings.  Headings and buttons are Title Case.  Body copy is sentence case with a real U+00A0 plus a normal space between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.

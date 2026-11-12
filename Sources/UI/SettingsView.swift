@@ -9,10 +9,10 @@ struct SettingsView: View {
 
     @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.system.rawValue
 
-    /// Settings opens on General every time.  Held as state rather than left to
-    /// the scene's implicit default so the tab the window comes back to is a
-    /// decision, not whatever was clicked last.
-    @State private var selection = SettingsTab.general
+    /// The tab the window comes back to.  Stored, so Settings reopens where
+    /// the owner left it instead of always on General; the iPhone opt-ins
+    /// live on the seventh tab and should not need re-finding every time.
+    @AppStorage(HogStore.Key.settingsTab) private var selectionRaw = SettingsTab.general.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -33,7 +33,10 @@ struct SettingsView: View {
             .padding(.horizontal, 16)
             .padding(.top, 12)
 
-            TabView(selection: $selection) {
+            TabView(selection: Binding(
+                get: { SettingsTab(rawValue: selectionRaw) ?? .general },
+                set: { selectionRaw = $0.rawValue }
+            )) {
             GeneralSettingsTab()
                 .environmentObject(store)
                 .tabItem {
@@ -107,11 +110,11 @@ struct SettingsView: View {
             WindowActivator.front()
             // A tab asked for before this window existed (the notification
             // had no subscriber yet) is picked up here.
-            if let tab = HogActions.takePendingSettingsTab() { selection = tab }
+            if let tab = HogActions.takePendingSettingsTab() { selectionRaw = tab.rawValue }
         }
         .onReceive(NotificationCenter.default.publisher(for: .selectSettingsTab)) { note in
             if let tab = note.object as? SettingsTab {
-                selection = tab
+                selectionRaw = tab.rawValue
                 _ = HogActions.takePendingSettingsTab()
             }
         }
@@ -138,9 +141,9 @@ extension SettingsView {
     }
 }
 
-/// Selection identity for the Settings tabs.  Explicit rather than raw strings
-/// so the default tab is written once and cannot drift out of sync with a tab.
-enum SettingsTab: Hashable {
+/// Selection identity for the Settings tabs.  Raw strings so the last tab
+/// survives a relaunch; an unknown stored value falls back to General.
+enum SettingsTab: String, CaseIterable {
     case general, alerts, startup, theme, cleaner, maintenance, iphone, about, advanced
 }
 
@@ -151,7 +154,9 @@ private struct GeneralSettingsTab: View {
 
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 5
     @AppStorage(HogStore.Key.backgroundRefreshInterval) private var backgroundRefreshInterval: Double = 10
-    @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
+    @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.historyBars.rawValue
+    @AppStorage(HogStore.Key.showMenuBarIcon) private var showMenuBarIcon: Bool = false
+    @AppStorage(HogStore.Key.showMenuBarPercent) private var showMenuBarPercent: Bool = true
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
 
     var body: some View {
@@ -178,6 +183,13 @@ private struct GeneralSettingsTab: View {
                 Picker("Menu Bar Shows", selection: $menuBarLabelMode) {
                     ForEach(MenuBarLabelMode.allCases) { Text($0.rawValue).tag($0.rawValue) }
                 }
+
+                Toggle("Show Percentage in Menu Bar", isOn: $showMenuBarPercent)
+                Toggle("Show Hog Icon in Menu Bar", isOn: $showMenuBarIcon)
+                Text("Turn off percentage and icon to show just the sparkline or history bars in the menu bar.\u{00A0} When the icon is off, extra space is saved in crowded menu bars.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Picker("CPU Rows Show", selection: $cpuScale) {
                     ForEach(CpuScale.allCases) {
@@ -227,7 +239,7 @@ private struct StartupSettingsTab: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text("Hog Hunter opens with your Mac and samples in the background.  History only covers the time it has been running, so this is also what makes the Past Hour and Past 24 Hours views able to reach a full day.")
+                Text("Hog Hunter opens with your Mac and samples in the background.\u{00A0} History only covers the time it has been running, so this is also what makes the Past Hour and Past 24 Hours views able to reach a full day.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -253,7 +265,7 @@ private struct ThemeSettingsTab: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                Text("System is the default, so Hog Hunter follows the Mac.  Light and Dark pin it either way, here and in the menu bar panel.")
+                Text("System is the default, so Hog Hunter follows the Mac.\u{00A0} Light and Dark pin it either way, here and in the menu bar panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -306,9 +318,9 @@ private struct CleanerSettingsTab: View {
         Form {
             Section("Temp File Safety") {
                 HStack {
-                    Stepper(value: $tempHoursDraft, in: 1...8_760) {
+                    Stepper(value: $tempHoursDraft, in: Int(TempFileSafetyPolicy.allowedHours.lowerBound)...Int(TempFileSafetyPolicy.allowedHours.upperBound)) {
                         HStack {
-                            Text("Minimum Untouched Time")
+                            Text("Leave Files Newer Than")
                             TextField("Hours", value: $tempHoursDraft, format: .number.grouping(.never))
                                 .frame(width: 60)
                                 .onSubmit { applyTempHours() }
@@ -319,7 +331,7 @@ private struct CleanerSettingsTab: View {
                         .disabled(!TempFileSafetyPolicy.isValid(Double(tempHoursDraft))
                             || Double(tempHoursDraft) == tempPolicy.minimumUntouchedHours)
                 }
-                Text("Current minimum: \(tempPolicy.hoursLabel) untouched hours.\u{00A0} Choose 1 to 8,760 whole hours, then Apply or press Return.")
+                Text("Files changed in the last \(tempPolicy.hoursLabel) hours stay.\u{00A0} Choose 1 to 8,760 hours, then Apply or press Return.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
@@ -332,7 +344,7 @@ private struct CleanerSettingsTab: View {
                         .controlSize(.small)
                     }
                 }
-                Text("Applies before /tmp items appear, including unchecked suggestions.\u{00A0} Git checkouts and recognizable source projects stay protected at every age.\u{00A0} Idle files are not evidence of a backup.")
+                Text("This applies before temp files are offered, including ones that are not ticked.\u{00A0} Git projects and recognizable source folders stay protected at every age.\u{00A0} An idle file is not a backup.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -447,14 +459,10 @@ private struct MaintenanceSettingsTab: View {
 private struct MaintenanceSettingsContent: View {
     @ObservedObject var maintain: MaintainStore
 
-    /// Mirrors `RETIRE_MIN_DAYS` in `scripts/vacuum/lanes.py`, a code
-    /// constant the engine never reads from the config.
-    static let worktreeRetireMinDays = 7
-
     var body: some View {
         Form {
             Section("Scheduled Maintenance Steps") {
-                Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.  Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
+                Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.\u{00A0} Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -551,7 +559,7 @@ private struct MaintenanceSettingsContent: View {
                         Text("\(Int(maintain.lowFreeGiB)) GB")
                             .font(.system(size: 12, weight: .bold))
                     }
-                    Slider(value: $maintain.lowFreeGiB, in: 30...200, step: 5)
+                    Slider(value: $maintain.lowFreeGiB, in: CompanionMaintainLimits.lowFreeGiBRange, step: CompanionMaintainLimits.lowFreeGiBStep)
                         .onChange(of: maintain.lowFreeGiB) { _ in maintain.saveMaintainConfig() }
                     Text("Trigger cache reclaim when available disk space falls below this limit (default 80 GB).")
                         .font(.system(size: 10))
@@ -570,7 +578,7 @@ private struct MaintenanceSettingsContent: View {
                     Slider(value: Binding(
                         get: { Double(maintain.pm2LogsCapMB) },
                         set: { maintain.pm2LogsCapMB = Int($0) }
-                    ), in: 10...200, step: 10)
+                    ), in: Double(CompanionMaintainLimits.pm2LogsCapMBRange.lowerBound)...Double(CompanionMaintainLimits.pm2LogsCapMBRange.upperBound), step: Double(CompanionMaintainLimits.pm2LogsCapMBStep))
                         .onChange(of: maintain.pm2LogsCapMB) { _ in maintain.saveMaintainConfig() }
                     Text("Truncate Node.js PM2 process manager logs in ~/.pm2/logs that exceed this file size.")
                         .font(.system(size: 10))
@@ -583,13 +591,19 @@ private struct MaintenanceSettingsContent: View {
                         Text("Merged Git Worktree Retention:")
                             .font(.system(size: 12, weight: .medium))
                         Spacer()
-                        Text("\(Self.worktreeRetireMinDays) days")
+                        Text("\(maintain.worktreeRetireMinDays) days")
                             .font(.system(size: 12, weight: .bold))
+                        Stepper("", value: Binding(
+                            get: { maintain.worktreeRetireMinDays },
+                            set: {
+                                maintain.worktreeRetireMinDays = $0
+                                maintain.saveWorktreeRetireMinDays()
+                            }
+                        ), in: CompanionMaintainLimits.worktreeRetireDaysRange)
+                        .labelsHidden()
+                        .help("Choose 1 to 90 whole days")
                     }
-                    // Read-only on purpose: the engine's lane_settings ignores
-                    // numeric `lanes` keys in the config, so a stray value can
-                    // neither loosen nor tighten this safety floor.
-                    Text("A merged lane worktree must sit idle at least this long before automated retirement.\u{00A0} This is a fixed safety limit, not a setting.")
+                    Text("Choose 1 to 90 whole days; default 7 days.\u{00A0} Only clean, merged, inactive worktrees are eligible.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -614,7 +628,7 @@ private struct MaintenanceSettingsContent: View {
                             }
                         }
                     }
-                    Text("SSH destination for remote Docker and system maintenance sweeps.  Supports ~/.ssh/config aliases or user@host with key-based authentication.  Leave blank to disable.")
+                    Text("SSH destination for remote Docker and system maintenance sweeps.\u{00A0} Supports ~/.ssh/config aliases or user@host with key-based authentication.\u{00A0} Leave blank to disable.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -809,7 +823,7 @@ private struct IPhoneSettingsTab: View {
                             }
                             Spacer()
                             Button("Revoke") { store.revokeCompanionDevice(id: device.id) }
-                                .help("Cut this iPhone off.  It must pair again to reconnect.")
+                                .help("Cut this iPhone off.\u{00A0} It must pair again to reconnect.")
                         }
                     }
                     if store.pairedDevices.count > 1 {
@@ -831,7 +845,7 @@ private struct IPhoneSettingsTab: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Toggle("Allow iPhone to Change Exclusions & View", isOn: $store.allowRemoteEdit)
-                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, switch this panel's lookback, grouping, and CPU scale, and change the refresh interval, alerts, and webhook.\u{00A0} The webhook URL can be replaced or cleared from the phone but never read back.")
+                    Text("When enabled, the paired iPhone can exclude cleaner categories and folders, switch this panel's timing, grouping, and CPU scale, and change the refresh interval, alerts, and webhook.\u{00A0} The webhook URL can be replaced or cleared from the phone but never read back.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -840,7 +854,18 @@ private struct IPhoneSettingsTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick the first three choices.\u{00A0} Running maintenance is never offered there.\u{00A0} Turn it on here, on purpose.")
+                    Toggle("Allow iPhone to See Server Status", isOn: $store.allowRemoteServerStatus)
+                    Text("When enabled, a paired iPhone on your local network or Tailscale can read what this Mac reads from your server: its CPU, memory, disks, databases, directories, tools, processes and workloads, and the server's flagged issues.\u{00A0} These name server internals, so they never go to the shared pairing code or to an address outside your network.\u{00A0} The phone cannot act on the server with this.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Allow iPhone to Control the Server", isOn: $store.allowRemoteServerControl)
+                        .disabled(!store.allowRemoteServerStatus)
+                    Text("When enabled with server status above, a paired iPhone connected over Tailscale can quit, tame or sample server processes, stop or restart Coolify workloads, and scan or run server maintenance.\u{00A0} The phone confirms each action, this Mac checks the row against its own current reading, and the server rechecks it again.\u{00A0} It never works over the local network, because that link is not encrypted.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("A phone without the code can ask to pair.\u{00A0} This Mac then shows an alert where you can allow it and pick the first three choices.\u{00A0} Running maintenance, seeing server status and controlling the server are never offered there.\u{00A0} Turn them on here, on purpose.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1096,7 +1121,7 @@ private struct AlertsSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Webhook URL (Slack, Discord, Pushover, generic)", text: $webhookURL)
                     .textFieldStyle(.roundedBorder)
-                Text("Sends a JSON alert payload when a sustained hog triggers.  Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
+                Text("Sends a JSON alert payload when a sustained hog triggers.\u{00A0} Compatible with Slack, Discord, Pushover, and custom HTTP endpoints.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1142,6 +1167,10 @@ private struct AdvancedSettingsTab: View {
     @EnvironmentObject private var store: HogStore
     @ObservedObject private var infisical = InfisicalSettings.shared
 
+    @State private var authMode: InfisicalAuthMode = .machineIdentity
+    @State private var secretPath = "/"
+    @State private var serviceTokens: [InfisicalServiceToken] = []
+    @State private var loadedEditor = false
     @State private var clientId = ""
     @State private var clientSecret = ""
     @State private var projectId = InfisicalSettings.shared.projectId
@@ -1151,7 +1180,7 @@ private struct AdvancedSettingsTab: View {
     var body: some View {
         Form {
             Section("Infisical Settings Sync") {
-                Text("App-level settings sync from Infisical, the fleet's source of truth.  The credential below is stored in the secure App Group container (mode 0600), never logged or shared across apps.")
+                Text("Infisical sync is optional.\u{00A0} Without a connection, local settings and built-in defaults apply.\u{00A0} Credentials stay in this Mac's Keychain and are never shared with the iPhone.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1159,7 +1188,7 @@ private struct AdvancedSettingsTab: View {
                 HStack {
                     Text("Status")
                     Spacer()
-                    Text(infisical.isConfigured ? "Configured" : "Not Configured")
+                    Text(infisical.isConfigured ? "Configured" : "Not configured")
                         .foregroundStyle(infisical.isConfigured ? .green : .secondary)
                 }
                 if let last = infisical.lastRefresh {
@@ -1185,20 +1214,72 @@ private struct AdvancedSettingsTab: View {
             }
 
             Section("Credential") {
-                TextField("Client ID", text: $clientId)
+                Picker("Authentication", selection: $authMode) {
+                    ForEach(InfisicalAuthMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                .disabled(isWorking || infisical.isSaving)
+                TextField("Active Project ID", text: $projectId)
                     .disabled(isWorking || infisical.isSaving)
-                SecureField("Client Secret", text: $clientSecret)
+                TextField(authMode == .machineIdentity ? "Settings Folder" : "New Settings Write Folder", text: $secretPath)
                     .disabled(isWorking || infisical.isSaving)
-                TextField("Project ID", text: $projectId)
-                    .disabled(isWorking || infisical.isSaving)
+                if authMode == .machineIdentity {
+                    TextField("Client ID", text: $clientId)
+                    SecureField("Client Secret", text: $clientSecret)
+                } else {
+                    Text("Add a token for each exact prod folder and permission.\u{00A0} Only tokens for the active project are read.\u{00A0} Each token must have one exact folder scope; overlapping settings keys are refused.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    ForEach($serviceTokens) { $entry in
+                        VStack(alignment: .leading) {
+                            TextField("Label", text: $entry.label)
+                            TextField("Token Project ID", text: $entry.projectId)
+                            TextField("Token Folder", text: $entry.secretPath)
+                            SecureField("Service Token", text: $entry.token)
+                            // Compact label+switch pairs, each switch immediately beside its
+                            // own label.  The Toggle keeps its title for VoiceOver but renders
+                            // only the switch (labelsHidden: a labeled Toggle in a grouped Form
+                            // takes the full row as its ideal width - spreading the switch away
+                            // from its label, or overflowing the window under fixedSize).  The
+                            // Text is the visible label, hidden from VoiceOver to avoid a double
+                            // read, and taps through to the same binding so the tap target spans
+                            // label + switch.
+                            HStack(spacing: 16) {
+                                HStack(spacing: 6) {
+                                    Text("Read Settings")
+                                        .accessibilityHidden(true)
+                                        .onTapGesture { $entry.reads.wrappedValue.toggle() }
+                                    Toggle("Read Settings", isOn: $entry.reads)
+                                        .labelsHidden()
+                                }
+                                .contentShape(Rectangle())
+                                HStack(spacing: 6) {
+                                    Text("Write Settings")
+                                        .accessibilityHidden(true)
+                                        .onTapGesture { $entry.writes.wrappedValue.toggle() }
+                                    Toggle("Write Settings", isOn: $entry.writes)
+                                        .labelsHidden()
+                                }
+                                .contentShape(Rectangle())
+                                Spacer(minLength: 8)
+                                Button("Remove") { serviceTokens.removeAll { $0.id == entry.id } }
+                            }
+                        }
+                    }
+                    Button("Add Service Token") {
+                        serviceTokens.append(InfisicalServiceToken(projectId: projectId))
+                    }
+                }
+                if infisical.hasCredentialDraft {
+                    Text("Inherited credentials are a draft.\u{00A0} No connection runs until you confirm the identity and save, or choose service tokens.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
                 Text(InfisicalSettings.credentialNotice)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 HStack {
                     Button("Save Credential") { saveCredential() }
-                        .disabled(clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || UUID(uuidString: projectId.trimmingCharacters(in: .whitespacesAndNewlines)) == nil || isWorking || infisical.isSaving)
+                        .disabled(!candidate.isComplete || isWorking || infisical.isSaving)
                     Button("Clear") { clearCredential() }
-                        .disabled(!infisical.isConfigured || isWorking)
+                        .disabled((!infisical.isConfigured && !infisical.hasCredentialDraft) || isWorking)
                     Spacer()
                     Button("Sync Now") { syncNow() }
                         .disabled(!infisical.isConfigured || infisical.isRefreshing || infisical.isSaving || isWorking)
@@ -1206,7 +1287,7 @@ private struct AdvancedSettingsTab: View {
             }
 
             Section("Seed") {
-                Text("Push the current local values of the migrated settings to Infisical.  Secrets are never pushed from here; fill those in the Infisical dashboard.")
+                Text("Push the current local values of the migrated settings to Infisical.\u{00A0} Secrets are never pushed from here; fill those in the Infisical dashboard.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1216,11 +1297,30 @@ private struct AdvancedSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(width: SettingsView.windowWidth - 80)
+        .onAppear {
+            guard !loadedEditor, ApplicationRunMode.current.allowsLiveProbes else { return }
+            loadedEditor = true
+            if let saved = infisical.editingCredential {
+                authMode = saved.effectiveMode
+                clientId = saved.clientId
+                clientSecret = saved.clientSecret
+                projectId = saved.effectiveProjectId
+                secretPath = saved.effectivePath
+                serviceTokens = saved.serviceTokens ?? []
+            }
+        }
         .onChange(of: infisical.projectId) { previous, current in
             // Bootstrap may finish after this tab first appears.  Update only
             // an untouched field; never replace a project the admin is typing.
             if projectId == previous { projectId = current }
         }
+    }
+
+    private var candidate: InfisicalCredential {
+        InfisicalCredential(clientId: authMode == .machineIdentity ? clientId : "",
+            clientSecret: authMode == .machineIdentity ? clientSecret : "",
+            projectId: projectId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            mode: authMode, secretPath: secretPath, serviceTokens: authMode == .serviceTokens ? serviceTokens : nil)
     }
 
     private func saveCredential() {
@@ -1229,9 +1329,8 @@ private struct AdvancedSettingsTab: View {
         Task { @MainActor in
             defer { isWorking = false }
             do {
-                try await infisical.saveCredential(clientId: clientId, clientSecret: clientSecret, projectId: projectId)
-                clientSecret = ""
-                notice = "Connection verified and saved to App Group storage."
+                try await infisical.saveConfiguration(candidate)
+                notice = "Connection verified and saved to Keychain."
             } catch {
                 notice = "Save failed: \(InfisicalSettings.safeMessage(for: error))"
             }
@@ -1248,7 +1347,9 @@ private struct AdvancedSettingsTab: View {
         projectId = infisical.projectId
         clientId = ""
         clientSecret = ""
-        notice = "Credential removed.  Local defaults stand until a credential is saved again."
+        serviceTokens = []
+        secretPath = "/"
+        notice = "Credential removed.\u{00A0} Local defaults stand until a credential is saved again."
     }
 
     private func syncNow() {

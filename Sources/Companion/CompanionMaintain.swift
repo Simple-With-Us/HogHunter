@@ -40,19 +40,25 @@ enum CompanionMaintain {
         isRunning: Bool,
         includeSteps: Bool,
         now: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        settings: Settings? = nil
     ) -> CompanionMaintainStatus? {
         let recent = recentRuns(from: history)
         let watchSummary = watch(from: history, now: now, calendar: calendar)
         guard let status else {
-            guard isRunning else { return nil }
+            // With settings to show, the phone gets a status even before the
+            // first run, or a Mac that has never run could not be set up.
+            guard isRunning || settings != nil else { return nil }
             return CompanionMaintainStatus(
                 health: "unknown",
                 displayHealth: "Waiting for first run",
                 launchdLoaded: false,
-                isRunning: true,
+                isRunning: isRunning,
                 recentRuns: recent,
-                watch: watchSummary
+                watch: watchSummary,
+                stepSettings: settings?.stepSettings,
+                tuning: settings?.tuning,
+                customScripts: settings?.customScripts
             )
         }
         let lastRun = headlineRun(status: status, history: history)
@@ -68,8 +74,18 @@ enum CompanionMaintain {
             lastRunTrigger: lastRun?.displayTrigger,
             steps: includeSteps ? steps(from: status, lastRun: lastRun) : nil,
             recentRuns: recent,
-            watch: watchSummary
+            watch: watchSummary,
+            stepSettings: settings?.stepSettings,
+            tuning: settings?.tuning,
+            customScripts: settings?.customScripts
         )
+    }
+
+    /// What the detailed snapshot adds for a phone allowed to run the Maintain.
+    struct Settings: Equatable {
+        var stepSettings: [CompanionMaintainStepSetting]
+        var tuning: CompanionMaintainTuning
+        var customScripts: [CompanionMaintainScript]
     }
 
     /// The run the phone leads with: the newest cleaning run (so janitor,

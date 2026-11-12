@@ -2,15 +2,19 @@
   "teamId": "CC8UTF7ATG",
   "apps": {
     "hoghunter": {
+      "fixedMarketingVersion": "0.1.0",
+      "buildNumberPolicy": "paired-release",
       "displayName": "Hog Hunter",
       "bundleId": "com.simplewithus.hoghunter.ios",
+      "testerPolicy": "public-group",
+      "pairedBuildFeed": "https://github.com/Simple-With-Us/HogHunter/releases/latest/download/appcast.xml",
       "appleId": 6816633156,
       "platform": "iOS",
       "scheme": "HogHunterIOS",
       "projectRel": "HogHunter.xcodeproj",
       "xcodegenDir": ".",
-      "marketingVersionDefault": "1.0.0",
-      "notes": "Hog Hunter iPhone companion for the macOS menu bar utility.  Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios.  The Xcode project is generated from project.yml (xcodegen at the repo root) and is not committed.  Marketing and build are both the repo's commit count (1.0.<commit_count> and <commit_count>); UTC build stamps are retired."
+      "marketingVersionDefault": "0.1.0",
+      "notes": "Hog Hunter iPhone companion; Apple ID 6816633156, team CC8UTF7ATG, ASC SKU hoghunter-ios; XcodeGen project.yml; marketing version stays 0.1.0; build numbers start at 1000 and increment the observed complete ASC/feed floor, including earlier timestamp builds"
     }
   }
 }

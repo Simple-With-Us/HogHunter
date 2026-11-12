@@ -29,12 +29,14 @@ The table below is the target.  The Python tick reaches it two ways: the `hoghun
 | Log rotation | `logs`: tail-truncate in place over 64 MiB, keep 16 MiB.  `sqlite-wal`: checkpoint over 32 MiB | In place, so a daemon's open file really frees space.  Repo checkouts are out of scope |
 | Homebrew leftovers | `brew cleanup --prune=all` | Skipped while brew or node-gyp runs |
 | Merged, clean, idle lanes | `git worktree remove`, no force | The lane doctor's cleaner list, then the Vacuum's own re-check (below) |
+| Transient agent state | `agent-state`: logs, tmp, cache and the like under the agent homes | Untouched 90 minutes, no open handle, no keep marker.  A tree holding a `.git` or `.project_root` stays.  `.tmp` is not a target and stays on the report, because `~/.codex/config.toml` names a folder in `~/.codex/.tmp` with no `.git` as a live source |
+| Old tool versions | `tool-versions`: `muse-bin-*`, `~/.local/share/cursor-agent/versions`, `~/.local/share/claude/versions` | Keeps the newest 2, what the default launcher resolves to, and any version a link, wrapper or LaunchAgent names.  Installed 7 days ago or more, not run in 7 days by its access time, no open handle, no process naming it, no keep marker.  With no proof of what the default launcher runs, the tool is left out |
 | Dependency folders of idle lanes | `node_modules`, `.next`, `.turbo`, `dist`, `build`, `.gradle`, `DerivedData`, `Pods`, `__pycache__`, `.venv`, `.pytest_cache` | Fleet lanes only, never harness-managed worktrees.  Idle 24 hours, clean tracked tree, no process inside, no keep marker, and no nested git repository inside the folder |
 
 **Lane checks, in order.**  Any failure removes nothing and writes the reason.
 
-1. The doctor report must be fresh (15 minutes), schema 2 or newer, from this home, with `lsof` ok and, for removing a lane, `gh` ok (dependency folders do not need `gh`).  A spawn error, timeout (5 minutes), bad JSON, or a future timestamp fails closed.  These limits, and the 7-day and 24-hour floors, are code constants.  Config can change only where the doctor is installed.
-2. The doctor's own conjunction: SAFE-TO-REMOVE, merged-PR evidence by head sha (MERGED, or CLOSED on an exact head match), age and idle at least 7 days, no keep marker, no process cwd, a lane-like location, not a tool cache, no read errors, and a good `gh` lookup for that repo.
+1. The doctor report must be fresh (15 minutes), schema 2 or newer, from this home, with `lsof` ok and, for removing a lane, `gh` ok (dependency folders do not need `gh`).  A spawn error, timeout (5 minutes), bad JSON, or a future timestamp fails closed.  Report validation and the 24-hour dependency floor remain fixed.  Merged-worktree retention is configurable from 1 to 90 whole days, defaulting to 7; the doctor report must use that same retention.
+2. The doctor's own conjunction: SAFE-TO-REMOVE, merged-PR evidence by head sha (MERGED, or CLOSED on an exact head match), age and idle at least the configured retention, no keep marker, no process cwd, a lane-like location, not a tool cache, no read errors, and a good `gh` lookup for that repo.
 3. The Vacuum's re-check at plan time and again right before removal:
    - The path is unchanged, not a symlink, and has a `.git` file.  It is not under a never-touch folder (`~/.grok/worktrees` and the rest of the `hoghunter-clean` list).  No keep marker is on disk, and no other checkout from the report sits inside it.
    - HEAD equals the reported head sha, on the reported branch.
@@ -46,9 +48,42 @@ The table below is the target.  The Python tick reaches it two ways: the `hoghun
    - No process has it as its working directory (`lsof`), and `pgrep -f`, given the path as a literal (regex characters escaped), finds no process naming it.
 4. The command is exactly `git -C <main repo> worktree remove <path>`.  A code assertion rejects `-f` and `--force`.  A non-zero exit is logged as failed and the loop goes on.
 
-What to expect.  On the 2026-10-08 doctor report (270 checkouts), a read-only replay of step 3 over the 38 lane-like worktrees rated SAFE-TO-REMOVE with merged evidence, with the age floor ignored, gave this result: 29 pass, 7 are refused for a nested repository, and 2 are kept by the keep list.  The 7 are SwiftPM `.build/checkouts`, which are real clones.  24 of the 29 pass only because of Rule 6: their commits are under no remote ref, only under the PR head on GitHub and the local branch, and the log line says so.  A real run also needs the 7-day floor and the doctor's cleaner list, so it removes fewer.  No real removal has been run.
+What to expect.  On the 2026-10-08 doctor report (270 checkouts), a read-only replay of step 3 over the 38 lane-like worktrees rated SAFE-TO-REMOVE with merged evidence, with the age floor ignored, gave this result: 29 pass, 7 are refused for a nested repository, and 2 are kept by the keep list.  The 7 are SwiftPM `.build/checkouts`, which are real clones.  24 of the 29 pass only because of Rule 6: their commits are under no remote ref, only under the PR head on GitHub and the local branch, and the log line says so.  A real run also needs the configured retention and the doctor's cleaner list, so it removes fewer.  No real removal has been run.
 
 Automatic mode never removes a lane that is dirty, open, fresh, beyond its merged PR, or unknown, and never touches anything in Mode 3.
+
+### The Pressure Rule For Duplicate Runtimes
+
+`duplicate-sim-runtimes` runs only at 25 GB free or less, whatever triggered the run.  `--band=full` alone is not enough, because the pressure triggers also fire on a 15 GB drop in free space, on swap and on load at any free level.  The line is enforced per rule: a clean run above it does not scan for it, its candidates are left out, and each delete reads df again first.  A df that fails counts as above the line.  Other semi-safe rules, such as `snapshots`, keep the schedule they had.
+
+| What | Rule | Gate |
+|---|---|---|
+| A duplicate simulator runtime image | `duplicate-sim-runtimes`, deleted with `xcrun simctl runtime delete <id>`, never a directory delete | Two or more Ready images of one runtime and version.  Only a Disk Image, never the image `simctl runtime match list` chooses, never an image used more recently than the rest, only one reported `deletable`.  Skipped unless exactly one Xcode is installed, while any device is not Shutdown, or while xcodebuild, Simulator or Bitrig runs.  Asks simctl only when CoreSimulatorService is already alive, so it never closes `simulator-runtimes`.  Output that does not read true gives no candidate, and an absent `lastUsedAt` is that |
+
+
+### Disk Upkeep (HH-219)
+
+The owner decided on Nov 5 to widen automatic deletes modestly ("train Hog Hunter to do a better job maintaining its disk space").  Each delete below identifies what it takes by what is there, never by a list of what to refuse.  Both pass a recheck on a fresh open-file listing right before the delete.
+
+| What | Rule | Gate |
+|---|---|---|
+| An Xcode DerivedData root left by `-derivedDataPath` | `xcode-scratch`: direct children of `/private/tmp` and `~/.clutch/derived-data`, deleted only at 60 GB free or less, so always at 25 GB | `info.plist` names a `WorkspacePath`, the top holds only Xcode's entries and no link, `Build/` holds only Products and Intermediates.noindex, `Logs/` or `Index.noindex/` sits beside it, and it is on the home folder's volume.  No repository inside but a clean SwiftPM clone.  Nothing in its top two levels changed in 24 hours.  No keep marker, no open handle, no process running from it or naming its path or folder name.  df is read again before the delete |
+| A superseded BotFleet release | `botfleet-releases`: `~/.botfleet/releases` and `~/.botfleet-companion/releases` | The store reads true: a real `releases` folder holding only commit-named folders, and a `current` link that resolves to one of them.  Keeps that one, the newest 2 others and any a link, wrapper or LaunchAgent names.  Idle 7 days, no open handle, no process running from it or naming it, no keep marker.  Releases are read-only, so the delete grants write permission first, after every guard |
+
+**The early warning.**  Under 40 GB free a run sizes the ask-first trees, and when the report-only rows add up to more than 10 GB the JSON report carries `top_report_only`: the 8 biggest rows with path, bytes and rule, a row inside another listed row not counted twice.  The key is absent otherwise.
+
+### What Is Only Reported
+
+`stale-build-output` never deletes, whatever the disk level.  `xcode-scratch` lists every Xcode-shaped tree it may not delete, with the first gate that stopped it.  A `--scan` lists each tree.  A clean run skips the stale build walks because nobody reads the rows, except under 40 GB free, where the early warning reads them.
+
+| What | Rule | What a row says |
+|---|---|---|
+| Ignored build output in main checkouts | `stale-build-output`: `.build`, `.next`, `build`, `target` directly in `~/Code/<repo>`, or a path named per repo | Whether git ignores it and tracks nothing in it, whether it changed in 14 days, whether a process holds it or works in the repo, a keep marker, nested repositories, and keys, notes or project files inside.  `node_modules` and `dist` get the idle row only |
+| Xcode-shaped scratch it may not delete | `xcode-scratch`: direct children of `/private/tmp` and `~/.clutch/derived-data` | The first gate that stopped it: Xcode's layout (the volume, what `Build/` and `SourcePackages/` hold, `Logs/` or `Index.noindex/` beside `Build/`), `info.plist`, use in 24 hours, a key, archive, project or note anywhere inside, a keep marker, a nested repository, an open handle, or a process running from it or naming it.  A child that is not Xcode-shaped at all gets no row |
+
+**The owner's Nov 4 narrowing was not used for automatic deletes.**  The owner allowed deleting stale build output ("teach HH wherever possible").  Two adversarial review rounds on Nov 4 kept finding what the checks miss: a `.p8` key and a dSYM past the refuse-list, a CLI symlinked into `target/release`, a server started from the parent folder.  With every gate in place the rules reclaimed almost nothing, because real SwiftPM clones fail the proof below.  So a person decides, and `Never Touch` stands as written.
+
+**The clone proof, for what the rows say.**  A SwiftPM clone at `<tree>/checkouts/<name>/.git` under `.build`, or at `.../SourcePackages/checkouts/<name>/.git`, is reported as provably regenerable only with a real `.git` directory, a clean status that counts untracked and ignored files whatever git's config says, no file flagged skip-worktree or assume-unchanged, and every ref reachable from a remote-tracking ref.  Any other nested `.git` is named in the row.  Rule 3 and the lane steps are unchanged.
 
 ### The Vacuum's Older Steps
 
@@ -93,14 +128,14 @@ Opt-in, manual, and never scheduled.  It is reachable only after an acknowledgem
 **Safety checks.**  The Rules For Every Mode apply unchanged, plus these.
 
 - Prefer Apple's or the tool's own command over deleting folders.  Every row prints its exact command before it runs, and a dry run prints the same lines.
-- Unknown facts still mean skip.  Runtime rows skip while xcodebuild, Simulator, or CoreSimulatorService runs.  Docker rows skip when the engine does not answer.
+- Unknown facts still mean skip.  Runtime rows skip while xcodebuild, Simulator, or CoreSimulatorService runs.  `duplicate-sim-runtimes` is the exception on the last name: asking simctl anything starts CoreSimulatorService, so it asks whether a device is booted instead.  Docker rows skip when the engine does not answer.
 - Stale-lane rows repeat the Mode 1 live checks except the merged-PR test: the target is a regenerable folder inside the lane, not a symlink, with a clean tracked tree, no process cwd, no keep marker, and no file written in the last 24 hours.  The lane itself is never removed.
 - A second prompt for anything that holds data rather than cache: Docker volumes, Xcode Archives.
 - A failed step is reported and not retried in the same run.
 
 ## Never Touch
 
-Personal media and documents, the Photos library, Pictures, Movies, Music, and personal media found in temp folders.  iCloud and `CloudStorage`.  Secrets, keychains, SSH material, env files, and `~/.secrets`.  Virtual machine bundles (a live one is running infrastructure).  The Time Machine backup itself, as distinct from local snapshots.  Anything with unpushed commits or the only copy of commits.  Anything with a keep marker.  Integration trees (`~/Code/<App>`) and `~/apps` itself.  Other tools' caches and plugin clones.  In-session `~/.grok/worktrees`, and harness-managed worktrees for the dependency step.  Nested git repositories inside ignored folders.  `CoreSimulator/Devices`, which is why the Vacuum never runs `xcrun simctl delete unavailable`.  The Trash, which no automatic mode empties.  Hog Hunter itself.
+Personal media and documents, the Photos library, Pictures, Movies, Music, and personal media found in temp folders.  iCloud and `CloudStorage`.  Secrets, keychains, SSH material, env files, and `~/.secrets`.  Virtual machine bundles (a live one is running infrastructure).  The Time Machine backup itself, as distinct from local snapshots.  Anything with unpushed commits or the only copy of commits.  Anything with a keep marker.  Integration trees (`~/Code/<App>`) and `~/apps` itself.  Other seats' worktrees under `.muse` and the `~/apps/botfleet-*` trees, which `is_forbidden` refuses at the delete itself and the ask-first report only surfaces.  Other tools' caches and plugin clones.  In-session `~/.grok/worktrees`, and harness-managed worktrees for the dependency step.  Nested git repositories inside ignored folders.  `CoreSimulator/Devices`, which is why the Vacuum never runs `xcrun simctl delete unavailable`.  The Trash, which no automatic mode empties: the regimen has no rule that selects or scans it (HH-213).  Hog Hunter itself.
 
 One honest exception: the existing Extreme tier's Large And Old Files category lists single files under Downloads, Documents, and Desktop for the user to pick one by one.  It is unchecked by default and goes to the Trash.  The developer tier must not include it, and the Vacuum never reads those folders.
 
@@ -116,9 +151,9 @@ Today the Python half writes `lane-actions.jsonl` in its data folder, rotated at
 |---|---|
 | `DiskCleaner.swift`, `CleanTier.standard` | Mode 1 and Mode 2 for the Swift side.  Snapshot first, Trash put-back |
 | `CleanTier.extreme` | Today's deep tier (orphans, AI artifacts, large files).  The developer tier is separate and does not widen it |
-| `CleanRegimen`, `CleanRegimenRunner`, `CleanPressure` | Wired by HH-183 (`HogStore.start()` starts `CleanRegimenRunner.shared`), off until the owner turns it on in the storage panel.  Mode 1 only, `.standard` only (the runner already passes it).  `schedulableRules` excludes ask-first and expensive |
+| `CleanRegimen`, `CleanRegimenRunner`, `CleanPressure` | Wired by HH-183 (`HogStore.start()` starts `CleanRegimenRunner.shared`), off until the owner turns it on in the storage panel.  Mode 1 only, `.standard` only (the runner already passes it).  `schedulableRules` is the names a stored regimen may keep, and only those a cleaner category answers to do anything.  Engine-only rules stay out of it |
 | Robotic Vacuum (`scripts/vacuum/`, 20 steps) | A five-minute tick.  The lane steps (`janitor_worktree_retire`, `pressure_apps_deps`) and `hoghunter_reclaim` are Mode 1.  The older steps meet only the gates listed under `The Vacuum's Older Steps` |
-| `scripts/hoghunter-clean` tiers | safe and semi-safe map to Mode 1.  expensive maps to Mode 3 rows.  ask-first stays report-only |
+| `scripts/hoghunter-clean` tiers | safe maps to Mode 1 on every run.  semi-safe needs `--band=full`, and `duplicate-sim-runtimes` also needs 25 GB free or less.  expensive needs `--band=full` under 40 GB free, and runs unattended there; the Mode 3 rows are a separate manual surface that has not been built.  ask-first stays report-only |
 | `scripts/clean.sh` | Shell twin of `DiskCleaner`, with `--tier` and `--confirm-extreme` |
 
 ## What The 2026-10-07 Fleet Cleanup Did And Deliberately Avoided
@@ -131,7 +166,7 @@ The lesson: the inventory came first, and every removal had to name the evidence
 
 ## Tunables
 
-New numeric knobs for the Swift tiers (a DerivedData age, the stale-lane idle days) go in Infisical with an `INFISICAL.md` row when the Swift code lands.  Exclusions and enabled rules stay in UserDefaults.  The Python Vacuum's lane limits are not knobs: report age, schema, doctor timeout, the 7-day retire floor, and the 24-hour dependency floor are code constants, and config can change only the doctor's install path.  The Vacuum's older settings in `config/robotic-vacuum.json` predate this work and have no Infisical reader (see `INFISICAL.md`).
+New numeric knobs for the Swift tiers (a DerivedData age, the stale-lane idle days) go in Infisical with an `INFISICAL.md` row when the Swift code lands.  Exclusions and enabled rules stay in UserDefaults.  Merged-worktree retention uses `hoghunter.maintain.janitor.retireMinDays` in Infisical and the mirrored `lanes.retire_min_days` fallback for standalone scheduling.  The valid range is 1 to 90 whole days, default 7; invalid values use 7.  Report age, schema, doctor timeout, and the 24-hour dependency floor stay fixed.  A nondefault retention requires the lane doctor's `--cleaner-retention-days` support; a mismatched report fails closed.
 
 ## Sequencing
 

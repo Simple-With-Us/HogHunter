@@ -62,7 +62,7 @@ final class UISmokeTest {
             // contentView, not the window: the window frame includes the title bar.
             let size = panelWindow.contentView?.frame.size ?? .zero
             let ok = abs(size.width - HogHunterPanel.panelWidth) < 1
-                && size.height > 180 && size.height < HogHunterPanel.panelHeight
+                && size.height > 180 && size.height <= HogHunterPanel.panelHeight
             record("quick view fits its content", ok, "got \(size)")
             checkRenderedContent(panelWindow, name: "quick-view")
         }

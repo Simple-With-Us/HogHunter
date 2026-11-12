@@ -11,13 +11,34 @@ final class VPSStatusStore: ObservableObject {
     @Published private(set) var snapshot: VPSStatusSnapshot?
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var errorMessage: String?
+    /// The last read's failure, kept until a read succeeds.  `errorMessage`
+    /// clears the moment a retry starts, and a retry against a dead host takes
+    /// up to 15 seconds, so a reader that polls would see the failure come and
+    /// go.  The phone polls.
+    @Published private(set) var lastReadError: String?
     @Published private(set) var lastFetchDate: Date?
     @Published private(set) var configuredHost: String = ""
+
+    /// The server's own CPU history, kept the way the Mac keeps its own: one
+    /// mean per minute.  Without it the server's CPU is a single number with
+    /// no shape, and the two machines cannot be read side by side.
+    @Published private(set) var cpuHistory = CpuMinuteHistory()
+
+    /// Bumped when a reading crosses the staleness deadline with no new
+    /// fetch landing, purely so observers re-render: `isStale` turns on
+    /// wall-clock time alone, and without a published change at that moment
+    /// SwiftUI keeps showing the reading as current until the next poll.
+    @Published private(set) var stalenessRevision = 0
 
     private let history: SizeGrowthHistory
     private let fetcher: Fetcher
     private var timer: Timer?
+    private var stalenessTimer: Timer?
     private var activeFetchTask: Task<Void, Never>?
+    /// A forced read asked for while another was in flight.  It runs once
+    /// that read ends, so a Refresh never lands on a read that started before
+    /// it and is silently dropped.  Several asks while busy make one read.
+    private(set) var hasQueuedForcedFetch = false
 
     init(initialHost: String = "", fetcher: Fetcher? = nil, history: SizeGrowthHistory = .shared) {
         self.history = history
@@ -40,10 +61,15 @@ final class VPSStatusStore: ObservableObject {
         snapshot = nil
         lastFetchDate = nil
         errorMessage = nil
+        lastReadError = nil
+        cancelStalenessTimer()
+        cpuHistory = CpuMinuteHistory()
         if !configuredHost.isEmpty {
+            // A new host wants fresh readings now, not in a minute.  The
+            // polling start reads at once, because the last fetch time was
+            // just cleared; a second, forced fetch here would only be queued
+            // behind it and read the host twice.
             startPolling()
-            // A new host wants fresh readings now, not in a minute.
-            fetch(force: true)
         } else {
             stopPolling()
         }
@@ -52,6 +78,20 @@ final class VPSStatusStore: ObservableObject {
     /// Whether the readings are being fetched.
     var isPolling: Bool {
         timer != nil
+    }
+
+    /// Whether the snapshot on screen is an old reading rather than the
+    /// server's state now: a snapshot exists, but the latest refresh failed,
+    /// or none has landed within two poll cycles.  Views mark the server's
+    /// numbers stale while this holds, so an old reading cannot present as
+    /// live data — the failure mode of 2026-11-04, when a dead SSH socket
+    /// froze the panel on a full-disk reading taken during an incident,
+    /// hours after the space had been freed.
+    var isStale: Bool {
+        guard snapshot != nil else { return false }
+        if errorMessage != nil { return true }
+        guard let lastFetchDate else { return true }
+        return Date().timeIntervalSince(lastFetchDate) > 150
     }
 
     func startPolling() {
@@ -70,11 +110,37 @@ final class VPSStatusStore: ObservableObject {
     }
 
     func stopPolling() {
+        hasQueuedForcedFetch = false
         timer?.invalidate()
         timer = nil
+        cancelStalenessTimer()
         activeFetchTask?.cancel()
         activeFetchTask = nil
         isLoading = false
+    }
+
+    /// Arms the one-shot timer that publishes a change when the current
+    /// reading crosses the staleness deadline in `isStale`, so the stale
+    /// markers appear at the deadline instead of at the next poll tick.
+    /// Internal rather than private so a test can arm it with a short
+    /// interval; production arms it from each successful fetch with the
+    /// time left until that reading ages out.
+    func scheduleStalenessFlip(after interval: TimeInterval) {
+        cancelStalenessTimer()
+        let t = Timer(timeInterval: max(0.001, interval), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.stalenessTimer = nil
+                self.stalenessRevision &+= 1
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        stalenessTimer = t
+    }
+
+    private func cancelStalenessTimer() {
+        stalenessTimer?.invalidate()
+        stalenessTimer = nil
     }
 
     func fetch(force: Bool = false) {
@@ -85,7 +151,10 @@ final class VPSStatusStore: ObservableObject {
             return
         }
 
-        if isLoading { return }
+        if isLoading {
+            if force { hasQueuedForcedFetch = true }
+            return
+        }
 
         if !force, let last = lastFetchDate, Date().timeIntervalSince(last) < 60 {
             return
@@ -116,12 +185,26 @@ final class VPSStatusStore: ObservableObject {
                 }.value
                 guard !Task.isCancelled, self.configuredHost == host else { return }
                 self.snapshot = snap
+                if let cpu = snap.cpu {
+                    self.cpuHistory.record(percent: cpu.pct, at: Date())
+                }
                 self.errorMessage = nil
-                self.lastFetchDate = Date()
+                self.lastReadError = nil
+                let fetchedAt = Date()
+                self.lastFetchDate = fetchedAt
+                self.scheduleStalenessFlip(after: fetchedAt.addingTimeInterval(150).timeIntervalSinceNow)
             case .failure(let err):
+                // The error itself is published, so observers re-render and
+                // read `isStale` as true without waiting for the timer.
+                self.cancelStalenessTimer()
                 self.errorMessage = err.localizedDescription
+                self.lastReadError = err.localizedDescription
             }
             self.isLoading = false
+            if self.hasQueuedForcedFetch {
+                self.hasQueuedForcedFetch = false
+                self.fetch(force: true)
+            }
         }
     }
 
@@ -162,7 +245,32 @@ final class VPSStatusStore: ObservableObject {
         return history.percentChange(host: historyHost(snapshot), metric: "directory", path: path)
     }
 
+    /// The fetcher the store uses live: one read over the app's SSH
+    /// connection (see `rawSSHFetcher`), with dead-socket recovery around it.
+    ///
+    /// When the connection's master has died, the read fails with a mux
+    /// error — a dead local socket, not an unreachable server.  The recovery
+    /// discards the dead master first and then runs the read once more, over
+    /// the fresh connection that attempt creates; no read is ever retried
+    /// over the dead socket or its path.  Recovery therefore happens on the
+    /// ordinary poll cycle, and the Retry button gets it for free because it
+    /// calls this same fetcher.  Any other failure is reported as produced.
     nonisolated static func sshFetcher() -> Fetcher {
+        let read = rawSSHFetcher()
+        return { host in
+            let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            return try await SSHConnection.retryingOnceOnDeadSocket(
+                attempt: { try await read(trimmedHost) },
+                discard: { await SSHConnection.invalidate(host: trimmedHost) }
+            )
+        }
+    }
+
+    /// One read of the server's status file over the app's SSH connection,
+    /// with no recovery of its own: a failure is reported exactly as ssh
+    /// produced it, and `sshFetcher` above decides whether the failure is a
+    /// dead socket worth discarding and retrying once.
+    nonisolated private static func rawSSHFetcher() -> Fetcher {
         { host in
             guard ApplicationRunMode.current.allowsLiveProbes else {
                 throw NSError(domain: "VPSStatusStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "SSH fetcher does not run from unit tests."])
@@ -191,6 +299,7 @@ final class VPSStatusStore: ObservableObject {
                 "-o", "ConnectTimeout=5",
                 "-o", "ServerAliveInterval=3",
                 "-o", "ServerAliveCountMax=2",
+            ] + SSHConnection.connectionOptions(forHost: trimmedHost) + [
                 trimmedHost,
                 "cat /root/vps-storage-status.json"
             ]

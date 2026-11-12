@@ -7,17 +7,20 @@ name: Hog Hunter iOS TestFlight
 # (project.yml, targets HogHunterIOS and HogHunterWidgets).  They are listed as
 # exact files, not Sources/Companion/**:  most of that directory is the Mac
 # companion server, and a Mac-only edit must not cut a TestFlight build.
-# scripts/test-ios-release.py pins both lists (these push paths and the
-# scheduled gate prefixes below) to project.yml, so a file added to the iOS
-# targets cannot quietly stop shipping.  workflow_dispatch is the manual path.
+# scripts/test-ios-release.py pins these push paths to project.yml, so a file
+# added to the iOS targets cannot quietly stop shipping, and pins the
+# scheduled gate prefixes below to THESE push paths verbatim (owner rule
+# 2026-10-29: unless a merge built recently it automatically builds, so a
+# merge the push trigger would have shipped can never be skipped by the cron
+# just because the push event was missed).  workflow_dispatch is the manual path.
 #
 # The ship goes through the fleet script (scripts/ios-fleet/ship-testflight.sh,
 # via scripts/ios-ship-testflight.sh), the same path Socratic.Trade,
 # Congress.Trade, Usage Monitor and Clutch use.  It owns:
-#   * the marketing version and the build number:  both are the repo's commit
-#     count, 1.0.<commit_count> and <commit_count>, so a version string is
-#     never uploaded twice (the old release script read 1.0.6 from project.yml
-#     and reused it);
+#   * marketing version 0.1.0 and the counter selected once by the serialized
+#     Mac publisher from complete ASC and Sparkle floors (at least1000).
+#     The published release-plan.json ties both platforms to one source SHA;
+#     a missing matching Mac release defers the iOS archive until a later tick.
 #   * the rate gate (one upload per hour) and the same-HEAD skip.  This file
 #     never sets IOS_TF_MIN_INTERVAL_SEC and never passes --force-ship;
 #   * ensure-tf-ready, which declares export compliance on the exact build and
@@ -30,9 +33,13 @@ name: Hog Hunter iOS TestFlight
 #   * ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 come from Fleet-OPS Infisical prod
 #     /asc, the fleet's single copy (owner ruling 2026-10-17).  The same-named
 #     repository secrets are a stale copy and are deliberately not read, with
-#     no fallback to them.  The multiline key never enters GITHUB_ENV;
-#     scripts/ios-stage-asc-key.sh writes it to a mode 600 file and only the
-#     path crosses steps.
+#     no fallback to them.  The multiline PEM never enters GITHUB_ENV;  the
+#     hosted form is the base64 trio (APPLE_API_KEY_ID, APPLE_API_ISSUER_ID and
+#     APPLE_API_KEY_P8_BASE64), which is one line and which the shell layer
+#     and the client both read from the environment.  A path on disk is not an
+#     approved credential source (AFC-459), so a named ASC_KEY_PATH is ignored.
+#     scripts/ios-stage-asc-key.sh writes the key to a mode 600 file, and only
+#     that path is used, by the Apple tools that can only read a key from disk.
 #   * IOS_DIST_P12_BASE64 and IOS_DIST_P12_PASSWORD (the Apple Distribution
 #     identity) are repository secrets, scoped to the import step only.
 #   * SENTRY_DSN and SENTRY_AUTH_TOKEN are best effort:  an inert Sentry beats a
@@ -42,10 +49,11 @@ name: Hog Hunter iOS TestFlight
 # A pull request merged by github-actions[bot] lands on main under GitHub's
 # recursion guard and dispatches no push run, and a push run that failed is
 # never retried.  A cron is exempt from both.  It is gated twice:
-# scripts/ios-fleet/scheduled-ship-gate.sh refuses unless a native path changed
-# since the last successful ship, and the ship script rate-limits and skips an
-# already-shipped HEAD.  A tick with nothing to ship exits in seconds.  push and
-# workflow_dispatch skip the path gate (a push already passed `paths:`).
+# scripts/ios-fleet/scheduled-ship-gate.sh refuses unless a path from the push
+# filter above changed since the last successful ship (native tree AND ship
+# machinery, with the same ! exclusions), and the ship script rate-limits and
+# skips an already-shipped HEAD.  A tick with nothing to ship exits in seconds.
+# push and workflow_dispatch skip the path gate (a push already passed `paths:`).
 #
 # The ship state (~/.cache/ios-fleet) is restored from actions/cache because a
 # hosted runner starts with an empty home;  without it every run would look like
@@ -75,6 +83,8 @@ on:
       - '.github/workflows/ios-testflight.yml'
       - '.github/actions/infisical-secrets/**'
       - 'scripts/infisical-fetch.mjs'
+      - 'scripts/release-build-policy.mjs'
+      - 'scripts/release-inventory.mjs'
       - 'scripts/ios-*.sh'
       - 'scripts/ios-fleet/**'
       - '!scripts/ios-fleet/test-*.sh'
@@ -85,6 +95,11 @@ on:
         description: 'Upload to TestFlight (false archives and exports only, and may run from a branch)'
         required: false
         default: true
+        type: boolean
+      inventory_only:
+        description: 'Read release versions and build floors only; never archive or upload'
+        required: false
+        default: false
         type: boolean
   schedule:
     # Hourly at :41, offset from the other fleet ship crons (:07 and :37 Congress,
@@ -99,10 +114,145 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  ship:
-    name: TestFlight archive + upload
+  inventory:
+    name: Read release inventory
+    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Load scoped ASC read credentials
+        uses: ./.github/actions/infisical-secrets
+        with:
+          names: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          required: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
+          secret-path: /asc
+          service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}
+          asc-mode: "true"
+      - name: Read versions and uploaded builds
+        run: node scripts/release-inventory.mjs > release-inventory.json
+      - name: Save nonsecret release inventory
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-inventory
+          path: release-inventory.json
+          retention-days: 14
+
+  # Reuse the published counter and source identity instead of allocating a
+  # second counter after the Mac upload advanced the shared floor.
+  # An explicit upload=false branch preview only computes an unused plan.
+  plan-build:
+    name: Plan release build
     if: >-
       github.event.repository.fork == false &&
+      inputs.inventory_only != true &&
+      vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
+      (github.ref == 'refs/heads/main' ||
+       (github.event_name == 'workflow_dispatch' && inputs.upload == false))
+    runs-on: macos-latest
+    timeout-minutes: 15
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      ready: ${{ steps.plan.outputs.ready }}
+      source_head: ${{ steps.plan.outputs.source_head }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # The gate below diffs HEAD against the sha recorded by the last
+          # successful ship.  A shallow clone makes the range uncomputable.
+          fetch-depth: 0
+
+      - name: Restore iOS ship state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ios-fleet
+          key: ios-fleet-state-hoghunter-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ios-fleet-state-hoghunter-ios-${{ github.run_id }}-
+            ios-fleet-state-hoghunter-ios-
+
+      # Before any ASC query, so a tick with nothing to ship costs seconds and
+      # a transient ASC hiccup cannot red it.  Prefixes are on.push.paths
+      # verbatim and in order (native tree AND ship machinery, with the same !
+      # exclusions), matching the ship job's gate below, so a merge the push
+      # trigger would have shipped still ships when the push event was missed.
+      # The logic lives in a script so CI unit-tests it, and
+      # scripts/test-ios-release.py pins both prefix lists to on.push.paths.
+      - name: Scheduled ship gate (skip unless a push path changed)
+        id: gate
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/ios-fleet/scheduled-ship-gate.sh" \
+            --event "${{ github.event_name }}" \
+            --path-prefix 'ios/**' \
+            --path-prefix 'project.yml' \
+            --path-prefix 'Sources/Companion/CompanionSnapshot.swift' \
+            --path-prefix 'Sources/Companion/CompanionHTTP.swift' \
+            --path-prefix 'Sources/Companion/CompanionPeer.swift' \
+            --path-prefix 'Sources/UI/CpuSparklineView.swift' \
+            --path-prefix 'Sources/Telemetry/SentryTelemetry.swift' \
+            --path-prefix '.github/workflows/ios-testflight.yml' \
+            --path-prefix '.github/actions/infisical-secrets/**' \
+            --path-prefix 'scripts/infisical-fetch.mjs' \
+            --path-prefix 'scripts/release-build-policy.mjs' \
+            --path-prefix 'scripts/release-inventory.mjs' \
+            --path-prefix 'scripts/ios-*.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix '!scripts/ios-fleet/test-*.sh' \
+            --path-prefix '!scripts/ios-fleet/README.md' \
+            --repo-root "$GITHUB_WORKSPACE" \
+            hoghunter
+
+      # Only an explicit export-only preview needs a fresh ASC inventory;
+      # normal uploads reuse the Mac publisher's immutable plan.
+      - name: Load ASC credentials (Fleet-OPS prod /asc)
+        if: steps.gate.outputs.should_ship == '1' && github.event_name == 'workflow_dispatch' && inputs.upload == false
+        uses: ./.github/actions/infisical-secrets
+        with:
+          names: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          required: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
+          secret-path: /asc
+          service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}
+          asc-mode: "true"
+
+      - name: Plan the release build
+        id: plan
+        if: steps.gate.outputs.should_ship == '1'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          UPLOAD: ${{ inputs.upload }}
+        run: |
+          set -euo pipefail
+          mode=--read-plan
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$UPLOAD" = false ]; then
+            mode=--preview-plan
+          fi
+          set +e
+          node scripts/release-build-policy.mjs "$mode" "$GITHUB_SHA" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/release-plan.json"
+          rc=$?
+          set -e
+          if [ "$rc" = 3 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Waiting for the matching Mac release; no archive or upload started."
+            exit 0
+          fi
+          [ "$rc" = 0 ] || exit "$rc"
+          # shellcheck disable=SC2016
+          node -e 'const fs=require("node:fs"),p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`build=${p.build}\nsource_head=${p.sourceHead}\nready=true\n`)' "$RUNNER_TEMP/release-plan.json"
+
+  ship:
+    name: TestFlight archive + upload
+    needs: [plan-build]
+    if: >-
+      github.event.repository.fork == false &&
+      inputs.inventory_only != true &&
+      needs.plan-build.outputs.ready == 'true' &&
       vars.HH_IOS_TESTFLIGHT_ENABLED == 'true' &&
       (github.ref == 'refs/heads/main' ||
        (github.event_name == 'workflow_dispatch' && inputs.upload == false))
@@ -115,6 +265,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          ref: ${{ needs.plan-build.outputs.source_head }}
           # The scheduled gate diffs HEAD against the sha recorded by the last
           # successful ship, and the release notes list the commits since it.
           # A shallow clone makes both ranges uncomputable.
@@ -152,21 +303,30 @@ jobs:
         run: rm -rf "$HOME"/.cache/ios-fleet/*.lockdir
 
       # Runs before any toolchain or secret step, so a tick with nothing to ship
-      # costs seconds.  Prefixes mirror on.push.paths (minus the machinery files,
-      # which only a push or a dispatch should act on).  The logic lives in a
-      # script so CI unit-tests it.
-      - name: Scheduled ship gate (skip unless iOS code changed)
+      # costs seconds.  Prefixes are on.push.paths verbatim and in order (native
+      # tree AND ship machinery, with the same ! exclusions), matching the
+      # plan-build gate above.  The logic lives in a script so CI unit-tests it.
+      - name: Scheduled ship gate (skip unless a push path changed)
         id: gate
         run: |
           bash "$GITHUB_WORKSPACE/scripts/ios-fleet/scheduled-ship-gate.sh" \
             --event "${{ github.event_name }}" \
-            --path-prefix 'ios/' \
+            --path-prefix 'ios/**' \
             --path-prefix 'project.yml' \
             --path-prefix 'Sources/Companion/CompanionSnapshot.swift' \
             --path-prefix 'Sources/Companion/CompanionHTTP.swift' \
             --path-prefix 'Sources/Companion/CompanionPeer.swift' \
             --path-prefix 'Sources/UI/CpuSparklineView.swift' \
             --path-prefix 'Sources/Telemetry/SentryTelemetry.swift' \
+            --path-prefix '.github/workflows/ios-testflight.yml' \
+            --path-prefix '.github/actions/infisical-secrets/**' \
+            --path-prefix 'scripts/infisical-fetch.mjs' \
+            --path-prefix 'scripts/release-build-policy.mjs' \
+            --path-prefix 'scripts/release-inventory.mjs' \
+            --path-prefix 'scripts/ios-*.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix '!scripts/ios-fleet/test-*.sh' \
+            --path-prefix '!scripts/ios-fleet/README.md' \
             --repo-root "$GITHUB_WORKSPACE" \
             hoghunter
 
@@ -188,10 +348,16 @@ jobs:
       - name: Install xcodegen
         if: steps.gate.outputs.should_ship == '1'
         run: |
-          if ! command -v xcodegen >/dev/null 2>&1; then
-            NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
-          fi
-          xcodegen --version
+          xcodegen_root="$(mktemp -d "${RUNNER_TEMP}/xcodegen-2.46.0.XXXXXX")"
+          curl --fail --silent --show-error --location \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$xcodegen_root/xcodegen.zip"
+          ditto -xk "$xcodegen_root/xcodegen.zip" "$xcodegen_root"
+          xcodegen_bin="$xcodegen_root/xcodegen/bin"
+          test -x "$xcodegen_bin/xcodegen"
+          test -d "$xcodegen_root/xcodegen/share/xcodegen/SettingPresets"
+          "$xcodegen_bin/xcodegen" --version | grep -Fx 'Version: 2.46.0'
+          echo "$xcodegen_bin" >> "$GITHUB_PATH"
 
       # Do not use `secrets.*` in `if:` -- GitHub's dispatch parser rejects it
       # (`Unrecognized named-value: secrets`) and the whole workflow dies at 0s.
@@ -201,92 +367,14 @@ jobs:
       # to a mode 600 file and only ASC_KEY_PATH is exported.
       - name: Load ASC credentials (Fleet-OPS prod /asc)
         if: steps.gate.outputs.should_ship == '1'
-        env:
-          # The org secret shared with this repository (ContactLogo reads /asc
-          # the same way), so this public file never names the project.
-          ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
-          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
-          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-        run: |
-          set +o xtrace
-          set -euo pipefail
-          export INFISICAL_DISABLE_UPDATE_CHECK=true
-
-          if [ -z "${ASC_INFISICAL_PROJECT_ID:-}" ]; then
-            echo "::error::The org secret INFISICAL_FLEET_OPS_PROJECT_ID is empty or not shared with this repository." >&2
-            exit 1
-          fi
-
-          if ! command -v infisical >/dev/null 2>&1; then
-            NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install infisical/get-cli/infisical
-          fi
-          command -v infisical >/dev/null 2>&1 || {
-            echo "::error::Infisical CLI is not installed."
-            exit 1
-          }
-
-          CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID}"
-          CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET}"
-          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            CLIENT_ID="${INFISICAL_CLIENT_ID}"
-            CLIENT_SECRET="${INFISICAL_CLIENT_SECRET}"
-          fi
-          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "::error::Missing Infisical machine identity.  Set INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET (fallback INFISICAL_CLIENT_ID/SECRET) on the org or repo."
-            exit 1
-          fi
-
-          TOKEN="$(
-            env -u INFISICAL_CLIENT_ID -u INFISICAL_CLIENT_SECRET -u INFISICAL_TOKEN \
-              INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CLIENT_ID" \
-              INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CLIENT_SECRET" \
-              infisical login --method=universal-auth --silent --plain --telemetry=false 2>/dev/null || true
-          )"
-          if [ -z "$TOKEN" ]; then
-            echo "::error::Infisical universal-auth login failed."
-            exit 1
-          fi
-          if [[ "$TOKEN" == *$'\n'* || "$TOKEN" == *$'\r'* ]]; then
-            echo '::error::Infisical returned a multiline token.' >&2
-            exit 1
-          fi
-          printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
-
-          for name in ASC_KEY_ID ASC_ISSUER_ID; do
-            val="$(
-              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
-                --plain --silent --telemetry=false --expand=false \
-                --projectId="$ASC_INFISICAL_PROJECT_ID" --env=prod --path=/asc \
-                2>/dev/null || true
-            )"
-            if [ -z "$val" ]; then
-              echo "::error::Missing $name in Fleet-OPS prod /asc;  verify the CI identity has read access to the Fleet-OPS project, path /asc." >&2
-              exit 1
-            fi
-            if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
-              echo "::error::Signing field $name must be single-line;  correct Infisical formatting." >&2
-              exit 1
-            fi
-            printf '::add-mask::%s\n' "${val//'%'/'%25'}"
-            printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
-          done
-
-          # Keep the multiline PEM out of GITHUB_ENV and every later step
-          # environment.  Only its mode 600 file path crosses the step boundary.
-          key_material="$(
-            INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
-              --plain --silent --telemetry=false --expand=false \
-              --projectId="$ASC_INFISICAL_PROJECT_ID" --env=prod --path=/asc \
-              2>/dev/null || true
-          )"
-          if [ -z "$key_material" ]; then
-            echo "::error::Missing ASC key material in Fleet-OPS prod /asc;  verify the CI identity has read access to the Fleet-OPS project, path /asc." >&2
-            exit 1
-          fi
-          printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
-          unset key_material TOKEN CLIENT_ID CLIENT_SECRET val
+        uses: ./.github/actions/infisical-secrets
+        with:
+          names: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          required: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
+          project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
+          secret-path: /asc
+          service-token: ${{ secrets.INFISICAL_ASC_READ_TOKEN }}
+          asc-mode: "true"
 
       # The distribution identity.  Scoped to this step's environment only, so
       # the certificate password never reaches the archive step.
@@ -316,8 +404,7 @@ jobs:
         with:
           names: SENTRY_DSN SENTRY_AUTH_TOKEN
           project-id: ${{ secrets.INFISICAL_PROJECT_ID }}
-          client-id: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID || secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET || secrets.INFISICAL_CLIENT_SECRET }}
+          service-token: ${{ secrets.INFISICAL_HOGHUNTER_READ_TOKEN }}
         env:
           GH_FALLBACK_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           GH_FALLBACK_SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -329,22 +416,36 @@ jobs:
           # Publish What to Test to App Store Connect (owner 2026-09-08).
           IOS_TF_RELEASE_NOTES: "1"
           EXPORT_ONLY: ${{ steps.mode.outputs.export_only }}
+          PLANNED_BUILD: ${{ needs.plan-build.outputs.build }}
         run: |
+          if [ -z "$PLANNED_BUILD" ]; then
+            echo "::error::No planned build from the plan-build job." >&2
+            exit 1
+          fi
           args=()
           if [ "$EXPORT_ONLY" = "1" ]; then
             args+=(--export-only)
           fi
-          bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
+          node scripts/ios-observe-ship.mjs bash scripts/ios-ship-testflight.sh --build "$PLANNED_BUILD" ${args[@]+"${args[@]}"}
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.
       - name: Sync standing TestFlight testers
         # Export-only runs archive without touching remote state: no group or
         # tester mutations either (Sentry review on #184).
+        #
+        # The policy comes from scripts/ios-fleet/apps.json.  There is one
+        # policy (owner, Nov 4 2026, HH-217):  "public-group" reuses the one
+        # external group with its public link on, keeps its people, assigns
+        # this build to it and submits it for Beta App Review.  A legacy
+        # "internal-group" value is refused by asc-api.mjs with a readable
+        # message, and this step is a warning either way, so the TestFlight
+        # upload itself still succeeds.
         if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1'
         continue-on-error: true
         env:
           ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
+          BUILD_NUMBER: ${{ needs.plan-build.outputs.build }}
         run: |
           for e in $(printf '%s' "${ASC_STANDING_TESTERS:-}" | tr ',;' '  '); do
             echo "::add-mask::${e}"
@@ -352,18 +453,52 @@ jobs:
           set +e
           appleid="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["hoghunter"]["appleId"])')"
           appleid_rc=$?
+          policy="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["hoghunter"].get("testerPolicy",""))')"
+          policy_rc=$?
           set -e
           if [ "$appleid_rc" -ne 0 ] || [ -z "$appleid" ]; then
             echo "::warning title=TestFlight standing testers::could not read the hoghunter appleId from scripts/ios-fleet/apps.json (rc=${appleid_rc}); tester sync skipped.  The TestFlight upload itself succeeded."
             exit 0
           fi
+          if [ "$policy_rc" -ne 0 ]; then
+            policy=""
+          fi
           set +e
-          node scripts/ios-fleet/asc-api.mjs ensure-standing-testers "$appleid"
+          node scripts/ios-fleet/asc-api.mjs ensure-standing-testers "$appleid" "${BUILD_NUMBER:-}" --policy "$policy"
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
             echo "::warning title=TestFlight standing testers::tester sync exited ${rc}; see the standing-testers lines above.  The TestFlight upload itself succeeded."
           fi
+
+      # The in-ship ensure-tf-ready pass runs before standing-tester sync, so
+      # it can falsely warn that nobody can install the build.  This read-only
+      # pass is what the job summary reports (OPS-1052).
+      - name: Re-verify TestFlight readiness after tester sync
+        id: recheck_tf
+        if: success() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1' && steps.ship.outputs.uploaded == 'true'
+        continue-on-error: true
+        env:
+          PLAN_BUILD: ${{ needs.plan-build.outputs.build }}
+          IOS_TF_READY_TIMEOUT_SEC: "300"
+        run: node scripts/ios-report-post-sync-tf-ready.mjs
+
+      - name: TestFlight readiness summary (after tester sync)
+        if: ${{ always() && steps.gate.outputs.should_ship == '1' && steps.mode.outputs.export_only != '1' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## TestFlight readiness (after standing-tester sync)"
+            if [ "${{ steps.ship.outputs.uploaded }}" = "unknown" ]; then
+              echo "- Hog Hunter: ship exited 0 but upload was not confirmed from logs; standing-tester sync ran, post-sync readiness skipped."
+            elif [ "${{ steps.ship.outputs.uploaded }}" != "true" ]; then
+              echo "- Hog Hunter: no upload this run (rate/same-HEAD skip or failed ship); post-sync readiness not applicable."
+            elif [ -n "${{ steps.recheck_tf.outputs.tf_ready_summary }}" ]; then
+              echo "- Hog Hunter (${{ steps.recheck_tf.outputs.tf_ready_bundle }} build ${{ steps.recheck_tf.outputs.tf_ready_build }}): rc=${{ steps.recheck_tf.outputs.tf_ready_rc }} — ${{ steps.recheck_tf.outputs.tf_ready_summary }}"
+            else
+              echo "- Hog Hunter: post-sync readiness check did not run or produced no summary"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
 
       # Saved even when the ship failed or was cancelled, but only on a run that
       # tried to ship (a no-op tick changes no state) and never for an

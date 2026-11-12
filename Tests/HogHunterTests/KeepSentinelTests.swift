@@ -70,6 +70,46 @@ final class KeepSentinelTests: XCTestCase {
         XCTAssertTrue(KeepSentinel.isKept(url: dir))
     }
 
+    // MARK: - containsMarkerInWholeTree
+
+    func testTheWholeTreeWalkFindsAMarkerPastBothBounds() throws {
+        let tree = root.appendingPathComponent("big", isDirectory: true)
+        let deep = tree.appendingPathComponent("z/y/x/w/v/u/t/s", isDirectory: true)
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        for entry in 0..<50 {
+            FileManager.default.createFile(atPath: tree.appendingPathComponent("a-\(entry)").path, contents: Data())
+        }
+        makeMarker(in: deep)
+        XCTAssertFalse(KeepSentinel.containsMarker(url: tree, maxDepth: 3, fileCap: 10))
+        XCTAssertTrue(KeepSentinel.containsMarkerInWholeTree(url: tree))
+    }
+
+    func testTheWholeTreeWalkFailsClosedWhenItRunsOutOfTime() throws {
+        let tree = root.appendingPathComponent("slow", isDirectory: true)
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: tree.appendingPathComponent("plain").path, contents: Data())
+        XCTAssertFalse(KeepSentinel.containsMarkerInWholeTree(url: tree))
+        var tick = Date(timeIntervalSince1970: 0)
+        let late = KeepSentinel.containsMarkerInWholeTree(url: tree, timeBudget: 1, now: {
+            tick = tick.addingTimeInterval(10)
+            return tick
+        })
+        XCTAssertTrue(late, "a walk that ran out of time cannot say the tree is unmarked")
+    }
+
+    func testTheWholeTreeWalkStopsAndFailsClosedWhenCancelled() throws {
+        let tree = root.appendingPathComponent("cancelled", isDirectory: true)
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: tree.appendingPathComponent("plain").path, contents: Data())
+        XCTAssertFalse(KeepSentinel.containsMarkerInWholeTree(url: tree, isCancelled: { false }))
+        XCTAssertTrue(KeepSentinel.containsMarkerInWholeTree(url: tree, isCancelled: { true }),
+                      "a cancelled walk cannot say the tree is unmarked")
+    }
+
+    func testTheWholeTreeWalkAnswersKeptForAMissingTree() {
+        XCTAssertTrue(KeepSentinel.containsMarkerInWholeTree(url: root.appendingPathComponent("missing")))
+    }
+
     // MARK: - containsMarker
 
     func testAMarkerUnderTheTreeIsFound() {
@@ -127,5 +167,13 @@ final class KeepSentinelTests: XCTestCase {
         XCTAssertFalse(KeepSentinel.containsMarker(url: tree, fileCap: 1))
         // With room to finish, the marker is found.
         XCTAssertTrue(KeepSentinel.containsMarker(url: tree, fileCap: 100))
+    }
+
+    func testAnUnlistableTreeAnswersKept() {
+        // No enumerator at all (missing path): fail closed.  A tree the
+        // cleaner cannot even list is not a tree it may trash.
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hoghunter-no-such-tree-\(UUID().uuidString)")
+        XCTAssertTrue(KeepSentinel.containsMarker(url: missing))
     }
 }

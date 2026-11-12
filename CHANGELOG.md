@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+In Settings, each Advanced switch sits next to its own label (HH-220):
+
+- The Read Settings switch in a service-token row now appears right after its label instead of at the far right of the row beside the Write Settings label, and the Write Settings switch sits by its own label too. Same toggles, same saved settings, no behavior change.
+
+The iPhone can refresh the server and act on Flagged Issues (HH-218):
+
+- The Server tab has a Refresh Server Reading button, and pull to refresh does the same: the Mac reads the server now instead of at its next minute.  The new route, `POST /v1/server/refresh`, is read only, so it sits behind Allow iPhone to See Server Status, takes a phone's own token on the local network or Tailscale, and allows one refresh per 15 seconds.
+- Flagged Issues show the Mac's Clean, Quit and Retry buttons when the matching opt-in is on.  Clean opens the Disk Cleaner screen, Quit goes through the usual quit confirmation by row id, and Retry is the server refresh.  No new route changes anything.  Full context in `docs/rollouts/2026-11-05-iphone-server-refresh-and-issue-actions.md`.
+
+The iPhone gets the Mac's navigation structure (HH-212):
+
+- A new **Overview** tab, now the first screen, matches the Mac: the CPU and memory meters, the six busiest rows (a total CPU-then-memory ranking in shared code, covered by `CompanionOverviewRankingTests`) with a jump into Activity, and the server's strip with a jump into the Server tab.  Storage splits into the Mac's three panes (Apps, Cleaner, Drives), and Maintain is its own tab instead of a section inside Storage.  With six tabs the top picker carries the Mac's own icons, names kept as accessibility labels.  No snapshot field, route or opt-in changes; every pane shows the same data as before.
+
+The iPhone closes the small gaps with the Mac (HH-215, batch 3):
+
+- The Storage tab shows what a Standard clean could free and the space by kind of data.  The Maintain screen lists the custom scripts by name and state, turns the built-in steps on or off, and sets the disk threshold, worktree retention and PM2 log cap.  The Disk Cleaner screen sets the temp file minimum untouched hours.  Settings can open Hog Hunter at login.
+- Two new routes, `POST /v1/maintain/settings` and `POST /v1/clean/settings`, sit behind the existing Run Maintenance and Run Disk Cleaner opt-ins.  Custom scripts cannot be turned on from the phone, turning on server maintenance needs its own confirmation, and every value is checked against the same ranges the Mac's controls use.  Full context in `docs/rollouts/2026-11-04-phone-parity-batch-3.md`.
+
+The iPhone can act on the server, over Tailscale only (HH-215, stage 2):
+
+- New routes let a paired phone quit, tame or sample server processes, stop or restart Coolify workloads, and scan or run server maintenance.  Each is behind a new opt-in, Allow iPhone to Control the Server, which also needs Allow iPhone to See Server Status.
+- These routes refuse the local network, because the link is not encrypted, and the phone says to connect over the Tailscale address.  The phone sends an opaque row id and the Mac builds everything else from its own current reading, so a stale reading or a protected row does nothing.  Full context in `docs/rollouts/2026-11-04-iphone-server-status.md`.
+
+The iPhone can see the server (HH-215, stage 1, read-only):
+
+- A new Server tab shows the Mac and the server side by side, then the server's CPU, memory, swap, paging, disks, databases and directories with daily change, container storage, tools, top processes and Coolify workloads.  The phone tells no server set up, no reading yet, a stale reading and a failed read apart, and draws a missing number as a dash, never 0.
+- Flagged Issues and All Systems Calm are on the phone, on the Activity and Server tabs.  All Systems Calm appears only when the server was looked at and its reading is current, or when there is no server.
+- This is a new opt-in, Allow iPhone to See Server Status, off by default and set in Mac Settings > iPhone only.  The readings name server internals, so they go only to a phone's own token on the local network or Tailscale, and never to the shared pairing code.  Full context in `docs/rollouts/2026-11-04-iphone-server-status.md`.
+
+Codex markers wait for the idle gate (issue 111 follow-up):
+
+- The temp-scratch rule left the `.com.openai.codex.*` markers ungated while the scratch around them waited 3 hours, so it could delete a marker a running Codex still uses.  A marker is now a candidate only when nobody holds it and it was last touched over 3 hours ago, and the loop stops at the rule deadline like the loops above it.
+
+The housekeeper owner record is one protocol across all four implementations (shared with AFC-554):
+
+- The lock at `~/.claude-disk-janitor/.housekeeper.lock` is shared by four programs: Hog Hunter's Python vacuum, Hog Hunter's Swift lock, and AFC's `mac-auto-cleanup.sh` and `mac-resource-watch.py`.  All four write an owner file beside the lock directory and read it back to answer one question: is the holder still there?
+- AFC PR #980 made AFC's two readers enforce one strict schema, and the record must carry the start time of the holder's process so that a pid the kernel has since handed to somebody else cannot pass for a live holder.  Hog Hunter's two writers still published the old shape, so a Hog Hunter holder's record was refused outright and AFC's readers fell back to the 120-minute age rule.  The cost was liveness only: no live holder was ever displaced.
+- Both Hog Hunter sides now publish the same five keys as AFC: `pid`, `host`, `acquired_at`, `lock` and `start`.  The key set is exact, every value is checked for its type and its bounds, and a boolean pid is refused because `isinstance(True, int)` is true in Python and JSON `true` bridges to `NSNumber` in Swift.
+- The start token is opaque and comes from one command in one locale: `LC_ALL=C ps -o lstart= -p <pid>`, run with PATH and LC_ALL alone.  The minimal environment is load-bearing: `ps` renders the start time in the caller's zone, so a TZ in the environment renders the same process with a different token, and a reader that passed its whole environment along would read a live holder as gone.
+- The owner file must be strictly newer than the lock directory beside it, and a file that cannot be read as an owner record is left alone rather than deleted, because a holder that cannot read it cannot know whose it is.
+- The Swift side reads the host with `gethostname` rather than `ProcessInfo.processInfo.hostName`, so it is byte-identical with the Python side's `socket.gethostname()` by construction.  Full context in `docs/rollouts/2026-10-28-housekeeper-owner-record-protocol.md`.
+
 One failed PR lookup no longer throws away the whole doctor report (HH-168):
 
 - The doctor's overall lookup status says whether every repository answered.  One that did not (here: a retired repository) made the Vacuum refuse the entire report, so no lane anywhere could be retired, including the ones in repositories that answered fine.  The overall status is a fact about the report now, not a gate; a candidate whose own repository failed is still refused, and the report's status travels with the plan so it is visible there.

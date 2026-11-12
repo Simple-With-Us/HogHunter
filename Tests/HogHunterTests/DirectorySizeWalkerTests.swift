@@ -15,6 +15,93 @@ final class DirectorySizeWalkerTests: XCTestCase {
         return Int64(info.st_blocks) * 512
     }
 
+    private final class MetadataReads: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: [String] = []
+        private var starts = 0
+        func read(_ path: String) { lock.lock(); paths.append(path); lock.unlock() }
+        func started() { lock.lock(); starts += 1; lock.unlock() }
+        var snapshot: ([String], Int) { lock.lock(); defer { lock.unlock() }; return (paths, starts) }
+    }
+
+    func testAutomaticPolicyRejectsExternalAndCustomMountsWithoutBlockingSystemData() {
+        let allows = DirectorySizeWalker.automaticAccessPolicy(mountPaths: ["/", "/System/Volumes/Data", "/Users/test/mounted", "/Volumes/Backup"])
+        for path in ["/Volumes", "/Volumes/Backup", "/Volumes/Backup/lanes", "/Users/test/mounted/Repo"] {
+            XCTAssertFalse(allows(path), path)
+        }
+        for path in ["/Users/test/Code", "/System/Volumes/Data/Users/test", "/Users/test/mounted-other"] {
+            XCTAssertTrue(allows(path), path)
+        }
+    }
+
+    func testRootAliasAndLaneLinkAreGatedBeforeReadingProtectedTarget() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let protected = try XCTUnwrap(DirectorySizeWalker.canonicalPath(root.path)) + "/protected"
+        let lanes = root.appendingPathComponent("lanes")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: lanes, withIntermediateDirectories: true)
+        // The destination intentionally does not exist: no target metadata is needed to gate it.
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: protected + "/missing")
+        try FileManager.default.createSymbolicLink(atPath: lanes.appendingPathComponent("external").path, withDestinationPath: protected)
+        let reads = MetadataReads()
+        let policy = DirectorySizeWalker.automaticAccessPolicy(mountPaths: [protected])
+        for path in [alias.path, lanes.path, protected + "/direct"] {
+            let walker = DirectorySizeWalker(path: path, startedAt: Date(), allowsPath: policy,
+                                             willReadMetadata: { reads.read($0) })
+            var result = walker.observation
+            for _ in 0..<20 where result.failure == nil && !result.isComplete {
+                result = walker.advance(maxEntries: 1, maxDuration: 1)
+            }
+            XCTAssertEqual(result.failure, DirectorySizeWalker.automaticAccessReason)
+            XCTAssertFalse(result.retryAutomatically)
+            XCTAssertFalse(result.isComplete)
+        }
+        XCTAssertFalse(reads.snapshot.0.contains { $0 == protected || $0.hasPrefix(protected + "/") })
+    }
+
+    @MainActor
+    func testRepeatedTimerRefreshDoesNotRetryProtectedAliasAndManualClickRunsOnlyOnce() async throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let protected = root.appendingPathComponent("protected")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: protected, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 4096).write(to: protected.appendingPathComponent("data"))
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: protected)
+        let reads = MetadataReads()
+        let blocked = try XCTUnwrap(DirectorySizeWalker.canonicalPath(protected.path))
+        let executor = DirectorySizeExecutor(makeWalker: { path, start, allowExternal in
+            reads.started()
+            return DirectorySizeWalker(path: path, startedAt: start,
+                allowsPath: allowExternal ? { _ in true } : DirectorySizeWalker.automaticAccessPolicy(mountPaths: [blocked]),
+                willReadMetadata: { reads.read($0) })
+        })
+        var now = Date()
+        let history = SizeGrowthHistory(fileURL: nil, now: { now })
+        history.record(host: "test", metric: "directory", path: alias.path, bytes: 123, sampledAt: now)
+        let store = DirectoryUsageStore(history: history, candidates: [("Alias", alias.path)], host: "test", now: { now },
+                                        pressure: { .normal }, idlePressure: { .normal }, executor: executor)
+        for _ in 0..<4 {
+            await store.refreshWhenIdle()
+            now = now.addingTimeInterval(60)
+        }
+        XCTAssertEqual(reads.snapshot.1, 1)
+        XCTAssertFalse(reads.snapshot.0.contains { $0 == blocked || $0.hasPrefix(blocked + "/") })
+        XCTAssertEqual(store.rows.first?.bytes, 123, "Retain the previous complete measurement")
+        XCTAssertTrue(store.rows.first?.isUnavailable == true)
+        XCTAssertTrue(store.rows.first?.requiresManualMeasurement == true)
+        XCTAssertEqual(store.rows.first?.statusText, DirectorySizeWalker.automaticAccessReason)
+        XCTAssertEqual(store.rows.first?.nextAttempt, .distantFuture)
+        await store.measureNow(id: alias.path)
+        XCTAssertEqual(reads.snapshot.1, 2)
+        XCTAssertEqual(store.rows.first?.statusText, "Complete")
+        XCTAssertEqual(store.rows.first?.nextAttempt, .distantFuture)
+        now = now.addingTimeInterval(3600)
+        await store.refreshWhenIdle()
+        XCTAssertEqual(reads.snapshot.1, 2, "A manual measurement must never authorize later automatic walks")
+    }
+
     func testResumesWithoutRepeatingPrefixAndCountsPhysicalHardLinksOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

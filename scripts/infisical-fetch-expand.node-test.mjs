@@ -1,6 +1,4 @@
-// OPS-818: infisical-fetch.mjs must ask Infisical to expand secret references
-// and must fail closed (naming the KEY only) when a value is still a bare
-// reference.  Run: node --test scripts/infisical-fetch-expand.node-test.mjs
+// Scoped service tokens never expand references into other folders.
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,13 +10,13 @@ import { isUnresolvedReference, run } from "./infisical-fetch.mjs";
 const REFERENCE = "${prod.global-api-keys.SENTINEL_KEY_ref_3c9e}";
 const RESOLVED = "sentinel-resolved-value-5d1a";
 
-/** Stub Infisical: login succeeds, the list call returns the fixture secrets
+/** Stub Infisical: metadata matches the exact scope, the list call returns the fixture secrets
  * and records every list URL so a test can assert on the query string. */
 function stubFetch(vaultSecrets, listUrls = []) {
   return async (url) => {
     const u = String(url);
-    if (u.includes("/api/v1/auth/universal-auth/login")) {
-      return { ok: true, json: async () => ({ accessToken: "test-token", expiresIn: 3600 }) };
+    if (u.includes("/api/v2/service-token")) {
+      return { ok: true, json: async () => ({ projectId: "proj", scopes: [{ environment: "prod", secretPath: "/" }], permissions: ["read"] }) };
     }
     if (u.includes("/api/v3/secrets/raw")) {
       listUrls.push(u);
@@ -37,19 +35,18 @@ function baseEnv(githubEnv, names) {
   return {
     INFISICAL_NAMES: names,
     INFISICAL_PROJECT_ID: "proj",
-    INFISICAL_CLIENT_ID: "id",
-    INFISICAL_CLIENT_SECRET: "secret",
+    INFISICAL_SERVICE_TOKEN: "synthetic-token",
     GITHUB_ENV: githubEnv,
   };
 }
 
-test("the secrets list asks Infisical to expand secret references", async () => {
+test("the secrets list disables server reference expansion", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ops818-fetch-"));
   try {
     const listUrls = [];
     await run({ env: baseEnv(join(dir, "env"), "FOO"), fetchImpl: stubFetch({ FOO: RESOLVED }, listUrls), log: () => {} });
     assert.equal(listUrls.length, 1);
-    assert.equal(new URL(listUrls[0]).searchParams.get("expandSecretReferences"), "true");
+    assert.equal(new URL(listUrls[0]).searchParams.get("expandSecretReferences"), "false");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -92,11 +89,11 @@ test("a resolved value is written normally", async () => {
   }
 });
 
-test("isUnresolvedReference matches only a whole-value bare reference", () => {
+test("isUnresolvedReference rejects references anywhere in a value", () => {
   assert.equal(isUnresolvedReference("${prod.global-api-keys.NAME}"), true);
   assert.equal(isUnresolvedReference("  ${prod.a.B}\n"), true);
-  assert.equal(isUnresolvedReference("prefix-${prod.a.B}"), false);
-  assert.equal(isUnresolvedReference("${prod.a.B}-suffix"), false);
+  assert.equal(isUnresolvedReference("prefix-${prod.a.B}"), true);
+  assert.equal(isUnresolvedReference("${prod.a.B}-suffix"), true);
   assert.equal(isUnresolvedReference("plain"), false);
   assert.equal(isUnresolvedReference(""), false);
   assert.equal(isUnresolvedReference(undefined), false);

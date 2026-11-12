@@ -7,8 +7,10 @@ junk cleaner does *and* the things one cannot do for this Mac:
 
   SHRINK   APFS local snapshots, SQLite -wal files, unbounded logs
   DELETE   fleet-specific regenerable staging (BotFleet, ShipIt, Sparkle,
-           mktemp `ssr` nests, simulator runtimes, device support)
-  REPORT   ask-first inventory, duplicates — surfaced, never auto-applied
+           mktemp `ssr` nests, simulator runtimes, device support, duplicate
+           runtime images, old tool versions)
+  REPORT   ask-first inventory, stale build output, Xcode-shaped scratch —
+           surfaced, never auto-applied
 
 The CleanMyMac CLI (MacPaw's free public beta, closed-source, never vendored)
 stays an opt-in extra: `--cleanmymac` runs its non-interactive sweeps
@@ -39,10 +41,13 @@ import plistlib
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
+import xml.parsers.expat
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, NamedTuple, Sequence
 
@@ -106,7 +111,56 @@ IDLE_MIN_OK = 90
 IDLE_MIN_SCRATCH = 180   # 3h for temp scratch
 IDLE_MIN_STAGING = 60    # 1h for app-update staging
 IDLE_MIN_ROLLBACK = 1440  # 24h for abandoned update/rollback copies
-IDLE_MIN_BUILD_OUTPUT = 7 * 24 * 60  # 7d for regenerable build output in main checkouts
+IDLE_MIN_BUILD_OUTPUT = 7 * 24 * 60  # 7d before idle build output is reported at all
+IDLE_MIN_STALE_BUILD = 14 * 24 * 60  # 14d before ignored build output reads as stale
+IDLE_MIN_TOOL_VERSION = 7 * 24 * 60  # 7d for superseded tool versions
+IDLE_MIN_TMP_BUILD_TREE = 60          # a throwaway agent checkout idle for an hour reads as left over
+IDLE_MIN_XCODE_SCRATCH = 24 * 60     # 24h before Xcode-shaped scratch reads as idle
+IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release may go
+
+# Below this a candidate is not worth the delete.  Same floor the cache rules use.
+MIN_CANDIDATE_BYTES = 8 * 1024 * 1024
+
+# Owner's condition for this rule: it deletes only under real disk pressure.
+# `--band=full` alone is not that, because the pressure triggers also fire on a
+# 15 GB drop, on swap and on load, at any free level.  So the line is enforced
+# per rule: main() leaves its candidates out above it, a clean run does not scan
+# for them, and apply_candidate reads df again before each delete.
+PRESSURE_RULE_FREE_GB = 25.0
+# HH-219 (owner decision Nov 5: "train Hog Hunter to do a better job maintaining
+# its disk space").  xcode-scratch deletes a positively identified DerivedData
+# root only while the disk is at or under this line, which is also true at the
+# 25 GB line, so it always runs there.
+XCODE_SCRATCH_DELETE_FREE_GB = 60.0
+# Each pressure-only rule: the tier that must be open for it, and the free-space
+# line it must be at or under.  The same three places enforce every line: a
+# clean run above it does not scan for the rule, main leaves its candidates out,
+# and apply_candidate reads df again before each delete.
+PRESSURE_RULES: dict[str, tuple[str, float]] = {
+    "duplicate-sim-runtimes": ("semi-safe", PRESSURE_RULE_FREE_GB),
+    "xcode-scratch": ("safe", XCODE_SCRATCH_DELETE_FREE_GB),
+}
+PRESSURE_ONLY_RULES = frozenset(PRESSURE_RULES)
+
+# These look at trees and say what they see, and they never delete.  Two rounds
+# of adversarial review kept finding what a refuse-list misses (a .p8 key, a
+# dSYM, a CLI symlinked into target/release, a server started from the parent
+# folder), and they reclaim almost nothing once every gate holds.  A clean run
+# has no reader for the report and does not pay for the walks.  xcode-scratch
+# left this set on Nov 5 (HH-219): it deletes what it can positively identify.
+REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output", "tmp-build-trees"})
+
+# The early warning (HH-219).  Under this much free space, the ask-first trees
+# are sized, and when the report-only rows add up to more than the floor, the
+# JSON carries `top_report_only`: the biggest rows, so the app can show what a
+# person should review.  Additive: the key is absent otherwise.
+EARLY_WARNING_FREE_GB = 40.0
+EARLY_WARNING_REPORT_BYTES = 10 * 1024 ** 3
+TOP_REPORT_ONLY_COUNT = 8
+
+# What the recheck may spend, so it cannot eat the time the delete needs.
+RECHECK_MAX_SEC = 60.0
+RECHECK_BUDGET_SHARE = 0.25
 
 # Per-rule wall clock.  A scan that takes longer than the pressure it is
 # responding to is worse than no scan: under load 500+ a TMPDIR or ~/Code
@@ -180,6 +234,9 @@ _SCAN_BUDGET_EXHAUSTED = False
 # exists to stop.  The flag lets every one of those probes take its timeout
 # from the clock of the phase it is actually running in.
 _SCAN_PHASE = False
+
+# While a recheck runs, every probe draws on the recheck's own slice.
+_RECHECK_DEADLINE: float | None = None
 
 
 def set_budget(seconds: float) -> None:
@@ -266,9 +323,18 @@ def probe_timeout(default: float) -> float:
     longer than the 60% share on its own: one rule starting with its share
     nearly spent could overrun the whole budget.
     """
+    if _RECHECK_DEADLINE is not None:
+        return min(float(default), max(1.0, _RECHECK_DEADLINE - time.monotonic()))
     if _SCAN_PHASE:
         return scan_op_timeout(default)
     return op_timeout(default)
+
+
+def probe_clock_spent() -> bool:
+    """True when the clock this phase's probes draw on has run out."""
+    if _RECHECK_DEADLINE is not None:
+        return time.monotonic() >= _RECHECK_DEADLINE
+    return (scan_budget_left() if _SCAN_PHASE else budget_left()) <= 0
 
 
 def rule_deadline() -> float:
@@ -298,8 +364,8 @@ class Candidate:
     path: str
     bytes: int
     reason: str
-    tier: str = "safe"          # safe | semi-safe | ask-first
-    op: str = "delete"          # delete | truncate | wal-checkpoint | snapshot-delete
+    tier: str = "safe"          # safe | semi-safe | expensive | ask-first
+    op: str = "delete"          # delete | truncate | wal-checkpoint | snapshot-delete | simctl-runtime-delete
     detail: str = ""
     applied: bool = False
     error: str = ""
@@ -307,6 +373,16 @@ class Candidate:
     # carried so the apply phase does not walk the same tree a second time
     # to ask the same question; the delete walks it anyway.
     keep_verdict: object = field(default=None, compare=False, repr=False)
+    # Asked right before the delete.  Returns why the delete must not happen, or
+    # None.  A scan is evidence, not permission (playbook rule 5), and minutes
+    # can pass between the two.  It does not make the delete atomic: a writer
+    # that arrives after this answer is the limit HH-180 records.
+    recheck: object = field(default=None, compare=False, repr=False)
+    # Why a gate stopped the delete at the last moment.  This is the gate
+    # working, not a failure, so it does not count as an error in any report.
+    refused: str = ""
+    # The run has too little time left for this delete.  The next run retries.
+    deferred: bool = False
 
     @property
     def mib(self) -> float:
@@ -315,6 +391,7 @@ class Candidate:
     def as_dict(self) -> dict:
         d = asdict(self)
         d.pop("keep_verdict", None)
+        d.pop("recheck", None)
         d["mib"] = round(self.mib, 1)
         return d
 
@@ -342,6 +419,9 @@ class Band:
     chunk_size: int = CHUNK_TARGETS
     chunk_pause_sec: float = CHUNK_PAUSE_SEC
     throttling: bool = False
+    # False when df did not answer.  disk_free_gb is then a meaningless 0.0, and
+    # that must never read as a full disk.
+    disk_free_known: bool = True
 
     @property
     def disk_band(self) -> str:
@@ -463,7 +543,28 @@ def is_forbidden(path: str) -> bool:
     for pre in FORBIDDEN_PREFIXES:
         if p == pre or p.startswith(pre + "/"):
             return True
-    return False
+    return is_peer_work(p)
+
+
+def is_peer_work(path: str) -> bool:
+    """True for a tree that holds another seat's live work.
+
+    `.muse/worktrees` held 16 of seat MC's worktrees with unmerged commits when
+    this was written, and several `~/apps/botfleet-*` trees are dirty.  Those
+    are surfaced by the ask-first rule and must never be a delete, whichever
+    rule names them.  This sits inside is_forbidden so apply_delete, the choke
+    point every delete passes through, refuses them too.
+
+    The name is read at call time, unlike the prefix lists above, so a fake
+    home in a test is protected the same way.
+    """
+    try:
+        parts = Path(path).relative_to(HOME).parts
+    except ValueError:
+        return False
+    if ".muse" in parts:
+        return True
+    return len(parts) >= 2 and parts[0] == "apps" and parts[1].startswith("botfleet-")
 
 
 def has_keep_sentinel(path: str) -> bool:
@@ -500,8 +601,12 @@ class MarkerVerdict(NamedTuple):
     reason: str = ""
 
 
-def holds_keep_sentinel(path: str, timeout: float) -> MarkerVerdict:
+def holds_keep_sentinel(path: str, timeout: float, name: str = KEEP_SENTINEL) -> MarkerVerdict:
     """True when a `.janitor-keep` marker sits anywhere under this path.
+
+    `name` asks the same three-state question about another entry; the agent
+    rule asks it about `.git`, because a checkout inside a tree named like
+    scratch is not scratch.
 
     The policy says any path with a marker is ask-first, and the rules that
     delete whole trees would otherwise take the marker with them.  A marker
@@ -535,7 +640,7 @@ def holds_keep_sentinel(path: str, timeout: float) -> MarkerVerdict:
     """
     try:
         proc = subprocess.run(
-            ["find", path, "-iname", KEEP_SENTINEL, "-print", "-quit"],
+            ["find", path, "-iname", name, "-print", "-quit"],
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -595,6 +700,10 @@ _OPEN_SNAPSHOT_MAX_AGE_SEC = 60.0
 # count per ancestor directory, built once per snapshot, so a candidate costs
 # one dictionary lookup instead of a walk over every open path.
 _OPEN_INDEX: dict[str, int] | None = None
+# Every process's working directory, from the same listing.  A server that read
+# its build output and closed it holds nothing open under the tree, so this is
+# the only sign of it.
+_OPEN_CWDS: set[str] = set()
 
 
 def _build_open_index(paths: set[str]) -> dict[str, int]:
@@ -633,7 +742,7 @@ def _load_open_snapshot() -> set[str] | None:
     DARWIN_USER_TEMP_DIR` hands back the symlink).  Matching the two by string
     would read every open handle in TMPDIR as absent.
     """
-    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_AT, _OPEN_INDEX
+    global _OPEN_SNAPSHOT, _OPEN_SNAPSHOT_AT, _OPEN_INDEX, _OPEN_CWDS
     if _OPEN_SNAPSHOT is not None and time.monotonic() - _OPEN_SNAPSHOT_AT < _OPEN_SNAPSHOT_MAX_AGE_SEC:
         return _OPEN_SNAPSHOT
     try:
@@ -651,8 +760,10 @@ def _load_open_snapshot() -> set[str] | None:
         return None
     cwd_by_pid: dict[str, str] = {}
     paths: set[str] = set()
+    cwds: set[str] = set()
     pid = ""
     want_cwd = False
+    is_cwd = False
     for ln in p.stdout.splitlines():
         if not ln:
             continue
@@ -661,6 +772,7 @@ def _load_open_snapshot() -> set[str] | None:
             pid = body
         elif tag == "f":
             want_cwd = body in ("cwd", "rtd") and bool(pid)
+            is_cwd = body == "cwd"
         elif tag == "n":
             name = body
             if name.endswith(" (deleted)"):
@@ -669,6 +781,8 @@ def _load_open_snapshot() -> set[str] | None:
                 # The name line that follows an fcwd/frtd line IS the working
                 # directory, and it is what a relative name resolves against.
                 cwd_by_pid[pid] = name
+                if is_cwd and name.startswith("/"):
+                    cwds.add(os.path.realpath(name))
             want_cwd = False
             if name and not name.startswith("/"):
                 base = cwd_by_pid.get(pid)
@@ -689,7 +803,16 @@ def _load_open_snapshot() -> set[str] | None:
     _OPEN_SNAPSHOT_AT = time.monotonic()
     _OPEN_SNAPSHOT = paths
     _OPEN_INDEX = _build_open_index(paths)
+    _OPEN_CWDS = cwds
     return _OPEN_SNAPSHOT
+
+
+def _expire_open_snapshot() -> None:
+    """The next look takes a new listing.  A recheck must not answer from the
+    scan's: a file opened since then would read as closed."""
+    global _OPEN_SNAPSHOT, _OPEN_INDEX
+    _OPEN_SNAPSHOT = None
+    _OPEN_INDEX = None
 
 
 def open_handles(path: str) -> int:
@@ -738,6 +861,106 @@ def open_handles(path: str) -> int:
         log(f"lsof exited {p.returncode} for {path!r}; treating it as open")
         return 1
     return len(pids)
+
+
+def tree_in_use(path: str) -> bool:
+    """True when a process holds this tree open, or when nobody can tell.
+
+    open_handles falls back to asking lsof about the exact path when the
+    system-wide snapshot failed, and that look cannot see a file open deeper
+    down.  It is fine for a cache.  The rules that delete a whole build tree
+    or an installed tool want the deep answer, so a failed snapshot counts as
+    in use and the next run asks again.
+    """
+    if _load_open_snapshot() is None:
+        return True
+    return open_handles(path) > 0
+
+
+def repo_has_process_cwd(repo: str) -> bool:
+    """True when a process's working directory is this folder or inside it, or
+    when nobody can tell.
+
+    `next start` reads `.next` and closes it, and `python3 build/server.py` names
+    only a relative path, so neither shows up as holding the tree or naming it.
+    Their working directory does.
+    """
+    if _load_open_snapshot() is None:
+        return True
+    root = os.path.realpath(repo).rstrip("/")
+    return any(cwd == root or cwd.startswith(root + "/") for cwd in _OPEN_CWDS)
+
+
+def process_names_path(path: str) -> bool:
+    """True when a running process has this path in its arguments.
+
+    Counted, never printed: argv on this Mac carries live credentials.  The
+    path is passed as a literal, with regex characters escaped.
+    """
+    return proc_count(re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", path)) > 0
+
+
+def path_identity(path: str) -> tuple[int, int, int] | None:
+    """The object at this path, without following a symlink, or None.
+
+    The mtime is here because a filesystem can hand a freed inode straight to a
+    new file at the same path, and that is a different object.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns)
+
+
+def changed_age_min(path: str) -> float:
+    """Minutes since this path's own ctime.  A failed look reads as just now.
+
+    A tree moved into place keeps its old file mtimes, and only the move
+    (which refreshes ctime) shows that it just arrived.
+    """
+    try:
+        return (time.time() - os.lstat(path).st_ctime) / 60.0
+    except OSError:
+        return 0.0
+
+
+def idle_for(path: str, minutes: float) -> bool:
+    """True when nothing shows this path was used in the last `minutes`.
+
+    The capped walk is the fast answer for an active tree, and the uncapped
+    find catches a recent file past its cap.  A failed look is not idle.
+    """
+    if changed_age_min(path) < minutes:
+        return False
+    if newest_file_age_min(path) < minutes:
+        return False
+    return not touched_since(path, minutes / (24 * 60))
+
+
+def scan_share_spent() -> bool:
+    """True, and the report says so, when the scan has spent its share."""
+    global _SCAN_BUDGET_EXHAUSTED
+    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+        _SCAN_BUDGET_EXHAUSTED = True
+        return True
+    return False
+
+
+def rule_out_of_time(deadline: float) -> bool:
+    """True when a rule must stop, and the report learns the scan was cut short.
+
+    A rule that stops on its own clock has not seen everything, whichever clock
+    it was, and a report that calls that complete would hide trees it never
+    reached.
+    """
+    global _SCAN_BUDGET_EXHAUSTED
+    if scan_share_spent():
+        return True
+    if time.time() > deadline:
+        _SCAN_BUDGET_EXHAUSTED = True
+        return True
+    return False
 
 
 def touched_since(path: str, days: float) -> bool:
@@ -833,6 +1056,22 @@ def proc_count(pattern: str) -> int:
     return len([ln for ln in p.stdout.splitlines() if ln.strip()])
 
 
+def proc_count_exact(name: str) -> int:
+    """Count processes by exact executable name; probe errors remain fail-closed."""
+    try:
+        p = subprocess.run(["/usr/bin/pgrep", "-x", name],
+                           capture_output=True, text=True, timeout=probe_timeout(15))
+    except (subprocess.TimeoutExpired, OSError):
+        log(f"pgrep executable check for {name!r} failed; treating it as busy")
+        return PROBE_FAILED
+    if p.returncode == 1:
+        return 0
+    if p.returncode != 0:
+        log(f"pgrep executable check for {name!r} exited {p.returncode}; treating it as busy")
+        return PROBE_FAILED
+    return len([ln for ln in p.stdout.splitlines() if ln.strip()])
+
+
 def dir_bytes(path: str, max_depth: int = 8, deadline_cap: float | None = None) -> int:
     """Bytes under a path, bounded by depth and time, without following symlinks.
 
@@ -912,7 +1151,7 @@ def dir_bytes(path: str, max_depth: int = 8, deadline_cap: float | None = None) 
 # --------------------------------------------------------------------------
 
 def apply_delete(path: str, known_bytes: int | None = None,
-                 keep_verdict: object = None) -> tuple[int, str]:
+                 keep_verdict: object = None, unlock: bool = False) -> tuple[int, str]:
     """Delete a file or tree for real.  Returns (bytes_freed, error).
 
     known_bytes is the size the scan already measured; passing it spares a second walk of a big tree.  The
@@ -924,7 +1163,14 @@ def apply_delete(path: str, known_bytes: int | None = None,
     measured at up to 5.99 s on a real cache tree.  A rule that did not probe
     at scan time gets the probe here, at the choke point every delete passes
     through, with a timeout capped to a tenth of what is left of the budget
-    so the guard cannot eat the delete reserve."""
+    so the guard cannot eat the delete reserve.
+
+    unlock gives the owner write permission on the tree's directories first,
+    after every guard above has passed.  A BotFleet release is installed
+    read-only, and `find -delete` cannot empty a folder it may not write.
+    Files are left as they are, because a hardlinked inode is shared with
+    whatever else links it.  Both walks stay on the tree's own volume
+    (`-xdev`), so a disk image or share mounted inside is never emptied."""
     p = Path(path)
     if is_forbidden(path):
         return 0, "forbidden path"
@@ -950,10 +1196,18 @@ def apply_delete(path: str, known_bytes: int | None = None,
     before = known_bytes if known_bytes is not None else dir_bytes(path, deadline_cap=_DEADLINE)
     try:
         if p.is_dir() and not p.is_symlink():
+            if unlock:
+                # Directories only: unlinking needs write on the folder, not
+                # the file, and a file's inode can be a hardlink shared with
+                # something outside the tree (a pnpm store).  -xdev keeps it
+                # off any volume mounted inside.
+                subprocess.run(["/usr/bin/find", str(p), "-xdev", "-type", "d",
+                                "-exec", "/bin/chmod", "u+w", "{}", "+"],
+                               capture_output=True, timeout=op_timeout(120))
             # -depth so children go before parents; -delete removes empty
             # dirs.  Do NOT use `rm -rf` -- mavis-trash swallows it.
             subprocess.run(
-                ["/usr/bin/find", str(p), "-depth", "-delete"],
+                ["/usr/bin/find", str(p), "-xdev", "-depth", "-delete"],
                 capture_output=True, timeout=op_timeout(600),
             )
         else:
@@ -1024,6 +1278,30 @@ def apply_wal_checkpoint(db: str) -> tuple[int, str]:
     if row and row[0] != 0:
         return 0, f"checkpoint busy (code {row[0]})"
     return max(0, before - after), ""
+
+
+def apply_simctl_runtime_delete(identifier: str) -> tuple[int, str]:
+    """Delete one simulator runtime image through simctl.  Returns (0, error).
+
+    The image lives in Apple's secure storage area, so a directory delete is
+    not an option and would not be safe if it were.  Size is what simctl
+    reported at scan time; a fresh df is the proof.  The exit code alone is not:
+    the image must be gone, or no longer Ready, when simctl is asked again.
+    """
+    if not _RUNTIME_ID_RE.fullmatch(identifier):
+        return 0, "not a runtime identifier"
+    # A timeout kills the client, and CoreSimulatorService can still finish the
+    # request it already has, so simctl is asked again whatever this returns.
+    delete_answered = _simctl(["runtime", "delete", identifier], op_timeout(600)) is not None
+    images = _simctl_json(["runtime", "list", "-j"])
+    if images is None:
+        return 0, "simctl could not confirm the delete"
+    entry = images.get(identifier)
+    if isinstance(entry, dict) and entry.get("state") == "Ready":
+        if delete_answered:
+            return 0, "runtime image still present after delete"
+        return 0, "simctl runtime delete failed"
+    return 0, ""
 
 
 def snapshot_timestamp(name: str) -> str:
@@ -1188,12 +1466,21 @@ def rule_temp_scratch() -> list[Candidate]:
             [str(root), "-maxdepth", "1", "-name", ".com.openai.codex.*"],
             probe_timeout(60),
         ):
-            if not f.strip() or f in seen:
+            if time.time() > deadline:
+                log("temp-scratch: budget exhausted, returning partial results")
+                break
+            if not f.strip() or f in seen or is_forbidden(f) or has_keep_sentinel(f):
+                continue
+            try:
+                age_min = (time.time() - Path(f).stat().st_mtime) / 60.0
+            except OSError:
+                continue
+            if age_min < IDLE_MIN_SCRATCH or open_handles(f):
                 continue
             seen.add(f)
             cands.append(Candidate(
                 category="temp-scratch", path=f, bytes=dir_bytes(f),
-                reason="Codex per-run marker file (auto-rotated by Codex)",
+                reason="Codex per-run marker file, no handles, idle over 3h",
             ))
     except (OSError, subprocess.SubprocessError):
         pass
@@ -1278,6 +1565,134 @@ def rule_botfleet_rollback() -> list[Candidate]:
     return cands
 
 
+# --------------------------------------------------------------------------
+# botfleet-releases (HH-219)
+#
+# BotFleet and its companion install each build as a read-only folder under
+# `releases/` and point a `current` symlink at the live one; the LaunchAgent
+# runs through that link.  Only the live one is needed, and an older one is a
+# reinstall away.  The store is identified positively: a real `releases` folder
+# holding nothing but commit-named folders, and a `current` link that resolves
+# to one of them.  Anything else leaves the whole store alone.
+# --------------------------------------------------------------------------
+
+_RELEASE_STORES = (".botfleet", ".botfleet-companion")
+_RELEASE_NAME_RE = re.compile(r"[0-9a-f]{7,64}")
+# The live release plus the newest two others stay, so a rollback by hand
+# always has two to pick from.
+RELEASES_KEEP_NEWEST = 2
+# Filled by rule_botfleet_releases so the ask-first rule does not list the same
+# folder a second time.
+_RELEASES_TAKEN: set[str] = set()
+
+
+def _release_store(home_dir: Path) -> tuple[Path, str] | None:
+    """(releases folder, live release name) when the store reads true, else None."""
+    releases = home_dir / "releases"
+    current = home_dir / "current"
+    try:
+        if releases.is_symlink() or not releases.is_dir() or not current.is_symlink():
+            return None
+        live = os.path.realpath(current)
+    except OSError:
+        return None
+    root = os.path.realpath(releases)
+    if os.path.dirname(live) != root or not os.path.isdir(live):
+        return None
+    return releases, os.path.basename(live)
+
+
+def release_victims(home_dir: Path) -> list[Path]:
+    """Superseded releases in this store, or nothing when it does not read true.
+
+    Keeps the live release, the newest two others by mtime, and any release a
+    symlink, wrapper or LaunchAgent names (the tool-versions reader, pointed at
+    this store).  The age, open-file and marker gates are
+    _release_refusal's job.
+    """
+    found = _release_store(home_dir)
+    if found is None:
+        return []
+    releases, live = found
+    try:
+        entries = list(releases.iterdir())
+    except OSError:
+        return []
+    versions: list[Path] = []
+    for entry in entries:
+        if entry.name == ".DS_Store":
+            continue
+        if entry.is_symlink() or not entry.is_dir() or not _RELEASE_NAME_RE.fullmatch(entry.name):
+            log(f"botfleet-releases: {releases} holds {entry.name!r}, which is not a release; leaving it alone")
+            return []
+        versions.append(entry)
+    if live not in {v.name for v in versions}:
+        return []
+    store = ToolStore("BotFleet", releases, _RELEASE_NAME_RE, True, True)
+    pinned = _tool_reference_pins(store, [v.name for v in versions]) | {live}
+    try:
+        others = sorted((v for v in versions if v.name != live),
+                        key=lambda v: v.lstat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    keep = {v.name for v in others[:RELEASES_KEEP_NEWEST]} | pinned
+    return sorted(v for v in versions if v.name not in keep)
+
+
+def _release_refusal(release: Path) -> str | None:
+    """Why this superseded release must stay, or None."""
+    s = str(release)
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    if not idle_for(s, IDLE_MIN_RELEASE):
+        return "installed or changed in the last 7 days"
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s):
+        return "a running process names it"
+    return None
+
+
+def rule_botfleet_releases() -> list[Candidate]:
+    """Superseded BotFleet and companion releases, idle a week, nothing holding them."""
+    _RELEASES_TAKEN.clear()
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for name in _RELEASE_STORES:
+        home_dir = HOME / name
+        for release in release_victims(home_dir):
+            if rule_out_of_time(deadline):
+                return cands
+            if _release_refusal(release) is not None:
+                continue
+            size = dir_bytes(str(release))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+
+            def recheck(home_dir: Path = home_dir, release: Path = release,
+                        identity=path_identity(str(release))) -> str | None:
+                if path_identity(str(release)) != identity:
+                    return "the path now holds something else"
+                if release not in release_victims(home_dir):
+                    return "no longer a superseded release"
+                return _release_refusal(release)
+
+            _RELEASES_TAKEN.add(str(release))
+            cands.append(Candidate(
+                category="botfleet-releases", path=str(release), bytes=size,
+                reason=f"superseded {name}/releases build, idle 7d+, not the current one or the newest 2",
+                # The recheck walks for a marker right before the delete.
+                keep_verdict=MarkerVerdict(False, True),
+                recheck=recheck,
+            ))
+    return cands
+
+
 def rule_dev_caches() -> list[Candidate]:
     """Package-manager and toolchain download caches.
 
@@ -1285,7 +1700,7 @@ def rule_dev_caches() -> list[Candidate]:
     no build is running, because on this Mac the build fan-out is what
     drives load and swap and disturbing it makes things worse.
     """
-    if proc_count("xcodebuild") or proc_count("swift-frontend") or proc_count("clang"):
+    if proc_count_exact("xcodebuild") or proc_count("swift-frontend") or proc_count("clang"):
         return []  # real build in flight -- leave the caches it is using alone
     cands: list[Candidate] = []
     paths = [
@@ -1321,6 +1736,33 @@ def rule_dev_caches() -> list[Candidate]:
     return cands
 
 
+# Where scripts/xcodegen-post.sh puts each Hog Hunter checkout's default
+# DerivedData.  It is on the internal disk because an ad hoc test host run from a
+# removable volume raises a permission prompt on every build, and it costs about
+# 3.8 GB per lane, so it has to be swept per checkout: as one tree, one busy lane
+# would keep every stale lane on disk.
+_HOGHUNTER_DERIVED_DATA = "Library/Caches/HogHunterDerivedData"
+
+
+def _hoghunter_lane_refusal(s: str) -> str | None:
+    """Why this checkout's Debug builds must stay, or None.  Asked at the scan
+    and again right before the delete, because a build can start in between."""
+    d = Path(s)
+    if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+        return "not a plain folder, or it is marked to keep"
+    # Cheap idleness probe first (it quits at the first recent file), then the
+    # full-tree keep-marker walk only for lanes that are idle.  This deletes a
+    # whole tree, and a big one can hide a recent write past newest_file_age_min's cap.
+    if touched_since(s, IDLE_MIN_OK / (24 * 60)):
+        return "touched in the last 90 minutes"
+    if tree_in_use(s):
+        return "held open"
+    verdict = holds_keep_sentinel(s, probe_timeout(60.0))
+    if verdict.found or not verdict.known:
+        return "holds a keep marker, or the look failed"
+    return None
+
+
 def rule_xcode_artifacts() -> list[Candidate]:
     """Xcode build products and simulator runtimes.
 
@@ -1328,7 +1770,8 @@ def rule_xcode_artifacts() -> list[Candidate]:
     biggest win on this Mac (18.5 GB measured 09-27).  Simulator *Devices*
     are NOT -- they hold user simulator state and are ask-first.
     """
-    if proc_count("xcodebuild") or proc_count("clang") or proc_count("swift-frontend"):
+    global _SCAN_BUDGET_EXHAUSTED
+    if proc_count_exact("xcodebuild") or proc_count("clang") or proc_count("swift-frontend"):
         return []
     cands: list[Candidate] = []
     dd = HOME / "Library/Developer/Xcode/DerivedData"
@@ -1341,6 +1784,36 @@ def rule_xcode_artifacts() -> list[Candidate]:
             cands.append(Candidate(
                 category="xcode-artifacts", path=str(d), bytes=dir_bytes(str(d)),
                 reason="Xcode DerivedData project, no build running",
+            ))
+    lanes_root = HOME / _HOGHUNTER_DERIVED_DATA
+    if lanes_root.is_dir() and not lanes_root.is_symlink():
+        try:
+            checkouts = sorted(lanes_root.iterdir())
+        except OSError as exc:
+            log(f"xcode-artifacts skipped {lanes_root}: {type(exc).__name__}: {exc}")
+            checkouts = []
+        for d in checkouts:
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            s = str(d)
+            if _hoghunter_lane_refusal(s) is not None:
+                continue
+
+            def recheck(s: str = s, identity=path_identity(s)) -> str | None:
+                if path_identity(s) != identity:
+                    return "the path now holds something else"
+                if _build_running():
+                    return "a build is running"
+                return _hoghunter_lane_refusal(s)
+
+            cands.append(Candidate(
+                category="xcode-artifacts", path=s, bytes=dir_bytes(s),
+                reason="Hog Hunter checkout's Debug builds, idle, no build running",
+                # The recheck walks for a marker right before the delete, so
+                # apply_delete does not need to walk the tree a second time.
+                keep_verdict=MarkerVerdict(False, True),
+                recheck=recheck,
             ))
     support = HOME / "Library/Developer/Xcode/iOS DeviceSupport"
     if support.is_dir() and newest_file_age_min(str(support)) > 60 * 24 * 7:
@@ -1360,7 +1833,7 @@ def rule_simulator_runtimes() -> list[Candidate]:
     Large (18+ GB measured), fully re-downloadable from Xcode.  Deleting a
     runtime does not touch CoreSimulator/Devices, which stays ask-first.
     """
-    if (proc_count("xcodebuild") or proc_count("Simulator") or
+    if (proc_count_exact("xcodebuild") or proc_count("Simulator") or
             proc_count("CoreSimulatorService") or proc_count("[Bb]itrig")):
         return []
     cands: list[Candidate] = []
@@ -1551,6 +2024,65 @@ def rule_brew() -> list[Candidate]:
     )]
 
 
+def _ask_first_peer_work(size: Callable[[str], int]) -> list[Candidate]:
+    """Big trees that are someone's work or a backup.  Surfaced, never deleted.
+
+    Each line is what a person needs to decide; none of them is a candidate
+    for any other rule, and is_peer_work keeps the seat trees out of every
+    delete.  Sizing happens only under --size-ask-first and stops with the
+    scan share.
+    """
+    entries: list[tuple[Path, str]] = []
+    backups = HOME / "BotFleet-migration-backups"
+    if backups.is_dir():
+        entries.append((backups, "BotFleet migration backups"))
+    for store in _RELEASE_STORES:
+        releases = HOME / store / "releases"
+        if not releases.is_dir():
+            continue
+        current = os.path.realpath(HOME / store / "current")
+        try:
+            older = [r for r in releases.iterdir()
+                     if r.is_dir() and not r.is_symlink() and os.path.realpath(r) != current
+                     and str(r) not in _RELEASES_TAKEN]
+        except OSError:
+            older = []
+        entries += [(r, f"{store} release other than the current one") for r in sorted(older)]
+    apps = HOME / "apps"
+    if apps.is_dir():
+        entries += [(t, "BotFleet tree in ~/apps (may hold a seat's uncommitted work)")
+                    for t in sorted(apps.glob("botfleet-*"))
+                    if t.is_dir() and not t.is_symlink()]
+    code = HOME / "Code"
+    if code.is_dir():
+        entries += [(t, "seat worktrees (live work; never removed by a rule)")
+                    for t in sorted(code.glob("*/.muse/worktrees"))
+                    if t.is_dir() and not t.is_symlink()]
+    sqlite_backups = HOME / ".minimax/v2/sqlite/backups"
+    if sqlite_backups.is_dir():
+        entries.append((sqlite_backups, "MiniMax sqlite backups"))
+    # ~/.codex/.tmp holds live marketplace sources, some with no `.git`, so no
+    # rule deletes it.  Its upgrade staging is nearly all of its size, and that
+    # is a person's call while the playbook keeps plugin clones out of every
+    # automatic mode.
+    for name in _AGENT_HOMES:
+        tmp = HOME / name / ".tmp"
+        if tmp.is_dir() and not tmp.is_symlink():
+            entries.append((tmp, "agent .tmp (report only; can hold live sources)"))
+    staging = HOME / ".codex/.tmp/marketplaces/.staging"
+    if staging.is_dir():
+        entries.append((staging, "Codex marketplace upgrade staging (holds plugin clones)"))
+    out: list[Candidate] = []
+    for path, label in entries:
+        if scan_share_spent():
+            break
+        out.append(Candidate(
+            category="ask-first", path=str(path), bytes=size(str(path)),
+            reason=label, tier="ask-first", op="report",
+        ))
+    return out
+
+
 def rule_ask_first_inventory() -> list[Candidate]:
     """The ask-first list, as a report.  NEVER applied.
 
@@ -1612,17 +2144,25 @@ def rule_ask_first_inventory() -> list[Candidate]:
                 category="ask-first", path=str(g), bytes=size(str(g)),
                 reason="BotFleet update generation (non-newest)", tier="ask-first", op="report",
             ))
-    # Idle regenerable build output in main checkouts (report only): .build,
-    # build, .next and dist trees with no file touched in 7 days and no open
-    # files.  Main checkouts are never lanes, so the vacuum's lane logic never
-    # sees them; the names mirror REGENERABLE_NAMES in scripts/vacuum/lanes.py.
+    cands += _ask_first_peer_work(size)
+    # Idle regenerable build output in main checkouts: trees with no file
+    # touched in 7 days and no open files.  A tree the stale-build-output rule
+    # listed is already on the report; everything else is reported here, with
+    # what that rule's checks found if it ran.  Main checkouts are never lanes, so the
+    # vacuum's lane logic never sees them; the names mirror REGENERABLE_NAMES in
+    # scripts/vacuum/lanes.py.
     code = HOME / "Code"
     if code.is_dir():
         for repo in sorted(code.iterdir()):
             if repo.is_symlink() or not repo.is_dir() or not (repo / ".git").exists():
                 continue
-            for dirname in (".build", "build", ".next", "dist"):
-                target = repo / dirname
+            if scan_share_spent():
+                return cands
+            # node_modules is the one a walk is costly for, and it lists nothing
+            # a clean run can act on, so only a scan looks.
+            names = _REPORTED_BUILD_NAMES if _REPORT_DEPENDENCY_TREES else _CLEAN_RUN_BUILD_NAMES
+            for rel in _build_output_paths(repo, names):
+                target = repo / rel
                 if target.is_symlink() or not target.is_dir():
                     continue
                 if is_forbidden(str(target)) or has_keep_sentinel(str(target)):
@@ -1636,9 +2176,20 @@ def rule_ask_first_inventory() -> list[Candidate]:
                     continue
                 if touched_since(str(target), IDLE_MIN_BUILD_OUTPUT / (24 * 60)):
                     continue
+                refusal = "this name is report only"
+                if rel in _promotable_build_paths(repo):
+                    # A tree the rule listed is already on the report.  One it
+                    # never reached, or skipped on this run, stays here, and the
+                    # walks behind the answer stay in the rule.
+                    if str(target) in _STALE_BUILD_LISTED:
+                        continue
+                    refusal = _STALE_BUILD_MEMO.get(str(target), "not checked this run")
+                    if refusal is None:
+                        refusal = "too small to take"
                 cands.append(Candidate(
                     category="ask-first", path=str(target), bytes=size(str(target)),
-                    reason=f"idle regenerable build output in {repo.name} (report only; rebuilds on demand)",
+                    reason=f"idle regenerable build output in {repo.name} "
+                           f"(report only; rebuilds on demand; {refusal})",
                     tier="ask-first", op="report",
                 ))
     return cands
@@ -1664,8 +2215,12 @@ _DEV_CACHE_PATHS = (
 # holds the update generations the ask-first inventory reports and never
 # deletes; the catch-all below works on whole directories, so without this it
 # would purge a pending update before BotFleet ever applied it.
+#
+# The Debug builds are swept by xcode-artifacts instead, which waits for any
+# running build and treats each checkout separately.  This rule has neither gate.
 _APP_CACHE_KEEP = (
     "Library/Caches/BotFleet",
+    _HOGHUNTER_DERIVED_DATA,
 )
 
 
@@ -1791,6 +2346,8 @@ def rule_app_caches() -> list[Candidate]:
 
 
 _AGENT_HOMES = (".codex", ".claude", ".grok", ".minimax", ".cursor", ".config", ".gemini", ".opencode")
+# Not `.tmp`: ~/.codex/config.toml names a folder in ~/.codex/.tmp as a live
+# marketplace source, and that folder has no `.git`.  It is on the report instead.
 _AGENT_TRANSIENT = ("logs", "log", "tmp", "temp", "cache", "caches", "debug", "shell-snapshots")
 _AGENT_HISTORY = ("sessions", "projects", "history", "conversations")
 # A `.project_root` file marks a directory as some agent's working copy of a
@@ -1928,6 +2485,13 @@ def rule_agent_state() -> list[Candidate]:
                 continue
             if open_handles(s):
                 continue
+            # The same for a checkout: a clone is not scratch whatever its
+            # folder is called.  A probe that cannot answer protects the tree.
+            # Last, because it walks the whole tree when there is no `.git`,
+            # and the gates above turn an active tree away for less.
+            has_git = holds_keep_sentinel(s, probe_timeout(60.0), name=".git")
+            if has_git.found or not has_git.known:
+                continue
             size = dir_bytes(s)
             if size < 8 * 1024 * 1024:
                 continue
@@ -1960,19 +2524,1227 @@ def rule_agent_state() -> list[Candidate]:
     return cands
 
 
+# --------------------------------------------------------------------------
+# Nested git repositories inside a tree we might delete
+# --------------------------------------------------------------------------
+
+# SwiftPM keeps a real clone of each dependency beside the build, rebuilt from
+# Package.resolved.  These are the only clones a build-output rule accepts, and
+# only with the proof in regenerable_clones_only.  Every other `.git`, a `.git`
+# file above all (a linked worktree), keeps the tree.
+_SOURCEPACKAGES_CLONE_RE = re.compile(r"(?:.*/)?SourcePackages/checkouts/[^/]+/\.git")
+_DOT_BUILD_CLONE_RE = re.compile(r"checkouts/[^/]+/\.git")
+_MAX_NESTED_CLONES = 32
+
+
+# These outrank -C, so a caller that exported one (a git hook, a wrapper) would
+# have every answer come from the wrong repository.
+_GIT_LOCATION_VARS = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_INTERNAL_SUPER_PREFIX", "GIT_QUARANTINE_PATH",
+    "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+})
+
+
+def _git_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess | None:
+    """Run a read-only git command, or None when it could not answer."""
+    try:
+        return subprocess.run(
+            ["/usr/bin/git", "-C", str(cwd), "-c", "core.fsmonitor=false", *args],
+            capture_output=True, text=True, timeout=probe_timeout(30.0),
+            env=_git_env(),
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+
+
+def regenerable_clones_only(target: Path) -> str | None:
+    """Why a nested git entry keeps this tree, or None when none does.
+
+    Playbook rule 3: git never looks inside an ignored folder, so a clone there
+    is invisible, and it may hold the only copy of something.  A SwiftPM clone
+    is the one narrow exception, and only when it can prove it holds nothing:
+    a real `.git` directory at SwiftPM's own path, a clean status that counts
+    untracked and ignored files whatever git's config says, no file flagged to
+    hide its edits, and every ref (stashes and local tags and branches among
+    them) reachable from a remote-tracking ref.  A tag is no proof, because a
+    local one is never pushed.  So a clone with upstream tags that no fetched
+    branch reaches stays too.
+    """
+    try:
+        gits = find_paths([str(target), "-iname", ".git", "-prune"], probe_timeout(60.0))
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        return f"could not walk it for nested repositories ({type(exc).__name__})"
+    if len(gits) > _MAX_NESTED_CLONES:
+        return f"holds {len(gits)} nested repositories"
+    for found in gits:
+        if probe_clock_spent():
+            return "ran out of time proving its clones"
+        rel = os.path.relpath(found, target)
+        swiftpm = _SOURCEPACKAGES_CLONE_RE.fullmatch(rel) or (
+            target.name == ".build" and _DOT_BUILD_CLONE_RE.fullmatch(rel))
+        if not swiftpm:
+            return f"holds a nested repository at {rel}"
+        try:
+            if not stat.S_ISDIR(os.lstat(found).st_mode):
+                return f"holds a linked worktree at {rel}"
+        except OSError:
+            return f"could not read {rel}"
+        clone = Path(found).parent
+        status = _git(clone, "status", "--porcelain", "--ignored", "--untracked-files=all")
+        if status is None or status.returncode != 0:
+            return f"could not read the status of the clone at {rel}"
+        if status.stdout.strip():
+            return f"the clone at {rel} has local changes"
+        flags = _git(clone, "ls-files", "-v")
+        if flags is None or flags.returncode != 0:
+            return f"could not read the index of the clone at {rel}"
+        if any(ln[:1] == "S" or ln[:1].islower() for ln in flags.stdout.splitlines()):
+            return f"the clone at {rel} hides edits with skip-worktree or assume-unchanged"
+        # --all takes in refs/stash, local branches, tags and HEAD.
+        local = _git(clone, "rev-list", "--max-count=1", "HEAD", "--all", "--not", "--remotes")
+        if local is None or local.returncode != 0:
+            return f"could not read the history of the clone at {rel}"
+        if local.stdout.strip():
+            return f"the clone at {rel} has commits no remote holds"
+    return None
+
+
+# --------------------------------------------------------------------------
+# What is inside a tree we might delete
+# --------------------------------------------------------------------------
+
+# Past this a tree is reported as not inspected.
+_MAX_WALK_ENTRIES = 500_000
+
+# No build writes these, whatever the folder is called.  Keys and archives do
+# not come back from a rebuild; an xcarchive holds the symbols of what shipped.
+_PRECIOUS_SUFFIXES = frozenset({
+    ".xcarchive", ".p8", ".p12", ".pfx", ".pem", ".key", ".keystore", ".jks", ".provisionprofile",
+    ".sqlite", ".sqlite3",
+})
+_OTHER_REPO_NAMES = frozenset({".hg", ".jj", ".svn", ".bzr"})
+_PROJECT_SUFFIXES = frozenset({".xcodeproj", ".xcworkspace", ".playground"})
+_PROJECT_NAMES = frozenset({"Package.swift", "Podfile", "Cartfile", "Makefile"})
+_NOTE_SUFFIXES = frozenset({".md", ".markdown", ".rtf", ".docx", ".pages"})
+# Source a compiler reads.  Builds also generate some, so where it may sit is
+# decided per rule.
+_SOURCE_SUFFIXES = frozenset({
+    ".swift", ".m", ".mm", ".c", ".cc", ".cpp", ".h", ".hpp", ".py", ".rb", ".go", ".rs",
+    ".java", ".kt", ".sh", ".js", ".jsx", ".ts", ".tsx", ".txt",
+})
+_SWIFTPM_REPOSITORY_RE = re.compile(r".+-[0-9a-f]{8}")
+
+
+def _precious_entry(path: str, name: str, is_dir: bool) -> str | None:
+    """What makes this one entry worth more than a rebuild, or None."""
+    suffix = os.path.splitext(name)[1].lower()
+    if suffix in _PRECIOUS_SUFFIXES:
+        return f"holds {name}, which a rebuild does not bring back"
+    if name == "." + "env" or name.startswith("." + "env."):
+        return f"holds {name}"
+    if name in _OTHER_REPO_NAMES:
+        return f"holds a {name} repository"
+    if is_dir and suffix == ".git":
+        return f"holds a bare repository, {name}"
+    if name == "HEAD" and not is_dir:
+        parent = os.path.dirname(path)
+        if os.path.isdir(os.path.join(parent, "objects")) and os.path.isdir(os.path.join(parent, "refs")):
+            return "holds a bare repository"
+    if suffix in _PROJECT_SUFFIXES or name in _PROJECT_NAMES:
+        return f"holds a project file, {name}"
+    return None
+
+
+def _swiftpm_store(rel: str, tree_name: str) -> str:
+    """Which SwiftPM store this folder is, or "": its contents get their own proof."""
+    parts = rel.split("/")
+    if parts[-1] not in ("checkouts", "repositories"):
+        return ""
+    if len(parts) == 1 and tree_name == ".build":
+        return parts[-1]
+    if len(parts) >= 2 and parts[-2] == "SourcePackages":
+        return parts[-1]
+    return ""
+
+
+def tree_content_refusal(tree: Path, entry_refusal: Callable[[str, str, str, bool], str | None]) -> str | None:
+    """Why something inside this tree keeps it, or None after seeing every entry.
+
+    For the report rules only.  This is a list of what to name, not proof of what
+    a tree holds, which is why no rule deletes on its answer.  An unreadable
+    folder, too many entries or no time left are named too.  A proven SwiftPM
+    clone's own files are not judged: they are checked in, and
+    regenerable_clones_only has already compared them with the remote.
+    """
+    limit = probe_timeout(60.0)
+    if limit <= 0:
+        return "no time left to inspect it"
+    deadline = time.monotonic() + limit
+    count = 0
+    stack: list[tuple[str, str, bool]] = [(str(tree), "", True)]
+    while stack:
+        folder, folder_rel, judge = stack.pop()
+        try:
+            with os.scandir(folder) as entries:
+                listing = list(entries)
+        except OSError as exc:
+            return f"could not read a folder inside it ({type(exc).__name__})"
+        count += len(listing)
+        if count > _MAX_WALK_ENTRIES:
+            return f"too many entries to inspect (over {_MAX_WALK_ENTRIES})"
+        if time.monotonic() > deadline:
+            return "ran out of time inspecting it"
+        store = _swiftpm_store(folder_rel, tree.name) if judge and folder_rel else ""
+        for entry in listing:
+            is_dir = entry.is_dir(follow_symlinks=False)
+            rel = f"{folder_rel}/{entry.name}" if folder_rel else entry.name
+            child_judge = judge
+            if judge:
+                if store:
+                    child_judge = False
+                    if entry.name != ".DS_Store" and not is_dir:
+                        return f"holds a loose file in SwiftPM's {store} folder"
+                    if is_dir and store == "checkouts" and not os.path.isdir(os.path.join(entry.path, ".git")):
+                        return f"holds {entry.name} in SwiftPM's checkouts, which is not a clone"
+                    if is_dir and store == "repositories" and not _SWIFTPM_REPOSITORY_RE.fullmatch(entry.name):
+                        return f"holds {entry.name} in SwiftPM's repositories, which is not a mirror"
+                elif entry.name == ".git":
+                    child_judge = False  # regenerable_clones_only rules on these
+                else:
+                    reason = entry_refusal(entry.path, rel, entry.name, is_dir)
+                    if reason:
+                        return reason
+            if is_dir:
+                stack.append((entry.path, rel, child_judge))
+    return None
+
+
+def _build_output_entry_refusal(path: str, rel: str, name: str, is_dir: bool) -> str | None:
+    """stale-build-output: ignored says nothing about whether a file regenerates.
+
+    Hand-written notes are named anywhere.  Source is named only at the top of
+    the tree, because builds generate it further down.
+    """
+    reason = _precious_entry(path, name, is_dir)
+    if reason:
+        return reason
+    suffix = os.path.splitext(name)[1].lower()
+    if suffix in _NOTE_SUFFIXES:
+        return f"holds a note, {rel}"
+    if "/" not in rel and suffix in _SOURCE_SUFFIXES:
+        return f"holds source at its top level, {rel}"
+    return None
+
+
+# --------------------------------------------------------------------------
+# tool-versions
+# --------------------------------------------------------------------------
+
+class ToolStore(NamedTuple):
+    """One tool's versioned store, whose layout has been read, not guessed."""
+    label: str
+    directory: Path
+    pattern: re.Pattern
+    is_directory: bool          # each version is a directory, not a file
+    exclusive: bool             # the directory holds versions and nothing else
+    pointer: str = ""           # a file naming the active version, when there is one
+    pointer_prefix: str = ""    # version file name = prefix + the pointer's text
+    locks: Path | None = None   # a directory of per-version locks
+    launcher: str = ""          # the link in ~/.local/bin that says what the tool runs
+
+
+def _tool_stores() -> list[ToolStore]:
+    """The stores whose layout is known.
+
+    Not here, on purpose: `~/.local/share/claude/stable` (one unversioned copy),
+    and `~/.local/bin/agy` and the like, which carry no version in the name.
+    """
+    return [
+        ToolStore("Muse Code", HOME / ".local/bin",
+                  re.compile(r"muse-bin-\d+\.\d+\.\d+(?:-R\d+(?:\.\d+)*)?"),
+                  False, False, pointer=".muse-version", pointer_prefix="muse-bin-"),
+        # A leading dot is an unpacked copy no path resolves to.  It is never
+        # one of the two newest, and it gets the same idle and in-use gates.
+        ToolStore("Cursor Agent", HOME / ".local/share/cursor-agent/versions",
+                  re.compile(r"\.?\d{4}\.\d{2}\.\d{2}-[0-9a-f]{7,40}"),
+                  True, True, launcher="cursor-agent"),
+        ToolStore("Claude Code", HOME / ".local/share/claude/versions",
+                  re.compile(r"\d+\.\d+\.\d+"),
+                  False, True, locks=HOME / ".local/state/claude/locks", launcher="claude"),
+    ]
+
+
+def _version_in_store(store: ToolStore, target: Path) -> str:
+    """The version name this path resolves into in the store, or ""."""
+    root = os.path.realpath(store.directory)
+    resolved = os.path.realpath(target)
+    return resolved[len(root) + 1:].split("/", 1)[0] if resolved.startswith(root + "/") else ""
+
+
+# Where a rollback or a wrapper would live.  Text in these folders is read for
+# a version's name, up to this size, which leaves the big binaries beside them.
+_TOOL_REFERENCE_MAX_BYTES = 256 * 1024
+
+
+def _tool_reference_pins(store: ToolStore, names: Iterable[str]) -> set[str]:
+    """Versions a symlink resolves to, or a wrapper or LaunchAgent names.
+
+    A version pinned this way may not be running when the scan looks, and it
+    would fail with "no such file" the next time someone runs it.  This cannot
+    see a reference anywhere else on the disk.
+    """
+    pins: set[str] = set()
+    link_roots = {HOME / ".local/bin", HOME / "bin", Path("/usr/local/bin"), Path("/opt/homebrew/bin"),
+                  store.directory, store.directory.parent}
+    for root in link_roots:
+        try:
+            links = [e for e in root.iterdir() if e.is_symlink()]
+        except OSError:
+            continue
+        for link in links:
+            name = _version_in_store(store, link)
+            if name:
+                pins.add(name)
+    wanted = {n: n.encode() for n in names}
+    for root in (HOME / ".local/bin", HOME / "bin", HOME / "Library/LaunchAgents"):
+        try:
+            files = [e for e in root.iterdir() if e.is_file() and not e.is_symlink()]
+        except OSError:
+            continue
+        for f in files:
+            try:
+                if f.stat().st_size > _TOOL_REFERENCE_MAX_BYTES or f.name in wanted:
+                    continue
+                body = f.read_bytes()
+            except OSError:
+                continue
+            pins.update(n for n, raw in wanted.items() if raw in body)
+    return pins
+
+
+def tool_version_victims(store: ToolStore) -> list[Path]:
+    """Old versions in this store, or nothing when its layout does not read true.
+
+    Keeps the two newest by mtime, whatever the default launcher resolves to,
+    and any version a link, wrapper or LaunchAgent names.  With no proof of what
+    the default launcher runs, the tool is left out: `launcher` must be a link
+    into the store, and a pointer must name an installed version.  The running
+    version is _tool_version_refusal's job, through the open-file listing.
+    """
+    try:
+        entries = list(store.directory.iterdir())
+    except OSError:
+        return []
+    versions: list[Path] = []
+    for entry in entries:
+        if store.pattern.fullmatch(entry.name):
+            if entry.is_symlink() or entry.is_dir() != store.is_directory:
+                log(f"tool-versions: {store.label} has an unexpected {entry.name}; leaving it alone")
+                return []
+            versions.append(entry)
+        elif store.exclusive and entry.name != ".DS_Store":
+            log(f"tool-versions: {store.label} holds more than versions; leaving it alone")
+            return []
+    pinned = _tool_reference_pins(store, [v.name for v in versions])
+    if store.launcher:
+        launcher = HOME / ".local/bin" / store.launcher
+        active = _version_in_store(store, launcher) if launcher.is_symlink() else ""
+        if active not in {v.name for v in versions}:
+            log(f"tool-versions: cannot prove what {store.launcher} runs; leaving {store.label} alone")
+            return []
+        pinned.add(active)
+    if store.pointer:
+        try:
+            named = (store.directory / store.pointer).read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return []
+        active = store.pointer_prefix + named
+        if active not in {v.name for v in versions}:
+            return []
+        pinned.add(active)
+    try:
+        named_versions = sorted((v for v in versions if not v.name.startswith(".")),
+                                key=lambda v: v.lstat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    keep = {v.name for v in named_versions[:2]} | pinned
+    return sorted(v for v in versions if v.name not in keep)
+
+
+def _run_recently(version: Path, minutes: float) -> bool:
+    """True when the version's access time, or a file at its top, is recent.
+
+    Running a binary moves its access time and not its mtime, so this is the one
+    trace a run leaves once the process is gone.  A backup or indexer can move
+    it too, and then the version just stays a while longer.
+    """
+    cutoff = time.time() - minutes * 60
+    try:
+        entries = [version] if not version.is_dir() else [
+            e for e in version.iterdir() if e.is_file() and not e.is_symlink()]
+        return any(e.stat().st_atime > cutoff for e in entries)
+    except OSError:
+        return True
+
+
+def _tool_version_refusal(store: ToolStore, version: Path) -> str | None:
+    """Why this old version must stay, or None."""
+    s = str(version)
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    if store.locks is not None:
+        try:
+            if any(e.name.startswith(version.name) for e in store.locks.iterdir()):
+                return "the tool holds a lock on it"
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return "could not read the tool's locks"
+    if not idle_for(s, IDLE_MIN_TOOL_VERSION):
+        return "installed or changed in the last 7 days"
+    if _run_recently(version, IDLE_MIN_TOOL_VERSION):
+        return "run in the last 7 days"
+    if version.is_dir():
+        marker = holds_keep_sentinel(s, probe_timeout(60.0))
+        if marker.found or not marker.known:
+            return "holds a keep marker, or the look failed"
+    if tree_in_use(s):
+        return "held open"
+    if process_names_path(s):
+        return "a running process names it"
+    return None
+
+
+def rule_tool_versions() -> list[Candidate]:
+    """Old versions of installed command-line tools, superseded and idle.
+
+    Muse Code prunes its own binaries on update, so its store is usually one
+    file; the rule is what catches an update that failed halfway.  Cursor Agent
+    and Claude Code keep every version they installed.
+    """
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for store in _tool_stores():
+        for version in tool_version_victims(store):
+            if rule_out_of_time(deadline):
+                return cands
+            if _tool_version_refusal(store, version) is not None:
+                continue
+            size = dir_bytes(str(version))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+
+            def recheck(store: ToolStore = store, version: Path = version,
+                        identity=path_identity(str(version))) -> str | None:
+                if path_identity(str(version)) != identity:
+                    return "the path now holds something else"
+                if version not in tool_version_victims(store):
+                    return "no longer an old version"
+                return _tool_version_refusal(store, version)
+
+            cands.append(Candidate(
+                category="tool-versions", path=str(version), bytes=size,
+                reason=f"superseded {store.label} version, idle 7d+, nothing holds it",
+                # The recheck walks for a marker right before the delete, so
+                # apply_delete does not need to walk the tree a second time.
+                keep_verdict=MarkerVerdict(False, True),
+                recheck=recheck,
+            ))
+    return cands
+
+
+# --------------------------------------------------------------------------
+# xcode-scratch
+# --------------------------------------------------------------------------
+
+XCODE_SCRATCH_ROOT = Path("/private/tmp")
+# What `xcodebuild -derivedDataPath` writes at the top.  A tree holding anything
+# else is not this shape and is not reported.
+# An earlier temp cleanup quarantined real work (HH-180), and the Nov 4 version of
+# this rule found the same limit with a refuse-list: the name of a temp folder and
+# how old it looks prove nothing.  Since Nov 5 (HH-219) it deletes only what it
+# can identify positively as Xcode's, and reports everything else.
+_DERIVED_DATA_ENTRIES = frozenset({
+    "Build", "CompilationCache.noindex", "Index.noindex", "Logs",
+    "ModuleCache.noindex", "SDKExplicitPrecompiledModules",
+    "SDKStatCaches.noindex", "SourcePackages", "TestResults", "info.plist",
+    ".DS_Store",
+})
+_DERIVED_DATA_CACHES = ("CompilationCache.noindex", "ModuleCache.noindex", "Index.noindex")
+_BUILD_CHILDREN = ("Products", "Intermediates.noindex")
+_SOURCE_PACKAGE_CHILDREN = ("artifacts", "checkouts", "repositories", "workspace-state.json",
+                            "plugins", "prebuilts", ".DS_Store")
+
+
+def _build_running() -> bool:
+    """A compiler or xcodebuild is alive.  A failed look counts as one."""
+    return bool(proc_count_exact("xcodebuild") or proc_count("swift-frontend") or proc_count("clang"))
+
+
+def _xcode_shape_refusal(tree: Path) -> str | None:
+    """Why this /private/tmp child is not Xcode scratch at all, or None."""
+    s = str(tree)
+    try:
+        st = os.lstat(s)
+        root_dev = os.lstat(tree.parent).st_dev
+        if not stat.S_ISDIR(st.st_mode):
+            return "not a real directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != root_dev:
+            return "a mount point"
+        names = os.listdir(s)
+        for name in names:
+            if name not in _DERIVED_DATA_ENTRIES:
+                return "holds something Xcode did not write"
+            child = os.lstat(os.path.join(s, name))
+            if stat.S_ISLNK(child.st_mode) or child.st_uid != os.getuid():
+                return "holds a link or another owner's entry"
+        if not stat.S_ISDIR(os.lstat(tree / "Build").st_mode):
+            return "Build is not a directory"
+        if not any(n in names for n in _DERIVED_DATA_CACHES):
+            return "no Xcode cache beside Build"
+        if not any((tree / "Build" / n).is_dir() for n in _BUILD_CHILDREN):
+            return "Build has none of Xcode's output folders"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    return None
+
+
+_INFO_PLIST_MAX_BYTES = 64 * 1024
+
+
+def _xcode_scratch_roots() -> list[Path]:
+    """Where xcode-scratch looks: direct children only.  Read at call time so a
+    test's fake home is used.  ~/Library/Developer/Xcode/DerivedData is
+    xcode-artifacts' job and is not repeated here."""
+    return [XCODE_SCRATCH_ROOT, HOME / ".clutch" / "derived-data"]
+
+
+def _workspace_path_refusal(tree: Path) -> str | None:
+    """Xcode writes `info.plist` at a DerivedData root with the workspace it
+    built.  A root without that is not positively Xcode's, or None."""
+    info = tree / "info.plist"
+    try:
+        st = os.lstat(info)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _INFO_PLIST_MAX_BYTES:
+            return "info.plist is not a small plain file"
+        with open(info, "rb") as fh:
+            data = plistlib.load(fh)
+    except (OSError, ValueError, plistlib.InvalidFileException, xml.parsers.expat.ExpatError) as exc:
+        # A truncated XML plist raises expat's own error, which is not a
+        # ValueError (review of PR 274).
+        return f"info.plist does not read as Xcode's ({type(exc).__name__})"
+    workspace = data.get("WorkspacePath") if isinstance(data, dict) else None
+    if not isinstance(workspace, str) or not workspace.strip():
+        return "info.plist names no WorkspacePath"
+    return None
+
+
+def _derived_data_identity_refusal(tree: Path) -> str | None:
+    """Why this child is not positively an Xcode DerivedData root, or None.
+
+    Every test here is a thing Xcode writes, never a thing it might not: the
+    top holds only Xcode's own entries and no link, `info.plist` names a
+    WorkspacePath, Build holds only Products and Intermediates.noindex, Logs or
+    Index.noindex sits beside it, SourcePackages holds only SwiftPM's stores,
+    and the tree is on the same volume as the home folder, so never on
+    /Volumes.
+    """
+    shape = _xcode_shape_refusal(tree)
+    if shape:
+        return shape
+    s = str(tree)
+    try:
+        if os.path.realpath(s).startswith("/Volumes/") or os.lstat(s).st_dev != os.stat(HOME).st_dev:
+            return "not on the internal volume"
+        if not any(stat.S_ISDIR(os.lstat(tree / n).st_mode)
+                   for n in ("Logs", "Index.noindex") if os.path.lexists(tree / n)):
+            return "neither Logs nor Index.noindex beside Build"
+        for name in os.listdir(tree / "Build"):
+            if name not in _BUILD_CHILDREN + (".DS_Store",):
+                return "Build holds something Xcode did not write"
+        packages = tree / "SourcePackages"
+        if os.path.lexists(packages):
+            if not stat.S_ISDIR(os.lstat(packages).st_mode):
+                return "SourcePackages is not a directory"
+            for name in os.listdir(packages):
+                if name not in _SOURCE_PACKAGE_CHILDREN:
+                    return "SourcePackages holds something SwiftPM did not write"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    return _workspace_path_refusal(tree)
+
+
+def _shallow_newest_age_min(tree: Path, levels: int = 2) -> float:
+    """Minutes since anything at the root or its first `levels` levels changed.
+
+    A build writes its log under Logs and its build database under
+    Build/Intermediates.noindex, both inside two levels, so a build in the last
+    day moves one of these.  A failed look reads as just now.
+    """
+    newest = 0.0
+    frontier = [str(tree)]
+    try:
+        newest = os.lstat(tree).st_mtime
+        for _level in range(levels):
+            nxt: list[str] = []
+            for folder in frontier:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        st = entry.stat(follow_symlinks=False)
+                        newest = max(newest, st.st_mtime)
+                        if stat.S_ISDIR(st.st_mode):
+                            nxt.append(entry.path)
+            frontier = nxt
+    except OSError:
+        return 0.0
+    return (time.time() - newest) / 60.0
+
+
+def _deep_newest_age_min(tree: Path) -> float:
+    """Minutes since the newest entry anywhere in the tree changed.
+
+    Every entry is seen, with no sampling cap.  A folder that cannot be read,
+    more than _MAX_WALK_ENTRIES entries or no time left reads as just now, so a
+    walk that cannot finish never makes a root look idle (review of PR 274).
+    """
+    limit = probe_timeout(60.0)
+    if limit <= 0:
+        return 0.0
+    deadline = time.monotonic() + limit
+    count = 0
+    stack = [str(tree)]
+    try:
+        newest = os.lstat(tree).st_mtime
+        while stack:
+            with os.scandir(stack.pop()) as entries:
+                listing = list(entries)
+            count += len(listing)
+            if count > _MAX_WALK_ENTRIES or time.monotonic() > deadline:
+                return 0.0
+            for entry in listing:
+                st = entry.stat(follow_symlinks=False)
+                newest = max(newest, st.st_mtime)
+                if stat.S_ISDIR(st.st_mode):
+                    stack.append(entry.path)
+    except OSError:
+        return 0.0
+    return (time.time() - newest) / 60.0
+
+
+def _derived_data_output_entry_refusal(path: str, rel: str, name: str, is_dir: bool) -> str | None:
+    """Anywhere in the root: a key, an archive, a project or a note is something
+    a person put there or a rebuild does not bring back."""
+    reason = _precious_entry(path, name, is_dir)
+    if reason:
+        return f"{rel}: {reason}"
+    if os.path.splitext(name)[1].lower() in _NOTE_SUFFIXES:
+        return f"holds a note, {rel}"
+    return None
+
+
+# The parts of a DerivedData root that must be folders when they exist.
+_DERIVED_DATA_OUTPUTS = (("Build", "Products"), ("SourcePackages", "artifacts"))
+
+
+def _derived_data_precious_refusal(tree: Path) -> str | None:
+    """Why something precious anywhere in this root keeps it, or None.
+
+    The whole tree is walked, Logs, Intermediates and the caches included, not
+    only the build output: a key dropped in Logs would otherwise be deleted
+    with the root (review of PR 274).  A walk that cannot finish keeps it.
+    """
+    for parts in _DERIVED_DATA_OUTPUTS:
+        sub = tree.joinpath(*parts)
+        if os.path.lexists(sub) and not stat.S_ISDIR(os.lstat(sub).st_mode):
+            return f"{'/'.join(parts)} is not a directory"
+    return tree_content_refusal(tree, _derived_data_output_entry_refusal)
+
+
+def _xcode_scratch_refusal(tree: Path) -> str | None:
+    """Why this tree may not be deleted, or None when every gate holds.
+
+    Positive identification, not a refuse-list (owner decision of Nov 5,
+    HH-219): it must be an Xcode DerivedData root by everything Xcode writes,
+    idle a day at its top two levels, carry no marker and no repository other
+    than a clean SwiftPM clone, and nothing may hold it open, run from it or
+    name it.  The same answer is asked again on a fresh open-file listing right
+    before the delete.
+    """
+    s = str(tree)
+    identity = _derived_data_identity_refusal(tree)
+    if identity:
+        return identity
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
+            or _shallow_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH
+            or _deep_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH):
+        return "used in the last 24 hours"
+    precious = _derived_data_precious_refusal(tree)
+    if precious:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(tree)
+    if nested:
+        return nested
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s) or process_names_path(tree.name):
+        return "a running process names it"
+    return None
+
+
+def rule_xcode_scratch() -> list[Candidate]:
+    """Derived data a build left through -derivedDataPath, in /private/tmp or
+    in Clutch's derived-data folder.
+
+    A root that passes every gate in _xcode_scratch_refusal is a delete,
+    checked again right before it, and main lets it through only at
+    XCODE_SCRATCH_DELETE_FREE_GB or less.  Any other Xcode-shaped child stays a
+    report row with what stopped it.  Direct children only.
+    """
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for root in _xcode_scratch_roots():
+        try:
+            if root.is_symlink() or not root.is_dir():
+                continue
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for tree in children:
+            if rule_out_of_time(deadline):
+                return cands
+            if _xcode_shape_refusal(tree) is not None:
+                continue
+            size = dir_bytes(str(tree))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+            refusal = _xcode_scratch_refusal(tree)
+            if refusal is None:
+                def recheck(tree: Path = tree, identity=path_identity(str(tree))) -> str | None:
+                    if path_identity(str(tree)) != identity:
+                        return "the path now holds something else"
+                    return _xcode_scratch_refusal(tree)
+
+                cands.append(Candidate(
+                    category="xcode-scratch", path=str(tree), bytes=size,
+                    reason="Xcode DerivedData root, idle 24h+, nothing holds or names it",
+                    tier="safe", op="delete",
+                    # The recheck walks for a marker right before the delete.
+                    keep_verdict=MarkerVerdict(False, True),
+                    recheck=recheck,
+                ))
+                continue
+            cands.append(Candidate(
+                category="xcode-scratch", path=str(tree), bytes=size,
+                reason=f"Xcode derived data in {root} (report only; {refusal})",
+                tier="ask-first", op="report",
+            ))
+    return cands
+
+# --------------------------------------------------------------------------
+# tmp-build-trees
+# --------------------------------------------------------------------------
+
+# Names agents give a throwaway build or rebase checkout in /private/tmp, for
+# example `hh212-candidate-3` or `feature-rebase`.  Only these names are looked
+# at; any other folder in /private/tmp is none of this rule's business.
+_TMP_BUILD_TREE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:-candidate-[A-Za-z0-9._-]+|-rebase(?:-[A-Za-z0-9._-]+)?)")
+
+
+def _tmp_tree_git_finding(tree: Path) -> str | None:
+    """What git says keeps this checkout, or None when it holds nothing unique."""
+    dot_git = tree / ".git"
+    try:
+        mode = os.lstat(dot_git).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"could not read .git ({type(exc).__name__})"
+    if stat.S_ISLNK(mode):
+        return "its .git is a link"
+    if not stat.S_ISDIR(mode):
+        return "a linked git worktree, its branch may hold unpushed work"
+    status = _git(tree, "status", "--porcelain", "--untracked-files=all")
+    if status is None or status.returncode != 0:
+        return "could not read its git status"
+    if status.stdout.strip():
+        return "has uncommitted changes"
+    # skip-worktree and assume-unchanged entries hide edits from git status;
+    # ls-files -v marks them with S or a lowercase tag.
+    flags = _git(tree, "ls-files", "-v")
+    if flags is None or flags.returncode != 0:
+        return "could not read its git index flags"
+    if any(line[:1] == "S" or line[:1].islower() for line in flags.stdout.splitlines()):
+        return "has files git is told to ignore changes in (skip-worktree or assume-unchanged)"
+    stash = _git(tree, "rev-list", "--max-count=1", "--walk-reflogs", "refs/stash")
+    if stash is not None and stash.returncode == 0 and stash.stdout.strip():
+        return "has a stash"
+    local = _git(tree, "rev-list", "--max-count=1", "HEAD", "--all", "--not", "--remotes")
+    if local is None or local.returncode != 0:
+        return "could not read its git history"
+    if local.stdout.strip():
+        return "has commits no remote holds"
+    return None
+
+
+def _tmp_build_tree_refusal(tree: Path) -> str | None:
+    """What keeps this /private/tmp folder from reading as disposable, or None."""
+    s = str(tree)
+    try:
+        st = os.lstat(s)
+        if not stat.S_ISDIR(st.st_mode):
+            return "not a real directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != os.lstat(tree.parent).st_dev:
+            return "a mount point"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    if not idle_for(s, IDLE_MIN_TMP_BUILD_TREE):
+        return "written to in the last hour"
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    if tree_in_use(s):
+        return "held open"
+    if process_names_path(s):
+        return "a running process names it"
+    return _tmp_tree_git_finding(tree)
+
+
+def rule_tmp_build_trees() -> list[Candidate]:
+    """Agent build and rebase checkouts left in /private/tmp.
+
+    Report only, whatever the disk level, for the reason stale-build-output and
+    xcode-scratch are: a refuse-list around a tree that may be a git checkout
+    keeps finding what it misses, and a person decides.  Direct children whose
+    name says candidate or rebase, each with what the checks found.
+    """
+    if not XCODE_SCRATCH_ROOT.is_dir():
+        return []
+    try:
+        children = sorted(XCODE_SCRATCH_ROOT.iterdir())
+    except OSError:
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for tree in children:
+        if rule_out_of_time(deadline):
+            return cands
+        if not _TMP_BUILD_TREE_RE.fullmatch(tree.name) or tree.is_symlink() or not tree.is_dir():
+            continue
+        size = dir_bytes(str(tree))
+        if size < MIN_CANDIDATE_BYTES:
+            continue
+        finding = _tmp_build_tree_refusal(tree) or "nothing the checks can see keeps it"
+        cands.append(Candidate(
+            category="tmp-build-trees", path=str(tree), bytes=size,
+            reason=f"Agent build or rebase checkout in /private/tmp (report only; {finding})",
+            tier="ask-first", op="report",
+        ))
+    return cands
+
+
+
+# --------------------------------------------------------------------------
+# duplicate-sim-runtimes
+# --------------------------------------------------------------------------
+
+_RUNTIME_ID_RE = re.compile(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}")
+
+
+def _simctl(args: Sequence[str], timeout: float) -> str | None:
+    """Run simctl and return stdout, or None when it failed.  The test seam."""
+    try:
+        p = subprocess.run(["/usr/bin/xcrun", "simctl", *args],
+                           capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def _simctl_json(args: Sequence[str]) -> dict | None:
+    """Parse simctl's JSON, or None when it is not a JSON object."""
+    out = _simctl(args, probe_timeout(30.0))
+    if out is None:
+        return None
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _parse_last_used(value: object) -> tuple[bool, datetime | None]:
+    """(understood, when).  Null is understood: the image was never used."""
+    if value is None:
+        return True, None
+    if not isinstance(value, str):
+        return False, None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False, None
+    return True, when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _any_simulator_booted() -> bool:
+    """True when a simulator is booted, or when simctl cannot say."""
+    listing = _simctl_json(["list", "devices", "-j"])
+    devices = listing.get("devices") if listing else None
+    if not isinstance(devices, dict):
+        return True
+    for group in devices.values():
+        if not isinstance(group, list):
+            return True
+        for device in group:
+            # Booting and Shutting Down are in use, and so is a state nobody
+            # has seen.  `runtime delete` shuts down what is running on it.
+            if not isinstance(device, dict) or device.get("state") != "Shutdown":
+                return True
+    return False
+
+
+def _simulator_service_alive() -> bool:
+    """CoreSimulatorService is already running.  A failed look says no.
+
+    Asking simctl anything starts it and it lingers for minutes at least, and
+    rule_simulator_runtimes stays shut while it is alive.  So this rule asks
+    simctl only when the service is already up.  It never starts it, and that
+    older reclaim path behaves as though this rule did not exist.  The cost is a
+    run that finds the service down picks nothing here, and the next may.
+    """
+    count = proc_count("CoreSimulatorService")
+    return 0 < count < PROBE_FAILED
+
+
+def _installed_xcodes() -> list[str] | None:
+    """Every Xcode that can be found, or None when a look failed.
+
+    `simctl runtime match list` answers for the active developer directory only,
+    so a second Xcode's chosen image would look unused.  Spotlight finds one
+    anywhere it indexes; one on an unindexed volume is the limit of this.
+    """
+    found: set[str] = set()
+    for root in (Path("/Applications"), HOME / "Applications"):
+        try:
+            found.update(str(a) for a in root.glob("Xcode*.app") if a.is_dir())
+        except OSError:
+            return None
+    try:
+        spot = subprocess.run(["/usr/bin/mdfind", 'kMDItemCFBundleIdentifier == "com.apple.dt.Xcode"'],
+                              capture_output=True, text=True, timeout=probe_timeout(15.0))
+        active = subprocess.run(["/usr/bin/xcode-select", "-p"],
+                                capture_output=True, text=True, timeout=probe_timeout(15.0))
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    if spot.returncode != 0 or active.returncode != 0:
+        return None
+    found.update(ln.strip() for ln in spot.stdout.splitlines() if ln.strip().endswith(".app"))
+    developer = active.stdout.strip()
+    suffix = "/Contents/Developer"
+    if not developer.endswith(suffix):
+        return None
+    found.add(developer[: -len(suffix)])
+    env_dir = os.environ.get("DEVELOPER_DIR", "")
+    if env_dir.endswith(suffix):
+        found.add(env_dir[: -len(suffix)])
+    return sorted(found)
+
+
+def duplicate_runtime_victims() -> list[dict]:
+    """Images that duplicate another Ready image of the same runtime and version.
+
+    Any answer that does not read true gives nothing: a tool that failed, JSON
+    that does not parse, an entry of the wrong shape, or a group where the image
+    `simctl runtime match list` chooses is not among the Ready ones.  Keeping
+    the chosen image is what keeps at least one per version.  The chooser speaks
+    for one Xcode, so with any other number of them there is no candidate.
+    """
+    if not _simulator_service_alive():
+        return []
+    # Not CoreSimulatorService: asking simctl anything starts it, so it is alive
+    # on every run of this rule whether or not a simulator is in use.
+    if proc_count_exact("xcodebuild") or proc_count_exact("Simulator") or proc_count("[Bb]itrig"):
+        return []
+    xcodes = _installed_xcodes()
+    if xcodes is None or len(xcodes) != 1:
+        return []
+    if _any_simulator_booted():
+        return []
+    images = _simctl_json(["runtime", "list", "-j"])
+    matches = _simctl_json(["runtime", "match", "list", "-j"])
+    if not images or not matches:
+        return []
+    chosen: set[str] = set()
+    for entry in matches.values():
+        build = entry.get("chosenRuntimeBuild") if isinstance(entry, dict) else None
+        if not isinstance(build, str) or not build:
+            return []
+        chosen.add(build)
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for image in images.values():
+        if not isinstance(image, dict):
+            return []
+        if image.get("state") != "Ready":
+            continue
+        runtime, version = image.get("runtimeIdentifier"), image.get("version")
+        # The key must be there.  Null means never used and absent means this
+        # is not the output the rule was written for, and a renamed key would
+        # otherwise make an image used today read as never used.
+        if "lastUsedAt" not in image:
+            return []
+        understood, _when = _parse_last_used(image["lastUsedAt"])
+        if not (isinstance(runtime, str) and runtime and isinstance(version, str) and version
+                and isinstance(image.get("build"), str) and image["build"] and understood
+                and isinstance(image.get("kind"), str)):
+            return []
+        groups.setdefault((runtime, version), []).append(image)
+    victims: list[dict] = []
+    for group in groups.values():
+        if len(group) < 2 or not any(i["build"] in chosen for i in group):
+            continue
+        used = [w for w in (_parse_last_used(i.get("lastUsedAt"))[1] for i in group) if w]
+        latest = max(used) if used else None
+        for image in group:
+            when = _parse_last_used(image.get("lastUsedAt"))[1]
+            size = image.get("sizeBytes")
+            identifier = image.get("identifier")
+            if (image["build"] not in chosen
+                    and image["kind"] == "Disk Image"
+                    and image.get("deletable") is True
+                    and (when is None or (latest is not None and when < latest))
+                    and isinstance(size, int) and not isinstance(size, bool) and size > 0
+                    and isinstance(identifier, str) and _RUNTIME_ID_RE.fullmatch(identifier)):
+                victims.append(image)
+    return victims
+
+
+def rule_duplicate_sim_runtimes() -> list[Candidate]:
+    """A second image of a runtime and version that simctl is not choosing.
+
+    The simulator-runtimes rule looks in Profiles/Runtimes.  Disk images live in
+    Apple's secure storage under /System/Library/AssetsV2, where only simctl may
+    delete them.  One re-download gets a deleted image back, and a Mac with
+    two 27.2 builds does not need one of them.
+    """
+    cands: list[Candidate] = []
+    for image in duplicate_runtime_victims():
+        identifier = image["identifier"]
+
+        def recheck(identifier: str = identifier) -> str | None:
+            if identifier not in {v["identifier"] for v in duplicate_runtime_victims()}:
+                return "no longer a duplicate, or a simulator or build is running"
+            return None
+
+        cands.append(Candidate(
+            category="duplicate-sim-runtimes", path=f"sim-runtime:{identifier}",
+            bytes=image["sizeBytes"],
+            reason=f"duplicate {image['runtimeIdentifier']} image, build {image['build']}, "
+                   f"not the chosen one, last used {image.get('lastUsedAt') or 'never'}",
+            tier="semi-safe", op="simctl-runtime-delete",
+            detail=f"deleted with simctl; re-downloadable from Xcode; "
+                   f"deleted only at {PRESSURE_RULE_FREE_GB:.0f} GB free or less",
+            recheck=recheck,
+        ))
+    return cands
+
+
+# --------------------------------------------------------------------------
+# stale-build-output
+# --------------------------------------------------------------------------
+
+_PROMOTED_BUILD_NAMES = (".build", ".next", "build", "target")
+# Reported when idle.  The four names above get the full checks on a scan, and
+# these two just the idle row.
+_REPORTED_BUILD_NAMES = (".build", "build", ".next", "target", "dist", "node_modules")
+_CLEAN_RUN_BUILD_NAMES = tuple(n for n in _REPORTED_BUILD_NAMES if n != "node_modules")
+# Set off for a clean run in main().
+_REPORT_DEPENDENCY_TREES = True
+# Build output one level or more down, named one repo at a time.
+_KNOWN_NESTED_BUILD = {
+    "CodeCaps": ("ios/CodeCapsCompanion/build",),
+}
+_BUILD_NEVER_UNDER = frozenset({".muse", ".claude", "worktrees"})
+
+
+def _build_output_paths(repo: Path, names: tuple[str, ...]) -> tuple[str, ...]:
+    return names + _KNOWN_NESTED_BUILD.get(repo.name, ())
+
+
+def _promotable_build_paths(repo: Path) -> tuple[str, ...]:
+    return _build_output_paths(repo, _PROMOTED_BUILD_NAMES)
+
+
+def stale_build_refusal(repo: Path, rel: str) -> str | None:
+    """What the checks found against `repo/rel`, or None when they found nothing.
+
+    None does not mean safe to delete, and no rule deletes on it.  Reviews kept
+    finding what these miss, such as a .p8 key, a dSYM, a CLI symlinked into
+    target/release, and a server started from the parent folder.
+    """
+    target = repo / rel
+    s = str(target)
+    parts = Path(rel).parts
+    if rel not in _promotable_build_paths(repo):
+        return "not a name this rule may delete"
+    if _BUILD_NEVER_UNDER.intersection(target.relative_to(HOME).parts):
+        return "under a worktree folder"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    try:
+        home_dev = os.lstat(HOME).st_dev
+        # Every step from ~/Code down is real.  One symlink would mean the
+        # bytes are somewhere this check has not looked.
+        walk = [HOME / "Code", repo]
+        for i in range(1, len(parts) + 1):
+            step = repo.joinpath(*parts[:i])
+            # The name on disk, exactly.  This volume is case-insensitive, so
+            # `build` opens a tracked `Build/`.  git's ignore rules fold case
+            # and its pathspecs do not, so both checks below would pass.
+            if parts[i - 1] not in os.listdir(step.parent):
+                return f"on disk it is not spelled {parts[i - 1]}"
+            walk.append(step)
+        for step in walk:
+            st = os.lstat(step)
+            if not stat.S_ISDIR(st.st_mode):
+                return "reached through a symlink, or not a directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != home_dev:
+            return "not on the internal disk"
+        # A `.git` file marks a linked worktree or a submodule, and so does a
+        # `.git` between the repo and the tree.
+        if not stat.S_ISDIR(os.lstat(repo / ".git").st_mode):
+            return "the checkout is a linked worktree"
+        for i in range(1, len(parts)):
+            if os.path.lexists(repo.joinpath(*parts[:i]) / ".git"):
+                return "inside a nested repository"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    ignored = _git(repo, "check-ignore", "-q", "--", rel + "/")
+    if ignored is None or ignored.returncode not in (0, 1):
+        return "git could not say whether it is ignored"
+    if ignored.returncode == 1:
+        return "git does not ignore it"
+    tracked = _git(repo, "ls-files", "-z", "--", rel)
+    if tracked is None or tracked.returncode != 0:
+        return "git could not list what it tracks there"
+    if tracked.stdout:
+        return "git tracks files inside it"
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(str(repo)):
+        return "a process has its working directory in the repo"
+    if not idle_for(s, IDLE_MIN_STALE_BUILD):
+        return "changed in the last 14 days"
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(target)
+    if nested:
+        return nested
+    contents = tree_content_refusal(target, _build_output_entry_refusal)
+    if contents:
+        return contents
+    if process_names_path(s):
+        return "a running process names it"
+    return None
+
+
+# One answer per scan.  The walks behind it are the expensive part, and the rule
+# and the ask-first report both need it for the same trees.
+_STALE_BUILD_MEMO: dict[str, str | None] = {}
+# What the rule put on this scan's list, so the ask-first report does not repeat it.
+_STALE_BUILD_LISTED: set[str] = set()
+
+
+def _cached_stale_build_refusal(repo: Path, rel: str) -> str | None:
+    key = str(repo / rel)
+    if key not in _STALE_BUILD_MEMO:
+        _STALE_BUILD_MEMO[key] = stale_build_refusal(repo, rel)
+    return _STALE_BUILD_MEMO[key]
+
+
+def rule_stale_build_output() -> list[Candidate]:
+    """Ignored build output in a main checkout that the checks found nothing against.
+
+    Report only, whatever the disk level.  The owner's request of Nov 4 ("teach
+    HH wherever possible") allowed deleting this, and it was not used: see
+    REPORT_ONLY_WALK_RULES.  A tree the checks did find something against is on
+    the ask-first report with the reason.
+    """
+    code = HOME / "Code"
+    if code.is_symlink() or not code.is_dir():
+        return []
+    try:
+        repos = sorted(code.iterdir())
+    except OSError:
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for repo in repos:
+        if repo.is_symlink() or not repo.is_dir():
+            continue
+        for rel in _promotable_build_paths(repo):
+            if rule_out_of_time(deadline):
+                return cands
+            target = repo / rel
+            if target.is_symlink() or not target.is_dir():
+                continue
+            if _cached_stale_build_refusal(repo, rel) is not None:
+                continue
+            size = dir_bytes(str(target))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+            cands.append(Candidate(
+                category="stale-build-output", path=str(target), bytes=size,
+                reason=f"ignored build output in {repo.name}, nothing tracked, idle 14d+ "
+                       f"(report only; rebuilds on demand)",
+                tier="ask-first", op="report",
+            ))
+            _STALE_BUILD_LISTED.add(str(target))
+    return cands
+
+
 RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "snapshots": (rule_snapshots, "APFS / Time Machine local snapshots"),
     "temp-scratch": (rule_temp_scratch, "Orphaned per-user temp scratch"),
     "app-staging": (rule_app_staging, "Extracted but unused app updaters"),
     "botfleet-rollback": (rule_botfleet_rollback, "Abandoned BotFleet update/rollback copies"),
+    "botfleet-releases": (rule_botfleet_releases, "Superseded BotFleet and companion releases"),
     "dev-caches": (rule_dev_caches, "Package manager and toolchain caches"),
     "app-caches": (rule_app_caches, "Per-application cache directories"),
     "agent-state": (rule_agent_state, "Transient state left by coding agents"),
     "xcode-artifacts": (rule_xcode_artifacts, "DerivedData and device support"),
+    "tool-versions": (rule_tool_versions, "Superseded versions of installed tools"),
     "simulator-runtimes": (rule_simulator_runtimes, "iOS simulator runtimes"),
+    "duplicate-sim-runtimes": (rule_duplicate_sim_runtimes, "Duplicate simulator runtime images"),
     "logs": (rule_unbounded_logs, "Unbounded logs (tail-truncated)"),
     "sqlite-wal": (rule_sqlite_wals, "Oversized SQLite WAL (checkpointed)"),
     "brew": (rule_brew, "Homebrew obsolete versions"),
+    "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
+    "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
+    "stale-build-output": (rule_stale_build_output, "Stale ignored build output in main checkouts (report only)"),
     "ask-first": (rule_ask_first_inventory, "Ask-first inventory (report only)"),
 }
 
@@ -2020,18 +3792,28 @@ def _read_cpu_pressures() -> tuple[float, float]:
     return (idle if idle >= 0 else 100.0), kernel
 
 
-def read_band() -> Band:
-    free_gb = 0.0
-    used_pct = 0.0
+def _read_disk() -> tuple[float, float] | None:
+    """(free GiB, used percent) from a fresh df, or None when it did not answer."""
     out = _run(["/bin/df", "-k", "/System/Volumes/Data"], timeout=probe_timeout(15))
     lines = out.splitlines()
     if len(lines) >= 2:
         parts = lines[1].split()
         try:
-            free_gb = int(parts[3]) / (1024 * 1024)
-            used_pct = int(parts[4].rstrip("%"))
+            return int(parts[3]) / (1024 * 1024), float(int(parts[4].rstrip("%")))
         except (IndexError, ValueError):
             pass
+    return None
+
+
+def read_disk_free() -> float | None:
+    """Free GiB from a fresh df, or None when it did not answer."""
+    disk = _read_disk()
+    return disk[0] if disk else None
+
+
+def read_band() -> Band:
+    disk = _read_disk()
+    free_gb, used_pct = disk if disk else (0.0, 0.0)
     swap_pct = 0.0
     sout = _run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], timeout=probe_timeout(10))
     # `vm.swapusage` prints "total = ...M  used = ...M  free = ...M  (encrypted)".
@@ -2083,6 +3865,7 @@ def read_band() -> Band:
         load1=load1, cheap_only=bool(reasons), reasons=reasons,
         cpu_idle_pct=cpu_idle_pct, kernel_task_pct=kernel_task_pct,
         chunk_size=chunk_size, chunk_pause_sec=pause, throttling=thrashing,
+        disk_free_known=disk is not None,
     )
 
 
@@ -2090,9 +3873,13 @@ def read_band() -> Band:
 # Driver
 # --------------------------------------------------------------------------
 
-def scan(cats: Sequence[str] | None) -> list[Candidate]:
+def scan(cats: Sequence[str] | None, skip: Iterable[str] = ()) -> list[Candidate]:
     global _SCAN_BUDGET_EXHAUSTED, _SCAN_PHASE
     _SCAN_BUDGET_EXHAUSTED = False
+    _STALE_BUILD_MEMO.clear()
+    _STALE_BUILD_LISTED.clear()
+    _RELEASES_TAKEN.clear()
+    skipped = set(skip)
     out: list[Candidate] = []
     seen: set[tuple[str, str]] = set()
     seen_inodes: set[tuple[int, int, str]] = set()
@@ -2103,7 +3890,7 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
     _SCAN_PHASE = True
     try:
         for name, (fn, _desc) in RULES.items():
-            if cats and name not in cats:
+            if name in skipped or (cats and name not in cats):
                 continue
             if scan_budget_left() <= 0:
                 if _SCAN_DEADLINE is not None:
@@ -2143,15 +3930,101 @@ def scan(cats: Sequence[str] | None) -> list[Candidate]:
 
 
 _KEEP_MIB_RE = re.compile(r"(\d+)M")
+# Rules whose trees are installed read-only and need write permission to delete.
+UNLOCK_BEFORE_DELETE = frozenset({"botfleet-releases"})
+
+
+def _disk_pressure_refusal(line: float = PRESSURE_RULE_FREE_GB) -> str | None:
+    """Why a pressure-only rule must not delete right now, or None."""
+    free = read_disk_free()
+    if free is None:
+        return "df could not say how much is free"
+    if free > line:
+        return f"{free:.1f} GB free is above the {line:.0f} GB line"
+    return None
+
+
+def open_pressure_rules(band: Band, allowed: set[str]) -> set[str]:
+    """The pressure-only rules that may delete on this run: the tier each needs
+    is open, df answered, and the disk is at or under the rule's line.  A df
+    that failed leaves disk_free_gb at 0.0, and that must not read as full."""
+    if not band.disk_free_known:
+        return set()
+    return {name for name, (tier, line) in PRESSURE_RULES.items()
+            if tier in allowed and band.disk_free_gb <= line}
+
+
+def _under_another(path: str, roots: set[str]) -> bool:
+    return any(path.startswith(r.rstrip("/") + "/") for r in roots if r != path)
+
+
+def top_report_only(cands: Sequence[Candidate], band: Band) -> list[dict] | None:
+    """The early warning: the biggest report-only rows, or None.
+
+    Only while df answered with less than EARLY_WARNING_FREE_GB free and the
+    report-only rows add up to more than EARLY_WARNING_REPORT_BYTES.  A row
+    inside another listed row is not counted twice.
+    """
+    if not band.disk_free_known or band.disk_free_gb >= EARLY_WARNING_FREE_GB:
+        return None
+    largest: dict[str, Candidate] = {}
+    for c in cands:
+        if (c.tier == "ask-first" or c.op == "report") and c.bytes > 0:
+            if c.path not in largest or c.bytes > largest[c.path].bytes:
+                largest[c.path] = c
+    rows = list(largest.values())
+    paths = set(largest)
+    rows = [c for c in rows if not _under_another(c.path, paths)]
+    if sum(c.bytes for c in rows) <= EARLY_WARNING_REPORT_BYTES:
+        return None
+    rows.sort(key=lambda c: -c.bytes)
+    return [{"path": report_path(c.path), "bytes": c.bytes, "rule": c.category}
+            for c in rows[:TOP_REPORT_ONLY_COUNT]]
+
+
+def _recheck_slice() -> float:
+    """The time a recheck may spend, which leaves the delete its share."""
+    left = budget_left()
+    if left == float("inf"):
+        return RECHECK_MAX_SEC
+    return max(1.0, min(RECHECK_MAX_SEC, left * RECHECK_BUDGET_SHARE))
+
+
+def _run_recheck(c: Candidate) -> str | None:
+    """Ask the gates again on a fresh listing, inside the recheck's slice."""
+    global _RECHECK_DEADLINE
+    _expire_open_snapshot()
+    _RECHECK_DEADLINE = time.monotonic() + _recheck_slice()
+    try:
+        return c.recheck()
+    finally:
+        _RECHECK_DEADLINE = None
 
 
 def apply_candidate(c: Candidate) -> None:
     if c.tier == "ask-first" or c.op == "report":
         return
     try:
+        if c.category in PRESSURE_RULES:
+            refused = _disk_pressure_refusal(PRESSURE_RULES[c.category][1])
+            if refused:
+                c.refused = refused
+                return
+        if c.recheck is not None:
+            refused = _run_recheck(c)
+            if refused:
+                c.refused = refused
+                return
+            if not is_light(c) and budget_left() < MIN_HEAVY_START_SEC:
+                # The recheck spent what was left.  A delete cut off by its
+                # timeout is an error; not starting it leaves it for the next run.
+                c.deferred = True
+                c.refused = "too little of the budget left to finish this delete"
+                return
         if c.op == "delete":
             freed, err = apply_delete(c.path, known_bytes=c.bytes,
-                                      keep_verdict=c.keep_verdict)
+                                      keep_verdict=c.keep_verdict,
+                                      unlock=c.category in UNLOCK_BEFORE_DELETE)
         elif c.op == "truncate":
             keep = _KEEP_MIB_RE.search(c.detail or "")
             freed, err = apply_truncate(c.path, keep_mib=int(keep.group(1)) if keep else 16)
@@ -2159,6 +4032,8 @@ def apply_candidate(c: Candidate) -> None:
             freed, err = apply_wal_checkpoint(c.path)
         elif c.op == "snapshot-delete":
             freed, err = apply_snapshot_delete(c.path.split(":", 1)[1])
+        elif c.op == "simctl-runtime-delete":
+            freed, err = apply_simctl_runtime_delete(c.path.split(":", 1)[1])
         elif c.op == "brew-cleanup":
             _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=op_timeout(600))
             freed, err = 0, ""
@@ -2230,7 +4105,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--version", action="store_true")
     args = p.parse_args(argv)
 
-    global SIZE_ASK_FIRST, CLEAN_IOS27
+    global SIZE_ASK_FIRST, CLEAN_IOS27, _REPORT_DEPENDENCY_TREES
+    _REPORT_DEPENDENCY_TREES = not args.clean
     SIZE_ASK_FIRST = args.size_ask_first
     CLEAN_IOS27 = args.clean_ios27 or os.environ.get("HOGHUNTER_CLEAN_IOS27") == "1"
     started = time.monotonic()
@@ -2254,7 +4130,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     band = read_band()
-    cands = scan(cats or None)
 
     # The safe tier ALWAYS runs.  Pressure no longer removes it.  (Owner
     # ruling 2026-10-02: "swap high should mean that you do the same stuff you
@@ -2277,6 +4152,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             # longer additionally gated on a busy CPU.
             allowed.add("expensive")
 
+    # Per rule, not per band.  df answered and the disk is at the rule's line,
+    # or these delete nothing.
+    open_rules = open_pressure_rules(band, allowed)
+    pressure_open = "duplicate-sim-runtimes" in open_rules
+    # A clean run does not spend the scan share on rules whose candidates it
+    # would throw away, or on report rows nobody reads.  A scan still runs them,
+    # read-only, so it shows what they see.  Under the early-warning line the
+    # report-only walks run on a clean run too, because top_report_only reads
+    # their rows (review of PR 274).
+    early_warning = band.disk_free_known and band.disk_free_gb < EARLY_WARNING_FREE_GB
+    skip = set()
+    if args.clean:
+        if not early_warning:
+            skip |= REPORT_ONLY_WALK_RULES
+        skip |= PRESSURE_ONLY_RULES - open_rules
+    # The early warning sizes the ask-first trees, so it can say which to review.
+    if early_warning:
+        SIZE_ASK_FIRST = True
+    cands = scan(cats or None, skip=skip)
+
     log(f"band={args.band} pressure={band.pressure_label} "
         f"({band.cpu_idle_pct:.0f}% idle, load1 {band.load1:.0f}, "
         f"swap {band.swap_used_pct:.0f}%) -> chunks of {band.chunk_size}, "
@@ -2286,7 +4181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         log(f"free {band.disk_free_gb:.1f}G >= --min-free-gb {args.min_free_gb:.1f}; skipping")
         return 0
 
-    actionable = [c for c in cands if c.tier in allowed]
+    actionable = [c for c in cands if c.tier in allowed
+                  and (c.category in open_rules or c.category not in PRESSURE_ONLY_RULES)]
     # Two different things end a run early, and the report must not conflate
     # them.  `scan_truncated` means the SCAN hit its own share of the budget
     # and there may be more to find than this run listed.  `budget_spent`
@@ -2321,8 +4217,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     budget_spent = True  # too little time to start this one; a light item may still fit
                     continue
                 apply_candidate(c)
+                if c.deferred:
+                    budget_spent = True  # the rest of the list may still fit
+                    continue
+                # Handled either way, so not left for the next run.  A refusal
+                # did not apply anything, so the log does not say it did.
                 attempted += 1
-                applied_here += 1
+                if not c.refused:
+                    applied_here += 1
             log(f"chunk {n}/{len(chunks)}: applied {applied_here} "
                 f"({len(ordered)} total)")
             if budget_spent:
@@ -2377,19 +4279,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             log("scan mode: CleanMyMac sweeps reported, not run (needs --clean --cleanmymac)")
 
     if args.json:
-        print(json.dumps({
+        payload = {
             "version": VERSION,
             "band": band.as_dict(),
             "mode": "clean" if args.clean else "scan",
             "tiers_applied": sorted(allowed),
             "candidates": [c.as_dict() for c in cands],
             "reclaimable_mib": round(
-                sum(c.bytes for c in cands if c.tier in allowed) / (1024 * 1024), 1),
+                sum(c.bytes for c in actionable) / (1024 * 1024), 1),
+            # Whether duplicate-sim-runtimes may delete on this run.  A scan
+            # lists its picks either way.
+            "pressure_rules_open": pressure_open,
+            # Each pressure-only rule that may delete on this run (HH-219).
+            "pressure_rules_open_by_rule": sorted(open_rules),
             "applied_mib": round(sum(c.bytes for c in actionable if c.applied) / (1024 * 1024), 1),
             # Added with --budget-sec.  The Robotic Vacuum reads these to report real bytes and a partial run.
             "applied_bytes": sum(c.bytes for c in actionable if c.applied),
             "applied_count": sum(1 for c in actionable if c.applied),
             "failed_count": sum(1 for c in actionable if c.error),
+            # A gate stopped it right before the delete.  Not a failure.
+            "refused_count": sum(1 for c in actionable if c.refused),
             "actionable_count": len(actionable),
             "budget_exhausted": budget_exhausted,
             # `scan_truncated` is the precise reason a run stopped early: the
@@ -2406,7 +4315,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "remaining_count": (len(actionable) - attempted) if args.clean else 0,
             "elapsed_sec": round(time.monotonic() - started, 1),
             "cleanmymac": cleanmymac_report,
-        }, indent=2))
+        }
+        warning = top_report_only(cands, band)
+        if warning is not None:
+            payload["top_report_only"] = warning
+        print(json.dumps(payload, indent=2))
         return 0
 
     # Human report
@@ -2449,6 +4362,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"    {flag} {c.mib:9.1f}M  {report_path(c.path)}")
                 if c.error:
                     print(f"        error: {report_path(c.error)}")
+                elif c.refused:
+                    print(f"        refused: {report_path(c.refused)}")
             if len(items) > 6:
                 print(f"      ... and {len(items) - 6} more")
     return 0

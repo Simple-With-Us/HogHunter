@@ -3,10 +3,16 @@ import XCTest
 
 final class ApplicationRunModeTests: XCTestCase {
     func testEveryTestHostSignalDisablesLiveProbes() {
-        for environment in [["XCTestConfigurationFilePath": "fixture"], ["XCTestBundlePath": "fixture"]] {
+        for environment in [
+            ["XCTestConfigurationFilePath": "fixture"],
+            ["XCTestBundlePath": "fixture"],
+            ["XCTestSessionIdentifier": "fixture"],
+            ["XCInjectBundleInto": "fixture"]
+        ] {
             XCTAssertFalse(ApplicationRunMode.detect(arguments: [], environment: environment, xctestLoaded: false).allowsLiveProbes)
         }
         XCTAssertFalse(ApplicationRunMode.detect(arguments: ["HogHunter", "-XCTest"], environment: [:], xctestLoaded: false).allowsLiveProbes)
+        XCTAssertFalse(ApplicationRunMode.detect(arguments: ["HogHunter", "/path/to/Tests.xctest"], environment: [:], xctestLoaded: false).allowsLiveProbes)
         XCTAssertFalse(ApplicationRunMode.detect(arguments: [], environment: [:], xctestLoaded: true).allowsLiveProbes)
         XCTAssertFalse(ApplicationRunMode.current.allowsLiveProbes)
     }

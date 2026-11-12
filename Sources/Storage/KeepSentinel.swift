@@ -55,14 +55,24 @@ enum KeepSentinel {
                                maxDepth: Int = 6,
                                fileCap: Int = 2_000,
                                fileManager: FileManager = .default) -> Bool {
+        // An unreadable subtree answers "kept".  The walk skips what it
+        // cannot read, and a marker inside the skipped part would otherwise
+        // be missed and the tree trashed with it.  Skipping the clean of one
+        // tree is the safe side; the cap and depth bounds below stay
+        // best-effort (HH-184), because trees over 2,000 entries are the
+        // cleaner's normal workload, not an error.
+        var sawError = false
         var visited = 0
         guard let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: nil,
             options: [],
-            errorHandler: { _, _ in true }
+            errorHandler: { _, _ in
+                sawError = true
+                return true
+            }
         ) else {
-            return false
+            return true
         }
         while let element = enumerator.nextObject() as? URL {
             visited += 1
@@ -74,7 +84,45 @@ enum KeepSentinel {
                 enumerator.skipDescendants()
             }
         }
-        return false
+        return sawError
+    }
+
+    /// True when a marker sits anywhere under this path, or when nobody can say.
+    ///
+    /// The whole tree, with no bound on entries or depth, because the one bound
+    /// here fails closed: a walk that runs out of time, or cannot read part of the
+    /// tree, or is cancelled, answers "kept".  `containsMarker` stays bounded for the trees where
+    /// that would hide every row.  Use this for a tree whose normal state is far
+    /// past that bound and that holds someone's marked work, one tree at a time.
+    static func containsMarkerInWholeTree(url: URL,
+                                          timeBudget: TimeInterval = 30,
+                                          fileManager: FileManager = .default,
+                                          now: () -> Date = Date.init,
+                                          isCancelled: () -> Bool = { Task.isCancelled }) -> Bool {
+        var sawError = false
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: [],
+            errorHandler: { _, _ in
+                sawError = true
+                return true
+            }
+        ) else {
+            return true
+        }
+        let deadline = now().addingTimeInterval(timeBudget)
+        var visited = 0
+        while let element = enumerator.nextObject() as? URL {
+            if element.lastPathComponent.caseInsensitiveCompare(fileName) == .orderedSame {
+                return true
+            }
+            visited += 1
+            if visited % 256 == 1, isCancelled() || now() > deadline {
+                return true
+            }
+        }
+        return sawError
     }
 
     /// True when the directory holds a marker.

@@ -5,30 +5,80 @@ Run after the existing watch finishes, under the same scheduler lock.  Directory
 failures omit that measurement; they never become a fictitious zero size.
 """
 import argparse
+import importlib.machinery
+import importlib.util
+import math
+import concurrent.futures
 import datetime
 import re
 import json
 import os
+import pwd
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
+import stat
+import sys
+from decimal import Decimal, InvalidOperation
+
+def control_policy():
+    # Both source checkout and deployed standalone layout use the same policy.
+    source = Path(__file__).with_name('control.py')
+    if not source.is_file():
+        source = Path('/usr/local/sbin/hoghunter-control')
+    try:
+        loader = importlib.machinery.SourceFileLoader('hoghunter_control_policy', str(source))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module if hasattr(module, 'inspect_process') else None
+    except (OSError, ImportError):
+        return None
+
+
+POLICY = control_policy()
 
 TOOLS = (
     ('claude', 'Claude Code', ('claude',)),
     ('codex', 'Codex', ('codex',)),
     ('muse', 'Muse', ('muse',)),
-    ('minimax', 'MiniMax Code', ('mcode',)),
-    ('fleet-cli', 'Fleet CLI', ('agent-sync', 'board')),
-    ('fleet-listener', 'Fleet Listener', ('agent-sync-listener',)),
+    # The seat's own launcher is named minimax-code; mcode is the installed
+    # command name.  Both are the same tool, and matching only one of them
+    # made a running seat read as unknown.
+    ('minimax', 'MiniMax Code', ('mcode', 'minimax-code')),
+    ('fleet-cli', 'Fleet CLI', ('simple-board', 'simple-chat', 'board')),
+    ('fleet-listener', 'Fleet Listener', ('operator',)),
     ('recall', 'Fleet Recall', ('recall',)),
     ('shellular', 'Shellular', ('shellular',)),
     ('docker', 'Docker', ('dockerd',)),
-    ('caddy', 'Caddy', ('caddy',)),
     ('postgres', 'PostgreSQL', ('postgres',)),
     ('redis', 'Redis', ('redis-server',)),
 )
+
+# Tools whose only presence on this host is a container.  Inside the container
+# the process identity is an interpreter, so the container name is the honest
+# identity and the process identity can never prove it.
+CONTAINER_TOOLS = {
+    'recall-api': 'recall',
+    'fleet-recall': 'recall',
+    # The listener runs as a Coolify workload here, not as a systemd unit, so
+    # the workload is the only identity that can answer for it.  Its container
+    # is named after the deployment, so the workload's own name is matched too.
+    'operator-listener': 'fleet-listener',
+}
+
+# Tools that run under an interpreter.  For these, "not seen in the process
+# table" cannot be read as "not running", because the process would be named
+# node or python rather than after the tool.
+INTERPRETED_TOOLS = {'claude', 'muse', 'minimax', 'fleet-cli', 'fleet-listener', 'recall'}
+
 DIRECTORIES = ('Code', 'apps/lanes', '.claude', '.codex', '.config/muse', '.minimax', '.minimax-code', '.npm', '.cache')
+
+# How many processes the snapshot carries, and how many of each owner group.
+PROCESS_LIMIT = 30
+OWNER_GROUPS = ('root', 'jay', 'container')
 
 
 def process_inventory(proc=Path('/proc')):
@@ -68,28 +118,85 @@ def installed_command(command, home=None):
     return any(path.is_file() and os.access(path, os.X_OK) for path in candidates)
 
 
-def tool_statuses(inventory, complete, which=shutil.which, installed=installed_command):
+def container_inventory(run=subprocess.run):
+    """Allowlisted Docker metadata only; never full Config/Env/Args inspection."""
+    if POLICY is None:
+        return None
+    rows = POLICY.coolify_containers(run)
+    if rows is None:
+        return None
+    return [{'container': row['container'], 'names': list(dict.fromkeys(
+        value for value in (row['container'], row['name'], row.get('resource'), row.get('service')) if value))}
+        for row in rows]
+
+
+def container_tool_counts(containers):
+    """How many containers belong to each tool.
+
+    A container is counted once, even when it answers to more than one name:
+    the recall workload is called both after its container and after the
+    workload it is, and it is still one workload.
+    """
+    counts = {}
+    if not containers:
+        return counts
+    for entry in containers:
+        if isinstance(entry, dict):
+            names = entry.get('names') or []
+        else:
+            names = [entry]
+        for name in names:
+            for prefix, ident in CONTAINER_TOOLS.items():
+                if name == prefix or name.startswith(prefix + '-') or name.startswith(prefix):
+                    counts[ident] = counts.get(ident, 0) + 1
+                    break
+            else:
+                continue
+            break
+    return counts
+
+
+def tool_statuses(inventory, complete, which=shutil.which, installed=installed_command, containers=None):
     rows = []
     # Interpreted CLIs cannot be identified safely from executable identity alone.
     interpreted = any(names & {'node', 'nodejs', 'python', 'python3', 'bash', 'sh'} for names in inventory)
+    counts = container_tool_counts(containers)
     for ident, label, commands in TOOLS:
         count = sum(bool(names.intersection(commands)) for names in inventory)
         is_installed = any(which(command) is not None or installed(command) for command in commands)
         if count:
             state = 'running'
-        elif not complete or (interpreted and ident not in {'docker', 'caddy', 'postgres', 'redis'}):
+            reason = f'{count} process' + ('' if count == 1 else 'es')
+        elif counts.get(ident):
+            state = 'running'
+            count = counts[ident]
+            reason = f'{count} container' + ('' if count == 1 else 's')
+        elif not is_installed:
+            # A tool that is not on this host cannot be running here, whatever
+            # else is.  This answer does not depend on the process list.
+            state = 'absent'
+            reason = 'not installed on this host'
+        elif not complete:
             state = 'unknown'
+            reason = 'the process list could not be read completely'
+        elif interpreted and ident in INTERPRETED_TOOLS:
+            state = 'unknown'
+            reason = 'runs under an interpreter; not provable from process identity'
         else:
-            state = 'stopped' if is_installed else 'absent'
-        rows.append(dict(id=ident, name=label, state=state, count=count))
+            state = 'stopped'
+            reason = 'installed; no matching process'
+        rows.append(dict(id=ident, name=label, state=state, count=count, reason=reason))
     return rows
 
 
 # Named service metadata can identify interpreted daemons without inspecting argv.
 SERVICE_UNITS = {
-    'fleet-listener': 'agent-sync-listener.service',
+    'fleet-listener': 'operator.service',
     'recall': 'fleet-recall.service',
     'shellular': 'shellular.service',
+    # Claude Code reaches this host as a named service; its unit answers the
+    # question the process identity cannot.
+    'claude': 'claude-remote-control.service',
 }
 
 
@@ -148,8 +255,431 @@ def directory_bytes(path, run=subprocess.run):
         return None
 
 
-def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state):
+def _process_ticks(proc):
+    """pid -> (name, ticks, start_time) from /proc identity only: never argv."""
+    rows = {}
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return rows
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / 'stat').read_text()
+            name = (entry / 'comm').read_text().strip()
+        except OSError:
+            continue  # A process exiting during enumeration is normal.
+        try:
+            # stat is "pid (comm) state ppid ..."; utime is field 14 and stime
+            # field 15, so they sit at index 11 and 12 after the state field.
+            tail = raw[raw.rindex(')') + 2:].split()
+            ticks = int(tail[11]) + int(tail[12])
+            start_time = int(tail[19])
+        except (ValueError, IndexError):
+            continue
+        rows[int(entry.name)] = (name, ticks, start_time)
+    return rows
+
+
+def _owner_of(pid, proc=Path('/proc')):
+    try:
+        uid = (proc / str(pid)).stat().st_uid
+    except OSError:
+        return None
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
+def _resident_bytes(pid, proc=Path('/proc')):
+    try:
+        fields = (proc / str(pid) / 'statm').read_text().split()
+        return int(fields[1]) * os.sysconf('SC_PAGE_SIZE')
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def container_identities(run=subprocess.run):
+    """Container id -> container name for the running containers."""
+    identities = {}
+    try:
+        result = run(['docker', 'ps', '--no-trunc', '--format', '{{.ID}} {{.Names}}'],
+                     capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return identities
+    if result.returncode != 0:
+        return identities
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            identities[parts[0]] = parts[1]
+    return identities
+
+
+def _container_of(pid, identities, proc=Path('/proc')):
+    if not identities:
+        return None
+    try:
+        cgroup = (proc / str(pid) / 'cgroup').read_text()
+    except OSError:
+        return None
+    for container_id, name in identities.items():
+        if container_id in cgroup:
+            return name
+    return None
+
+
+def top_processes(proc=Path('/proc'), limit=PROCESS_LIMIT, sleep=time.sleep, elapsed=1.0,
+                  run=subprocess.run, monotonic=time.monotonic, owners=None):
+    """Balanced CPU/RSS/swap leaders, using measured time and stable identities."""
+    first = _process_ticks(proc)
+    boot = POLICY.boot_identity(proc) if POLICY else None
+    started = monotonic()
+    sleep(elapsed)
+    second = _process_ticks(proc)
+    duration = monotonic() - started
+    if duration <= 0 or duration > 10 or (POLICY and POLICY.boot_identity(proc) != boot):
+        return []
+    hz = os.sysconf('SC_CLK_TCK')
+    containers = POLICY.coolify_containers(run) if POLICY else None
+    ancestors = POLICY.ancestor_pids(proc) if POLICY else set()
+    rows = []
+    for pid, (name, ticks, start_time) in second.items():
+        before = first.get(pid)
+        if before is None or before[2] != start_time or ticks < before[1]:
+            continue
+        identity_args = dict(proc=proc, ancestors=ancestors, containers=containers)
+        if owners is not None:
+            identity_args['owners'] = owners
+        target, reason = POLICY.inspect_process(pid, start_time, boot, **identity_args) if POLICY else (None, 'control policy unavailable')
+        sample_target, sample_reason = POLICY.inspect_process(pid, start_time, boot, sample=True, **identity_args) if POLICY else (None, reason)
+        actions = [] if reason else ['quit', 'force-quit', 'tame', 'untame']
+        if not sample_reason:
+            actions.append('sample')
+        fields = POLICY.process_stat_fields(pid, proc) if POLICY else None
+        memory = POLICY.process_memory(pid, proc) if POLICY else {}
+        if fields is not None and fields['start_time'] != start_time:
+            continue
+        try:
+            executable = Path(os.readlink(proc / str(pid) / 'exe')).name
+        except OSError:
+            executable = name
+        identities = {row['id']: row['container'] for row in (containers or [])}
+        rows.append(dict(pid=pid, name=executable, start_time=start_time, boot_id=boot,
+                         owner=_owner_of(pid, proc), container=_container_of(pid, identities, proc),
+                         cpu_percent=round(100.0 * (ticks - before[1]) / (hz * duration), 2),
+                         memory_bytes=memory.get('resident_bytes', _resident_bytes(pid, proc)),
+                         swap_bytes=memory.get('swap_bytes'), nice=fields.get('nice') if fields else None,
+                         allowed_actions=actions, protection_reason=reason))
+    # CPU-only truncation concealed large idle resident/swap holders.  Retain
+    # leaders from each measurement before the Mac applies its selected sort.
+    rankings = [sorted(rows, key=lambda r: (-(r.get(key) or 0), r['pid']))
+                for key in ('cpu_percent', 'memory_bytes', 'swap_bytes')]
+    chosen, seen = [], set()
+    for group in zip(*rankings):
+        for row in group:
+            if row['pid'] not in seen:
+                seen.add(row['pid'])
+                chosen.append(row)
+                if len(chosen) >= limit:
+                    return chosen
+    return chosen
+
+
+def _swap_counters(proc):
+    try:
+        values = {}
+        for line in POLICY.read_text(proc / 'vmstat').splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ('pswpin', 'pswpout') and parts[1].isdigit():
+                values[parts[0]] = int(parts[1])
+        return values
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def memory_pressure(proc=Path('/proc'), sleep=time.sleep, elapsed=1.0,
+                    monotonic=time.monotonic, now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    first = _swap_counters(proc)
+    start = monotonic()
+    sleep(elapsed)
+    duration = monotonic() - start
+    if duration <= 0 or duration > 10:
+        return None
+    last = _swap_counters(proc)
+    result = dict(sampled_at=now().isoformat(), duration_seconds=round(duration, 3),
+                  swap_in_bytes_per_second=None, swap_out_bytes_per_second=None,
+                  memory_some_avg10=None, memory_full_avg10=None)
+    for field, key in [('swap_in_bytes_per_second', 'pswpin'), ('swap_out_bytes_per_second', 'pswpout')]:
+        if key in first and key in last and last[key] >= first[key]:
+            result[field] = (last[key] - first[key]) * os.sysconf('SC_PAGE_SIZE') / duration
+    try:
+        for line in POLICY.read_text(proc / 'pressure/memory', 4096).splitlines():
+            parts = line.split()
+            if len(parts) < 2 or parts[0] not in ('some', 'full'):
+                continue
+            values = dict(part.split('=', 1) for part in parts[1:])
+            value = float(values['avg10'])
+            if math.isfinite(value) and 0 <= value <= 100:
+                result['memory_' + parts[0] + '_avg10'] = value
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    return result if any(result[key] is not None for key in result if key not in ('sampled_at', 'duration_seconds')) else None
+
+
+def _parse_bytes(text):
+    """A memory reading like "535.1MiB" into bytes, or None when unreadable."""
+    match = re.match(r'^\s*([0-9.]+)\s*([A-Za-z]+)\s*$', str(text))
+    if match is None:
+        return None
+    factors = {'b': 1, 'kb': 1024, 'kib': 1024, 'mb': 1024 ** 2, 'mib': 1024 ** 2,
+               'gb': 1024 ** 3, 'gib': 1024 ** 3, 'tb': 1024 ** 4, 'tib': 1024 ** 4}
+    factor = factors.get(match.group(2).lower())
+    if factor is None:
+        return None
+    try:
+        return int(float(match.group(1)) * factor)
+    except ValueError:
+        return None
+
+
+def coolify_resources(run=subprocess.run):
+    """Safe container identity/state metadata, plus numeric Docker statistics."""
+    if POLICY is None:
+        return None
+    inspected = POLICY.coolify_containers(run)
+    if inspected is None:
+        return None
+    stats = {}
+    if inspected:
+        try:
+            result = run(POLICY.DOCKER + ['stats', '--no-stream', '--format', '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'],
+                         capture_output=True, text=True, timeout=20, check=False)
+            if result.returncode == 0 and len(result.stdout) <= 1024 * 1024:
+                for line in result.stdout.splitlines():
+                    parts = line.split('\t')
+                    if len(parts) == 3:
+                        stats[parts[0]] = parts[1:]
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+    rows = []
+    for entry in inspected:
+        usage = stats.get(entry['container'], [])
+        cpu, memory = None, None
+        try:
+            if usage:
+                value = float(usage[0].rstrip('%'))
+                cpu = value if math.isfinite(value) and value >= 0 else None
+            if len(usage) == 2:
+                memory = _parse_bytes(usage[1].split('/')[0])
+        except ValueError:
+            pass
+        rows.append(dict(uuid=entry['id'], name=entry['display_name'], container=entry['container'],
+                         container_id=entry['id'], started_at=entry['started_at'],
+                         type=entry.get('type') or 'standalone', status=entry.get('status') or 'unknown',
+                         cpu_percent=cpu, memory_bytes=memory, allowed_actions=entry['allowed_actions'],
+                         protection_reason=entry['protection_reason']))
+    return sorted(rows, key=lambda row: (row['type'], row['name']))
+
+
+STORAGE_BUDGET = 10.0
+BLOB_ROOT = Path('/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256')
+STORAGE_INFO_FORMAT = '{"root":{{json .DockerRootDir}},"driver":{{json .Driver}},"driver_status":{{json .DriverStatus}}}'
+STORAGE_DF_FORMAT = '{"type":{{json .Type}},"total":{{json .TotalCount}},"active":{{json .Active}},"size":{{json .Size}},"reclaimable":{{json .Reclaimable}}}'
+
+
+def docker_size(value):
+    """Docker display sizes use decimal SI; binary suffixes remain binary."""
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)(B|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)', value or '')
+    if not match:
+        raise ValueError('malformed size')
+    factors = {'B': 1, 'kB': 1000, 'KB': 1000, 'MB': 1000**2, 'GB': 1000**3, 'TB': 1000**4,
+               'KiB': 1024, 'MiB': 1024**2, 'GiB': 1024**3, 'TiB': 1024**4}
+    size = int(Decimal(match[1]) * factors[match[2]])
+    if not 0 <= size <= 2**63 - 1:
+        raise ValueError('size outside contract')
+    return size
+
+
+def blob_metadata(path=BLOB_ROOT, root=Path('/'), budget=1.5, limit=20000,
+                  monotonic=time.monotonic, clock=time.time, scandir=os.scandir):
+    """Flat allocated metadata only; parent runs this in a bounded child."""
+    started = monotonic()
+    result = dict(status='unavailable', reason='blob metadata unavailable', count=0,
+                  allocated_bytes=0, apparent_bytes=0, modified_hour_bytes=0, modified_day_bytes=0)
+    try:
+        if any(p.is_symlink() for p in [path, *path.parents]):
+            return result
+        identity = path.stat()
+        if not stat.S_ISDIR(identity.st_mode) or identity.st_dev != root.stat().st_dev:
+            return result
+        result.update(device=identity.st_dev, inode=identity.st_ino)
+        now = clock()
+        with scandir(path) as entries:
+            for entry in entries:
+                if monotonic() - started >= budget or result['count'] >= limit:
+                    result.update(status='incomplete', reason='blob metadata budget exceeded')
+                    return result
+                info = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_dev != identity.st_dev:
+                    result.update(status='incomplete', reason='blob directory contains unsupported entries')
+                    return result
+                allocated = info.st_blocks * 512
+                result['count'] += 1
+                result['allocated_bytes'] += allocated
+                result['apparent_bytes'] += info.st_size
+                # Cohorts describe current files, never net growth or a reclaim target.
+                if now - 3600 <= info.st_mtime <= now and now - 3600 <= info.st_ctime <= now:
+                    result['modified_hour_bytes'] += allocated
+                if now - 86400 <= info.st_mtime <= now and now - 86400 <= info.st_ctime <= now:
+                    result['modified_day_bytes'] += allocated
+        if (path.stat().st_dev, path.stat().st_ino) != (identity.st_dev, identity.st_ino):
+            result.update(status='incomplete', reason='blob directory identity changed')
+            return result
+        result.update(status='complete', reason=None)
+    except (OSError, ValueError):
+        result.update(status='unavailable', reason='blob metadata unavailable')
+    return result
+
+
+def storage_diagnostics(run=None, monotonic=time.monotonic,
+                        now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    started = monotonic()
+    deadline = started + STORAGE_BUDGET
+    result = dict(sampled_at=now().isoformat(), duration_seconds=0, status='unavailable',
+                  daemon=dict(status='unavailable', reason='Docker storage identity unavailable'),
+                  categories=dict(status='unavailable', reason='Docker storage totals unavailable', items=[]),
+                  blobs=dict(status='unavailable', reason='containerd blob metadata unavailable'))
+    run = run or (POLICY.bounded_run if POLICY is not None else None)
+    def command(arguments, budget):
+        remaining = deadline - monotonic()
+        if run is None or remaining <= 0:
+            raise ValueError('storage budget unavailable')
+        response = run(arguments, timeout=min(budget, remaining), max_output=65536,
+                       capture_output=True, text=True, check=False)
+        if response.returncode != 0 or len(response.stdout) > 65536:
+            raise ValueError('storage response unavailable')
+        return response.stdout
+    docker = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
+    try:
+        data = json.loads(command(docker + ['info', '--format', STORAGE_INFO_FORMAT], 2))
+        if (not isinstance(data, dict) or not isinstance(data.get('root'), str)
+                or not data['root'].startswith('/') or len(data['root']) > 512
+                or not isinstance(data.get('driver'), str) or len(data['driver']) > 64
+                or not isinstance(data.get('driver_status'), list)):
+            raise ValueError('invalid storage identity')
+        containerd = ['driver-type', 'io.containerd.snapshotter.v1'] in data['driver_status']
+        result['daemon'] = dict(status='complete', root=data['root'], driver=data['driver'], uses_containerd=containerd)
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        pass
+    try:
+        items = []
+        names = {'Images': 'images', 'Build Cache': 'build_cache', 'Local Volumes': 'volumes', 'Containers': 'containers'}
+        for line in command(docker + ['system', 'df', '--format', STORAGE_DF_FORMAT], 8).splitlines():
+            data = json.loads(line)
+            if not isinstance(data, dict) or data.get('type') not in names:
+                raise ValueError('invalid category')
+            total, active = data.get('total'), data.get('active')
+            if not isinstance(total, str) or not total.isdecimal() or not isinstance(active, str) or not active.isdecimal():
+                raise ValueError('invalid count')
+            total, active = int(total), int(active)
+            reclaimable = re.fullmatch(r'(.+?)(?: \(([0-9]{1,3})%\))?', data.get('reclaimable') or '')
+            if total > 2**31 - 1 or active > total or not reclaimable or int(reclaimable[2] or 0) > 100:
+                raise ValueError('invalid aggregate')
+            size, reclaim = docker_size(data.get('size')), docker_size(reclaimable[1])
+            if reclaim > size:
+                raise ValueError('reclaimable exceeds category size')
+            items.append(dict(id=names[data['type']], total_count=total, active_count=active,
+                              size_bytes=size, engine_reclaimable_bytes=reclaim))
+        if len(items) != 4 or len({row['id'] for row in items}) != 4:
+            raise ValueError('missing or duplicate categories')
+        result['categories'] = dict(status='complete', items=items)
+    except (OSError, ValueError, TypeError, InvalidOperation, subprocess.TimeoutExpired):
+        pass
+    if result['daemon'].get('uses_containerd') is True:
+        try:
+            data = json.loads(command(['/usr/bin/ionice', '-c', '3', '/usr/bin/nice', '-n', '19',
+                                       sys.executable, '-B', '-S', str(Path(__file__).resolve()), '--storage-blobs'], 2))
+            if (not isinstance(data, dict) or data.get('status') not in ('complete', 'incomplete', 'unavailable')
+                    or any(type(data.get(k)) is not int or not 0 <= data[k] <= 2**63-1 for k in
+                           ('count', 'allocated_bytes', 'apparent_bytes', 'modified_hour_bytes', 'modified_day_bytes'))
+                    or (data['status'] == 'complete' and any(type(data.get(k)) is not int or data[k] <= 0
+                                                            for k in ('device', 'inode')))):
+                raise ValueError('invalid blob metadata')
+            result['blobs'] = {key: data[key] for key in ('status', 'count', 'allocated_bytes', 'apparent_bytes',
+                               'modified_hour_bytes', 'modified_day_bytes', 'device', 'inode') if key in data}
+            if data['status'] != 'complete':
+                result['blobs']['reason'] = 'blob metadata incomplete' if data['status'] == 'incomplete' else 'blob metadata unavailable'
+            if data['status'] == 'unavailable':
+                result['blobs'] = dict(status='unavailable', reason='blob metadata unavailable')
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+            pass
+    elif result['daemon'].get('status') == 'complete':
+        result['blobs'] = dict(status='unavailable', reason='containerd image store not observed')
+    states = [result[k]['status'] for k in ('daemon', 'categories', 'blobs')]
+    result['status'] = 'complete' if all(s == 'complete' for s in states) else 'partial' if 'complete' in states else 'unavailable'
+    result['duration_seconds'] = round(monotonic() - started, 3)
+    return result
+
+
+def storage_baseline(diagnostics, state, host):
+    """Only complete allocated observations become a future baseline."""
+    blobs = diagnostics['blobs']
+    blobs['baseline_status'] = 'unavailable'
+    blobs.pop('change_bytes', None)
+    blobs.pop('baseline_sampled_at', None)
+    if blobs['status'] != 'complete':
+        return
+    path = state / 'hoghunter-storage-baseline.json'
+    try:
+        scope = dict(host=host, device=blobs['device'], inode=blobs['inode'])
+        previous = None
+        if path.exists():
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
+                return
+            previous = json.loads(path.read_text())
+            if (not isinstance(previous, dict) or set(previous) != {'scope', 'sampled_at', 'allocated_bytes'}
+                    or not isinstance(previous['scope'], dict)
+                    or type(previous['sampled_at']) not in (int, float) or not math.isfinite(previous['sampled_at'])
+                    or type(previous['allocated_bytes']) is not int or previous['allocated_bytes'] < 0):
+                raise ValueError('invalid baseline')
+        stamp = datetime.datetime.fromisoformat(diagnostics['sampled_at'].replace('Z', '+00:00')).timestamp()
+        if (isinstance(previous, dict) and previous.get('scope') == scope
+                and type(previous.get('sampled_at')) in (int, float) and previous['sampled_at'] < stamp
+                and type(previous.get('allocated_bytes')) is int and previous['allocated_bytes'] >= 0):
+            blobs['change_bytes'] = blobs['allocated_bytes'] - previous['allocated_bytes']
+            blobs['baseline_sampled_at'] = previous['sampled_at']
+            blobs['baseline_status'] = 'complete'
+        else:
+            blobs['baseline_status'] = 'first_observation'
+        atomic_write(path, dict(scope=scope, sampled_at=stamp, allocated_bytes=blobs['allocated_bytes']))
+    except (OSError, ValueError, TypeError, KeyError):
+        blobs.pop('change_bytes', None)
+        blobs.pop('baseline_sampled_at', None)
+        blobs['baseline_status'] = 'unavailable'
+
+
+def supplement(snapshot, home, measure=directory_bytes, inventory=None, services=service_state, shellular=shellular_state, extra_volume=Path('/mnt/fleet-extra'), statvfs_func=os.statvfs, ismount_func=os.path.ismount, containers=None, processes=None, coolify=None, collect_live=False, pressure=None, storage=None):
     result = dict(snapshot)
+    devices = dict(snapshot.get('devices', {}))
+    if extra_volume and ismount_func(str(extra_volume)):
+        try:
+            st = statvfs_func(str(extra_volume))
+            free = st.f_bavail * st.f_frsize
+            total = st.f_blocks * st.f_frsize
+            if total > 0:
+                total_gb = int(round(total / (1024**3)))
+                if 'fleet_extra' not in devices and 'fleet-extra' not in devices:
+                    devices['fleet_extra'] = {
+                        'mount': str(extra_volume),
+                        'free_bytes': free,
+                        'note': f"{total_gb}GB disk: extra volume {extra_volume}"
+                    }
+        except OSError:
+            pass
+    result['devices'] = devices
     directories = {row['path']: row for row in snapshot.get('largest_dirs', [])}
     for relative in DIRECTORIES:
         path = home / relative
@@ -159,20 +689,43 @@ def supplement(snapshot, home, measure=directory_bytes, inventory=None, services
             directories[str(path)] = dict(path=str(path), bytes=size)
     result['largest_dirs'] = list(directories.values())
     names, complete = process_inventory() if inventory is None else inventory
-    rows = tool_statuses(names, complete)
+    if containers is None and collect_live:
+        containers = container_inventory()
+    rows = tool_statuses(names, complete, containers=containers)
     for row in rows:
         if row['id'] in SERVICE_UNITS and row['state'] != 'running':
             state = services(SERVICE_UNITS[row['id']])
             if state is not None:
                 row['state'] = state
                 row['count'] = 1 if state == 'running' else 0
+                row['reason'] = f'{SERVICE_UNITS[row["id"]]} is {state}'
     for row in rows:
         if row['id'] == 'shellular':
             state = shellular(home)
             if state in {'running', 'stopped'} or row['state'] not in {'running', 'stopped'}:
                 row['state'] = state
                 row['count'] = 1 if state == 'running' else 0
+                row['reason'] = f'shellular manager says {state}'
     result['tool_statuses'] = rows
+    if collect_live:
+        # The CPU tick window sleeps and the docker reads wait on the daemon;
+        # neither needs the other, so they overlap and a slow daemon no longer
+        # adds its time on top of the tick window.  Each keeps its own timeouts.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            processes_future = pool.submit(top_processes if processes is None else processes)
+            coolify_future = pool.submit(coolify_resources if coolify is None else coolify)
+            pressure_future = pool.submit(memory_pressure if pressure is None else pressure)
+            storage_future = pool.submit(storage_diagnostics if storage is None else storage)
+            result['storage_diagnostics'] = storage_future.result()
+            result['memory_pressure'] = pressure_future.result()
+            result['processes'] = processes_future.result()
+            result['coolify'] = coolify_future.result()
+    elif processes is not None:
+        result['processes'] = processes()
+    elif coolify is not None:
+        result['coolify'] = coolify()
+    if not collect_live and pressure is not None:
+        result['memory_pressure'] = pressure()
     return result
 
 
@@ -257,15 +810,22 @@ def atomic_write(path, value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--snapshot', type=Path, required=True)
+    parser.add_argument('--storage-blobs', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--snapshot', type=Path)
     parser.add_argument('--history', type=Path, default=Path('/root/.vps-storage-watch'))
     parser.add_argument('--home', type=Path, default=Path.home())
     args = parser.parse_args()
+    if args.storage_blobs:
+        print(json.dumps(blob_metadata(), separators=(',', ':')))
+        return
+    if args.snapshot is None:
+        parser.error('--snapshot is required')
     original = json.loads(args.snapshot.read_text())
     # Prevent applying measurements to a snapshot published during the scan.
-    output = supplement(original, args.home)
+    output = supplement(original, args.home, collect_live=True)
     output['database_samples'] = database_samples(original, args.history)
     output['directory_samples'] = directory_samples(output, args.history)
+    storage_baseline(output['storage_diagnostics'], args.history, output.get('host', ''))
     current = json.loads(args.snapshot.read_text())
     if current != original:
         raise SystemExit('Snapshot changed during collection; leaving it untouched.')
