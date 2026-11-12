@@ -154,6 +154,14 @@ struct ServerTabContent: View {
     /// The screenshot lane's flag.  The rows are far down a lazy list, so the
     /// frame's confirmation hangs off the top card instead.
     @State private var previewProcess: PendingServerProcessAction?
+    /// The section the person last looked at.  A screenshot flag wins, so a
+    /// capture never depends on what an earlier run stored.
+    @AppStorage("hoghunter.ios.serverSection") private var storedSection = CompanionServerSection.overview.rawValue
+
+    private var section: CompanionServerSection {
+        CompanionServerSection.screenshotOverride(arguments: ProcessInfo.processInfo.arguments)
+            ?? CompanionServerSection.stored(storedSection)
+    }
 
     static let optInNote = "Server status on iPhone is off.\u{00A0} Turn on Allow iPhone to See Server Status in Hog Hunter Settings > iPhone on your Mac."
     static let linkNote = "Server status is on, but it reaches only a phone paired with its own token on your local network or Tailscale.\u{00A0} Connect that way, or pair this phone again, to see it."
@@ -179,14 +187,34 @@ struct ServerTabContent: View {
                 if server.resolvedState() != .notConfigured {
                     refreshSection
                 }
+                if server.hasReading {
+                    sectionPicker
+                }
             }
             if server.hasReading {
                 ServerControlNote(snapshot: snapshot, model: model)
-                ServerReadings(server: server, controls: ServerRowControls(snapshot: snapshot, model: model))
-                if server.host != nil {
+                ServerReadings(server: server, section: section, controls: ServerRowControls(snapshot: snapshot, model: model))
+                if server.host != nil, section.showsMaintenanceControls {
+                    IncludeInMacMaintenanceSection(snapshot: snapshot, model: model)
                     ServerMaintenanceSection(snapshot: snapshot, model: model)
                 }
             }
+        }
+    }
+
+    /// The Mac's server sections, as a segmented picker under the cards.
+    private var sectionPicker: some View {
+        Section {
+            Picker("Server Section", selection: Binding(
+                get: { section },
+                set: { storedSection = $0.rawValue }
+            )) {
+                ForEach(CompanionServerSection.allCases) { choice in
+                    Text(choice.rawValue).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
         }
     }
 
@@ -360,24 +388,29 @@ private enum ServerScreenshotFrame {
 /// Everything the block carries, in the order the Mac's card shows it.
 private struct ServerReadings: View {
     let server: CompanionServerStatus
+    let section: CompanionServerSection
     let controls: ServerRowControls
 
     var body: some View {
-        let frame = ServerScreenshotFrame.current
-        if frame == .top {
+        // The details and controls frames start the Overview further down;
+        // every other section shows its whole part.
+        let frame = section == .overview ? ServerScreenshotFrame.current : .top
+        if section.showsActivityReadings, frame == .top {
             activitySection
             pressureSection
         }
-        if frame != .controls {
+        if section.showsStorageReadings, frame != .controls {
             devicesSection
             sizeSection("App Databases", rows: server.databases)
             sizeSection("Directories", rows: server.directories)
             diagnosticsSection
+        }
+        if section.showsTools, frame != .controls {
             toolsSection
         }
         if frame != .details {
-            processesSection
-            workloadsSection
+            if section.showsProcesses { processesSection }
+            if section.showsWorkloads { workloadsSection }
         }
     }
 
@@ -428,13 +461,21 @@ private struct ServerReadings: View {
         if let devices = server.devices, !devices.isEmpty {
             Section("Server Disks") {
                 ForEach(devices) { device in
-                    MeterRow(
-                        title: device.title,
-                        value: device.usedText,
-                        percent: device.usedPercent,
-                        severity: device.severity,
-                        detail: deviceDetail(device)
-                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        MeterRow(
+                            title: device.title,
+                            value: device.usedText,
+                            percent: device.usedPercent,
+                            severity: device.severity,
+                            detail: deviceDetail(device)
+                        )
+                        // The Mac shows this in the disk's tooltip.
+                        if let note = device.note, !note.isEmpty {
+                            Text(note)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
         }
@@ -628,6 +669,12 @@ private struct ServerReadings: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                            if let reason = workload.protectionReason, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                         }
                         Spacer(minLength: 8)
                         Text(workload.cpuText ?? ServerFormat.dash)
@@ -840,7 +887,19 @@ private struct ServerWorkloadMenu: View {
     }
 
     var body: some View {
-        if controls.snapshot.remoteServerControlAllowed == true, workload.actions?.isEmpty == false {
+        if controls.snapshot.remoteServerControlAllowed == true, workload.actions?.isEmpty == true {
+            // A protected workload offers nothing.  The Mac keeps a disabled
+            // menu with the reason as its help; the phone keeps a menu that
+            // says the same thing.
+            Menu {
+                Button(workload.protectionReason ?? "No actions are offered for this workload.") {}
+                    .disabled(true)
+            } label: {
+                Label("No actions for \(workload.name)", systemImage: "lock")
+                    .labelStyle(.iconOnly)
+            }
+            .accessibilityHint(workload.protectionReason ?? "Protected")
+        } else if controls.snapshot.remoteServerControlAllowed == true, workload.actions?.isEmpty == false {
             Menu {
                 if workload.actions?.contains("stop") == true {
                     Button("Stop Workload…", role: .destructive) { pendingAction = "stop" }
@@ -867,6 +926,52 @@ private struct ServerWorkloadMenu: View {
                 Button("Cancel", role: .cancel) { pendingAction = nil }
             } message: {
                 Text("This interrupts the server workload and may lose unsaved work.\u{00A0} Coolify may restart workloads it is configured to keep alive, and changed or protected containers are refused.")
+            }
+        }
+    }
+}
+
+/// The Mac's Include in Mac Maintenance switch, beside server maintenance.  It
+/// is the Maintain tab's remote server step: the same row, the same
+/// confirmation and the same POST /v1/maintain/settings call, and it shows only
+/// where the Maintain tab would let the switch be used.
+private struct IncludeInMacMaintenanceSection: View {
+    let snapshot: CompanionSnapshot
+    @Bindable var model: CompanionModel
+    @State private var pendingChange: PendingMaintainChange?
+
+    private var live: CompanionSnapshot { model.snapshot ?? snapshot }
+    private var step: CompanionMaintainStepSetting? {
+        live.maintain?.stepSettings?.first(where: { $0.stepId == Self.stepId })
+    }
+
+    static let stepId = "coolify_remote"
+
+    var body: some View {
+        if live.remoteMaintainAllowed == true, let step {
+            Section {
+                Toggle("Include in Mac Maintenance", isOn: Binding(
+                    get: { step.isEnabled },
+                    set: { pendingChange = MaintainView.stepChange(step, turningOn: $0, host: live.hostName) }
+                ))
+                .disabled(model.isApplyingMaintainSettings)
+                .confirmationDialog(
+                    pendingChange?.title ?? "",
+                    isPresented: Binding(get: { pendingChange != nil }, set: { if !$0 { pendingChange = nil } }),
+                    titleVisibility: .visible
+                ) {
+                    if let change = pendingChange {
+                        Button(change.confirmLabel) {
+                            pendingChange = nil
+                            Task { await model.updateMaintainSettings(change.update) }
+                        }
+                    }
+                    Button("Cancel", role: .cancel) { pendingChange = nil }
+                } message: {
+                    Text(pendingChange?.message ?? "")
+                }
+            } footer: {
+                Text("Uses the Mac's maintenance schedule, and the server's own schedule is unchanged.\u{00A0} Manual actions work with this option off.")
             }
         }
     }

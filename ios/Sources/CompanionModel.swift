@@ -1877,7 +1877,7 @@ final class CompanionModel {
                 CompanionServerDevice(id: "root", title: "Disk (/)", mount: "/", freeText: "117 GB", totalText: "300 GB", usedPercent: 61, usedText: "61% used", severity: "calm"),
                 CompanionServerDevice(id: "data", title: "Data Volume (/mnt/data)", mount: "/mnt/data", freeText: "143 GB", totalText: "1024 GB", usedPercent: 86, usedText: "86% used", severity: "elevated"),
                 // A device whose size the server does not report: free space and a dash.
-                CompanionServerDevice(id: "tmp", title: "Tmpfs (/tmp)", mount: "/tmp", freeText: "15.2 GB"),
+                CompanionServerDevice(id: "tmp", title: "Tmpfs (/tmp)", mount: "/tmp", freeText: "15.2 GB", note: "Memory-backed, so the server does not report its size."),
             ],
             databases: [
                 CompanionServerSizeRow(id: "orders", name: "Orders", bytesText: "18.4 GB", changeText: "↑1.2%", changePercent: 1.2),

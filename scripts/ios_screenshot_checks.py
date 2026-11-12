@@ -132,6 +132,13 @@ def scene_problem(scene, text):
         "cleaner-partial": ("disk cleaner", "partial scan", "lower bounds", "scan deeper", "clean selected"),
         "cleaner-extreme": ("disk cleaner", "extreme clean", "estimated to move or remove", "rescan"),
         "issue-actions": ("flagged issues", "runaway cpu hog", "quit", "clean", "retry"),
+        # The Server tab's sections (HH-224).  The details and controls frames
+        # start the Overview further down; the others show the picker.
+        "server-details": ("server disks", "memory backed", "app databases"),
+        "server-controls": ("top server processes", "coolify workloads", "protected database"),
+        "server-activity": ("overview", "activity", "storage", "maintenance", "server activity", "paging activity"),
+        "server-storage": ("overview", "maintenance", "server disks", "memory backed", "app databases"),
+        "server-maintenance": ("overview", "activity", "include in mac maintenance", "scan server"),
         "mac-settings": ("sampling display", "active refresh when open", "background refresh when closed", "menu bar shows", "show percentage in menu bar", "cpu rows show"),
     }
     if scene not in required:

@@ -111,6 +111,8 @@ targets:
       # Security-only token store, same reason: the phone-token round trip is
       # worth a maintained test even though the phone ships no unit harness.
       - path: ios/Sources/CompanionKeychain.swift
+      # Foundation-only: which rows each Server tab section shows.
+      - path: ios/Sources/CompanionServerSection.swift
     dependencies:
       - target: HogHunter
     settings:
