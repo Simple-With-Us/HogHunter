@@ -9,6 +9,11 @@ private enum DashboardMountedDrives {
     static let shared = MountedDriveStore.shared
 }
 
+private struct ServerOverviewSummaryHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 enum PanelTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case activity = "Activity"
@@ -39,6 +44,7 @@ struct HogHunterPanel: View {
     @State private var driveReadAttempted = false
     @State private var mountedDrivePage = 0
     @State private var pendingQuit: HogRow?
+    @State private var serverOverviewSummaryHeight: CGFloat = 180
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
     @State private var storageSubTab: StorageSubTab = .apps
@@ -115,6 +121,11 @@ struct HogHunterPanel: View {
                     if selectedTab == .activity && hostScope == .mac {
                         activityContent
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    } else if selectedTab == .overview {
+                        Group {
+                            if hostScope == .mac { overview } else { serverOverview }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     } else if selectedTab == .maintenance && hostScope == .mac {
                         MaintainView(store: store.maintain, showHeader: true)
                     } else if (selectedTab != .network || hostScope != .mac)
@@ -308,6 +319,29 @@ struct HogHunterPanel: View {
     /// directories and tool states, so each section shows the part of it that
     /// belongs there.  The two sections the snapshot cannot answer say so
     /// plainly instead of showing the same card every other section shows.
+    private var serverOverview: some View {
+        GeometryReader { geometry in
+            VStack(alignment: .leading, spacing: 12) {
+                ScrollView {
+                    VPSResourceCardView(store: store.maintain.vpsStore, showsProcesses: false)
+                        .background(GeometryReader { summary in
+                            Color.clear.preference(key: ServerOverviewSummaryHeight.self, value: summary.size.height)
+                        })
+                }
+                .frame(height: min(serverOverviewSummaryHeight, geometry.size.height * 0.45))
+                .onPreferenceChange(ServerOverviewSummaryHeight.self) { height in
+                    if height > 0 { serverOverviewSummaryHeight = height }
+                }
+                Text("Top Activity").font(.headline)
+                serverActivityColumn
+                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
+                if let outcome = serverActivityControl.lastOutcome {
+                    Text(outcome.message).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     private var serverPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
@@ -386,56 +420,35 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                cpuHistoryCard
-                Meter(title: "Memory", value: store.pulse.memoryPercent,
-                      caption: store.memorySizeCaption,
-                      severity: Severity.forPressure(store.pulse.pressure),
-                      accessibilityDetail: store.memoryCaption)
-                    // The memory meter keeps its size; the CPU graph takes
-                    // the rest of the width, because a graph squeezed into
-                    // half a card is not worth having.
-                    .frame(width: 260)
-            }
-            .frame(height: 94)
-            pillRow(memoryPills + thermalPills)
-            capacityCards
-            HStack {
-                Text("Top Activity").font(.headline)
-                Spacer()
-                Button("Open Activity") { selectedTab = .activity }
-                    .buttonStyle(.link)
-            }
-            ForEach(Array(store.rows.prefix(6))) { row in
-                HStack(spacing: 8) {
-                    Text(row.name).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale,
-                                       coreCount: store.pulse.coreCount))
-                    Text(HogFormat.memory(row.memoryBytes))
+        GeometryReader { geometry in
+            VStack(alignment: .leading, spacing: 12) {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 10) {
+                            cpuHistoryCard
+                            Meter(title: "Memory", value: store.pulse.memoryPercent,
+                                  caption: store.memorySizeCaption,
+                                  severity: Severity.forPressure(store.pulse.pressure),
+                                  accessibilityDetail: store.memoryCaption)
+                                .frame(width: 260)
+                        }
+                        .frame(height: 94)
+                        pillRow(memoryPills + thermalPills)
+                        capacityCards
+                        if !store.maintain.vpsStore.configuredHost.isEmpty {
+                            serverStrip
+                        }
+                        captions
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .font(.system(size: 11).monospacedDigit())
-            }
-            if store.rows.isEmpty {
-                Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
-                    .foregroundStyle(.secondary)
-            }
-            captions
-            // The server is a separate thing from this Mac's readings, so it
-            // sits at the bottom of the window with a rule above it rather
-            // than tucked under Top Activity as if it were one more row.
-            if !store.maintain.vpsStore.configuredHost.isEmpty {
-                Divider()
-                    .padding(.top, 4)
-                Text("Server").font(.headline)
-                serverStrip
+                .frame(height: min(320, geometry.size.height * 0.60))
+                .accessibilityLabel("Overview summary, scroll for capacity and captions")
+                activitySection
+                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
             }
         }
     }
-
-    /// True while the pointer is over the activity list, which opens it up.
-    @State private var activityHovered = false
 
     /// Shared by the menu bar and the dashboard.  Clicking it reads the Mac again.
     private var lateReadingsControl: some View {
@@ -475,17 +488,20 @@ struct HogHunterPanel: View {
             // Area for prioritized flagged issues / system alerts
             flaggedIssuesSection
 
-            // Scrollable consolidated telemetry
-            ScrollView(.vertical, showsIndicators: false) {
+            // Keep the summary and footer stable. Activity owns the remaining
+            // height instead of changing its row count when the pointer moves.
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 9) {
                     cpuSection
                     ramSection
                     storageSection
-                    activitySection
                 }
-                .padding(.trailing, 2)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxHeight: 520)
+            .frame(height: 240)
+            .accessibilityLabel("Resource summary, scroll for more drives")
+            activitySection
+                .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
 
             Divider()
 
@@ -1043,14 +1059,13 @@ struct HogHunterPanel: View {
                     serverActivityColumn
                 }
             }
-            .onHover { inside in
-                withAnimation(.easeInOut(duration: 0.12)) { activityHovered = inside }
-            }
+            .frame(maxHeight: .infinity, alignment: .topLeading)
 
             if let outcome = serverActivityControl.lastOutcome {
                 Text(outcome.message).font(.system(size: 9)).foregroundStyle(.secondary)
             }
         }
+        .frame(minHeight: 100)
     }
 
     private var macActivityColumn: some View {
@@ -1066,28 +1081,39 @@ struct HogHunterPanel: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
             }
-            ForEach(Array(store.rows.prefix(activityRowLimit))) { row in
-                HStack(spacing: 6) {
-                    Text(row.name)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .lineLimit(1)
-                    Spacer()
-                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
-                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
-                    Text(HogFormat.memory(row.memoryBytes))
-                        .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(.secondary)
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    ForEach(store.rows) { row in
+                        HStack(spacing: 6) {
+                            Text(row.name)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .lineLimit(1)
+                            Spacer()
+                            Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
+                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(row.cpuPercent >= 100 ? .orange : .primary)
+                            Text(HogFormat.memory(row.memoryBytes))
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Button("Stop…") { pendingQuit = row }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
+                                .disabled(!row.canQuit || row.keys.isEmpty)
+                                .help(row.quitBlockReason ?? "Ask this Mac process to quit after confirmation")
+                                .accessibilityLabel("Stop \(row.name) on Mac")
+                        }
+                    }
+                    if store.rows.isEmpty {
+                        Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            if store.rows.isEmpty {
-                Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            }
+            .accessibilityLabel("Mac activity, scroll for more processes")
         }
         .padding(5)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
     }
 
@@ -1104,41 +1130,42 @@ struct HogHunterPanel: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
             }
-            ForEach(serverProcesses.prefix(activityRowLimit)) { process in
-                HStack(spacing: 6) {
-                    Text(process.name)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .lineLimit(1)
-                    if let container = process.container, !container.isEmpty {
-                        Text(container)
-                            .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    ForEach(serverProcesses) { process in
+                        HStack(spacing: 6) {
+                            Text(process.name)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .lineLimit(1)
+                            if let container = process.container, !container.isEmpty {
+                                Text(container)
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text(String(format: "%.0f%%", process.cpuPercent))
+                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(process.cpuPercent >= 100 ? .orange : .primary)
+                            Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
+                                                 control: serverActivityControl, showsStopButton: true)
+                        }
                     }
-                    Spacer()
-                    Text(String(format: "%.0f%%", process.cpuPercent))
-                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(process.cpuPercent >= 100 ? .orange : .primary)
-                    Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
-                        .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
-                                         control: serverActivityControl)
+                    if serverProcesses.isEmpty {
+                        Text("No processes in the server's latest reading.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            if serverProcesses.isEmpty {
-                Text("No processes in the server's latest reading.")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            }
+            .accessibilityLabel("Server activity, scroll for more processes")
         }
         .padding(5)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private var activityRowLimit: Int {
-        activityHovered ? 6 : 3
     }
 
     /// One wording for every volume: how much of it is spoken for, and how

@@ -313,7 +313,96 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
     }
 
-    private func populatedStore(_ preferences: UserDefaults, maintain: MaintainStore? = nil) -> HogStore {
+    func testOverviewActivityUsesRemainingHeightWithMacAndServerStops() async throws {
+        let suite = "hh-overview-scroll-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(#"{"coolify_ssh_host":"fixture"}"#.utf8)
+            .write(to: directory.appendingPathComponent("config.json"))
+        let processes = (0..<30).map { index in
+            VPSProcess(pid: 90000 + index, name: "Server worker \(index + 1)",
+                startTime: Int64(index + 1), owner: "fixture", container: nil,
+                cpuPercent: Double(95 - index), memoryBytes: 300_000_000,
+                bootID: "fixture-boot", allowedActions: index == 0 ? [] : ["quit"],
+                protectionReason: index == 0 ? "Protected fixture" : nil)
+        }
+        let snapshot = VPSStatusSnapshot(generatedAt: ISO8601DateFormatter().string(from: Date()),
+            host: "Fixture server", devices: ["root": VPSDevice(mount: "/", freeBytes: 120_000_000_000, note: "500GB disk")],
+            cpu: try JSONDecoder().decode(VPSCPU.self, from: Data(#"{"pct":32,"load1":2.1,"cores":16}"#.utf8)),
+            memory: try JSONDecoder().decode(VPSMemory.self, from: Data(#"{"total_bytes":32000000000,"used_bytes":12000000000,"available_bytes":20000000000}"#.utf8)),
+            processes: processes)
+        let maintain = MaintainStore(supportDirectory: directory, repoRoot: directory,
+            launcher: { _ in XCTFail("No maintenance action in a layout test"); return false },
+            vpsFetcher: { _ in snapshot })
+        maintain.vpsStore.setHost("fixture")
+        maintain.vpsStore.fetch(force: true)
+        for _ in 0..<100 where maintain.vpsStore.isLoading { try await Task.sleep(for: .milliseconds(20)) }
+        let store = populatedStore(preferences, maintain: maintain, processCount: 30)
+        XCTAssertGreaterThan(store.rows.count, 20)
+        for _ in 0..<100 where maintain.vpsStore.snapshot == nil { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(maintain.vpsStore.snapshot?.processes?.count, 30)
+        XCTAssertFalse(store.tick(), "No live sampler in layout validation")
+        for (name, quick, size) in [
+            ("quick", true, CGSize(width: 720, height: 640)),
+            ("overview-minimum", false, CGSize(width: 860, height: 580)),
+            ("overview-grown", false, CGSize(width: 1050, height: 780))
+        ] {
+            let view = HogHunterPanel(isQuickView: quick).environmentObject(store)
+                .defaultAppStorage(preferences).frame(width: size.width, height: size.height)
+            let host = NSHostingView(rootView: view)
+            host.appearance = NSAppearance(named: .aqua)
+            XCTAssertLessThanOrEqual(host.fittingSize.width, size.width + 1)
+            XCTAssertLessThanOrEqual(host.fittingSize.height, size.height + 1)
+            try render(host, size: size, name: "hh-overview-" + name)
+            try render(host, size: size, name: "hh-overview-" + name + "-scrolled", scrollToEnd: true)
+        }
+        let drives = MountedDriveStore(probe: {
+            (1...12).map { index in
+                MountedDriveCandidate(name: "Fixture drive \(index)", path: "/Volumes/Fixture\(index)",
+                    isLocal: true, isHidden: false, isExternalPhysical: true,
+                    totalBytes: 500_000_000_000, availableBytes: 50_000_000_000)
+            }
+        })
+        await drives.refresh()
+        let crowded = NSHostingView(rootView: HogHunterPanel(isQuickView: true, mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences).frame(width: 720, height: 640))
+        crowded.appearance = NSAppearance(named: .aqua)
+        try render(crowded, size: CGSize(width: 720, height: 640), name: "hh-overview-quick-many-drives")
+        try render(crowded, size: CGSize(width: 720, height: 640), name: "hh-overview-quick-many-drives-scrolled", scrollToEnd: true)
+        let crowdedDashboard = NSHostingView(rootView: HogHunterPanel(mountedDrives: drives)
+            .environmentObject(store).defaultAppStorage(preferences).frame(width: 860, height: 580))
+        crowdedDashboard.appearance = NSAppearance(named: .aqua)
+        try render(crowdedDashboard, size: CGSize(width: 860, height: 580), name: "hh-overview-many-drives-minimum")
+        try render(crowdedDashboard, size: CGSize(width: 860, height: 580), name: "hh-overview-many-drives-minimum-scrolled", scrollToEnd: true)
+        preferences.set("Server", forKey: "dashboardHostScope")
+        for (name, size) in [("minimum", CGSize(width: 860, height: 580)),
+                             ("grown", CGSize(width: 1050, height: 780))] {
+            let host = NSHostingView(rootView: HogHunterPanel().environmentObject(store)
+                .defaultAppStorage(preferences).frame(width: size.width, height: size.height))
+            host.appearance = NSAppearance(named: .aqua)
+            try render(host, size: size, name: "hh-overview-server-" + name)
+            try render(host, size: size, name: "hh-overview-server-" + name + "-scrolled", scrollToEnd: true)
+        }
+        preferences.set("This Mac", forKey: "dashboardHostScope")
+        let empty = HogStore(historyURL: directory.appendingPathComponent("empty.sqlite"),
+            defaults: preferences, maintain: maintain, startImmediately: false)
+        for (name, quick, size) in [("empty-quick", true, CGSize(width: 720, height: 640)),
+                                   ("empty-minimum", false, CGSize(width: 860, height: 580))] {
+            let host = NSHostingView(rootView: HogHunterPanel(isQuickView: quick, mountedDrives: drives)
+                .environmentObject(empty).defaultAppStorage(preferences).frame(width: size.width, height: size.height))
+            host.appearance = NSAppearance(named: .aqua)
+            try render(host, size: size, name: "hh-overview-" + name)
+        }
+        XCTAssertTrue(processes[1].can(action: "quit"))
+        XCTAssertFalse(processes[0].can(action: "quit"))
+        XCTAssertNil(maintain.lastError)
+    }
+
+    private func populatedStore(_ preferences: UserDefaults, maintain: MaintainStore? = nil, processCount: Int = 7) -> HogStore {
         let store = HogStore(historyURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("hh174-populated-layout-\(UUID().uuidString).sqlite"),
             defaults: preferences, maintain: maintain, startImmediately: false)
@@ -346,10 +435,11 @@ final class StorageGrowthLayoutTests: XCTestCase {
             ("Backup Helper", 15, 900_000_000),
             ("Terminal", 6, 420_000_000),
         ]
-        let processes = processRows.enumerated().map { index, row in
+        let processes = (0..<processCount).map { index in
+            let row = processRows[index % processRows.count]
             let pid = pid_t(90_000 + index)
             return ProcessSample(key: ProcessKey(pid: pid, startTime: UInt64(index + 1)),
-                ppid: 1, uid: getuid(), name: row.0,
+                ppid: 1, uid: getuid(), name: processCount > 7 ? "\(row.0) \(index + 1)" : row.0,
                 path: "/fixture/\(index)", cpuPercent: row.1, hasBaseline: true,
                 footprintBytes: row.2, residentBytes: row.2, threadCount: 8,
                 diskReadBytesPerSec: 0, diskWriteBytesPerSec: 0, idleWakeupsPerSec: 0)
@@ -360,12 +450,28 @@ final class StorageGrowthLayoutTests: XCTestCase {
         return store
     }
 
-    private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {
+    private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String,
+                                 scrollToEnd: Bool = false) throws {
         host.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        if scrollToEnd {
+            func scrollViews(_ view: NSView) -> [NSScrollView] {
+                (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap { scrollViews($0) }
+            }
+            let lists = scrollViews(host).filter { ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height }
+            XCTAssertFalse(lists.isEmpty, "The full process list must scroll, not truncate rows")
+            for list in lists {
+                guard let document = list.documentView else { continue }
+                let y = document.isFlipped ? max(0, document.bounds.height - list.contentView.bounds.height) : 0
+                list.contentView.scroll(to: NSPoint(x: 0, y: y))
+                list.reflectScrolledClipView(list.contentView)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            host.layoutSubtreeIfNeeded()
+        }
         let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: rep)
         let directory = ProcessInfo.processInfo.environment["HOGHUNTER_RENDER_DIR"]
@@ -373,6 +479,28 @@ final class StorageGrowthLayoutTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         try XCTUnwrap(rep.representation(using: .png, properties: [:]))
             .write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + ".png"))
+        // Legacy component fixtures size to their intrinsic content once
+        // attached to a window. Compare the settled pre-hover viewport, not
+        // the requested outer size, so this checks hover rather than sizing.
+        let preHoverSize = host.bounds.size
+        // Deliver pointer motion to this fixture window only. No global
+        // pointer, sampler, process action or server request is involved.
+        window.acceptsMouseMovedEvents = true
+        for point in [NSPoint(x: size.width * 0.35, y: size.height * 0.25),
+                      NSPoint(x: size.width * 0.8, y: size.height * 0.2)] {
+            if let event = NSEvent.mouseEvent(with: .mouseMoved, location: point,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 0, pressure: 0) {
+                window.sendEvent(event)
+            }
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(host.bounds.size, preHoverSize, "Hover must not resize the activity area")
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            .write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + "-hover.png"))
         window.contentView = nil
     }
 }
