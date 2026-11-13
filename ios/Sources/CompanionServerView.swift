@@ -193,8 +193,15 @@ struct ServerTabContent: View {
             }
             if server.hasReading {
                 ServerControlNote(snapshot: snapshot, model: model)
+                // A section capture puts the maintenance controls ahead of the
+                // tool rows, so the switch and Scan Server sit on screen.
+                let controlsFirst = frame == .section
+                if controlsFirst, server.host != nil, section.showsMaintenanceControls {
+                    IncludeInMacMaintenanceSection(snapshot: snapshot, model: model)
+                    ServerMaintenanceSection(snapshot: snapshot, model: model)
+                }
                 ServerReadings(server: server, section: section, controls: ServerRowControls(snapshot: snapshot, model: model))
-                if server.host != nil, section.showsMaintenanceControls {
+                if !controlsFirst, server.host != nil, section.showsMaintenanceControls {
                     IncludeInMacMaintenanceSection(snapshot: snapshot, model: model)
                     ServerMaintenanceSection(snapshot: snapshot, model: model)
                 }
