@@ -31,11 +31,18 @@ enum CompanionServerSection: String, CaseIterable, Identifiable {
     /// The screenshot lane's flags.  A flag picks the section whatever the
     /// phone last remembered, so a capture does not depend on stored state.
     static func screenshotOverride(arguments: [String]) -> CompanionServerSection? {
+        // The Details and Controls frames are slices of the Overview, so they
+        // win over a stored section as well.
+        if arguments.contains("-HogHunterServerDetails") || arguments.contains("-HogHunterServerControls") { return .overview }
         if arguments.contains("-HogHunterServerActivity") { return .activity }
         if arguments.contains("-HogHunterServerStorage") { return .storage }
         if arguments.contains("-HogHunterServerMaintenance") { return .maintenance }
         return nil
     }
+
+    /// The flags are read once: they cannot change while the app runs, and the
+    /// view body would otherwise copy the process arguments on every update.
+    static let screenshotSection = screenshotOverride(arguments: ProcessInfo.processInfo.arguments)
 
     /// The section a stored value names, Overview for anything else.
     static func stored(_ raw: String) -> CompanionServerSection {

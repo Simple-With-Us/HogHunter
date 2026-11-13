@@ -159,8 +159,7 @@ struct ServerTabContent: View {
     @AppStorage("hoghunter.ios.serverSection") private var storedSection = CompanionServerSection.overview.rawValue
 
     private var section: CompanionServerSection {
-        CompanionServerSection.screenshotOverride(arguments: ProcessInfo.processInfo.arguments)
-            ?? CompanionServerSection.stored(storedSection)
+        CompanionServerSection.screenshotSection ?? CompanionServerSection.stored(storedSection)
     }
 
     static let optInNote = "Server status on iPhone is off.\u{00A0} Turn on Allow iPhone to See Server Status in Hog Hunter Settings > iPhone on your Mac."
@@ -384,7 +383,7 @@ private enum ServerScreenshotFrame {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("-HogHunterServerControls") { return .controls }
         if arguments.contains("-HogHunterServerDetails") { return .details }
-        if CompanionServerSection.screenshotOverride(arguments: arguments) != nil { return .section }
+        if arguments.contains("-HogHunterServerActivity") || arguments.contains("-HogHunterServerStorage") || arguments.contains("-HogHunterServerMaintenance") { return .section }
         return .top
     }
 }
@@ -973,6 +972,20 @@ private struct IncludeInMacMaintenanceSection: View {
                     Button("Cancel", role: .cancel) { pendingChange = nil }
                 } message: {
                     Text(pendingChange?.message ?? "")
+                }
+                // A refusal, an unreachable Mac or a failed request lands in
+                // maintainSettingsError; show it as the Maintain tab does, so
+                // the switch does not snap back without a word.
+                .alert(
+                    "Could Not Change That",
+                    isPresented: Binding(
+                        get: { model.maintainSettingsError != nil },
+                        set: { if !$0 { model.maintainSettingsError = nil } }
+                    )
+                ) {
+                    Button("OK", role: .cancel) { model.maintainSettingsError = nil }
+                } message: {
+                    Text(model.maintainSettingsError ?? "")
                 }
             } footer: {
                 Text("Uses the Mac's maintenance schedule, and the server's own schedule is unchanged.\u{00A0} Manual actions work with this option off.")

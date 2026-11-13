@@ -66,4 +66,10 @@ final class CompanionServerSectionTests: XCTestCase {
         XCTAssertEqual(Section.stored("storage"), .overview)
         XCTAssertEqual(Section.stored("Retired"), .overview)
     }
+
+    func testDetailsAndControlsFramesWinOverAStoredSection() {
+        XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServerDetails"]), .overview)
+        XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServerControls"]), .overview)
+        XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServerStorage"]), .storage)
+    }
 }
