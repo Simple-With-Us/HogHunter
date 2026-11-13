@@ -181,15 +181,16 @@ struct ServerTabContent: View {
             machinesSection(server: nil)
             noteSection(icon: "network.slash", title: "Not Available on This Connection", note: Self.linkNote)
         case .available(let server):
-            if ServerScreenshotFrame.current == .top {
+            let frame = ServerScreenshotFrame.current
+            if frame == .top {
                 machinesSection(server: server)
                 stateSection(server)
                 if server.resolvedState() != .notConfigured {
                     refreshSection
                 }
-                if server.hasReading {
-                    sectionPicker
-                }
+            }
+            if frame == .top || frame == .section, server.hasReading {
+                sectionPicker
             }
             if server.hasReading {
                 ServerControlNote(snapshot: snapshot, model: model)
@@ -375,12 +376,15 @@ private struct MachineCard: View {
 /// The screenshot lane's flags.  A UI capture sees only the top of a long list,
 /// so a flag starts the list further down and every row gets looked at.
 private enum ServerScreenshotFrame {
-    case top, details, controls
+    /// `section` is a capture of one picker section: the cards above it are
+    /// left off so the section's own rows sit on screen under the picker.
+    case top, details, controls, section
 
     static var current: ServerScreenshotFrame {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("-HogHunterServerControls") { return .controls }
         if arguments.contains("-HogHunterServerDetails") { return .details }
+        if CompanionServerSection.screenshotOverride(arguments: arguments) != nil { return .section }
         return .top
     }
 }
