@@ -43,7 +43,9 @@ UI changes must be covered by automated visual verification where feasible: Play
 
 ## Optional Infisical
 
-Infisical is optional.  Without an explicitly validated connection, Hog Hunter uses local settings and defaults.  The contract is [`INFISICAL.md`](INFISICAL.md); read it before touching settings.  The Mac owns this integration; there is no backend and the iPhone never receives Infisical credentials.  Settings > Advanced offers an explicit machine identity or multiple project/folder service tokens with separate read/write routes, stored in Keychain.  Legacy unvalidated credentials are migration drafts and must never authenticate in the background.  Shared Automation identity fallback is forbidden; release/cloud consumers use the three scope-verified read-only service-token bindings documented in INFISICAL.md.
+Infisical is optional.  Without an explicitly validated connection, Hog Hunter uses local settings and defaults.  The contract is [`INFISICAL.md`](INFISICAL.md); read it before touching settings.  The Mac owns this integration; there is no backend and the iPhone never receives Infisical credentials.  **Legacy implementation context:** Settings > Advanced still offers an explicit machine identity alongside multiple project/folder service tokens with separate read/write routes, stored in Keychain; that machine-identity option is not current credential authorization.  Legacy unvalidated credentials are migration drafts and must never authenticate in the background.  Shared Automation identity fallback is forbidden; release/cloud consumers use the three scope-verified read-only service-token bindings documented in INFISICAL.md.
+
+**Current credential policy (owner, November 11, 2026):** new or replacement Infisical connections use scoped service tokens only, never an automation or machine identity.  Infisical is the sole source for secrets and non-user settings; a consumer's bootstrap service token is the standing exception, and any necessary environment transport is synced from Infisical, never hand-set.  This policy does not make the optional local-only mode an Infisical connection or migrate a saved binding: preserve a working binding until its replacement is live and verified, and do not claim runtime migration from this documentation change.
 
 Implementation: `Sources/Infisical/InfisicalSettings.swift` (`InfisicalClient`, `InfisicalStore`, `InfisicalSettings`).  Runtime reads use the in-memory store, never per-request fetches; refresh failure preserves last-known-good settings.  Connected admin saves write through to the matching Infisical write route first; disconnected settings remain local.  Per-user display, consent and device settings stay in UserDefaults.  Never expose secret values in code, logs, PRs or chat.  Network and credential seams are stubbed in `Tests/HogHunterTests/InfisicalSettingsTests.swift`.
 
@@ -119,10 +121,10 @@ Tests: `Tests/HogHunterTests/{HousekeeperLockTests,KeepSentinelTests,CleanRegime
 
 ## Copy
 
-Theme default is **system** — the fleet-wide owner ruling of 2026-09-19 in
-`/Users/jay/apps/FLEET-UI-COPY.md` supersedes this repo's earlier "Light
-default".  Only the no-stored-preference fallback changed; a user who picked
-Light or Dark stays on it.  Title Case chrome.  Body sentence case with a
+Theme default is **Light** when no stored preference exists, under the current
+owner rule in `/Users/jay/apps/FLEET-UI-COPY.md`; this supersedes the September 19 System default.
+Preserve stored preferences and the Light, Dark and System choices.  Capture screenshots,
+App Store and marketing assets in Light unless the owner requests Dark.  Title Case chrome.  Body sentence case with a
 real U+00A0 plus a normal space between sentences (owner ruling 2026-10-23;  in
 Swift string literals `"\u{00A0} "`), never the `&nbsp;` entity and never two
 plain ASCII spaces.
