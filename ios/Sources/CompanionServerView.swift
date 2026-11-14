@@ -205,6 +205,9 @@ struct ServerTabContent: View {
                     IncludeInMacMaintenanceSection(snapshot: snapshot, model: model)
                     ServerMaintenanceSection(snapshot: snapshot, model: model)
                 }
+            } else if frame == .section {
+                // A section capture before the Mac has read the server still says why it is empty.
+                noteSection(icon: "hourglass", title: "No Reading Yet", note: Self.noReadingNote)
             }
         }
     }
@@ -221,6 +224,8 @@ struct ServerTabContent: View {
                 }
             }
             .pickerStyle(.segmented)
+            // A pinned section is a screenshot frame; a tap must not rewrite the stored choice.
+            .disabled(CompanionServerSection.screenshotSection != nil)
             .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
         }
     }
