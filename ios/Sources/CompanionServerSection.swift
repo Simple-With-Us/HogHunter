@@ -37,6 +37,8 @@ enum CompanionServerSection: String, CaseIterable, Identifiable {
         if arguments.contains("-HogHunterServerActivity") { return .activity }
         if arguments.contains("-HogHunterServerStorage") { return .storage }
         if arguments.contains("-HogHunterServerMaintenance") { return .maintenance }
+        // A bare server capture is the Overview, whatever an earlier run stored.
+        if arguments.contains("-HogHunterServer") || arguments.contains("-HogHunterServerConfirm") { return .overview }
         return nil
     }
 

@@ -72,4 +72,10 @@ final class CompanionServerSectionTests: XCTestCase {
         XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServerControls"]), .overview)
         XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServerStorage"]), .storage)
     }
+
+    func testABareServerLaunchIsTheOverviewWhateverWasStored() {
+        XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServer"]), .overview)
+        XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServer", "-HogHunterServerStorage"]), .storage)
+        XCTAssertNil(CompanionServerSection.screenshotOverride(arguments: []))
+    }
 }
