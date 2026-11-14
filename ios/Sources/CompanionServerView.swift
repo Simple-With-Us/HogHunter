@@ -397,7 +397,7 @@ private enum ServerScreenshotFrame {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("-HogHunterServerControls") { return .controls }
         if arguments.contains("-HogHunterServerDetails") { return .details }
-        if arguments.contains("-HogHunterServerActivity") || arguments.contains("-HogHunterServerStorage") || arguments.contains("-HogHunterServerMaintenance") { return .section }
+        if arguments.contains("-HogHunterServerActivity") || arguments.contains("-HogHunterServerStorage") || arguments.contains("-HogHunterServerMaintenance") || arguments.contains("-HogHunterServerScan") { return .section }
         return .top
     }
 }
