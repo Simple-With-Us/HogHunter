@@ -17,6 +17,7 @@ Never contacts Apple, GitHub or Infisical and never reads a credential.  It pins
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import subprocess
@@ -436,14 +437,25 @@ class ReleaseContractTests(unittest.TestCase):
         text = (ROOT / "ios/Info.plist").read_text(encoding="utf-8")
         self.assertRegex(text, r"<key>ITSAppUsesNonExemptEncryption</key>\s*<false/>")
 
-    def test_iphone_targets_carry_no_mac_entitlements(self):
-        # The old release validator rejected an App Group on the iPhone signature.
-        # Pinned here at the source:  the iPhone targets set no entitlements file.
+    def test_iphone_targets_carry_the_shared_app_group_entitlements(self):
+        # This check used to pin the opposite: no entitlements file on the
+        # iPhone targets at all.  That pin was the old release validator's
+        # entitlements guard, kept as a source check when the validator
+        # itself was removed in the Oct 2026 auto-ship change.  The
+        # validator was this fleet's own tool, not Apple's, and the pin
+        # outlived it: without the App Group the shared container does not
+        # exist on device, the app writes no widget snapshot, and the
+        # widget can only draw its empty state (issue #65).  The contract
+        # now runs the other way, with the old check's real concern kept:
+        # both iPhone targets sign with the one iOS entitlements file,
+        # never the Mac one, and that file names exactly the shared group.
         project = PROJECT.read_text(encoding="utf-8")
         section = project.split("  HogHunterIOS:", 1)[1].split("\nschemes:", 1)[0]
-        self.assertNotIn("CODE_SIGN_ENTITLEMENTS", section)
-        for path in (ROOT / "ios").rglob("*.entitlements"):
-            self.assertNotIn("com.apple.security.application-groups", path.read_text(encoding="utf-8"), str(path))
+        self.assertEqual(section.count("CODE_SIGN_ENTITLEMENTS: ios/HogHunterIOS.entitlements"), 2)
+        self.assertNotIn("CODE_SIGN_ENTITLEMENTS: HogHunter.entitlements", section)
+        with open(ROOT / "ios/HogHunterIOS.entitlements", "rb") as handle:
+            groups = plistlib.load(handle).get("com.apple.security.application-groups")
+        self.assertEqual(groups, ["group.com.simplewithus.hoghunter"])
 
     def test_wrapper_refuses_a_local_upload(self):
         env = {key: value for key, value in os.environ.items() if key != "GITHUB_ACTIONS"}
