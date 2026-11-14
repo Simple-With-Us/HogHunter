@@ -79,6 +79,7 @@ EXTRA_SCREENS = [
     ("server-activity", ["-HogHunterServer", "-HogHunterServerActivity"]),
     ("server-storage", ["-HogHunterServer", "-HogHunterServerStorage"]),
     ("server-maintenance", ["-HogHunterServer", "-HogHunterServerMaintenance"]),
+    ("server-scan", ["-HogHunterServer", "-HogHunterServerScan"]),
     ("issue-actions", ["-HogHunterIssueActions"]),
     ("mac-settings", ["-HogHunterMacSettings"]),
     ("sample-result", ["-HogHunterSampleResult"]),
@@ -102,7 +103,7 @@ def capture_extras(udid, out_dir):
             print(f"  WARN: extra screen {name}: screenshot failed")
             continue
         problem = screenshot_problem(out_file)
-        if not problem and name in ("cleaner", "cleaner-extreme", "issue-actions", "server-details", "server-controls", "server-activity", "server-storage", "server-maintenance"):
+        if not problem and name in ("cleaner", "cleaner-extreme", "issue-actions", "server-details", "server-controls", "server-activity", "server-storage", "server-maintenance", "server-scan"):
             scene = name if name.startswith("server-") or name == "issue-actions" else ("cleaner-extreme" if name.endswith("extreme") else "cleaner-quick")
             try:
                 problem = scene_problem(scene, recognize_text(out_file))
