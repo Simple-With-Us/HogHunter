@@ -197,7 +197,9 @@ struct ServerTabContent: View {
                 // tool rows, so the switch and Scan Server sit on screen.
                 let controlsFirst = frame == .section
                 if controlsFirst, server.host != nil, section.showsMaintenanceControls {
-                    IncludeInMacMaintenanceSection(snapshot: snapshot, model: model)
+                    if !CompanionServerSection.screenshotHidesIncludeSwitch {
+                        IncludeInMacMaintenanceSection(snapshot: snapshot, model: model)
+                    }
                     ServerMaintenanceSection(snapshot: snapshot, model: model)
                 }
                 ServerReadings(server: server, section: section, controls: ServerRowControls(snapshot: snapshot, model: model))
