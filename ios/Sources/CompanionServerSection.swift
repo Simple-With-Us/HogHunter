@@ -36,7 +36,7 @@ enum CompanionServerSection: String, CaseIterable, Identifiable {
         if arguments.contains("-HogHunterServerDetails") || arguments.contains("-HogHunterServerControls") { return .overview }
         if arguments.contains("-HogHunterServerActivity") { return .activity }
         if arguments.contains("-HogHunterServerStorage") { return .storage }
-        if arguments.contains("-HogHunterServerMaintenance") { return .maintenance }
+        if arguments.contains("-HogHunterServerMaintenance") || arguments.contains("-HogHunterServerScan") { return .maintenance }
         // A bare server capture is the Overview, whatever an earlier run stored.
         if arguments.contains("-HogHunterServer") || arguments.contains("-HogHunterServerConfirm") { return .overview }
         return nil
@@ -45,6 +45,9 @@ enum CompanionServerSection: String, CaseIterable, Identifiable {
     /// The flags are read once: they cannot change while the app runs, and the
     /// view body would otherwise copy the process arguments on every update.
     static let screenshotSection = screenshotOverride(arguments: ProcessInfo.processInfo.arguments)
+
+    /// The Scan frame leaves the Include switch out so the scan and run buttons fit on screen.
+    static let screenshotHidesIncludeSwitch = ProcessInfo.processInfo.arguments.contains("-HogHunterServerScan")
 
     /// The section a stored value names, Overview for anything else.
     static func stored(_ raw: String) -> CompanionServerSection {
