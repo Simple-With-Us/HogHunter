@@ -450,9 +450,15 @@ class ReleaseContractTests(unittest.TestCase):
         # both iPhone targets sign with the one iOS entitlements file,
         # never the Mac one, and that file names exactly the shared group.
         project = PROJECT.read_text(encoding="utf-8")
-        section = project.split("  HogHunterIOS:", 1)[1].split("\nschemes:", 1)[0]
-        self.assertEqual(section.count("CODE_SIGN_ENTITLEMENTS: ios/HogHunterIOS.entitlements"), 2)
-        self.assertNotIn("CODE_SIGN_ENTITLEMENTS: HogHunter.entitlements", section)
+        self.assertIn("  HogHunterIOS:", project)
+        self.assertIn("  HogHunterWidgets:", project)
+        sections = (
+            project.split("  HogHunterIOS:", 1)[1].split("  HogHunterWidgets:", 1)[0],
+            project.split("  HogHunterWidgets:", 1)[1].split("\nschemes:", 1)[0],
+        )
+        for section in sections:
+            self.assertEqual(section.count("CODE_SIGN_ENTITLEMENTS: ios/HogHunterIOS.entitlements"), 1)
+            self.assertNotIn("CODE_SIGN_ENTITLEMENTS: HogHunter.entitlements", section)
         with open(ROOT / "ios/HogHunterIOS.entitlements", "rb") as handle:
             groups = plistlib.load(handle).get("com.apple.security.application-groups")
         self.assertEqual(groups, ["group.com.simplewithus.hoghunter"])
