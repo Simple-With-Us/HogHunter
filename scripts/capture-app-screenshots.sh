@@ -110,7 +110,9 @@ def capture_extras(udid, out_dir):
                 problem = f"OCR unavailable: {error}"
         if problem:
             print(f"  WARN: extra screen {name}: frame rejected: {problem}")
-            os.remove(out_file)
+            # Keep the rejected frame beside the others so the reason can be seen,
+            # not guessed.  It is marked, and nothing treats it as a pass.
+            os.replace(out_file, f"{out_dir}/extra_{name}.rejected.png")
             continue
         print(f"  OK extra screen saved: {out_file}")
 
