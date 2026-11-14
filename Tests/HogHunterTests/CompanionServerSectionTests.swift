@@ -78,4 +78,8 @@ final class CompanionServerSectionTests: XCTestCase {
         XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServer", "-HogHunterServerStorage"]), .storage)
         XCTAssertNil(CompanionServerSection.screenshotOverride(arguments: []))
     }
+
+    func testTheScanFrameIsTheMaintenanceSection() {
+        XCTAssertEqual(CompanionServerSection.screenshotOverride(arguments: ["-HogHunterServer", "-HogHunterServerScan"]), .maintenance)
+    }
 }
