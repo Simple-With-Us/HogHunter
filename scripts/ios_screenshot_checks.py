@@ -138,7 +138,9 @@ def scene_problem(scene, text):
         "server-controls": ("top server processes", "coolify workloads", "protected database"),
         "server-activity": ("overview", "activity", "storage", "maintenance", "server activity", "paging activity"),
         "server-storage": ("overview", "maintenance", "server disks", "memory backed", "app databases"),
-        "server-maintenance": ("overview", "activity", "include in mac maintenance", "scan server"),
+        "server-maintenance": ("overview", "activity", "include in mac maintenance", "server maintenance", "package cache"),
+        # The scan and run buttons sit below the switch, so this frame leaves the switch out.
+        "server-scan": ("overview", "maintenance", "server maintenance", "package cache", "scan server", "run server maintenance"),
         "mac-settings": ("sampling display", "active refresh when open", "background refresh when closed", "menu bar shows", "show percentage in menu bar", "cpu rows show"),
     }
     if scene not in required:
