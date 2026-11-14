@@ -460,8 +460,11 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertEqual(section.count("CODE_SIGN_ENTITLEMENTS: ios/HogHunterIOS.entitlements"), 1)
             self.assertNotIn("CODE_SIGN_ENTITLEMENTS: HogHunter.entitlements", section)
         with open(ROOT / "ios/HogHunterIOS.entitlements", "rb") as handle:
-            groups = plistlib.load(handle).get("com.apple.security.application-groups")
-        self.assertEqual(groups, ["group.com.simplewithus.hoghunter"])
+            entitlements = plistlib.load(handle)
+        self.assertEqual(
+            entitlements,
+            {"com.apple.security.application-groups": ["group.com.simplewithus.hoghunter"]},
+        )
 
     def test_wrapper_refuses_a_local_upload(self):
         env = {key: value for key, value in os.environ.items() if key != "GITHUB_ACTIONS"}
