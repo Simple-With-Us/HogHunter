@@ -167,6 +167,11 @@ targets:
         SWIFT_EMIT_LOC_STRINGS: YES
         ENABLE_PREVIEWS: NO
         INFOPLIST_FILE: ios/Info.plist
+        # The App Group entitlement the widget reads the shared snapshot
+        # through.  Without it the group container does not exist on
+        # device and the widget stays on its empty state (issue #65).
+        # The widget target signs with the same file, so the two match.
+        CODE_SIGN_ENTITLEMENTS: ios/HogHunterIOS.entitlements
         # Empty unless the TestFlight archive passes SENTRY_DSN=...
         SENTRY_DSN: ""
 
@@ -192,6 +197,10 @@ targets:
         CURRENT_PROJECT_VERSION: "1000"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_FILE: ios/Widgets/Info.plist
+        # Same App Group entitlement file as the app target: the widget
+        # reads the snapshot the app writes into the shared suite, which
+        # needs the group on both sides (issue #65).
+        CODE_SIGN_ENTITLEMENTS: ios/HogHunterIOS.entitlements
         SWIFT_EMIT_LOC_STRINGS: YES
         ENABLE_PREVIEWS: NO
 
