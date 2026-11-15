@@ -4985,12 +4985,23 @@ def test_temp_staged_refuses_a_nested_keep_marker(hh):
         (stale / "deep" / "deeper").mkdir(parents=True)
         f = stale / "deep" / "deeper" / "payload.bin"
         f.write_bytes(b"x" * 64)
-        (stale / "deep" / ".janitor-keep").write_text("keep")
-        _age(f, 5); _age(stale / "deep" / "deeper", 5); _age(stale / "deep", 5); _age(stale, 5)
+        marker = stale / "deep" / ".janitor-keep"
+        marker.write_text("keep")
+        # The marker must be aged too: a fresh one trips the idle gate first
+        # and this test would pass without ever reaching the marker probe.
+        _age(f, 5); _age(marker, 5)
+        _age(stale / "deep" / "deeper", 5); _age(stale / "deep", 5); _age(stale, 5)
         with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
                 mock.patch.object(hh, "open_handles", return_value=0), \
                 mock.patch.object(hh, "proc_count", return_value=0):
             assert hh.rule_temp_staged() == []
+        # Control: the same idle tree WITHOUT the marker is offered, so the
+        # refusal above really comes from the nested-marker gate.
+        marker.unlink()
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            assert [c.path for c in hh.rule_temp_staged()] == [str(stale)]
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
