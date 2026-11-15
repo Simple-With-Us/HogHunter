@@ -318,8 +318,17 @@ final class CleanRegimenRunner: ObservableObject {
                 lastRunDefaults.set(dueAt, forKey: dueSinceKey)
             }
             guard !Self.overdueOverrideApplies(regimen: regimen, dueAt: dueAt, now: now(), blocker: reason) else {
-                Self.log.info("tick: due and overdue — the override starts it now")
-                return runNow(regimen: regimen, scheduled: true, busyOverride: true)
+                // runNow returns nil when a run is already in flight:  say so
+                // and set the retry moment, or the log claims a start that
+                // never happened while the panel keeps a stale next-run time.
+                let task = runNow(regimen: regimen, scheduled: true, busyOverride: true)
+                if task != nil {
+                    Self.log.info("tick: due and overdue — the override starts it now")
+                } else {
+                    Self.log.info("tick: overdue override deferred — a run is already in progress")
+                    nextRunDate = now().addingTimeInterval(checkInterval)
+                }
+                return task
             }
             Self.log.info("tick: due, held (\(reason, privacy: .public))")
             waitingReason = Self.blockerText(reason: reason, regimen: regimen, dueAt: dueAt, now: now())

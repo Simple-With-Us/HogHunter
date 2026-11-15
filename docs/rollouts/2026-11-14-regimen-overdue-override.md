@@ -22,7 +22,7 @@ Run Now skips the gate as before; a skipped no-op still does not own the interva
 
 ## Launch at login
 
-``HogStore.setLoginItem` registers `SMAppService.mainApp`, which is in-process only, so the toggle in Hog Hunter's Settings is the one way to enable it. A legacy System Events login item was attempted from the agent session on 2026-11-15 and never landed: the Automation consent prompt was not answered, and nothing was added or recorded in `MAC-LOCAL-PROCESSES.md` (there is no login item to record). Until the owner flips the in-app toggle once, a reboot leaves Hog Hunter unstarted and therefore not cleaning.
+`HogStore.setLoginItem` registers `SMAppService.mainApp`, whose registration persists across reboots and may need the owner to approve it in System Settings > Login Items.  Three surfaces drive the same call:  the Mac's Settings window, the Mac's panel, and the iPhone's Open Hog Hunter At Login setting (through `POST /v1/settings`).  Until registration is approved, a reboot leaves Hog Hunter unstarted and therefore not cleaning.
 
 ## Follow-ups left open
 
