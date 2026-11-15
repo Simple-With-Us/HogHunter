@@ -574,9 +574,17 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         let task = runner.tick(regimen: regimen)
 
+        let san = regimen.sanitized()
+        let dueAt = CleanRegimenRunner.dueDate(lastRunAt: defaults.object(forKey: key) as? Date,
+                                               regimen: san, now: now)
+        let blocker = CleanRegimenRunner.scheduleBlocker(regimen: san, idleSeconds: 0, panelOpen: false)
+        let applies = CleanRegimenRunner.overdueOverrideApplies(regimen: san, dueAt: dueAt, now: now, blocker: blocker ?? "")
+        XCTFail("DIAG task=\(task != nil) dueAtOffset=\(dueAt.timeIntervalSince(now)) blocker=\(blocker ?? "nil") applies=\(applies) interval=\(san.effectiveIntervalHours) idleMin=\(san.requireIdleMinutes) preset=\((defaults.object(forKey: key) as? Date)?.timeIntervalSince(now) ?? -9999)")
         XCTAssertNil(task, "a run inside the override window keeps waiting")
         XCTAssertTrue(runner.waitingReason?.contains("starts anyway") ?? false)
-        XCTAssertNil(defaults.object(forKey: key), "a held run records nothing")
+        XCTAssertEqual((defaults.object(forKey: key) as? Date)?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(-5 * 3600).timeIntervalSince1970, accuracy: 1,
+                       "a held run leaves the stored clock where it was")
     }
 
     func testTheOverdueOverrideNeverBreaksRequireUserPresent() {
@@ -598,7 +606,9 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         XCTAssertNil(task, "a panel hold is an instruction, and overdue never outranks it")
         XCTAssertEqual(runner.waitingReason, "Waiting for the panel to be open.")
-        XCTAssertNil(defaults.object(forKey: key))
+        XCTAssertEqual((defaults.object(forKey: key) as? Date)?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(-48 * 3600).timeIntervalSince1970, accuracy: 1,
+                       "a held run leaves the stored clock where it was")
     }
 
     func testAnOverdueRunCleansInSmallChunks() async {
@@ -725,7 +735,8 @@ final class CleanRegimenRunnerTests: XCTestCase {
         XCTAssertNil(regimen.sanitized().emptyTrashBelowGB)
 
         regimen.emptyTrashBelowGB = 0.5
-        XCTAssertEqual(regimen.sanitized().emptyTrashBelowGB, 1)
+        XCTAssertNil(regimen.sanitized().emptyTrashBelowGB,
+                    "a line below the floor is nonsense the valve refuses, not a clamp")
 
         regimen.emptyTrashBelowGB = 25
         XCTAssertEqual(regimen.sanitized().emptyTrashBelowGB, 25)
@@ -733,7 +744,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
     func testTheTrashValveOpensOnlyBelowItsLine() {
         var regimen = CleanRegimen()
-        XCTAssertNil(CleanRegimenRunner.trashValveOpen(
+        XCTAssertFalse(CleanRegimenRunner.trashValveOpen(
             regimen: regimen,
             pressure: CleanPressure(diskFreeGB: 5, swapUsedPercent: 0, load1: 0,
                                     cpuIdlePercent: nil, kernelTaskPercent: nil)),
