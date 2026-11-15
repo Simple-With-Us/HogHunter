@@ -729,8 +729,8 @@ final class CleanRegimenRunnerTests: XCTestCase {
         XCTAssertNil(regimen.sanitized().emptyTrashBelowGB)
 
         regimen.emptyTrashBelowGB = 0.5
-        XCTAssertNil(regimen.sanitized().emptyTrashBelowGB,
-                    "a line below the floor is nonsense the valve refuses, not a clamp")
+        XCTAssertEqual(regimen.sanitized().emptyTrashBelowGB, 1,
+                       "a finite line below the floor clamps up to the floor")
 
         regimen.emptyTrashBelowGB = 25
         XCTAssertEqual(regimen.sanitized().emptyTrashBelowGB, 25)
@@ -798,7 +798,7 @@ final class CleanRegimenRunnerTests: XCTestCase {
             }
         )
 
-        await runner.runNow(regimen: regimen)?.value
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
 
         XCTAssertNil(runner.lastRun?.skippedReason)
         XCTAssertEqual(cleaned.value.map(\.title), ["TrashItem"],
@@ -833,12 +833,124 @@ final class CleanRegimenRunnerTests: XCTestCase {
             }
         )
 
-        await runner.runNow(regimen: regimen)?.value
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
 
         XCTAssertEqual(cleaned.value.map(\.title), ["CacheItem"])
         XCTAssertTrue(scanned.value.contains(CleanCategory.trash.rawValue),
                       "a shut valve keeps the Trash out of the scan")
         XCTAssertEqual(runner.lastRun?.itemsRemoved, 1)
+    }
+
+    func testManualRunNowNeverOpensTheValve() async {
+        // The valve is the schedule's permanence, not a button's:  Run Now
+        // reclaims what the panel offered, and never wipes the Trash on the
+        // side.  The same open-valve regimen a scheduled run would honor
+        // does nothing here.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: [])
+        regimen.emptyTrashBelowGB = 10_000
+        let cleaned = LockedBox<[CleanItem]>([])
+        let scanned = LockedBox<Set<String>>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { exclusions in
+                scanned.value = exclusions.excludedCategories
+                return self.reportWith([self.trashItem(), self.cacheItem()])
+            },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: UInt64(items.count) * 1_000,
+                                   itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertTrue(cleaned.value.isEmpty, "a button press never carries the valve")
+        XCTAssertTrue(scanned.value.isEmpty, "a skipped run never walks the disk")
+    }
+
+    func testAClocklessRegimenMarksItsFirstHoldAndThenBecomesOverdue() async {
+        // A blob enabled without a stored last-run time is due the moment it
+        // is first seen, and the idle gate would hold it forever at "zero
+        // overdue".  The first hold marks the moment;  hours measure against
+        // it, so the override can arrive.
+        let key = "hoghunter.cleaner.regimen.dueSince"
+        let now = Date()
+        let defaults = makeDefaults()
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 }
+        )
+        let regimen = makeRegimen(enabled: true, intervalHours: 4)
+
+        XCTAssertNil(runner.tick(regimen: regimen), "a just-due run still waits")
+        let marked = defaults.object(forKey: key) as? Date
+        XCTAssertNotNil(marked, "the first hold marks when the run became due")
+
+        // Seven hours past the marked moment:  the override opens.
+        defaults.set(now.addingTimeInterval(-7 * 3600), forKey: key)
+        let task = runner.tick(regimen: regimen)
+        XCTAssertNotNil(task, "hours against the marked moment open the override")
+        await task?.value
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+    }
+
+    func testAnExcludedTrashCategoryKeepsTheValveShut() async {
+        // An explicit exclusion outranks the valve:  the run neither walks
+        // the Trash nor pretends the valve emptied it.
+        let now = Date()
+        let defaults = makeDefaults()
+        defaults.set(now.addingTimeInterval(-11 * 3600),
+                     forKey: "hoghunter.cleaner.regimen.lastRunAt")
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: [])
+        regimen.emptyTrashBelowGB = 10_000
+        regimen.requireIdleMinutes = 30
+        let cleaned = LockedBox<[CleanItem]>([])
+        let scanned = LockedBox<Set<String>>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 },
+            exclusionsProvider: {
+                CleanerExclusions(excludedCategories: [CleanCategory.trash.rawValue],
+                                  excludedPaths: [])
+            },
+            scanProvider: { exclusions in
+                scanned.value = exclusions.excludedCategories
+                return self.reportWith([self.trashItem(), self.cacheItem()])
+            },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: UInt64(items.count) * 1_000,
+                                   itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        let task = runner.tick(regimen: regimen)
+        XCTAssertNotNil(task, "an overdue scheduled run starts")
+        await task?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertTrue(cleaned.value.isEmpty, "the owner's exclusion keeps the Trash")
+        XCTAssertTrue(scanned.value.contains(CleanCategory.trash.rawValue),
+                      "the Trash stays out of the scan while its category is excluded")
+    }
+
+    func testUnknownFreeSpaceClosesTheExpensiveTier() {
+        // The disk-band contract:  an unmeasured disk has no band and opens
+        // no bulk delete, whatever zero would read as.
+        let unknown = CleanPressure(diskFreeGB: 0, diskFreeKnown: false,
+                                    swapUsedPercent: 0, load1: 0,
+                                    cpuIdlePercent: nil, kernelTaskPercent: nil)
+        XCTAssertEqual(unknown.diskBand, "unknown")
+        XCTAssertFalse(unknown.allowsExpensiveTier(regimen: CleanRegimen()))
     }
 
     func testRunNowAndANewScheduleClearAHold() async {

@@ -200,10 +200,10 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         copy.requireIdleMinutes = max(0, requireIdleMinutes)
         copy.expensiveTierFreeGB = max(1, expensiveTierFreeGB)
         copy.enabledRules = enabledRules.intersection(Self.schedulableRules)
-        // A valve line that is not at least one gigabyte is nonsense a
-        // corrupt blob must not turn into a permanent delete;  an unparsable
-        // one disables the valve instead.
-        if let line = emptyTrashBelowGB, line.isFinite, line >= 1 {
+        // A finite line below the floor clamps up to it;  only genuine
+        // nonsense -- negative, unparsable -- disables the valve, so a
+        // hand-edited blob cannot silently switch a permanent delete off.
+        if let line = emptyTrashBelowGB, line.isFinite, line >= 0 {
             copy.emptyTrashBelowGB = max(1, line)
         } else {
             copy.emptyTrashBelowGB = nil

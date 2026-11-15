@@ -14,7 +14,7 @@ Measured 2026-11-14: the internal drive fell to 6.8 GB free mid-afternoon; the e
 
 ## What stayed true
 
-Run Now skips the gate as before; a skipped no-op still does not own the interval clock; the snapshot gate and its backoff are untouched; the Trash is still unreachable from a regimen; the enabled rules, not pressure, still decide scope.
+Run Now skips the gate as before; a skipped no-op still does not own the interval clock; the snapshot gate and its backoff are untouched; before the 2026-11-15 valve the Trash was unreachable from a regimen (now reachable only through the owner-configured valve below); the enabled rules, not pressure, still decide scope.
 
 ## Tests
 
@@ -26,7 +26,7 @@ Run Now skips the gate as before; a skipped no-op still does not own the interva
 
 ## Follow-ups left open
 
-- Emptying the Trash (26 GB) is the owner's call; `neverEmptyTrash` keeps the regimen away from it either way.
+- Emptying the Trash (26 GB at the time) was the owner's call; `neverEmptyTrash` keeps the regimen away from every path except the valve below.
 - The Mac-triggered remote maintenance path fails over SSH (`/etc/cron.daily/coolify-auto-maintenance` exits 126 as a non-root user); the server's own cron still runs it.
 - The git relay has no seat policy row for ZC's workflow verbs (`seat_not_in_policy`), so the PR for this branch must be opened once the grant lands or by the owner (see Fleet GitOPS deficiencies, AFC-664).
 

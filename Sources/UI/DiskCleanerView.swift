@@ -170,6 +170,13 @@ struct DiskCleanerView: View {
                             ForEach(Self.trashValveThresholds, id: \.self) { gb in
                                 Text("\(Int(gb)) GB Free").tag(gb)
                             }
+                            if let current = regimen.emptyTrashBelowGB,
+                               !Self.trashValveThresholds.contains(current) {
+                                // A line a hand-edited blob or Infisical set
+                                // outside the picker stays visible instead
+                                // of leaving the menu blank.
+                                Text("\(Int(current)) GB Free").tag(current)
+                            }
                         }
                         .pickerStyle(.menu)
                         .controlSize(.small)

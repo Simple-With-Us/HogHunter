@@ -71,6 +71,9 @@ struct CleanPressure: Equatable, Sendable {
     /// thresholds are Infisical-overridable (`hoghunter.reclaim.*FreeGb`);
     /// the built-ins stand when Infisical is not configured.
     var diskBand: String {
+        // An unmeasured disk has no band:  "critical" would open permanent
+        // deletes on a number nobody took.
+        guard diskFreeKnown else { return "unknown" }
         let cache = InfisicalStore.shared
         let critical = cache.double(for: InfisicalKey.reclaimCriticalFreeGb) ?? 25
         let acute = cache.double(for: InfisicalKey.reclaimAcuteFreeGb) ?? 40
@@ -118,7 +121,8 @@ struct CleanPressure: Equatable, Sendable {
     /// runtimes and device support, the biggest wins on this machine and the
     /// biggest I/O bursts.  It opens on disk pressure alone.
     func allowsExpensiveTier(regimen: CleanRegimen) -> Bool {
-        hasSpacePressure && diskFreeGB < regimen.effectiveExpensiveTierFreeGB
+        guard diskFreeKnown else { return false }
+        return hasSpacePressure && diskFreeGB < regimen.effectiveExpensiveTierFreeGB
     }
 
     // MARK: - Reading
