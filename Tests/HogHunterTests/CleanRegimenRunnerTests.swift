@@ -918,13 +918,13 @@ final class CleanRegimenRunnerTests: XCTestCase {
             defaults: defaults,
             lockProvider: { HousekeeperLock(path: self.lockPath) },
             idleSeconds: { 0 },
-            exclusionsProvider: {
-                CleanerExclusions(excludedCategories: [CleanCategory.trash.rawValue],
-                                  excludedPaths: [])
-            },
             scanProvider: { exclusions in
                 scanned.value = exclusions.excludedCategories
                 return self.reportWith([self.trashItem(), self.cacheItem()])
+            },
+            exclusionsProvider: {
+                CleanerExclusions(excludedCategories: [CleanCategory.trash.rawValue],
+                                  excludedPaths: [])
             },
             cleanProvider: { items, _, _ in
                 cleaned.value += items
