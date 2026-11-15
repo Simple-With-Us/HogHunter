@@ -939,8 +939,8 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
         XCTAssertTrue(cleaned.value.isEmpty, "the owner's exclusion keeps the Trash")
-        XCTAssertTrue(scanned.value.contains(CleanCategory.trash.rawValue),
-                      "the Trash stays out of the scan while its category is excluded")
+        XCTAssertTrue(scanned.value.isEmpty,
+                      "a run the valve cannot serve never walks the disk at all")
     }
 
     func testUnknownFreeSpaceClosesTheExpensiveTier() {
