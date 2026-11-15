@@ -268,7 +268,7 @@ final class CleanRegimenRunner: ObservableObject {
         let regimen = (plan ?? CleanRegimen.load()).sanitized()
         let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
-            Self.log.info("tick: not due (enabled=\(regimen.isEnabled, privacy: .public), lastRun=\(lastRunAt.map(\.description) ?? "never", privacy: .public), gateRetry=\(gateRetryDate.map(\.description) ?? "none", privacy: .public))")
+            Self.log.info("tick: not due (enabled=\(regimen.isEnabled, privacy: .public), lastRun=\(lastRunAt.map(\.description) ?? "never", privacy: .public), gateRetry=\(self.gateRetryDate.map(\.description) ?? "none", privacy: .public))")
             // A gate that failed recently is holding the run, and the owner
             // can act on that, so the panel says so rather than going quiet.
             if regimen.isEnabled, let retry = gateRetryDate, retry > now() {
