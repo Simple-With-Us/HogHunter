@@ -109,6 +109,7 @@ PROBE_FAILED = 10 ** 6
 # Idle gates.  "No file touched in N minutes" proves nothing is mid-write.
 IDLE_MIN_OK = 90
 IDLE_MIN_SCRATCH = 180   # 3h for temp scratch
+APPLE_STAGING_IDLE_MIN = 7 * 24 * 60  # neverAppleDeleting: orphan only after a week idle
 IDLE_MIN_STAGING = 60    # 1h for app-update staging
 IDLE_MIN_ROLLBACK = 1440  # 24h for abandoned update/rollback copies
 IDLE_MIN_BUILD_OUTPUT = 7 * 24 * 60  # 7d before idle build output is reported at all
@@ -467,6 +468,20 @@ def _run(cmd: Sequence[str], timeout: int = 20) -> str:
         return p.stdout if p.returncode == 0 else ""
     except (subprocess.TimeoutExpired, OSError):
         return ""
+
+def _run_full(cmd: Sequence[str], timeout: int = 20) -> tuple[str, str, int]:
+    """Run a command, return (stdout, stderr, returncode).  Never raises.
+
+    _run discards stderr and the exit code; a diagnostic that exists to see
+    a failure (tmutil destinationinfo reports a failed mount on stderr with
+    a non-zero exit) needs all three.
+    """
+    try:
+        p = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout)
+        return p.stdout or "", p.stderr or "", p.returncode
+    except (subprocess.TimeoutExpired, OSError):
+        return "", "", -1
+
 
 
 # --------------------------------------------------------------------------
@@ -1382,19 +1397,20 @@ def rule_snapshots() -> list[Candidate]:
     # and the fix (review the TM setting) is a person's call.
     dest_state = "unknown"
     dest_note = "tmutil destinationinfo gave no readable answer"
-    try:
-        dest_out = _run(["/usr/bin/tmutil", "destinationinfo"], timeout=probe_timeout(20))
-    except Exception:
-        dest_out = ""
-    if dest_out:
-        if "Failed to mount" in dest_out:
-            dest_state = "unreachable"
-            dest_note = "destination configured but failed to mount (possibly transient)"
-        elif "Name" in dest_out:
-            dest_state = "healthy"
-        elif "No destinations configured" in dest_out:
-            dest_state = "absent"
-            dest_note = "no backup destination configured"
+    # tmutil reports a mount failure on stderr with a non-zero exit; the
+    # stdout-only _run helper would hide exactly the case this diagnostic
+    # exists for.  Capture both streams and the exit code.
+    dest_out, dest_err, dest_rc = _run_full(
+        ["/usr/bin/tmutil", "destinationinfo"], timeout=probe_timeout(20))
+    dest_text = dest_out + "\n" + dest_err
+    if "Failed to mount" in dest_text:
+        dest_state = "unreachable"
+        dest_note = "destination configured but failed to mount (possibly transient)"
+    elif dest_rc == 0 and "Name" in dest_out:
+        dest_state = "healthy"
+    elif "No destinations configured" in dest_text:
+        dest_state = "absent"
+        dest_note = "no backup destination configured"
     if names and dest_state in ("unreachable", "absent"):
         cands.append(Candidate(
             category="ask-first",
@@ -1522,28 +1538,74 @@ def rule_temp_scratch() -> list[Candidate]:
     return cands
 
 
-def rule_temp_staged() -> list[Candidate]:
-    """The per-user temp X dir: items the OS already staged for deletion.
+def _temp_staged_refusal(entry: Path, identity: tuple[int, int]) -> str | None:
+    """Every gate for an X item, as one refusal string (None = clear).
 
-    getconf DARWIN_USER_TEMP_DIR hands back .../<uuid>/T; its sibling X is
-    where macOS moves replaced/retired temp items before deleting them
-    itself.  Reclaiming X only hurries the OS along, but the name alone is
-    not proof, so every entry must still pass the full gate: owned by this
-    user, not a symlink, idle past the scratch window, no open handles, no
-    keep sentinel, never forbidden.  The rule is pressure-gated in
-    PRESSURE_RULES (semi-safe, 25 GB line): it deletes only while the disk
-    is genuinely short, and reports otherwise.
+    Shared by the scan and the recheck so the delete-time check cannot drift
+    from the scan-time one.
+    """
+    s = str(entry)
+    try:
+        est = entry.lstat()
+    except OSError:
+        return "the entry is unreadable"
+    if (est.st_dev, est.st_ino) != identity:
+        return "the path now holds something else"
+    # Never follow or delete a symlink, never touch another user's item.
+    if stat.S_ISLNK(est.st_mode) or est.st_uid != os.getuid():
+        return "a symlink or another user's item"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    # newest_file_age_min reads files only; a file-less staged tree would
+    # look ancient, so the entry's own mtime (and data/'s below) count too.
+    idle = min(newest_file_age_min(s), (time.time() - est.st_mtime) / 60.0)
+    # neverAppleDeleting: an entry shaped like Apple staging (it carries a
+    # data/ subtree) is live until that subtree has no children AND the
+    # tree has been idle over 7d.
+    data_dir = entry / "data"
+    try:
+        if data_dir.is_dir() and not data_dir.is_symlink():
+            idle = min(idle, (time.time() - data_dir.lstat().st_mtime) / 60.0)
+            if any(data_dir.iterdir()):
+                return "Apple staging with live children under data/"
+            if idle < APPLE_STAGING_IDLE_MIN:
+                return "Apple staging idle under 7d"
+    except OSError:
+        return "staging subtree unreadable"
+    if idle < IDLE_MIN_SCRATCH:
+        return "not idle 3h"
+    if open_handles(s):
+        return "a process holds it open"
+    # A writer that opens and closes files shows zero handles; a process
+    # naming this entry's exact name (its UUID) in argv counts as live.
+    # proc_count returns PROBE_FAILED on any pgrep failure, which reads as
+    # busy here.
+    if proc_count(entry.name) > 0:
+        return "a process names it"
+    return None
+
+
+def rule_temp_staged() -> list[Candidate]:
+    """Per-user temp staged-for-deletion items, reclaimed only under disk pressure.
+
+    getconf DARWIN_USER_TEMP_DIR points at the per-user T directory; the X
+    sibling holds items the OS has staged for deletion.  macOS empties both
+    on its own schedule, so reclaiming here only early-frees bytes the OS
+    already means to release.  Every gate the T rule has applies: owner-only,
+    no symlinks, keep sentinel, forbidden paths, and no open handles.  Apple
+    staging gets the policy's neverAppleDeleting orphan test (empty data/
+    subtree and a week idle), a process naming the entry's UUID counts as a
+    live writer, and the recheck re-runs every gate right before the delete.
     """
     tmpdir = _run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], timeout=probe_timeout(10)).strip()
     if not tmpdir:
         return []
-    xdir = Path(tmpdir.rstrip("/")).parent / "X"
+    xdir = Path(tmpdir).parent / "X"
     try:
         st = xdir.lstat()
     except OSError:
         return []
-    # A symlinked or foreign-owned stage is not the OS's directory.
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
         return []
     if st.st_uid != os.getuid():
         return []
@@ -1562,19 +1624,20 @@ def rule_temp_staged() -> list[Candidate]:
             est = entry.lstat()
         except OSError:
             continue
-        # Never follow or delete a symlink, never touch another user's item.
-        if stat.S_ISLNK(est.st_mode) or est.st_uid != os.getuid():
+        identity = (est.st_dev, est.st_ino)
+        if _temp_staged_refusal(entry, identity) is not None:
             continue
-        if is_forbidden(s) or has_keep_sentinel(s):
-            continue
-        if newest_file_age_min(s) < IDLE_MIN_SCRATCH:
-            continue
-        if open_handles(s):
-            continue
+
+        def recheck(entry: Path = entry, identity: tuple[int, int] = identity) -> str | None:
+            return _temp_staged_refusal(entry, identity)
+
         cands.append(Candidate(
             category="temp-staged", path=s, bytes=dir_bytes(s),
-            reason="OS-staged temp deletion item, idle over 3h, no handles",
+            reason="OS-staged temp deletion item, idle gates passed, no handles or writers",
             tier="semi-safe",
+            # The recheck walks every gate again right before the delete.
+            keep_verdict=MarkerVerdict(False, True),
+            recheck=recheck,
         ))
     return cands
 
