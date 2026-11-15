@@ -753,9 +753,9 @@ final class CleanRegimenRunnerTests: XCTestCase {
         // a failed query reads 0, and 0 is not evidence the disk is full.
         XCTAssertFalse(CleanRegimenRunner.trashValveOpen(
             regimen: regimen,
-            pressure: CleanPressure(diskFreeGB: 0, swapUsedPercent: 0, load1: 0,
-                                    cpuIdlePercent: nil, kernelTaskPercent: nil,
-                                    diskFreeKnown: false)))
+            pressure: CleanPressure(diskFreeGB: 0, diskFreeKnown: false,
+                                    swapUsedPercent: 0, load1: 0,
+                                    cpuIdlePercent: nil, kernelTaskPercent: nil)))
         // A measured zero -- the disk genuinely full -- opens the valve.
         XCTAssertTrue(CleanRegimenRunner.trashValveOpen(
             regimen: regimen,
