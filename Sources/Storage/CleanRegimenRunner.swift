@@ -360,7 +360,11 @@ final class CleanRegimenRunner: ObservableObject {
     /// opens only on measured free space at or below that line.  Every other
     /// path keeps `neverEmptyTrash` intact.
     nonisolated static func trashValveOpen(regimen: CleanRegimen, pressure: CleanPressure) -> Bool {
-        guard let line = regimen.emptyTrashBelowGB else { return false }
+        // An unmeasured disk is a closed valve:  `diskFreeGB` reads 0 when
+        // the query fails, and 0 would otherwise look like the fullest disk
+        // there is.  A permanent delete never runs on a number we do not
+        // have.
+        guard pressure.diskFreeKnown, let line = regimen.emptyTrashBelowGB else { return false }
         return pressure.diskFreeGB <= line
     }
 
