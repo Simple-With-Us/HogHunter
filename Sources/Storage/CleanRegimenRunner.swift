@@ -1,6 +1,7 @@
 import Combine
 import CoreGraphics
 import Foundation
+import os
 
 /// Runs `CleanRegimen` unattended, on a timer, in bounded chunks.
 ///
@@ -64,6 +65,12 @@ final class CleanRegimenRunner: ObservableObject {
     /// The run in flight, held for the same reason.
     nonisolated let runBox = CleanRegimenTaskBox()
     private let defaultsKey = "hoghunter.cleaner.regimen.lastRunAt"
+    /// Every tick decision and skip lands here:  a silent skip is an
+    /// unexplainable one, and the 2026-11-15 investigation of a regimen that
+    /// never ran cost an afternoon because nothing said why.
+    private static let log = Logger(subsystem: "com.simplewithus.hoghunter",
+                                    category: "Regimen")
+
     /// When a clock-less regimen first became due.  A blob enabled without a
     /// stored last-run time is due the moment it is first seen;  this marker
     /// is what hours of overdue measure against, and it clears whenever the
@@ -289,6 +296,7 @@ final class CleanRegimenRunner: ObservableObject {
             idleSeconds: idleSeconds(),
             panelOpen: presenceProvider()
         ) {
+            Self.log.info("tick: due, held (\(reason, privacy: .public))")
             // A run the interval has been owed long enough stops waiting on
             // the idle gate and starts in the busy shape instead; see
             // `overdueOverrideHours`.  Anything else keeps the hold, and the
@@ -503,6 +511,7 @@ final class CleanRegimenRunner: ObservableObject {
         }
         isRunning = true
         lastError = nil
+        Self.log.info("run started (scheduled=\(scheduled, privacy: .public), busy=\(busyOverride, privacy: .public))")
         // A run that starts is no longer waiting, whether the schedule or Run
         // Now started it.
         waitingReason = nil
@@ -558,6 +567,7 @@ final class CleanRegimenRunner: ObservableObject {
         // path time out and leave orphans behind.
         if regimen.avoidDuringBuilds, Self.buildInFlight() {
             result.skippedReason = "A build is running, so the regimen waited."
+            Self.log.notice("run skipped: build in flight")
             recordsRun = false
             finish(result, regimen: regimen)
             return
@@ -577,6 +587,7 @@ final class CleanRegimenRunner: ObservableObject {
         let outcome = await Task.detached(priority: .utility) { lock.acquire() }.value
         guard outcome == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
+            Self.log.notice("run skipped: housekeeper lock held")
             recordsRun = false
             finish(result, regimen: regimen)
             return
@@ -606,6 +617,7 @@ final class CleanRegimenRunner: ObservableObject {
         // the valve still asked for work.
         guard !regimen.enabledRules.isEmpty || trashValveOpen else {
             result.skippedReason = "No cleaning rules are enabled."
+            Self.log.notice("run skipped: no enabled rules")
             recordsRun = false
             finish(result, regimen: regimen)
             return
@@ -623,7 +635,9 @@ final class CleanRegimenRunner: ObservableObject {
             scanExclusions.excludedCategories.remove(CleanCategory.trash.rawValue)
         }
         let scan = await scanProvider(scanExclusions)
+        Self.log.info("scan finished: partial=\(scan.isPartial, privacy: .public) selected=\(scan.categories.flatMap { $0.items.filter(\.isSelected) }.count, privacy: .public)")
         if scan.isPartial {
+            Self.log.notice("run skipped: scan was partial")
             recordsRun = false
             result.skippedReason = "Discovery was incomplete; the regimen will retry at the next check."
         }
@@ -701,6 +715,7 @@ final class CleanRegimenRunner: ObservableObject {
         }
 
         result.cancelled = Task.isCancelled
+        Self.log.info("run finished: reclaimed=\(result.bytesReclaimed, privacy: .public) items=\(result.itemsRemoved, privacy: .public) errors=\(result.errors.count, privacy: .public) cancelled=\(result.cancelled, privacy: .public) skip=\(result.skippedReason ?? "none", privacy: .public)")
         finish(result, regimen: regimen)
     }
 
