@@ -336,7 +336,10 @@ final class CleanRegimenRunner: ObservableObject {
                                                    now: Date,
                                                    blocker: String) -> Bool {
         if regimen.requireUserPresent { return false }
-        return now.timeIntervalSince(dueAt) >= overdueOverrideHours
+        // `timeIntervalSince` is seconds and the constant is hours:  compare
+        // like with like, or six hours collapses to six seconds and every
+        // barely-due run starts at once.
+        return now.timeIntervalSince(dueAt) >= overdueOverrideHours * 3600
     }
 
     /// The hold text, plus -- once the run is overdue at all -- how far it
