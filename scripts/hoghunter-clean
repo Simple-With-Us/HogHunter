@@ -139,6 +139,7 @@ XCODE_SCRATCH_DELETE_FREE_GB = 60.0
 PRESSURE_RULES: dict[str, tuple[str, float]] = {
     "duplicate-sim-runtimes": ("semi-safe", PRESSURE_RULE_FREE_GB),
     "xcode-scratch": ("safe", XCODE_SCRATCH_DELETE_FREE_GB),
+    "temp-staged": ("semi-safe", PRESSURE_RULE_FREE_GB),
 }
 PRESSURE_ONLY_RULES = frozenset(PRESSURE_RULES)
 
@@ -1373,6 +1374,39 @@ def rule_snapshots() -> list[Candidate]:
     # Newest first, by the timestamp embedded in the name.
     names.sort(reverse=True)
     cands = []
+    # Destination health is reported, never acted on.  A broken or absent
+    # destination does NOT make the newest local snapshot worthless -- it can
+    # be the only local recovery point -- so the keep-newest rule below is
+    # unchanged.  What Jay gets is the diagnosis: local snapshots keep
+    # pinning reclaimed blocks while the destination cannot receive backups,
+    # and the fix (review the TM setting) is a person's call.
+    dest_state = "unknown"
+    dest_note = "tmutil destinationinfo gave no readable answer"
+    try:
+        dest_out = _run(["/usr/bin/tmutil", "destinationinfo"], timeout=probe_timeout(20))
+    except Exception:
+        dest_out = ""
+    if dest_out:
+        if "Failed to mount" in dest_out:
+            dest_state = "unreachable"
+            dest_note = "destination configured but failed to mount (possibly transient)"
+        elif "Name" in dest_out:
+            dest_state = "healthy"
+        elif "No destinations configured" in dest_out:
+            dest_state = "absent"
+            dest_note = "no backup destination configured"
+    if names and dest_state in ("unreachable", "absent"):
+        cands.append(Candidate(
+            category="ask-first",
+            path="tm-destination:" + dest_state,
+            bytes=0,
+            reason=("Time Machine %s; %d local snapshot(s) exist and the newest stays "
+                    "protected, but local snapshots pin reclaimed space while no backup "
+                    "can leave the Mac -- review the Time Machine setting" % (dest_note, len(names))),
+            tier="ask-first",
+            op="report",
+            detail="diagnostic only; newest snapshot is still kept",
+        ))
     for name in names[1:]:
         cands.append(Candidate(
             category="snapshots",
@@ -1485,6 +1519,63 @@ def rule_temp_scratch() -> list[Candidate]:
     except (OSError, subprocess.SubprocessError):
         pass
 
+    return cands
+
+
+def rule_temp_staged() -> list[Candidate]:
+    """The per-user temp X dir: items the OS already staged for deletion.
+
+    getconf DARWIN_USER_TEMP_DIR hands back .../<uuid>/T; its sibling X is
+    where macOS moves replaced/retired temp items before deleting them
+    itself.  Reclaiming X only hurries the OS along, but the name alone is
+    not proof, so every entry must still pass the full gate: owned by this
+    user, not a symlink, idle past the scratch window, no open handles, no
+    keep sentinel, never forbidden.  The rule is pressure-gated in
+    PRESSURE_RULES (semi-safe, 25 GB line): it deletes only while the disk
+    is genuinely short, and reports otherwise.
+    """
+    tmpdir = _run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], timeout=probe_timeout(10)).strip()
+    if not tmpdir:
+        return []
+    xdir = Path(tmpdir.rstrip("/")).parent / "X"
+    try:
+        st = xdir.lstat()
+    except OSError:
+        return []
+    # A symlinked or foreign-owned stage is not the OS's directory.
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return []
+    if st.st_uid != os.getuid():
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    try:
+        entries = sorted(xdir.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if time.time() > deadline:
+            log("temp-staged: budget exhausted, returning partial results")
+            break
+        s = str(entry)
+        try:
+            est = entry.lstat()
+        except OSError:
+            continue
+        # Never follow or delete a symlink, never touch another user's item.
+        if stat.S_ISLNK(est.st_mode) or est.st_uid != os.getuid():
+            continue
+        if is_forbidden(s) or has_keep_sentinel(s):
+            continue
+        if newest_file_age_min(s) < IDLE_MIN_SCRATCH:
+            continue
+        if open_handles(s):
+            continue
+        cands.append(Candidate(
+            category="temp-staged", path=s, bytes=dir_bytes(s),
+            reason="OS-staged temp deletion item, idle over 3h, no handles",
+            tier="semi-safe",
+        ))
     return cands
 
 
@@ -2098,6 +2189,7 @@ def rule_ask_first_inventory() -> list[Candidate]:
     cands: list[Candidate] = []
     size = dir_bytes if SIZE_ASK_FIRST else (lambda _p: 0)
     watch = [
+        (HOME / ".Trash", "Trash contents (report only; emptied by Jay or with his explicit OK, never by this engine)"),
         (HOME / "Library/Application Support/Google/DriveFS", "DriveFS local cache (content cache + Logs only; Resources are program files)"),
         (HOME / "Library/Developer/CoreSimulator/Devices", "Simulator devices (user simulator state)"),
         (HOME / ".grok/worktrees", "in-session Grok worktrees"),
@@ -3729,6 +3821,7 @@ def rule_stale_build_output() -> list[Candidate]:
 RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "snapshots": (rule_snapshots, "APFS / Time Machine local snapshots"),
     "temp-scratch": (rule_temp_scratch, "Orphaned per-user temp scratch"),
+    "temp-staged": (rule_temp_staged, "OS-staged temp deletion items (per-user X dir)"),
     "app-staging": (rule_app_staging, "Extracted but unused app updaters"),
     "botfleet-rollback": (rule_botfleet_rollback, "Abandoned BotFleet update/rollback copies"),
     "botfleet-releases": (rule_botfleet_releases, "Superseded BotFleet and companion releases"),

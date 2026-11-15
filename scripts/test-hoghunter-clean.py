@@ -3447,6 +3447,7 @@ def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulab
                            ("tool-versions", "safe", "delete"),
                            ("tmp-build-trees", "ask-first", "report"),
                            ("xcode-scratch", "safe", "delete"),
+                           ("temp-staged", "semi-safe", "delete"),
                            ("botfleet-releases", "safe", "delete")):
         assert rules[name]["tier"] == tier, name
         assert rules[name]["op"] == op, name
@@ -4202,7 +4203,7 @@ def test_the_policy_and_docs_state_the_line_and_the_report_rules(hh):
     rules = {r["name"]: r for r in policy["rules"]}
     assert hh.PRESSURE_RULE_FREE_GB == 25.0
     assert hh.XCODE_SCRATCH_DELETE_FREE_GB == 60.0
-    assert set(hh.PRESSURE_ONLY_RULES) == {"duplicate-sim-runtimes", "xcode-scratch"}
+    assert set(hh.PRESSURE_ONLY_RULES) == {"duplicate-sim-runtimes", "xcode-scratch", "temp-staged"}
     for name, (tier, line) in hh.PRESSURE_RULES.items():
         assert rules[name]["maxFreeGb"] == line, name
         assert rules[name]["tier"] == tier, name
@@ -4742,6 +4743,145 @@ def test_pr274_a_clean_run_under_the_warning_line_walks_the_report_rules(hh):
             skip = scan.call_args.kwargs["skip"]
             assert bool(hh.REPORT_ONLY_WALK_RULES & skip) == skipped, (free, skip)
         hh.SIZE_ASK_FIRST = False
+
+
+def _staged_fixture(hh):
+    """A fake DARWIN_USER_TEMP_DIR layout: .../<uuid>/T beside .../<uuid>/X."""
+    home = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhclean-staged-")))
+    base = home / "0b" / "uuid"
+    tdir = base / "T"
+    xdir = base / "X"
+    tdir.mkdir(parents=True)
+    xdir.mkdir()
+    return home, tdir, xdir
+
+
+def _age(path, hours):
+    old = time.time() - hours * 3600
+    os.utime(path, (old, old))
+
+
+def test_temp_staged_offers_idle_owned_entries(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-dead-beef"
+        stale.mkdir()
+        f = stale / "payload.bin"
+        f.write_bytes(b"x" * 1024)
+        _age(f, 5); _age(stale, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0):
+            cands = hh.rule_temp_staged()
+        assert [c.path for c in cands] == [str(stale)], cands
+        assert all(c.tier == "semi-safe" and c.category == "temp-staged" for c in cands)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_refuses_a_symlinked_or_foreign_stage(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        real = home / "elsewhere"
+        real.mkdir()
+        link = xdir.parent / "X2"
+        xdir.rename(link)
+        xdir.symlink_to(link)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"):
+            assert hh.rule_temp_staged() == []
+        xdir.unlink()
+        link.rename(xdir)
+        entry = xdir / "stale"
+        entry.mkdir()
+        _age(entry, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh.os, "getuid", return_value=os.getuid() + 1):
+            assert hh.rule_temp_staged() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_skips_fresh_handled_sentinel_and_symlink_entries(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        fresh = xdir / "fresh"
+        fresh.mkdir()
+        ff = fresh / "in-flight.tmp"
+        ff.write_bytes(b"y" * 64)          # written now: inside the idle window
+        stale = xdir / "stale"
+        stale.mkdir()
+        sf = stale / "old.bin"
+        sf.write_bytes(b"z" * 64)
+        _age(sf, 5); _age(stale, 5)
+        kept = xdir / "kept"
+        kept.mkdir()
+        (kept / ".janitor-keep").write_text("keep")
+        _age(kept, 5)
+        victim = xdir / "victim-dir"
+        victim.mkdir()
+        _age(victim, 5)
+        link = xdir / "a-link"
+        link.symlink_to(victim)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0):
+            paths = [c.path for c in hh.rule_temp_staged()]
+        assert str(stale) in paths and str(victim) in paths, paths
+        for refused in (fresh, kept, link):
+            assert str(refused) not in paths, (refused, paths)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=1):
+            assert hh.rule_temp_staged() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ask_first_reports_the_trash_without_applying_it(hh):
+    with fake_home(hh) as home:
+        trash = home / ".Trash"
+        trash.mkdir()
+        (trash / "junk.app").write_bytes(b"x" * 64)
+        cands = hh.rule_ask_first_inventory()
+    rows = [c for c in cands if c.path == str(trash)]
+    assert len(rows) == 1, cands
+    assert rows[0].tier == "ask-first" and rows[0].op == "report", rows[0]
+
+
+def _snap_run(list_out, dest_out):
+    def fake_run(cmd, **kw):
+        if "listlocalsnapshots" in cmd:
+            return list_out
+        if "destinationinfo" in cmd:
+            return dest_out
+        return ""
+    return fake_run
+
+
+def test_snapshots_report_a_broken_destination_but_still_keep_the_newest(hh):
+    listed = ("com.apple.TimeMachine.2026-11-13-040000.local\n"
+              "com.apple.TimeMachine.2026-11-14-180602.local\n")
+    broken = "==============\nName: Macintosh HD\nKind: Local\n"              "Failed to mount backup destination, error: boop\n"
+    with mock.patch.object(hh, "_run", side_effect=_snap_run(listed, broken)):
+        cands = hh.rule_snapshots()
+    deletes = [c for c in cands if c.op == "snapshot-delete"]
+    assert [c.path for c in deletes] == ["apfs-snapshot:com.apple.TimeMachine.2026-11-13-040000.local"], deletes
+    diag = [c for c in cands if c.path == "tm-destination:unreachable"]
+    assert len(diag) == 1 and diag[0].tier == "ask-first" and diag[0].op == "report", cands
+
+
+def test_snapshots_no_diagnostic_when_the_destination_is_healthy(hh):
+    listed = ("com.apple.TimeMachine.2026-11-13-040000.local\n"
+              "com.apple.TimeMachine.2026-11-14-180602.local\n")
+    healthy = "==================================================\nName: Backups\nKind: Local\nID: 1234\n"
+    with mock.patch.object(hh, "_run", side_effect=_snap_run(listed, healthy)):
+        cands = hh.rule_snapshots()
+    assert [c.path for c in cands] == ["apfs-snapshot:com.apple.TimeMachine.2026-11-13-040000.local"], cands
+
+
+def test_snapshots_diagnostic_when_no_destination_is_configured(hh):
+    listed = "com.apple.TimeMachine.2026-11-14-180602.local\n"
+    with mock.patch.object(hh, "_run", side_effect=_snap_run(listed, "No destinations configured\n")):
+        cands = hh.rule_snapshots()
+    assert [c.path for c in cands] == ["tm-destination:absent"], cands
+    assert cands[0].tier == "ask-first" and cands[0].op == "report"
 
 
 def main() -> int:
