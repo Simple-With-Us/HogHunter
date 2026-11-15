@@ -353,6 +353,7 @@ final class CleanRegimenRunner: ObservableObject {
         // a permanent-looking countdown on a first-time hold.
         let overdueSeconds = now.timeIntervalSince(dueAt)
         guard overdueSeconds > 60, overdueSeconds < Self.overdueOverrideHours * 3600 else { return reason }
+        let overdueHours = overdueSeconds / 3600
         let hours = Int(Self.overdueOverrideHours.rounded())
         let short = max(0, Int(overdueHours.rounded()))
         let unit = short == 1 ? "hour" : "hours"
