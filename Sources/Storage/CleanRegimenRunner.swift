@@ -195,6 +195,7 @@ final class CleanRegimenRunner: ObservableObject {
                 guard let self else { return }
                 try? await Task.sleep(for: .seconds(self.checkInterval))
                 guard !Task.isCancelled else { return }
+                Self.log.info("scheduler woke to check")
                 self.tick()
             }
         })
@@ -267,6 +268,7 @@ final class CleanRegimenRunner: ObservableObject {
         let regimen = (plan ?? CleanRegimen.load()).sanitized()
         let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
+            Self.log.info("tick: not due (enabled=\(regimen.isEnabled, privacy: .public), lastRun=\(lastRunAt.map(\.description) ?? "never", privacy: .public), gateRetry=\(gateRetryDate.map(\.description) ?? "none", privacy: .public))")
             // A gate that failed recently is holding the run, and the owner
             // can act on that, so the panel says so rather than going quiet.
             if regimen.isEnabled, let retry = gateRetryDate, retry > now() {
@@ -291,6 +293,7 @@ final class CleanRegimenRunner: ObservableObject {
         }
         // A scheduled run honors the regimen's own conditions.  "Run Now" is
         // a person asking, so it does not go through this gate.
+        Self.log.info("tick: due (lastRun=\(lastRunAt.map(\.description) ?? "never", privacy: .public))")
         if let reason = Self.scheduleBlocker(
             regimen: regimen,
             idleSeconds: idleSeconds(),
@@ -585,6 +588,7 @@ final class CleanRegimenRunner: ObservableObject {
         // `release()` spawns no process, so the deferred give-back stays here.
         let lock = lockProvider()
         let outcome = await Task.detached(priority: .utility) { lock.acquire() }.value
+        Self.log.info("housekeeper lock: \(outcome == .acquired ? "acquired" : outcome == .alreadyHeld ? "already held" : "error", privacy: .public)")
         guard outcome == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
             Self.log.notice("run skipped: housekeeper lock held")
