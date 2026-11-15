@@ -588,7 +588,7 @@ final class CleanRegimenRunner: ObservableObject {
         // `release()` spawns no process, so the deferred give-back stays here.
         let lock = lockProvider()
         let outcome = await Task.detached(priority: .utility) { lock.acquire() }.value
-        Self.log.info("housekeeper lock: \(outcome == .acquired ? "acquired" : outcome == .alreadyHeld ? "already held" : "error", privacy: .public)")
+        Self.log.info("housekeeper lock: \(outcome == .acquired ? "acquired" : "held by peer", privacy: .public)")
         guard outcome == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
             Self.log.notice("run skipped: housekeeper lock held")
