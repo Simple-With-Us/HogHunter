@@ -51,6 +51,7 @@ struct MacActivityActionsMenu: View {
 
     private func sample() {
         store.lastError = nil
+        store.lastNotice = nil
         // Same live identity and ownership gate the phone-triggered sample
         // uses: a pid that now belongs to something else, Hog Hunter itself,
         // a system process or another user's process is never sampled.
