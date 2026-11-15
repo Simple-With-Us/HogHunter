@@ -50,15 +50,24 @@ struct MacActivityActionsMenu: View {
     }
 
     private func sample() {
-        guard let pid = row.pid else { return }
         store.lastError = nil
-        SampleReport.run(name: row.name, pid: pid) { outcome in
-            switch outcome {
-            case .written(let url):
-                NSWorkspace.shared.open(url)
-            case .failed(let message):
-                store.lastError = message
+        // Same live identity and ownership gate the phone-triggered sample
+        // uses: a pid that now belongs to something else, Hog Hunter itself,
+        // a system process or another user's process is never sampled.
+        switch ProcessControl.sampleChoice(members: row.keys, fallbackName: row.name) {
+        case .ready(let key, let name):
+            SampleReport.run(name: name, pid: key.pid) { outcome in
+                switch outcome {
+                case .written(let url):
+                    NSWorkspace.shared.open(url)
+                case .failed(let message):
+                    store.lastError = message
+                }
             }
+        case .blocked(let name, let reason):
+            store.lastError = "\(name) is \(reason).\u{00A0} Hog Hunter will not sample it."
+        case .changed(let name):
+            store.lastError = "\(name) changed since sampling.\u{00A0} Hog Hunter left it alone."
         }
     }
 }
