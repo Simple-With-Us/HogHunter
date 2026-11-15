@@ -299,7 +299,6 @@ final class CleanRegimenRunner: ObservableObject {
             idleSeconds: idleSeconds(),
             panelOpen: presenceProvider()
         ) {
-            Self.log.info("tick: due, held (\(reason, privacy: .public))")
             // A run the interval has been owed long enough stops waiting on
             // the idle gate and starts in the busy shape instead; see
             // `overdueOverrideHours`.  Anything else keeps the hold, and the
@@ -319,8 +318,10 @@ final class CleanRegimenRunner: ObservableObject {
                 lastRunDefaults.set(dueAt, forKey: dueSinceKey)
             }
             guard !Self.overdueOverrideApplies(regimen: regimen, dueAt: dueAt, now: now(), blocker: reason) else {
+                Self.log.info("tick: due and overdue — the override starts it now")
                 return runNow(regimen: regimen, scheduled: true, busyOverride: true)
             }
+            Self.log.info("tick: due, held (\(reason, privacy: .public))")
             waitingReason = Self.blockerText(reason: reason, regimen: regimen, dueAt: dueAt, now: now())
             nextRunDate = now().addingTimeInterval(checkInterval)
             return nil
@@ -641,7 +642,7 @@ final class CleanRegimenRunner: ObservableObject {
         let scan = await scanProvider(scanExclusions)
         Self.log.info("scan finished: partial=\(scan.isPartial, privacy: .public) selected=\(scan.categories.flatMap { $0.items.filter(\.isSelected) }.count, privacy: .public)")
         if scan.isPartial {
-            Self.log.notice("run skipped: scan was partial")
+            Self.log.notice("run continues with partial discovery (cleaning the found subset)")
             recordsRun = false
             result.skippedReason = "Discovery was incomplete; the regimen will retry at the next check."
         }
