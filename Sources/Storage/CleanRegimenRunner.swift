@@ -371,10 +371,21 @@ final class CleanRegimenRunner: ObservableObject {
         let overdueSeconds = now.timeIntervalSince(dueAt)
         guard overdueSeconds > 60, overdueSeconds < Self.overdueOverrideHours * 3600 else { return reason }
         let hours = Int(Self.overdueOverrideHours.rounded())
-        let remainingHours = Self.overdueOverrideHours - overdueSeconds / 3600
-        let short = max(0, Int(remainingHours.rounded()))
-        let unit = short == 1 ? "hour" : "hours"
-        return "\(reason)\u{00A0} A run overdue by \(hours) hours starts anyway; this one starts in about \(short) \(unit)."
+        // A sub-half-hour remainder rounds to zero hours, which reads as a
+        // wait with no end -- the one thing this text exists to rule out.
+        // Minutes take over under an hour, floored at one.
+        let remainingSeconds = max(0, Self.overdueOverrideHours * 3600 - overdueSeconds)
+        let countdown: String
+        if remainingSeconds < 3600 {
+            let minutes = max(1, Int((remainingSeconds / 60).rounded(.up)))
+            let unit = minutes == 1 ? "minute" : "minutes"
+            countdown = "\(minutes) \(unit)"
+        } else {
+            let short = max(1, Int((remainingSeconds / 3600).rounded()))
+            let unit = short == 1 ? "hour" : "hours"
+            countdown = "\(short) \(unit)"
+        }
+        return "\(reason)\u{00A0} A run overdue by \(hours) hours starts anyway; this one starts in about \(countdown)."
     }
 
     /// Whether the owner-configured Trash valve is open for this run.
