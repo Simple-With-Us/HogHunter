@@ -348,8 +348,11 @@ final class CleanRegimenRunner: ObservableObject {
     /// start, keeps the plain reason.
     nonisolated static func blockerText(reason: String, regimen: CleanRegimen, dueAt: Date, now: Date) -> String {
         guard !regimen.requireUserPresent else { return reason }
-        let overdueHours = now.timeIntervalSince(dueAt) / 3600
-        guard overdueHours > 0, overdueHours < Self.overdueOverrideHours else { return reason }
+        // A run that became due seconds ago is not meaningfully overdue:
+        // clock drift between "scheduled" and "checked" would otherwise pin
+        // a permanent-looking countdown on a first-time hold.
+        let overdueSeconds = now.timeIntervalSince(dueAt)
+        guard overdueSeconds > 60, overdueSeconds < Self.overdueOverrideHours * 3600 else { return reason }
         let hours = Int(Self.overdueOverrideHours.rounded())
         let short = max(0, Int(overdueHours.rounded()))
         let unit = short == 1 ? "hour" : "hours"

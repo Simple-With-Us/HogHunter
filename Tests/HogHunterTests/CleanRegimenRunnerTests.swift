@@ -574,12 +574,6 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         let task = runner.tick(regimen: regimen)
 
-        let san = regimen.sanitized()
-        let dueAt = CleanRegimenRunner.dueDate(lastRunAt: defaults.object(forKey: key) as? Date,
-                                               regimen: san, now: now)
-        let blocker = CleanRegimenRunner.scheduleBlocker(regimen: san, idleSeconds: 0, panelOpen: false)
-        let applies = CleanRegimenRunner.overdueOverrideApplies(regimen: san, dueAt: dueAt, now: now, blocker: blocker ?? "")
-        XCTFail("DIAG task=\(task != nil) dueAtOffset=\(dueAt.timeIntervalSince(now)) blocker=\(blocker ?? "nil") applies=\(applies) interval=\(san.effectiveIntervalHours) idleMin=\(san.requireIdleMinutes) preset=\((defaults.object(forKey: key) as? Date)?.timeIntervalSince(now) ?? -9999)")
         XCTAssertNil(task, "a run inside the override window keeps waiting")
         XCTAssertTrue(runner.waitingReason?.contains("starts anyway") ?? false)
         XCTAssertEqual((defaults.object(forKey: key) as? Date)?.timeIntervalSince1970 ?? 0,
