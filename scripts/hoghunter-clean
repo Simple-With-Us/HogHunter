@@ -1562,25 +1562,38 @@ def _temp_staged_refusal(entry: Path, identity: tuple[int, int]) -> str | None:
     # neverAppleDeleting: an entry shaped like Apple staging (it carries a
     # data/ subtree) is live until that subtree has no children AND the
     # tree has been idle over 7d.
+    is_apple = False
     data_dir = entry / "data"
     try:
         if data_dir.is_dir() and not data_dir.is_symlink():
+            is_apple = True
             idle = min(idle, (time.time() - data_dir.lstat().st_mtime) / 60.0)
             if any(data_dir.iterdir()):
                 return "Apple staging with live children under data/"
-            if idle < APPLE_STAGING_IDLE_MIN:
-                return "Apple staging idle under 7d"
     except OSError:
         return "staging subtree unreadable"
-    if idle < IDLE_MIN_SCRATCH:
-        return "not idle 3h"
+    window = APPLE_STAGING_IDLE_MIN if is_apple else IDLE_MIN_SCRATCH
+    if idle < window:
+        return "Apple staging idle under 7d" if is_apple else "not idle 3h"
+    # newest_file_age_min caps its walk, so a tree with more entries than
+    # the cap can hide a recent write past it.  The uncapped find probe
+    # answers on the first recent file, and a failed probe reads as touched.
+    if touched_since(s, window / (24 * 60)):
+        return "touched inside the idle window"
+    # A .janitor-keep anywhere inside the tree protects the tree; a probe
+    # that cannot answer refuses too.  keep_verdict on the Candidate is
+    # honest only because this runs at scan AND at recheck.
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "nested keep marker" if marker.found else "keep-marker probe failed"
     if open_handles(s):
         return "a process holds it open"
     # A writer that opens and closes files shows zero handles; a process
     # naming this entry's exact name (its UUID) in argv counts as live.
-    # proc_count returns PROBE_FAILED on any pgrep failure, which reads as
-    # busy here.
-    if proc_count(entry.name) > 0:
+    # The name reaches pgrep -f as a regex, so escape it the way
+    # process_names_path does.  proc_count returns PROBE_FAILED on any
+    # pgrep failure, which reads as busy here.
+    if proc_count(re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", entry.name)) > 0:
         return "a process names it"
     return None
 
@@ -1594,8 +1607,10 @@ def rule_temp_staged() -> list[Candidate]:
     already means to release.  Every gate the T rule has applies: owner-only,
     no symlinks, keep sentinel, forbidden paths, and no open handles.  Apple
     staging gets the policy's neverAppleDeleting orphan test (empty data/
-    subtree and a week idle), a process naming the entry's UUID counts as a
-    live writer, and the recheck re-runs every gate right before the delete.
+    subtree and a week idle), idle is confirmed by the uncapped touched_since
+    probe (the capped walk can hide a recent write), a nested .janitor-keep
+    protects the tree, a process naming the entry's UUID counts as a live
+    writer, and the recheck re-runs every gate right before the delete.
     """
     tmpdir = _run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], timeout=probe_timeout(10)).strip()
     if not tmpdir:

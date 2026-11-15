@@ -4978,6 +4978,73 @@ def test_temp_staged_recheck_reruns_the_gates_before_the_delete(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_temp_staged_refuses_a_nested_keep_marker(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-marked"
+        (stale / "deep" / "deeper").mkdir(parents=True)
+        f = stale / "deep" / "deeper" / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        (stale / "deep" / ".janitor-keep").write_text("keep")
+        _age(f, 5); _age(stale / "deep" / "deeper", 5); _age(stale / "deep", 5); _age(stale, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            assert hh.rule_temp_staged() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_confirms_idle_with_the_uncapped_probe(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-capped"
+        stale.mkdir()
+        f = stale / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        _age(f, 5); _age(stale, 5)
+        # A recent write hidden past the capped walk: the probe says touched.
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            assert hh.rule_temp_staged() == []
+        # A failed probe fails closed the same way; touched_since already
+        # returns True on failure, so both shapes are the True above.  With a
+        # quiet probe the entry is offered.
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0), \
+                mock.patch.object(hh, "touched_since", return_value=False):
+            assert [c.path for c in hh.rule_temp_staged()] == [str(stale)]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_escapes_the_writer_pattern(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        odd = xdir / "stale(1).tmp+[v2]"
+        odd.mkdir()
+        f = odd / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        _age(f, 5); _age(odd, 5)
+        seen = []
+        def fake_proc_count(pattern):
+            seen.append(pattern)
+            return 0
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", side_effect=fake_proc_count):
+            cands = hh.rule_temp_staged()
+        assert [c.path for c in cands] == [str(odd)], cands
+        assert seen, "writer check must run"
+        import re as _re
+        assert all(p == _re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", "stale(1).tmp+[v2]") for p in seen), seen
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
