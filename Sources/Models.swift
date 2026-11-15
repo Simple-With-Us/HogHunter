@@ -351,8 +351,11 @@ struct DiskSpace: Equatable {
     static func current() -> DiskSpace? {
         guard let values = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(
             forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]
-        ), let total = values.volumeTotalCapacity, total > 0 else { return nil }
-        let free = values.volumeAvailableCapacityForImportantUsage ?? 0
+        ), let total = values.volumeTotalCapacity, total > 0,
+        // A capacity the volume will not report is an unmeasured disk, not
+        // an empty one:  the reclaim paths gate permanent deletes on this
+        // number, and nil is how "not measured" travels.
+        let free = values.volumeAvailableCapacityForImportantUsage else { return nil }
         return DiskSpace(freeBytes: UInt64(max(0, free)), totalBytes: UInt64(total))
     }
 }

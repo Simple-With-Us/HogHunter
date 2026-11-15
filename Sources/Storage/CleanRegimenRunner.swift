@@ -1,6 +1,7 @@
 import Combine
 import CoreGraphics
 import Foundation
+import os
 
 /// Runs `CleanRegimen` unattended, on a timer, in bounded chunks.
 ///
@@ -64,6 +65,17 @@ final class CleanRegimenRunner: ObservableObject {
     /// The run in flight, held for the same reason.
     nonisolated let runBox = CleanRegimenTaskBox()
     private let defaultsKey = "hoghunter.cleaner.regimen.lastRunAt"
+    /// Every tick decision and skip lands here:  a silent skip is an
+    /// unexplainable one, and the 2026-11-15 investigation of a regimen that
+    /// never ran cost an afternoon because nothing said why.
+    private static let log = Logger(subsystem: "com.simplewithus.hoghunter",
+                                    category: "Regimen")
+
+    /// When a clock-less regimen first became due.  A blob enabled without a
+    /// stored last-run time is due the moment it is first seen;  this marker
+    /// is what hours of overdue measure against, and it clears whenever the
+    /// interval's clock starts for real.
+    private let dueSinceKey = "hoghunter.cleaner.regimen.dueSince"
     /// When a safety gate last failed, kept apart from the completed-run
     /// clock: a run that tripped the gate did not happen, and the two states
     /// have to be told apart.
@@ -79,6 +91,23 @@ final class CleanRegimenRunner: ObservableObject {
     /// enough that the cleaner is not left idle for a whole interval after
     /// the blocker is gone.
     static let gateBackoff: TimeInterval = 60 * 60
+
+    /// How long a due run may sit held by the regimen's own conditions
+    /// before it starts anyway, in the pressured chunk shape.
+    ///
+    /// The idle gate exists so an unattended reclaim does not land on a Mac
+    /// someone is using.  On this host the gate never opens:  fleet build
+    /// work keeps the machine busy around the clock, so a daily regimen that
+    /// waits for a quiet half hour never runs at all.  That is the same
+    /// failure the 2026-10-02 owner ruling removed for load -- a guard whose
+    /// threshold equals the normal state is an outage, not a guard -- so a
+    /// run owed long enough stops waiting and cleans in smaller chunks with
+    /// longer pauses, the same shape high swap or load already gets.  A run
+    /// is measured overdue from when its interval said it was due, not from
+    /// when it was last seen waiting.  An explicit `requireUserPresent`
+    /// stays binding:  the owner who asked for the panel to be open asked
+    /// for exactly that.
+    nonisolated static let overdueOverrideHours: TimeInterval = 6
 
     /// How often the scheduler wakes to *consider* a run.  The interval
     /// between runs is the regimen's; this just checks the clock, and
@@ -166,6 +195,7 @@ final class CleanRegimenRunner: ObservableObject {
                 guard let self else { return }
                 try? await Task.sleep(for: .seconds(self.checkInterval))
                 guard !Task.isCancelled else { return }
+                Self.log.info("scheduler woke to check")
                 self.tick()
             }
         })
@@ -238,6 +268,7 @@ final class CleanRegimenRunner: ObservableObject {
         let regimen = (plan ?? CleanRegimen.load()).sanitized()
         let lastRunAt = lastRunDefaults.object(forKey: defaultsKey) as? Date
         guard isDue(regimen: regimen, lastRunAt: lastRunAt) else {
+            Self.log.info("tick: not due (enabled=\(regimen.isEnabled, privacy: .public), lastRun=\(lastRunAt.map(\.description) ?? "never", privacy: .public), gateRetry=\(self.gateRetryDate.map(\.description) ?? "none", privacy: .public))")
             // A gate that failed recently is holding the run, and the owner
             // can act on that, so the panel says so rather than going quiet.
             if regimen.isEnabled, let retry = gateRetryDate, retry > now() {
@@ -262,16 +293,50 @@ final class CleanRegimenRunner: ObservableObject {
         }
         // A scheduled run honors the regimen's own conditions.  "Run Now" is
         // a person asking, so it does not go through this gate.
+        Self.log.info("tick: due (lastRun=\(lastRunAt.map(\.description) ?? "never", privacy: .public))")
         if let reason = Self.scheduleBlocker(
             regimen: regimen,
             idleSeconds: idleSeconds(),
             panelOpen: presenceProvider()
         ) {
-            waitingReason = reason
+            // A run the interval has been owed long enough stops waiting on
+            // the idle gate and starts in the busy shape instead; see
+            // `overdueOverrideHours`.  Anything else keeps the hold, and the
+            // panel says when the override would arrive so a wait never
+            // reads as forever.
+            let dueAt: Date
+            if let lastRunAt {
+                dueAt = Self.dueDate(lastRunAt: lastRunAt, regimen: regimen, now: now())
+            } else if let marked = lastRunDefaults.object(forKey: dueSinceKey) as? Date {
+                dueAt = marked
+            } else {
+                // A regimen with no stored clock (a hand-enabled blob) was
+                // due when it was first seen;  mark that moment so the
+                // override can measure hours against it instead of finding
+                // zero forever.
+                dueAt = now()
+                lastRunDefaults.set(dueAt, forKey: dueSinceKey)
+            }
+            guard !Self.overdueOverrideApplies(regimen: regimen, dueAt: dueAt, now: now(), blocker: reason) else {
+                // runNow returns nil when a run is already in flight:  say so
+                // and set the retry moment, or the log claims a start that
+                // never happened while the panel keeps a stale next-run time.
+                let task = runNow(regimen: regimen, scheduled: true, busyOverride: true)
+                if task != nil {
+                    Self.log.info("tick: due and overdue — the override starts it now")
+                } else {
+                    Self.log.info("tick: overdue override deferred — a run is already in progress")
+                    waitingReason = "A run is already in progress; this check will try again shortly."
+                    nextRunDate = now().addingTimeInterval(checkInterval)
+                }
+                return task
+            }
+            Self.log.info("tick: due, held (\(reason, privacy: .public))")
+            waitingReason = Self.blockerText(reason: reason, regimen: regimen, dueAt: dueAt, now: now())
             nextRunDate = now().addingTimeInterval(checkInterval)
             return nil
         }
-        return runNow(regimen: regimen)
+        return runNow(regimen: regimen, scheduled: true)
     }
 
     /// Why a due, scheduled run must not start yet, or nil when it may.
@@ -290,6 +355,74 @@ final class CleanRegimenRunner: ObservableObject {
             return "Waiting for the Mac to be idle."
         }
         return nil
+    }
+
+    /// When the interval's run became due:  the last completed or scheduled
+    /// run plus one interval, or now when there is no previous run, which is
+    /// the same answer `isDue` gives a first-time schedule.
+    nonisolated static func dueDate(lastRunAt: Date?, regimen: CleanRegimen, now: Date) -> Date {
+        lastRunAt.map { $0.addingTimeInterval(regimen.effectiveIntervalHours * 3600) } ?? now
+    }
+
+    /// True when a due run has been held long enough to start anyway.
+    ///
+    /// `requireUserPresent` is excluded on purpose.  The idle hold is a
+    /// courtesy guess about a person who may never leave;  a panel hold is
+    /// the owner's own instruction about when unattended work may happen,
+    /// and no amount of being overdue outranks an instruction.
+    nonisolated static func overdueOverrideApplies(regimen: CleanRegimen,
+                                                   dueAt: Date,
+                                                   now: Date,
+                                                   blocker: String) -> Bool {
+        if regimen.requireUserPresent { return false }
+        // `timeIntervalSince` is seconds and the constant is hours:  compare
+        // like with like, or six hours collapses to six seconds and every
+        // barely-due run starts at once.
+        return now.timeIntervalSince(dueAt) >= overdueOverrideHours * 3600
+    }
+
+    /// The hold text, plus -- once the run is overdue at all -- how far it
+    /// still is from the override, so the panel never shows a wait with no
+    /// end.  A run that is not overdue, or one the override is about to
+    /// start, keeps the plain reason.
+    nonisolated static func blockerText(reason: String, regimen: CleanRegimen, dueAt: Date, now: Date) -> String {
+        guard !regimen.requireUserPresent else { return reason }
+        // A run that became due seconds ago is not meaningfully overdue:
+        // clock drift between "scheduled" and "checked" would otherwise pin
+        // a permanent-looking countdown on a first-time hold.
+        let overdueSeconds = now.timeIntervalSince(dueAt)
+        guard overdueSeconds > 60, overdueSeconds < Self.overdueOverrideHours * 3600 else { return reason }
+        let hours = Int(Self.overdueOverrideHours.rounded())
+        // A sub-half-hour remainder rounds to zero hours, which reads as a
+        // wait with no end -- the one thing this text exists to rule out.
+        // Minutes take over under an hour, floored at one.
+        let remainingSeconds = max(0, Self.overdueOverrideHours * 3600 - overdueSeconds)
+        let countdown: String
+        if remainingSeconds < 3600 {
+            let minutes = max(1, Int((remainingSeconds / 60).rounded(.up)))
+            let unit = minutes == 1 ? "minute" : "minutes"
+            countdown = "\(minutes) \(unit)"
+        } else {
+            let short = max(1, Int((remainingSeconds / 3600).rounded()))
+            let unit = short == 1 ? "hour" : "hours"
+            countdown = "\(short) \(unit)"
+        }
+        return "\(reason)\u{00A0} A run overdue by \(hours) hours starts anyway; this one starts in about \(countdown)."
+    }
+
+    /// Whether the owner-configured Trash valve is open for this run.
+    ///
+    /// The valve is the one sanctioned way a scheduled run may touch the
+    /// Trash:  it is off unless the owner set a line in Settings, and it
+    /// opens only on measured free space at or below that line.  Every other
+    /// path keeps `neverEmptyTrash` intact.
+    nonisolated static func trashValveOpen(regimen: CleanRegimen, pressure: CleanPressure) -> Bool {
+        // An unmeasured disk is a closed valve:  `diskFreeGB` reads 0 when
+        // the query fails, and 0 would otherwise look like the fullest disk
+        // there is.  A permanent delete never runs on a number we do not
+        // have.
+        guard pressure.diskFreeKnown, let line = regimen.emptyTrashBelowGB else { return false }
+        return pressure.diskFreeGB <= line
     }
 
     /// Why a chunk's errors mean the run must stop, or nil when the run may
@@ -347,6 +480,7 @@ final class CleanRegimenRunner: ObservableObject {
         }
         let started = now()
         lastRunDefaults.set(started, forKey: defaultsKey)
+        lastRunDefaults.removeObject(forKey: dueSinceKey)
         updateNextRun(regimen: plan, lastRunAt: started)
     }
 
@@ -373,8 +507,16 @@ final class CleanRegimenRunner: ObservableObject {
     ///
     /// The task is returned so a caller can wait for it.  The UI does not
     /// need to, but a test does, and returning the handle costs nothing.
+    /// `scheduled` marks a run the interval started (as opposed to a person
+    /// pressing Run Now), and is the only path the Trash valve rides:  a
+    /// button press never carries the valve's permanence.
+    ///
+    /// `busyOverride` is the overdue path:  the Mac is in use -- that is why
+    /// the run was waiting -- so the run takes the pressured burst shape
+    /// whatever the gauges read between bursts of the work keeping it busy.
     @discardableResult
-    func runNow(regimen: CleanRegimen? = nil) -> Task<Void, Never>? {
+    func runNow(regimen: CleanRegimen? = nil, scheduled: Bool = false,
+                busyOverride: Bool = false) -> Task<Void, Never>? {
         guard !isRunning else { return nil }
         let plan = (regimen ?? CleanRegimen.load()).sanitized()
         guard plan.isValid else {
@@ -383,18 +525,20 @@ final class CleanRegimenRunner: ObservableObject {
         }
         isRunning = true
         lastError = nil
+        Self.log.info("run started (scheduled=\(scheduled, privacy: .public), busy=\(busyOverride, privacy: .public))")
         // A run that starts is no longer waiting, whether the schedule or Run
         // Now started it.
         waitingReason = nil
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.perform(plan)
+            await self.perform(plan, scheduled: scheduled, busyOverride: busyOverride)
         }
         runBox.set(task)
         return task
     }
 
-    private func perform(_ regimen: CleanRegimen) async {
+    private func perform(_ regimen: CleanRegimen, scheduled: Bool = false,
+                         busyOverride: Bool = false) async {
         let started = now()
         var result = RegimenRun(startedAt: started)
         // A run that stepped aside (a build in flight, or another cleanup
@@ -414,6 +558,7 @@ final class CleanRegimenRunner: ObservableObject {
             // restart.  The next launch finds the run still due.
             if recordsRun && !Task.isCancelled {
                 lastRunDefaults.set(started, forKey: defaultsKey)
+                lastRunDefaults.removeObject(forKey: dueSinceKey)
                 // The gate works again, so the backoff it earned is over.
                 lastRunDefaults.removeObject(forKey: gateFailureKey)
                 updateNextRun(regimen: regimen, lastRunAt: started)
@@ -436,6 +581,7 @@ final class CleanRegimenRunner: ObservableObject {
         // path time out and leave orphans behind.
         if regimen.avoidDuringBuilds, Self.buildInFlight() {
             result.skippedReason = "A build is running, so the regimen waited."
+            Self.log.notice("run skipped: build in flight")
             recordsRun = false
             finish(result, regimen: regimen)
             return
@@ -453,8 +599,10 @@ final class CleanRegimenRunner: ObservableObject {
         // `release()` spawns no process, so the deferred give-back stays here.
         let lock = lockProvider()
         let outcome = await Task.detached(priority: .utility) { lock.acquire() }.value
+        Self.log.info("housekeeper lock: \(outcome == .acquired ? "acquired" : "held by peer", privacy: .public)")
         guard outcome == .acquired else {
             result.skippedReason = "Another cleanup is already running, so the regimen waited."
+            Self.log.notice("run skipped: housekeeper lock held")
             recordsRun = false
             finish(result, regimen: regimen)
             return
@@ -464,41 +612,80 @@ final class CleanRegimenRunner: ObservableObject {
         // Nothing to select means nothing to scan.  The scan walks the whole
         // disk, so a regimen with no enabled rules must not pay for it: the
         // answer is the same either way, and the walk is the expensive part.
-        guard !regimen.enabledRules.isEmpty else {
+        // The Trash valve reads live free space before the scan:  the scan
+        // categories depend on it, and a valve decision made after the walk
+        // would already have paid for a scan that could not include the
+        // Trash.
+        let pressure = CleanPressure.current()
+        let exclusions = exclusionsProvider()
+        // The valve rides scheduled runs only, and stays shut when the owner
+        // excluded the Trash category:  an explicit exclusion outranks the
+        // valve, and walking the Trash only to delete nothing would lie
+        // twice.
+        let trashValveOpen = scheduled
+            && !exclusions.isCategoryExcluded(.trash)
+            && Self.trashValveOpen(regimen: regimen, pressure: pressure)
+        // Nothing to select means nothing to scan.  The scan walks the whole
+        // disk, so a regimen with no enabled rules must not pay for it: the
+        // answer is the same either way, and the walk is the expensive part.
+        // The valve is its own reason to scan:  an owner who configured only
+        // the valve still asked for work.
+        guard !regimen.enabledRules.isEmpty || trashValveOpen else {
             result.skippedReason = "No cleaning rules are enabled."
+            Self.log.notice("run skipped: no enabled rules")
             recordsRun = false
             finish(result, regimen: regimen)
             return
         }
 
-        let exclusions = exclusionsProvider()
-        // Disabled rules must not consume the bounded scan before enabled ones run.
+        // Disabled rules must not consume the bounded scan before enabled
+        // ones run.  With the valve open the Trash is scanned too:  it is
+        // the one category no rule may select, so the valve lifts its
+        // exclusion itself.
         let enabledCategories = Self.scanCategories(for: regimen.enabledRules)
         var scanExclusions = exclusions
         scanExclusions.excludedCategories.formUnion(CleanCategory.allCases
             .filter { !enabledCategories.contains($0) }.map(\.rawValue))
+        if trashValveOpen {
+            scanExclusions.excludedCategories.remove(CleanCategory.trash.rawValue)
+        }
         let scan = await scanProvider(scanExclusions)
+        Self.log.info("scan finished: partial=\(scan.isPartial, privacy: .public) selected=\(scan.categories.flatMap { $0.items.filter(\.isSelected) }.count, privacy: .public)")
         if scan.isPartial {
+            Self.log.notice("run continues with partial discovery (cleaning the found subset)")
             recordsRun = false
             result.skippedReason = "Discovery was incomplete; the regimen will retry at the next check."
         }
         // `CleanScanReport` groups by category rather than exposing a flat
         // item list, so flatten the selected items from each report.
         let scanned = scan.categories.flatMap { $0.items.filter(\.isSelected) }
+        // The valve's items ride beside the rule-selected ones and are never
+        // filtered by rules:  `CleanCategory.trash` answers to no rule by
+        // design, so `pendingItems` would drop everything the valve exists
+        // to clean.
+        let valveItems = trashValveOpen
+            ? scanned.filter { $0.category == .trash }
+            : []
         let decision = Self.pendingItems(from: scanned, rules: regimen.enabledRules)
-        guard decision.skipReason == nil else {
+        guard decision.skipReason == nil || !valveItems.isEmpty else {
             result.skippedReason = result.skippedReason ?? decision.skipReason
             recordsRun = false
             finish(result, regimen: regimen)
             return
         }
-        let pending = decision.items
+        let pending = decision.items + valveItems
 
-        // Pressure decides the burst size, never the burst count.
-        let pressure = CleanPressure.current()
-        let chunk = pressure.chunkSize(regimen: regimen)
-        let pause = pressure.pauseSeconds(regimen: regimen)
-        result.pressureLabel = pressure.label
+        // Pressure decides the burst size, never the burst count.  An
+        // overdue run takes the pressured shape without asking the gauges:
+        // the person the idle gate protects is there, whatever the idle
+        // percentage reads between bursts of the work keeping the Mac busy.
+        let chunk = busyOverride
+            ? max(1, regimen.effectivePressuredTargetsPerChunk)
+            : pressure.chunkSize(regimen: regimen)
+        let pause = busyOverride
+            ? regimen.effectivePressuredChunkPauseSeconds
+            : pressure.pauseSeconds(regimen: regimen)
+        result.pressureLabel = busyOverride ? "Busy (Overdue)" : pressure.label
         result.chunkSize = chunk
 
         // One rollback point per run, not one per chunk.  Every `clean` call
@@ -543,6 +730,7 @@ final class CleanRegimenRunner: ObservableObject {
         }
 
         result.cancelled = Task.isCancelled
+        Self.log.info("run finished: reclaimed=\(result.bytesReclaimed, privacy: .public) items=\(result.itemsRemoved, privacy: .public) errors=\(result.errors.count, privacy: .public) cancelled=\(result.cancelled, privacy: .public) skip=\(result.skippedReason ?? "none", privacy: .public)")
         finish(result, regimen: regimen)
     }
 

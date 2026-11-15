@@ -78,6 +78,14 @@ struct CleanRegimen: Codable, Equatable, Sendable {
     /// space pressure.
     var expensiveTierFreeGB: Double = 40
 
+    /// The Trash valve:  when free space falls to this line or below, a
+    /// scheduled run also empties the Trash, permanently.  `nil` (the
+    /// default) means the regimen never touches the Trash at all, which was
+    /// the only behavior until the owner asked for the valve on 2026-11-15.
+    /// It is its own explicit setting -- never a rule mapping -- because
+    /// `DiskCleaner.clean` removes a Trash item and there is no undo.
+    var emptyTrashBelowGB: Double?
+
     // MARK: - Infisical-overridable effective values
 
     /// The stored properties above are the local fallback (the regimen JSON
@@ -130,7 +138,8 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         pressuredTargetsPerChunk: Int = 2,
         pressuredChunkPauseSeconds: Double = 10,
         createSnapshotBeforeClean: Bool = true,
-        expensiveTierFreeGB: Double = 40
+        expensiveTierFreeGB: Double = 40,
+        emptyTrashBelowGB: Double? = nil
     ) {
         self.isEnabled = isEnabled
         self.intervalHours = intervalHours
@@ -144,6 +153,7 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         self.pressuredChunkPauseSeconds = pressuredChunkPauseSeconds
         self.createSnapshotBeforeClean = createSnapshotBeforeClean
         self.expensiveTierFreeGB = expensiveTierFreeGB
+        self.emptyTrashBelowGB = emptyTrashBelowGB
     }
 
     /// The engine's rule names.  `ask-first` is deliberately absent: nothing
@@ -190,6 +200,14 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         copy.requireIdleMinutes = max(0, requireIdleMinutes)
         copy.expensiveTierFreeGB = max(1, expensiveTierFreeGB)
         copy.enabledRules = enabledRules.intersection(Self.schedulableRules)
+        // A finite line below the floor clamps up to it;  only genuine
+        // nonsense -- negative, unparsable -- disables the valve, so a
+        // hand-edited blob cannot silently switch a permanent delete off.
+        if let line = emptyTrashBelowGB, line.isFinite, line >= 0 {
+            copy.emptyTrashBelowGB = max(1, line)
+        } else {
+            copy.emptyTrashBelowGB = nil
+        }
         return copy
     }
 
@@ -244,6 +262,7 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         regimen.pressuredChunkPauseSeconds = try raw.decodeIfPresent(Double.self, forKey: .pressuredChunkPauseSeconds) ?? regimen.pressuredChunkPauseSeconds
         regimen.createSnapshotBeforeClean = try raw.decodeIfPresent(Bool.self, forKey: .createSnapshotBeforeClean) ?? regimen.createSnapshotBeforeClean
         regimen.expensiveTierFreeGB = try raw.decodeIfPresent(Double.self, forKey: .expensiveTierFreeGB) ?? regimen.expensiveTierFreeGB
+        regimen.emptyTrashBelowGB = try raw.decodeIfPresent(Double?.self, forKey: .emptyTrashBelowGB) ?? regimen.emptyTrashBelowGB
         self = regimen
     }
 }
