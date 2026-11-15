@@ -515,7 +515,7 @@ struct HogHunterPanel: View {
 
                 Spacer()
 
-                Button("Clean…") {
+                Button("Open Cleaner…") {
                     DetachedWindowManager.shared.openCleaner(store: store)
                 }
                 .buttonStyle(.bordered)
@@ -1101,6 +1101,9 @@ struct HogHunterPanel: View {
                                 .disabled(!row.canQuit || row.keys.isEmpty)
                                 .help(row.quitBlockReason ?? "Ask this Mac process to quit after confirmation")
                                 .accessibilityLabel("Stop \(row.name) on Mac")
+                            if !row.keys.isEmpty {
+                                MacActivityActionsMenu(row: row, store: store)
+                            }
                         }
                     }
                     if store.rows.isEmpty {
