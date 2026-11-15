@@ -326,7 +326,7 @@ final class CleanRegimenRunner: ObservableObject {
                     Self.log.info("tick: due and overdue — the override starts it now")
                 } else {
                     Self.log.info("tick: overdue override deferred — a run is already in progress")
-                    waitingReason = "A run is already in progress; the overdue run starts when it finishes."
+                    waitingReason = "A run is already in progress; this check will try again shortly."
                     nextRunDate = now().addingTimeInterval(checkInterval)
                 }
                 return task
