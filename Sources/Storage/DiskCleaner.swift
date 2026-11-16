@@ -1055,7 +1055,7 @@ final class DiskCleaner: @unchecked Sendable {
     struct TempRepoProbe: Sendable {
         /// HEAD is contained in at least one remote-tracking branch.
         var headContainedByRemoteBranch: Bool
-        /// Commits on local branches that no remote-tracking ref contains.
+        /// Commits reachable from any ref, HEAD or reflog absent from remote-tracking refs.
         var unpushedCommitCount: Int
         /// `git diff --numstat HEAD` output (added, deleted, path per line).
         var diffNumstat: String
@@ -1097,7 +1097,7 @@ final class DiskCleaner: @unchecked Sendable {
         }
         guard git(["rev-parse", "--git-dir"]) != nil,
               let contains = git(["branch", "-r", "--contains", "HEAD"]),
-              let unpushed = git(["log", "--branches", "--not", "--remotes", "--oneline"]),
+              let unpushed = git(["rev-list", "--all", "--reflog", "HEAD", "--not", "--remotes"]),
               let numstat = git(["diff", "--numstat", "HEAD"]),
               let untracked = git(["ls-files", "--others", "--exclude-standard", "-z"]),
               let ignored = git(["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]),

@@ -142,6 +142,35 @@ final class StaleTempRepoTests: XCTestCase {
         XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
     }
 
+    func testDefaultProbeProtectsTagDetachedAndReflogOnlyCommits() throws {
+        let repo = tempDirectory.appendingPathComponent("unique-ref-fixture")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        func git(_ args: [String]) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo.path] + args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try p.run(); p.waitUntilExit()
+            XCTAssertEqual(p.terminationStatus, 0)
+        }
+        try git(["init"])
+        try git(["config", "user.email", "fixture@invalid.test"])
+        try git(["config", "user.name", "Fixture"])
+        try git(["commit", "--allow-empty", "-m", "remote baseline"])
+        try git(["update-ref", "refs/remotes/origin/main", "HEAD"])
+        XCTAssertTrue(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+        try git(["checkout", "--detach"])
+        try git(["commit", "--allow-empty", "-m", "unique detached work"])
+        XCTAssertGreaterThan(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo)).unpushedCommitCount, 0)
+        try git(["tag", "unique-only-tag"])
+        try git(["checkout", "--detach", "refs/remotes/origin/main"])
+        XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+        try git(["tag", "-d", "unique-only-tag"])
+        // Even after the tag goes away, HEAD's reflog is recovery content.
+        XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+    }
+
     func testNoUnattendedRuleCanConsumeStaleRepoItems() {
         let item = CleanItem(category: .staleTempRepos, title: "fixture", subtitle: "fixture",
                              url: tempDirectory, bytes: 1, fileCount: 1, lastModified: nil, isSelected: false)
