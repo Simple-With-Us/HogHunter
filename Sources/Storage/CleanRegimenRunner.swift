@@ -847,6 +847,11 @@ final class CleanRegimenRunner: ObservableObject {
             // them unattended, and "ask-first" is not schedulable, so items in
             // this category stay a Standard one-click choice only.
             return ["ask-first"]
+        case .staleTempRepos:
+            // Own rule, like temp files and snapshots: an unattended regimen
+            // takes verified-redundant temp checkouts only when the user has
+            // explicitly enabled temp-repo cleaning.
+            return ["temp-repos"]
         }
     }
 
@@ -867,7 +872,7 @@ final class CleanRegimenRunner: ObservableObject {
     /// `nonisolated` because `ruleName(for:)` is, and a main-actor-isolated
     /// constant read from a nonisolated context is an error in Swift 6.
     nonisolated private static let canonicalRuleNames = [
-        "agent-state", "app-caches", "tmp-files", "snapshots",
+        "agent-state", "app-caches", "tmp-files", "temp-repos", "snapshots",
         "logs", "xcode-artifacts", "ask-first",
     ]
 
