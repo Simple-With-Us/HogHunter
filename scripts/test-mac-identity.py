@@ -533,6 +533,20 @@ class InstallerSwapTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no downgrade", result.stderr)
 
+    def test_equal_major_with_nonzero_dotted_suffix_is_a_downgrade(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        for suffix in (".1", ".0.1", ".0001"):
+            with self.subTest(suffix=suffix):
+                data = plistlib.loads(info.read_bytes())
+                data["CFBundleVersion"] = "202611161234" + suffix
+                info.write_bytes(plistlib.dumps(data))
+                result = self.adhoc(HH_BUILD_NUMBER="202611161234")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no downgrade", result.stderr)
+                self.assertEqual(self.marker(), "OLD")
+                self.assertNotIn("pkill", self.calls())
+
     def test_an_unreadable_installed_identity_is_reported_not_silently_skipped(self) -> None:
         app = self.previous_copy(self.dest)
         info = app / "Contents" / "Info.plist"
