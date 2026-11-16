@@ -541,11 +541,22 @@ class InstallerSwapTests(unittest.TestCase):
                 data = plistlib.loads(info.read_bytes())
                 data["CFBundleVersion"] = "202611161234" + suffix
                 info.write_bytes(plistlib.dumps(data))
-                result = self.adhoc(HH_BUILD_NUMBER="202611161234")
+                result = self.adhoc(HOGHUNTER_BUILD_NUMBER="202611161234")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("no downgrade", result.stderr)
                 self.assertEqual(self.marker(), "OLD")
                 self.assertNotIn("pkill", self.calls())
+
+    def test_equal_major_with_zero_suffix_is_not_a_downgrade(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "202611161234.0.0"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc(HOGHUNTER_BUILD_NUMBER="202611161234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(plistlib.loads(info.read_bytes())["CFBundleVersion"], "202611161234")
+        self.assertEqual(self.marker(), "NEW")
 
     def test_an_unreadable_installed_identity_is_reported_not_silently_skipped(self) -> None:
         app = self.previous_copy(self.dest)
