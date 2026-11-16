@@ -32,7 +32,9 @@ extension HogRow {
     /// key — so a grouped row keeps its Sample action whenever any member
     /// can be sampled, even when the first key cannot (Hog Hunter itself,
     /// PID 1 and below, a recycled pid, another user's process).  History
-    /// rows have no keys, so they never offer Sample.
+    /// rows have no keys, so they never offer Sample.  The check probes the
+    /// kernel, so callers that render UI compute it once per render and
+    /// share the result (see MacProcessActions.body).
     var canSample: Bool {
         keys.contains { key in
             if case .ready = ProcessControl.sampleChoice(members: [key], fallbackName: name) {
@@ -82,29 +84,34 @@ struct MacProcessActions: View {
     }
 
     var body: some View {
-        HStack(spacing: 3) {
+        // Computed once per render and shared by every control below:
+        // `allowedActions` probes the kernel for Sample eligibility (see
+        // `HogRow.canSample`), so each button reading it separately would
+        // re-run those probes on every redraw.
+        let actions = row.allowedActions
+        return HStack(spacing: 3) {
             if showsStopButton {
                 Button("Stop…") { pending = PendingAction(action: .quit, row: row) }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(!row.can(action: "quit"))
+                    .disabled(!actions.contains("quit"))
                     .help(row.protectionReason ?? "Ask this Mac process to quit after confirmation")
                     .accessibilityLabel("Stop \(row.name) on Mac")
             }
-            actionMenu
+            actionMenu(actions: actions)
         }
     }
 
-    private var actionMenu: some View {
+    private func actionMenu(actions: [String]) -> some View {
         Menu {
-            Button("Quit…") { pending = PendingAction(action: .quit, row: row) }.disabled(!row.can(action: "quit"))
+            Button("Quit…") { pending = PendingAction(action: .quit, row: row) }.disabled(!actions.contains("quit"))
             Button("Force Quit…", role: .destructive) { pending = PendingAction(action: .forceQuit, row: row) }
-                .disabled(!row.can(action: "force-quit"))
+                .disabled(!actions.contains("force-quit"))
             Divider()
-            Button("Tame…") { pending = PendingAction(action: .tame, row: row) }.disabled(!row.can(action: "tame"))
-            Button("Restore Priority…") { pending = PendingAction(action: .untame, row: row) }.disabled(!row.can(action: "untame"))
+            Button("Tame…") { pending = PendingAction(action: .tame, row: row) }.disabled(!actions.contains("tame"))
+            Button("Restore Priority…") { pending = PendingAction(action: .untame, row: row) }.disabled(!actions.contains("untame"))
             Button("Sample For 3 Seconds") { sample() }
-                .disabled(!row.can(action: "sample") || isSampling)
+                .disabled(!actions.contains("sample") || isSampling)
             Divider()
             Button("Reveal in Finder") { reveal() }
                 .disabled((row.path ?? "").isEmpty)
@@ -118,7 +125,7 @@ struct MacProcessActions: View {
         // A live row always opens the menu — Reveal and Copy PID stay
         // reachable for a fully blocked row, as they were in #369 — while a
         // history row with no keys and no actions leaves it disabled.
-        .disabled(row.allowedActions.isEmpty && row.keys.isEmpty)
+        .disabled(actions.isEmpty && row.keys.isEmpty)
         .help(row.protectionReason ?? "Actions for \(row.name) on this Mac")
         .confirmationDialog(
             "\(pending?.action.title ?? "Change") \(pending?.row.name ?? row.name) On Mac?",
@@ -143,10 +150,16 @@ struct MacProcessActions: View {
         } message: {
             if pending?.action == .tame || pending?.action == .untame {
                 Text("This changes scheduling priority and may affect response times.\u{00A0} Hog Hunter rechecks the process identity and its protections before acting.")
+            } else if pending?.action == .forceQuit {
+                let count = max(1, pending?.row.keys.count ?? row.keys.count)
+                let ends = count == 1
+                    ? "Force Quit ends 1 process immediately."
+                    : "Force Quit ends \(count) processes immediately."
+                Text("\(ends)\u{00A0} Unsaved work is lost.\u{00A0} Hog Hunter rechecks the process identity and its protections before acting.")
             } else {
                 let count = max(1, pending?.row.keys.count ?? row.keys.count)
                 let included = count == 1 ? "1 process is included." : "\(count) processes are included."
-                Text("Asks \(pending?.row.name ?? row.name) to quit.\u{00A0} \(included)\u{00A0} Unsaved work may be lost.\u{00A0} Hog Hunter rechecks the process identity and its protections before acting.")
+                Text("Asks \(pending?.row.name ?? row.name) to quit.\u{00A0} It may show a save prompt or refuse.\u{00A0} \(included)\u{00A0} Unsaved work may be lost.\u{00A0} Hog Hunter rechecks the process identity and its protections before acting.")
             }
         }
         .sheet(isPresented: Binding(get: { sampleText != nil }, set: { if !$0 { sampleText = nil } })) {
