@@ -165,7 +165,12 @@ final class StaleTempRepoTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo)).unpushedCommitCount, 0)
         try git(["tag", "unique-only-tag"])
         try git(["checkout", "--detach", "refs/remotes/origin/main"])
+        // Isolate refs/tags: no detached-HEAD reflog may mask missing --all.
+        try git(["reflog", "expire", "--expire=now", "--all"])
         XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+        // Revisit the unique commit to seed recovery-only HEAD history anew.
+        try git(["checkout", "--detach", "refs/tags/unique-only-tag"])
+        try git(["checkout", "--detach", "refs/remotes/origin/main"])
         try git(["tag", "-d", "unique-only-tag"])
         // Even after the tag goes away, HEAD's reflog is recovery content.
         XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
