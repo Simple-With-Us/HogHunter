@@ -799,6 +799,7 @@ private struct CategoryCardView: View {
         case .apfsSnapshots: color = .cyan
         case .tempFiles: color = .brown
         case .staleBackups: color = .gray
+        case .staleTempRepos: color = .pink
         }
 
         return ZStack {

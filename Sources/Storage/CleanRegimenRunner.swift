@@ -847,6 +847,9 @@ final class CleanRegimenRunner: ObservableObject {
             // them unattended, and "ask-first" is not schedulable, so items in
             // this category stay a Standard one-click choice only.
             return ["ask-first"]
+        case .staleTempRepos:
+            // Extreme, per-item review only. No unattended rule owns repos.
+            return ["ask-first"]
         }
     }
 
