@@ -285,8 +285,40 @@ version_of() {
 echo "Generating the Xcode project."
 xcodegen generate
 
-BUILD_COUNT="${HOGHUNTER_BUILD_NUMBER:-1000}"
-[[ "$BUILD_COUNT" =~ ^[1-9][0-9]{3,11}$ ]] || { echo "Invalid build number; expected an integer of at least1000." >&2; exit 1; }
+# Jay's current policy: use this build run's start time, including rebuilds.
+# An explicit number is reserved for an already planned paired release/test fixture.
+if [[ -n "${HOGHUNTER_BUILD_NUMBER:-}" ]]; then
+  BUILD_COUNT="$HOGHUNTER_BUILD_NUMBER"
+else
+  if ! BUILD_COUNT="$(bash "$REPO_ROOT/scripts/build-run-stamp.sh")"; then
+    echo "error: build start time unavailable; nothing was installed." >&2
+    exit 1
+  fi
+fi
+[[ "$BUILD_COUNT" =~ ^[1-9][0-9]{11}$ ]] || { echo "Invalid build timestamp; expected YYYYMMDDHHMM Central time." >&2; exit 1; }
+# Do not replace a future-numbered installed copy with an older timestamp.
+# Equal minute stamps are allowed for local rebuilds, without inventing +1.
+if [[ -f "$INSTALLED_PATH/Contents/Info.plist" ]]; then
+  installed_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INSTALLED_PATH/Contents/Info.plist") || {
+    echo "error: cannot read the installed build identity; nothing was installed." >&2; exit 1;
+  }
+  # CFBundleVersion may have up to three numeric components in legacy copies.
+  # Compare the leading component, then a nonzero suffix, rather than treating
+  # a dotted identity as unreadable or silently dropping downgrade protection.
+  [[ "$installed_build" =~ ^[0-9]{1,12}(\.[0-9]{1,12}){0,2}$ ]] || {
+    echo "error: installed build identity is malformed; nothing was installed." >&2; exit 1;
+  }
+  IFS=. read -r installed_major installed_minor installed_patch <<< "$installed_build"
+  installed_minor="${installed_minor:-0}"
+  installed_patch="${installed_patch:-0}"
+  if (( 10#$BUILD_COUNT < 10#$installed_major )) || {
+    (( 10#$BUILD_COUNT == 10#$installed_major )) &&
+    { (( 10#$installed_minor > 0 )) || (( 10#$installed_patch > 0 )); }
+  }; then
+    echo "error: build timestamp $BUILD_COUNT is below installed build $installed_build; no downgrade or counter bump allowed." >&2
+    exit 1
+  fi
+fi
 MARKETING_VERSION="0.1.0"
 echo "Building Release version $MARKETING_VERSION (build $BUILD_COUNT)."
 # SENTRY_DSN_MACOS wins when both are set (fleet split).  The value is passed

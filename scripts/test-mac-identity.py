@@ -47,7 +47,7 @@ def make_bundle(parent: Path, bundle_id: str = BUNDLE_ID) -> Path:
     (app / "Contents" / "MacOS").mkdir(parents=True)
     with open(app / "Contents" / "Info.plist", "wb") as handle:
         plistlib.dump(
-            {"CFBundleIdentifier": bundle_id, "CFBundleExecutable": "HogHunter", "CFBundlePackageType": "APPL"},
+            {"CFBundleIdentifier": bundle_id, "CFBundleExecutable": "HogHunter", "CFBundlePackageType": "APPL", "CFBundleVersion": "1000"},
             handle,
         )
     shutil.copy("/bin/echo", app / "Contents" / "MacOS" / "HogHunter")
@@ -195,7 +195,9 @@ class InstallerGateTests(unittest.TestCase):
         write_tool(self.bin, "security", line + "\n")
 
     def install(self, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-        env = dict(os.environ, HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}")
+        # These tests stop at the build stub and only exercise destination/signing gates.
+        # Source-metadata refusal and deterministic stamps have their own real-git suite.
+        env = dict(os.environ, HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}", HOGHUNTER_BUILD_NUMBER="202611151634")
         return subprocess.run([str(INSTALL), *arguments], env=env, capture_output=True, text=True, cwd=cwd)
 
     def assert_refused(self, result: subprocess.CompletedProcess, code: int, text: str) -> None:
@@ -341,6 +343,7 @@ class InstallerSwapTests(unittest.TestCase):
         repo = self.dir / "repo"
         (repo / "scripts").mkdir(parents=True)
         shutil.copy(INSTALL, repo / "scripts" / "install.sh")
+        shutil.copy(ROOT / "scripts" / "build-run-stamp.sh", repo / "scripts" / "build-run-stamp.sh")
         shutil.copy(ROOT / "HogHunter.entitlements", repo / "HogHunter.entitlements")
         self.script = repo / "scripts" / "install.sh"
         write_tool(
@@ -502,6 +505,69 @@ class InstallerSwapTests(unittest.TestCase):
 
     def backup_paths(self) -> list[Path]:
         return sorted(self.dest.glob(".hoghunter-previous.*/Hog Hunter.app"))
+
+    def test_a_future_installed_build_is_not_downgraded(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "209912312359"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no downgrade", result.stderr)
+        self.assertEqual(self.marker(), "OLD")
+        self.assertNotIn("pkill", self.calls())
+
+    def test_a_legacy_dotted_build_can_update_but_future_dotted_build_cannot(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "214.2.1"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "209912312359.1"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no downgrade", result.stderr)
+
+    def test_equal_major_with_nonzero_dotted_suffix_is_a_downgrade(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        for suffix in (".1", ".0.1", ".0001"):
+            with self.subTest(suffix=suffix):
+                data = plistlib.loads(info.read_bytes())
+                data["CFBundleVersion"] = "202611161234" + suffix
+                info.write_bytes(plistlib.dumps(data))
+                result = self.adhoc(HOGHUNTER_BUILD_NUMBER="202611161234")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no downgrade", result.stderr)
+                self.assertEqual(self.marker(), "OLD")
+                self.assertNotIn("pkill", self.calls())
+
+    def test_equal_major_with_zero_suffix_is_not_a_downgrade(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "202611161234.0.0"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc(HOGHUNTER_BUILD_NUMBER="202611161234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(plistlib.loads(info.read_bytes())["CFBundleVersion"], "202611161234")
+        self.assertEqual(self.marker(), "NEW")
+
+    def test_an_unreadable_installed_identity_is_reported_not_silently_skipped(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        del data["CFBundleVersion"]
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read the installed build identity", result.stderr)
+        self.assertEqual(self.marker(), "OLD")
 
     def test_a_finished_install_replaces_the_copy_and_leaves_nothing_behind(self) -> None:
         self.previous_copy(self.dest)

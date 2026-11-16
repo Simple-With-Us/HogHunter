@@ -17,10 +17,10 @@ name: Hog Hunter iOS TestFlight
 # The ship goes through the fleet script (scripts/ios-fleet/ship-testflight.sh,
 # via scripts/ios-ship-testflight.sh), the same path Socratic.Trade,
 # Congress.Trade, Usage Monitor and Clutch use.  It owns:
-#   * marketing version 0.1.0 and the counter selected once by the serialized
-#     Mac publisher from complete ASC and Sparkle floors (at least1000).
-#     The published release-plan.json ties both platforms to one source SHA;
-#     a missing matching Mac release defers the iOS archive until a later tick.
+#   * marketing version 0.1.0 and a fresh Central-time start timestamp for each
+#     independent build run, including rebuilds. The published Mac plan still
+#     proves source coverage; it no longer supplies an old build number to a
+#     new iOS execution. Missing Mac source coverage still defers the archive.
 #   * the rate gate (one upload per hour) and the same-HEAD skip.  This file
 #     never sets IOS_TF_MIN_INTERVAL_SEC and never passes --force-ship;
 #   * ensure-tf-ready, which declares export compliance on the exact build and
@@ -159,6 +159,7 @@ jobs:
       build: ${{ steps.plan.outputs.build }}
       ready: ${{ steps.plan.outputs.ready }}
       source_head: ${{ steps.plan.outputs.source_head }}
+      plan_b64: ${{ steps.plan.outputs.plan_b64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -208,10 +209,10 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             hoghunter
 
-      # Only an explicit export-only preview needs a fresh ASC inventory;
-      # normal uploads reuse the Mac publisher's immutable plan.
+      # Every new build execution needs complete current floors. The resulting
+      # plan is carried unchanged through this execution, never regenerated mid-archive.
       - name: Load ASC credentials (Fleet-OPS prod /asc)
-        if: steps.gate.outputs.should_ship == '1' && github.event_name == 'workflow_dispatch' && inputs.upload == false
+        if: steps.gate.outputs.should_ship == '1'
         uses: ./.github/actions/infisical-secrets
         with:
           names: ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
@@ -229,7 +230,7 @@ jobs:
           UPLOAD: ${{ inputs.upload }}
         run: |
           set -euo pipefail
-          mode=--read-plan
+          mode=--ios-plan
           if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$UPLOAD" = false ]; then
             mode=--preview-plan
           fi
@@ -244,7 +245,7 @@ jobs:
           fi
           [ "$rc" = 0 ] || exit "$rc"
           # shellcheck disable=SC2016
-          node -e 'const fs=require("node:fs"),p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`build=${p.build}\nsource_head=${p.sourceHead}\nready=true\n`)' "$RUNNER_TEMP/release-plan.json"
+          node -e 'const fs=require("node:fs"),p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`build=${p.build}\nsource_head=${p.sourceHead}\nplan_b64=${Buffer.from(JSON.stringify(p)).toString("base64")}\nready=true\n`)' "$RUNNER_TEMP/release-plan.json"
 
   ship:
     name: TestFlight archive + upload
@@ -417,6 +418,7 @@ jobs:
           IOS_TF_RELEASE_NOTES: "1"
           EXPORT_ONLY: ${{ steps.mode.outputs.export_only }}
           PLANNED_BUILD: ${{ needs.plan-build.outputs.build }}
+          HOGHUNTER_EXECUTION_PLAN_B64: ${{ needs.plan-build.outputs.plan_b64 }}
         run: |
           if [ -z "$PLANNED_BUILD" ]; then
             echo "::error::No planned build from the plan-build job." >&2
