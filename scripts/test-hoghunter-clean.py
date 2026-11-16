@@ -4124,6 +4124,41 @@ def test_stale_build_lists_each_name_with_nothing_found_against_it(hh):
         assert rule_paths(found) == {str(repo / ".build")}, found
 
 
+def test_partial_xcode_dependencies_are_report_only_even_in_clean_mode(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        shutil.rmtree(tree / "Build")
+        blob(tree / "SourcePackages" / "artifacts" / "framework.bin", 3, 9 * 1024 * 1024)
+        settle(tree)
+        assert hh._xcode_scratch_refusal(tree) is not None
+        [row] = hh.rule_xcode_scratch()
+        assert (row.op, row.tier) == ("report", "ask-first")
+        assert "Build is absent" in row.reason and row.recheck is None
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 10.0)
+        assert report["applied_count"] == 0 and tree.is_dir()
+        assert report["actionable_count"] == 0
+
+
+def test_partial_xcode_reports_require_workspace_shape_and_preserve_protections(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home)
+        shutil.rmtree(tree / "Build")
+        blob(tree / "SourcePackages" / "artifacts" / "framework.bin", 3, 9 * 1024 * 1024)
+        assert hh._partial_xcode_scratch_reportable(tree)
+        for name in (".janitor-keep", ".git", "note.md", "Package.swift"):
+            (tree / name).write_text("keep")
+            assert not hh._partial_xcode_scratch_reportable(tree), name
+            (tree / name).unlink()
+        (tree / "info.plist").write_text("not a plist")
+        assert not hh._partial_xcode_scratch_reportable(tree)
+        (tree / "info.plist").write_text(INFO_PLIST)
+        link = tree.parent / "linked-partial"
+        link.symlink_to(tree, target_is_directory=True)
+        assert not hh._partial_xcode_scratch_reportable(link)
+        (tree / "SourcePackages" / "unique-work").mkdir()
+        assert not hh._partial_xcode_scratch_reportable(tree)
+
+
 def test_xcode_scratch_lists_what_it_found_and_ignores_what_is_not_xcode(hh):
     with fake_home(hh) as home, gates_open(hh):
         tree = xcode_tree(home)

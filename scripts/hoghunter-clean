@@ -3379,6 +3379,39 @@ def _xcode_scratch_refusal(tree: Path) -> str | None:
     return None
 
 
+def _partial_xcode_scratch_reportable(tree: Path) -> bool:
+    """Recognize dependency-only Xcode roots for review, never for deletion.
+
+    An interrupted/previously trimmed build may leave SourcePackages and its
+    workspace plist without Build.  That is not the complete identity required
+    by _xcode_scratch_refusal, and must never enter its deleting branch.
+    """
+    try:
+        st = os.lstat(tree)
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_dev != os.stat(HOME).st_dev
+                or os.path.realpath(tree).startswith("/Volumes/")
+                or is_forbidden(str(tree)) or has_keep_sentinel(str(tree))):
+            return False
+        names = os.listdir(tree)
+        if "SourcePackages" not in names or "Build" in names:
+            return False
+        for name in names:
+            if name not in _DERIVED_DATA_ENTRIES:
+                return False
+            child = os.lstat(tree / name)
+            if stat.S_ISLNK(child.st_mode) or child.st_uid != os.getuid():
+                return False
+        packages = tree / "SourcePackages"
+        if not stat.S_ISDIR(os.lstat(packages).st_mode):
+            return False
+        if any(name not in _SOURCE_PACKAGE_CHILDREN for name in os.listdir(packages)):
+            return False
+        return _workspace_path_refusal(tree) is None
+    except OSError:
+        return False
+
+
 def rule_xcode_scratch() -> list[Candidate]:
     """Derived data a build left through -derivedDataPath, in /private/tmp or
     in Clutch's derived-data folder.
@@ -3401,6 +3434,15 @@ def rule_xcode_scratch() -> list[Candidate]:
             if rule_out_of_time(deadline):
                 return cands
             if _xcode_shape_refusal(tree) is not None:
+                if _partial_xcode_scratch_reportable(tree):
+                    size = dir_bytes(str(tree))
+                    if size >= MIN_CANDIDATE_BYTES:
+                        cands.append(Candidate(
+                            category="xcode-scratch", path=str(tree), bytes=size,
+                            reason="Partial Xcode dependency root (report only; Build is absent)",
+                            detail="Review dependency checkout edits, active users and held-build evidence before removing; size is not a forecast of free-space gain",
+                            tier="ask-first", op="report",
+                        ))
                 continue
             size = dir_bytes(str(tree))
             if size < MIN_CANDIDATE_BYTES:
