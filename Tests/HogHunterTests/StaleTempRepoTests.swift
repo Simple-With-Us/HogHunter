@@ -52,7 +52,8 @@ final class StaleTempRepoTests: XCTestCase {
     }
 
     func testStaleTempReposRuleMapping() {
-        XCTAssertTrue(CleanRegimenRunner.scanCategories(for: ["temp-repos"]).contains(.staleTempRepos))
+        XCTAssertFalse(CleanRegimenRunner.scanCategories(for: ["temp-repos"]).contains(.staleTempRepos))
+        XCTAssertFalse(CleanRegimen.schedulableRules.contains("temp-repos"))
         XCTAssertFalse(CleanRegimenRunner.scanCategories(for: ["tmp-files"]).contains(.staleTempRepos),
                        "the temp-files rule must not silently sweep repo copies")
         XCTAssertFalse(CleanRegimenRunner.scanCategories(for: ["xcode-artifacts"]).contains(.staleTempRepos))
@@ -63,9 +64,9 @@ final class StaleTempRepoTests: XCTestCase {
     func testVerdictAcceptsVerifiedRedundantCopy() {
         var probe = redundantProbe()
         probe.diffNumstat = "0\t0\tmode-only.sh\n0\t12\tdeleted-file.txt"
-        probe.untrackedTopLevelNames = ["node_modules", "dist"]
+        probe.untrackedTopLevelNames = []
         XCTAssertTrue(DiskCleaner.tempRepoIsRedundant(probe),
-                      "mode-only churn, pure deletions, and build-output untracked dirs carry no unique content")
+                      "mode-only churn and pure deletions carry no unique content")
     }
 
     func testVerdictRejectsHeadNotOnRemote() {
@@ -97,6 +98,69 @@ final class StaleTempRepoTests: XCTestCase {
         var probe = redundantProbe()
         probe.untrackedTopLevelNames = ["notes"]
         XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(probe))
+    }
+
+    func testArtifactNamesNeverWaiveUntrackedOrIgnoredWork() {
+        for path in ["build", "build/notes.txt", "node_modules/unique.txt", ".cache/key", "dist/a\nb"] {
+            var probe = redundantProbe()
+            probe.untrackedTopLevelNames = [path]
+            XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(probe), path)
+        }
+    }
+
+    func testSuccessfulEmptyCommandIsAnEmptyInventoryNotFailure() {
+        XCTAssertEqual(CleanerScanCommand.run(executable: "/usr/bin/true", arguments: []), Data())
+        XCTAssertNil(CleanerScanCommand.run(executable: "/usr/bin/false", arguments: []))
+    }
+
+    func testDefaultProbeRefusesIgnoredAndUntrackedContentInTrackedArtifactFolders() throws {
+        let repo = tempDirectory.appendingPathComponent("git-fixture")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        func git(_ args: [String]) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo.path] + args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try p.run(); p.waitUntilExit()
+            XCTAssertEqual(p.terminationStatus, 0)
+        }
+        try git(["init"])
+        try git(["config", "user.email", "fixture@invalid.test"])
+        try git(["config", "user.name", "Fixture"])
+        let build = repo.appendingPathComponent("build")
+        try FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
+        try "tracked".write(to: build.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        try "ignored\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try git(["add", "."]); try git(["commit", "-m", "fixture"])
+        try git(["update-ref", "refs/remotes/origin/main", "HEAD"])
+        XCTAssertTrue(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+        try "unique".write(to: build.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+        try FileManager.default.removeItem(at: build.appendingPathComponent("notes.txt"))
+        try "unique".write(to: repo.appendingPathComponent("ignored"), atomically: true, encoding: .utf8)
+        XCTAssertFalse(DiskCleaner.tempRepoIsRedundant(try XCTUnwrap(DiskCleaner.defaultTempRepoProbe(repo))))
+    }
+
+    func testNoUnattendedRuleCanConsumeStaleRepoItems() {
+        let item = CleanItem(category: .staleTempRepos, title: "fixture", subtitle: "fixture",
+                             url: tempDirectory, bytes: 1, fileCount: 1, lastModified: nil, isSelected: false)
+        XCTAssertTrue(CleanRegimenRunner.pendingItems(from: [item], rules: ["temp-repos"]).items.isEmpty)
+        XCTAssertTrue(CleanRegimenRunner.pendingItems(from: [item], rules: Set(CleanRegimen.schedulableRules)).items.isEmpty)
+    }
+
+    func testRecentGitAccessStillRefusesRevalidationRatherThanWaivingActivitySafety() {
+        let (cleaner, root) = makeRepoFixture()
+        let repo = root.appendingPathComponent("verified-copy")
+        XCTAssertTrue(cleaner.isSafeToDelete(url: repo, category: .staleTempRepos))
+        // Model the access side effect without reading a live user repository.
+        let guarded = DiskCleaner(tempRootDirectory: root, worktreePathsProvider: { [] },
+            tempMetadataProvider: { url in
+                var info = try Self.fixtureMetadata(url)
+                if url.path.contains("/.git") { info.latestActivity = Date() }
+                return info
+            }, tempRepoProbeProvider: { _ in self.redundantProbe() })
+        XCTAssertFalse(guarded.isSafeToDelete(url: repo, category: .staleTempRepos))
     }
 
     // MARK: - Scan fixtures

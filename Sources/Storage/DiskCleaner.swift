@@ -299,8 +299,12 @@ enum CleanerScanCommand {
                       let input = try? FileHandle(forReadingFrom: outputURL) else { return nil }
                 defer { try? input.close() }
                 // Refuse truncated inventory rather than treating its prefix as complete.
-                guard let data = try? input.read(upToCount: 1_048_577), data.count <= 1_048_576 else { return nil }
-                return data
+                do {
+                    // A successful empty Git inventory is EOF, not failure.
+                    let data = try input.read(upToCount: 1_048_577) ?? Data()
+                    guard data.count <= 1_048_576 else { return nil }
+                    return data
+                } catch { return nil }
             }
         }
         if process.isRunning { process.terminate() }
@@ -1041,16 +1045,9 @@ final class DiskCleaner: @unchecked Sendable {
     static let tempRepoWalkTimeLimit: TimeInterval = 20
     static let tempRepoEntryCap = 250_000
 
-    /// Top-level untracked directories that hold only regenerable build
-    /// output.  An untracked entry anywhere else means the copy may hold
-    /// work that exists nowhere else, so the copy is never listed.
-    static let tempRepoArtifactTopLevelNames: Set<String> = [
-        "node_modules", "dist", "build", ".next", ".turbo", ".cache", "target",
-        ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-        "DerivedData", ".dart_tool", ".gradle", "out", ".output", ".vercel",
-        "coverage", ".nyc_output"
-    ]
-
+    /// No untracked or ignored content is inferred disposable from its name.
+    /// A tracked build/ directory can contain a unique untracked note, and
+    /// ignored paths can hold credentials or work absent from Git entirely.
     /// Raw local git facts about one checkout.  Every field comes from
     /// plumbing that reads only the local repository and its remote-tracking
     /// refs; nothing here fetches or asks a network service whether work is
@@ -1062,7 +1059,7 @@ final class DiskCleaner: @unchecked Sendable {
         var unpushedCommitCount: Int
         /// `git diff --numstat HEAD` output (added, deleted, path per line).
         var diffNumstat: String
-        /// First path components of untracked (`??`) status entries.
+        /// Full NUL-delimited untracked and ignored paths. None may be discarded.
         var untrackedTopLevelNames: [String]
     }
 
@@ -1071,8 +1068,8 @@ final class DiskCleaner: @unchecked Sendable {
     /// already on a remote branch, it carries no unpushed commits, its
     /// worktree adds or changes no content (file-mode-only churn and pure
     /// deletions carry no unique content; binary diffs fail closed because
-    /// numstat cannot tell a deletion from a modification), and every
-    /// untracked entry is a known regenerable build-output directory.
+    /// numstat cannot tell a deletion from a modification), and no
+    /// untracked or ignored entry remains, even inside a build-output directory.
     static func tempRepoIsRedundant(_ probe: TempRepoProbe) -> Bool {
         guard probe.headContainedByRemoteBranch, probe.unpushedCommitCount == 0 else { return false }
         for line in probe.diffNumstat.split(separator: "\n") {
@@ -1081,34 +1078,38 @@ final class DiskCleaner: @unchecked Sendable {
             if fields[0] == "-" || fields[1] == "-" { return false }
             guard let added = Int(fields[0]), added == 0 else { return false }
         }
-        return probe.untrackedTopLevelNames.allSatisfy { tempRepoArtifactTopLevelNames.contains($0) }
+        return probe.untrackedTopLevelNames.isEmpty
     }
 
     /// Default probe: local `git` plumbing against the checkout.  Any failed
     /// or timed-out command returns nil, and nil never lists a copy.
+    @TaskLocal private static var tempRepoProbeDeadline: TimeInterval?
+
     static func defaultTempRepoProbe(_ url: URL) -> TempRepoProbe? {
+        let deadline = tempRepoProbeDeadline ?? (ProcessInfo.processInfo.systemUptime + 8)
         func git(_ arguments: [String]) -> String? {
-            guard let data = CleanerScanCommand.run(executable: "/usr/bin/git",
-                arguments: ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", url.path] + arguments,
-                timeout: 10) else { return nil }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard !Task.isCancelled, remaining > 0,
+                  let data = CleanerScanCommand.run(executable: "/usr/bin/git",
+                    arguments: ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", url.path] + arguments,
+                    timeout: min(10, remaining)) else { return nil }
             return String(decoding: data, as: UTF8.self)
         }
-        guard git(["rev-parse", "--git-dir"]) != nil else { return nil }
-        guard let contains = git(["branch", "-r", "--contains", "HEAD"]) else { return nil }
-        guard let unpushed = git(["log", "--branches", "--not", "--remotes", "--oneline"]) else { return nil }
-        guard let numstat = git(["diff", "--numstat", "HEAD"]) else { return nil }
-        guard let status = git(["status", "--porcelain"]) else { return nil }
-        var untracked: [String] = []
-        for line in status.split(separator: "\n") {
-            guard line.hasPrefix("?? ") else { continue }
-            let path = line.dropFirst(3).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            untracked.append(String(path.split(separator: "/").first ?? ""))
-        }
+        guard git(["rev-parse", "--git-dir"]) != nil,
+              let contains = git(["branch", "-r", "--contains", "HEAD"]),
+              let unpushed = git(["log", "--branches", "--not", "--remotes", "--oneline"]),
+              let numstat = git(["diff", "--numstat", "HEAD"]),
+              let untracked = git(["ls-files", "--others", "--exclude-standard", "-z"]),
+              let ignored = git(["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]),
+              let stash = git(["stash", "list"]), stash.isEmpty,
+              let flags = git(["ls-files", "-v", "-z"]),
+              !flags.split(separator: "\0").contains(where: { $0.first == "S" || $0.first?.isLowercase == true })
+        else { return nil }
         return TempRepoProbe(
             headContainedByRemoteBranch: !contains.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             unpushedCommitCount: unpushed.split(separator: "\n").count,
             diffNumstat: numstat,
-            untrackedTopLevelNames: untracked)
+            untrackedTopLevelNames: (untracked + ignored).split(separator: "\0").map(String.init))
     }
 
     /// Lists standalone git clones sitting directly in the temp root that
@@ -1156,9 +1157,17 @@ final class DiskCleaner: @unchecked Sendable {
         let gitPath = url.appendingPathComponent(".git").path
         guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory),
               isDirectory.boolValue else { return nil }
+        // Keep the full activity check before Git reads. A later live
+        // revalidation still fails closed if those reads advanced atime: we
+        // cannot safely distinguish our reads from another user's activity.
         guard !hasAdjacentTempLock(url),
               let stats = tempRepoWalk(url, cutoff: cutoff), stats.bytes > 0 else { return nil }
-        guard let probe = tempRepoProbeProvider(url), Self.tempRepoIsRedundant(probe) else { return nil }
+        guard !scanShouldStop() else { return nil }
+        let remaining = max(0, (Self.scanContext?.deadline ?? (scanUptime() + 8)) - scanUptime())
+        let probe = Self.$tempRepoProbeDeadline.withValue(ProcessInfo.processInfo.systemUptime + remaining) {
+            tempRepoProbeProvider(url)
+        }
+        guard !scanShouldStop(), let probe, Self.tempRepoIsRedundant(probe) else { return nil }
         let itemURL = URL(fileURLWithPath: path)
         return CleanItem(
             category: .staleTempRepos, title: url.lastPathComponent, subtitle: itemURL.path,
@@ -1176,7 +1185,8 @@ final class DiskCleaner: @unchecked Sendable {
     /// overrun returns nil: an incompletely observed tree cannot prove it
     /// is stale.
     private func tempRepoWalk(_ url: URL, cutoff: Date) -> DirectoryStats? {
-        let deadline = tempUptime() + Self.tempRepoWalkTimeLimit
+        let remaining = max(0, (Self.scanContext?.deadline ?? (scanUptime() + Self.tempRepoWalkTimeLimit)) - scanUptime())
+        let deadline = tempUptime() + min(Self.tempRepoWalkTimeLimit, remaining)
         var bytes: UInt64 = 0
         var count = 0
         var visited = 0
