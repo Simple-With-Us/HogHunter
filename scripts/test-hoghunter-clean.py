@@ -1084,7 +1084,8 @@ def test_a_failed_pgrep_stops_the_dev_cache_rule(hh):
         old = hh.time.time() - 5 * 3600
         os.utime(big, (old, old))
         os.utime(cache, (old, old))
-        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             with mock.patch.object(hh.subprocess, "run", return_value=completed(1)):
                 offered = hh.rule_dev_caches()
             assert [c.path for c in offered] == [str(cache)], offered
@@ -1200,7 +1201,8 @@ def test_botfleet_rollback_lists_only_stale_versioned_copies(hh):
         # old copy passes both the file-age and the ctime grace gates.
         ahead = hh.time.time() + 2 * 3600
         os.utime(new / "package.json", (ahead, ahead))
-        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             # The fixture directories were just created (ctime is now), so run
             # the rule a day later: only then is the grace period over.
             with mock.patch.object(hh.time, "time", return_value=hh.time.time() + 25 * 3600):
@@ -1231,7 +1233,8 @@ def test_ask_first_reports_idle_build_output_only(hh):
         old = hh.time.time() - 8 * 24 * 3600
         for p in (idle / "out.o", plainbuild / "out.o"):
             os.utime(p, (old, old))
-        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             found = {c.path: c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason}
         assert list(found) == [str(idle)], found
         assert found[str(idle)].tier == "ask-first"
@@ -1254,7 +1257,8 @@ def test_botfleet_rollback_holds_a_moved_in_old_tree(hh):
         old_file.write_text("{}\n", encoding="utf-8")
         ancient = hh.time.time() - 30 * 24 * 3600
         os.utime(old_file, (ancient, ancient))
-        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             assert hh.rule_botfleet_rollback() == [], "a just-moved tree is not listed on day zero"
     finally:
         shutil.rmtree(home, ignore_errors=True)
@@ -1294,7 +1298,8 @@ def test_app_staging_offers_idle_shipit_in_the_safe_tier(hh):
         pkg.write_text("x\n", encoding="utf-8")
         old = hh.time.time() - 2 * 3600
         os.utime(pkg, (old, old))
-        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             with mock.patch.object(hh.subprocess, "run", return_value=completed(1)):
                 offered = hh.rule_app_staging()
         assert [c.path for c in offered] == [str(shipit)], offered
@@ -1353,7 +1358,8 @@ def test_idle_build_output_survives_a_blind_capped_walk(hh):
         build.mkdir(parents=True)
         (repo / ".git").mkdir()
         (build / "out.o").write_text("x\n", encoding="utf-8")
-        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "HOME", home), mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             with mock.patch.object(hh, "newest_file_age_min", return_value=10 ** 9):
                 found = [c for c in hh.rule_ask_first_inventory() if "regenerable build output" in c.reason]
         assert found == [], "the probe overrules a blind capped walk"
@@ -2739,7 +2745,8 @@ def test_agent_state_tmp_keeps_the_existing_gates(hh):
         tmp = home / ".codex" / "tmp"
         tmp.mkdir(parents=True)
         (tmp / "x").write_text("x", encoding="utf-8")
-        with agent_gates(hh), mock.patch.object(hh, "open_handles", return_value=1):
+        with agent_gates(hh), mock.patch.object(hh, "open_handles", return_value=1), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             assert hh.rule_agent_state() == [], "held open"
         with agent_gates(hh), mock.patch.object(hh, "touched_since", return_value=True):
             assert hh.rule_agent_state() == [], "recently written"
@@ -3293,7 +3300,8 @@ def test_stale_build_never_takes_node_modules_or_dist(hh):
         assert hh.rule_stale_build_output() == []
         assert hh.stale_build_refusal(repo, "node_modules") is not None
         assert hh.stale_build_refusal(repo, "dist") is not None
-        with mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             report = {c.path: c for c in hh.rule_ask_first_inventory()}
         for name in ("node_modules", "dist"):
             assert report[str(repo / name)].op == "report", name
@@ -3305,7 +3313,8 @@ def test_stale_build_ask_first_reports_only_what_the_rule_cannot_take(hh):
         eligible = old_tree(repo / ".next")
         not_ignored = old_tree(repo / ".build")
         hh.rule_stale_build_output()
-        with mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             report = {c.path: c for c in hh.rule_ask_first_inventory()}
         assert str(eligible) not in report, "the rule owns it"
         c = report[str(not_ignored)]
@@ -3395,10 +3404,12 @@ def test_ask_first_peer_work_stops_with_the_scan_share(hh):
 
 def test_tree_in_use_treats_a_failed_snapshot_as_in_use(hh):
     with mock.patch.object(hh, "_load_open_snapshot", return_value=None), \
-            mock.patch.object(hh, "open_handles", return_value=0):
+            mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
         assert hh.tree_in_use("/some/tree"), "the per-path fallback cannot see deep files"
     with mock.patch.object(hh, "_load_open_snapshot", return_value={"/x"}), \
-            mock.patch.object(hh, "open_handles", return_value=0):
+            mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
         assert not hh.tree_in_use("/some/tree")
     with mock.patch.object(hh, "_load_open_snapshot", return_value={"/x"}), \
             mock.patch.object(hh, "open_handles", return_value=2):
@@ -3447,6 +3458,7 @@ def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulab
                            ("tool-versions", "safe", "delete"),
                            ("tmp-build-trees", "ask-first", "report"),
                            ("xcode-scratch", "safe", "delete"),
+                           ("temp-staged", "semi-safe", "delete"),
                            ("botfleet-releases", "safe", "delete")):
         assert rules[name]["tier"] == tier, name
         assert rules[name]["op"] == op, name
@@ -3903,7 +3915,8 @@ def test_f14_a_tree_no_rule_listed_stays_on_the_report(hh):
         with mock.patch.object(hh, "rule_deadline", return_value=0.0):
             hh.rule_stale_build_output()
         hh._SCAN_BUDGET_EXHAUSTED = False
-        with mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             report = {c.path: c for c in hh.rule_ask_first_inventory()}
         assert str(eligible) in report, "neither a candidate nor a report row"
         assert "not checked" in report[str(eligible)].reason
@@ -4027,7 +4040,8 @@ def test_f23_peer_work_is_surfaced_and_a_rule_naming_it_deletes_nothing(hh):
         worktree = home / "Code" / "BotFleet" / ".muse" / "worktrees" / "one"
         lane_build = old_tree(worktree / ".build")
         tree_build = old_tree(home / "apps" / "botfleet-mm-mcode" / ".build")
-        with mock.patch.object(hh, "open_handles", return_value=0):
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
             report = {c.path: c for c in hh.rule_ask_first_inventory()}
         for path in (worktree.parent, home / "apps" / "botfleet-mm-mcode"):
             assert report[str(path)].op == "report", path
@@ -4202,7 +4216,7 @@ def test_the_policy_and_docs_state_the_line_and_the_report_rules(hh):
     rules = {r["name"]: r for r in policy["rules"]}
     assert hh.PRESSURE_RULE_FREE_GB == 25.0
     assert hh.XCODE_SCRATCH_DELETE_FREE_GB == 60.0
-    assert set(hh.PRESSURE_ONLY_RULES) == {"duplicate-sim-runtimes", "xcode-scratch"}
+    assert set(hh.PRESSURE_ONLY_RULES) == {"duplicate-sim-runtimes", "xcode-scratch", "temp-staged"}
     for name, (tier, line) in hh.PRESSURE_RULES.items():
         assert rules[name]["maxFreeGb"] == line, name
         assert rules[name]["tier"] == tier, name
@@ -4562,7 +4576,8 @@ def test_hh219_the_early_warning_sizes_the_ask_first_trees(hh):
         backups = str(home / "BotFleet-migration-backups")
         for free, sized in ((80.0, False), (30.0, True)):
             hh.SIZE_ASK_FIRST = False
-            with mock.patch.object(hh, "open_handles", return_value=0):
+            with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
                 report = clean_main(hh, ["--scan", "--json", "--categories=ask-first"], free)
             row = next(c for c in report["candidates"] if c["path"] == backups)
             assert (row["bytes"] > 0) == sized, (free, row)
@@ -4742,6 +4757,303 @@ def test_pr274_a_clean_run_under_the_warning_line_walks_the_report_rules(hh):
             skip = scan.call_args.kwargs["skip"]
             assert bool(hh.REPORT_ONLY_WALK_RULES & skip) == skipped, (free, skip)
         hh.SIZE_ASK_FIRST = False
+
+
+def _staged_fixture(hh):
+    """A fake DARWIN_USER_TEMP_DIR layout: .../<uuid>/T beside .../<uuid>/X."""
+    home = Path(os.path.realpath(tempfile.mkdtemp(prefix="hhclean-staged-")))
+    base = home / "0b" / "uuid"
+    tdir = base / "T"
+    xdir = base / "X"
+    tdir.mkdir(parents=True)
+    xdir.mkdir()
+    return home, tdir, xdir
+
+
+def _age(path, hours):
+    old = time.time() - hours * 3600
+    os.utime(path, (old, old))
+
+
+def test_temp_staged_offers_idle_owned_entries(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-dead-beef"
+        stale.mkdir()
+        f = stale / "payload.bin"
+        f.write_bytes(b"x" * 1024)
+        _age(f, 5); _age(stale, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            cands = hh.rule_temp_staged()
+        assert [c.path for c in cands] == [str(stale)], cands
+        assert all(c.tier == "semi-safe" and c.category == "temp-staged" for c in cands)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_refuses_a_symlinked_or_foreign_stage(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        real = home / "elsewhere"
+        real.mkdir()
+        link = xdir.parent / "X2"
+        xdir.rename(link)
+        xdir.symlink_to(link)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"):
+            assert hh.rule_temp_staged() == []
+        xdir.unlink()
+        link.rename(xdir)
+        entry = xdir / "stale"
+        entry.mkdir()
+        _age(entry, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh.os, "getuid", return_value=os.getuid() + 1):
+            assert hh.rule_temp_staged() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_skips_fresh_handled_sentinel_and_symlink_entries(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        fresh = xdir / "fresh"
+        fresh.mkdir()
+        ff = fresh / "in-flight.tmp"
+        ff.write_bytes(b"y" * 64)          # written now: inside the idle window
+        stale = xdir / "stale"
+        stale.mkdir()
+        sf = stale / "old.bin"
+        sf.write_bytes(b"z" * 64)
+        _age(sf, 5); _age(stale, 5)
+        kept = xdir / "kept"
+        kept.mkdir()
+        (kept / ".janitor-keep").write_text("keep")
+        _age(kept, 5)
+        victim = xdir / "victim-dir"
+        victim.mkdir()
+        _age(victim, 5)
+        link = xdir / "a-link"
+        link.symlink_to(victim)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            paths = [c.path for c in hh.rule_temp_staged()]
+        assert str(stale) in paths and str(victim) in paths, paths
+        for refused in (fresh, kept, link):
+            assert str(refused) not in paths, (refused, paths)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=1), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            assert hh.rule_temp_staged() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ask_first_reports_the_trash_without_applying_it(hh):
+    with fake_home(hh) as home:
+        trash = home / ".Trash"
+        trash.mkdir()
+        (trash / "junk.app").write_bytes(b"x" * 64)
+        cands = hh.rule_ask_first_inventory()
+    rows = [c for c in cands if c.path == str(trash)]
+    assert len(rows) == 1, cands
+    assert rows[0].tier == "ask-first" and rows[0].op == "report", rows[0]
+
+
+def _snap_run(list_out):
+    def fake_run(cmd, **kw):
+        if "listlocalsnapshots" in cmd:
+            return list_out
+        return ""
+    return fake_run
+
+
+def _snap_full(dest_out="", dest_err="", dest_rc=0):
+    def fake_full(cmd, **kw):
+        if "destinationinfo" in cmd:
+            return dest_out, dest_err, dest_rc
+        return "", "", 0
+    return fake_full
+
+
+def test_snapshots_report_a_broken_destination_but_still_keep_the_newest(hh):
+    listed = ("com.apple.TimeMachine.2026-11-13-040000.local\n"
+              "com.apple.TimeMachine.2026-11-14-180602.local\n")
+    # tmutil prints the mount failure to stderr and exits non-zero.
+    with mock.patch.object(hh, "_run", side_effect=_snap_run(listed)), \
+            mock.patch.object(hh, "_run_full", side_effect=_snap_full(
+                dest_err="Failed to mount backup destination, error: boop\n", dest_rc=1)):
+        cands = hh.rule_snapshots()
+    deletes = [c for c in cands if c.op == "snapshot-delete"]
+    assert [c.path for c in deletes] == ["apfs-snapshot:com.apple.TimeMachine.2026-11-13-040000.local"], deletes
+    diag = [c for c in cands if c.path == "tm-destination:unreachable"]
+    assert len(diag) == 1 and diag[0].tier == "ask-first" and diag[0].op == "report", cands
+
+
+def test_snapshots_no_diagnostic_when_the_destination_is_healthy(hh):
+    listed = ("com.apple.TimeMachine.2026-11-13-040000.local\n"
+              "com.apple.TimeMachine.2026-11-14-180602.local\n")
+    healthy = "==================================================\nName: Backups\nKind: Local\nID: 1234\n"
+    with mock.patch.object(hh, "_run", side_effect=_snap_run(listed)), \
+            mock.patch.object(hh, "_run_full", side_effect=_snap_full(dest_out=healthy)):
+        cands = hh.rule_snapshots()
+    assert [c.path for c in cands] == ["apfs-snapshot:com.apple.TimeMachine.2026-11-13-040000.local"], cands
+
+
+def test_snapshots_diagnostic_when_no_destination_is_configured(hh):
+    listed = "com.apple.TimeMachine.2026-11-14-180602.local\n"
+    with mock.patch.object(hh, "_run", side_effect=_snap_run(listed)), \
+            mock.patch.object(hh, "_run_full", side_effect=_snap_full(
+                dest_out="No destinations configured\n")):
+        cands = hh.rule_snapshots()
+    assert [c.path for c in cands] == ["tm-destination:absent"], cands
+    assert cands[0].tier == "ask-first" and cands[0].op == "report"
+
+
+def test_temp_staged_applies_the_apple_staging_orphan_test(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        live = xdir / "A1000000-live"
+        (live / "data").mkdir(parents=True)
+        (live / "data" / "chunk.bin").write_bytes(b"x" * 64)
+        _age(live / "data" / "chunk.bin", 400); _age(live / "data", 400); _age(live, 400)
+        young = xdir / "B2000000-young"
+        (young / "data").mkdir(parents=True)
+        _age(young / "data", 96); _age(young, 96)
+        orphan = xdir / "C3000000-orphan"
+        (orphan / "data").mkdir(parents=True)
+        _age(orphan / "data", 200); _age(orphan, 200)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            paths = [c.path for c in hh.rule_temp_staged()]
+        assert paths == [str(orphan)], paths
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_skips_a_writer_naming_the_entry(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-writer"
+        stale.mkdir()
+        f = stale / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        _age(f, 5); _age(stale, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=2):
+            assert hh.rule_temp_staged() == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_recheck_reruns_the_gates_before_the_delete(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-recheck"
+        stale.mkdir()
+        f = stale / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        _age(f, 5); _age(stale, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            cands = hh.rule_temp_staged()
+        assert len(cands) == 1 and cands[0].recheck is not None, cands
+        # A fresh file lands after the scan: the recheck must refuse.
+        (stale / "late.bin").write_bytes(b"y" * 16)
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            refusal = cands[0].recheck()
+        assert refusal, "recheck must refuse a freshened entry"
+        # Once everything ages out again the recheck passes.
+        _age(stale / "late.bin", 5); _age(stale, 5)
+        with mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            assert cands[0].recheck() is None
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_refuses_a_nested_keep_marker(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-marked"
+        (stale / "deep" / "deeper").mkdir(parents=True)
+        f = stale / "deep" / "deeper" / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        marker = stale / "deep" / ".janitor-keep"
+        marker.write_text("keep")
+        # The marker must be aged too: a fresh one trips the idle gate first
+        # and this test would pass without ever reaching the marker probe.
+        _age(f, 5); _age(marker, 5)
+        _age(stale / "deep" / "deeper", 5); _age(stale / "deep", 5); _age(stale, 5)
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            assert hh.rule_temp_staged() == []
+        # Control: the same idle tree WITHOUT the marker is offered, so the
+        # refusal above really comes from the nested-marker gate.
+        marker.unlink()
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0):
+            assert [c.path for c in hh.rule_temp_staged()] == [str(stale)]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_confirms_idle_with_the_uncapped_probe(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        stale = xdir / "29E28E95-capped"
+        stale.mkdir()
+        f = stale / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        _age(f, 5); _age(stale, 5)
+        # A recent write hidden past the capped walk: the probe says touched.
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            assert hh.rule_temp_staged() == []
+        # A failed probe fails closed the same way; touched_since already
+        # returns True on failure, so both shapes are the True above.  With a
+        # quiet probe the entry is offered.
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", return_value=0), \
+                mock.patch.object(hh, "touched_since", return_value=False):
+            assert [c.path for c in hh.rule_temp_staged()] == [str(stale)]
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_temp_staged_escapes_the_writer_pattern(hh):
+    home, tdir, xdir = _staged_fixture(hh)
+    try:
+        odd = xdir / "stale(1).tmp+[v2]"
+        odd.mkdir()
+        f = odd / "payload.bin"
+        f.write_bytes(b"x" * 64)
+        _age(f, 5); _age(odd, 5)
+        seen = []
+        def fake_proc_count(pattern):
+            seen.append(pattern)
+            return 0
+        with mock.patch.object(hh, "_run", return_value=str(tdir) + "\n"), \
+                mock.patch.object(hh, "open_handles", return_value=0), \
+                mock.patch.object(hh, "proc_count", side_effect=fake_proc_count):
+            cands = hh.rule_temp_staged()
+        assert [c.path for c in cands] == [str(odd)], cands
+        assert seen, "writer check must run"
+        import re as _re
+        assert all(p == _re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", "stale(1).tmp+[v2]") for p in seen), seen
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def main() -> int:

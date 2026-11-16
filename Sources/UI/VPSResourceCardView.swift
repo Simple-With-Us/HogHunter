@@ -41,6 +41,8 @@ struct VPSResourceCardView: View {
     @Environment(\.openSettings) private var openSettings
     /// Which part of the snapshot this card shows.
     var section: VPSResourceSection = .all
+    /// The overview keeps its process list in a separate, height-filling scroll area.
+    var showsProcesses = true
     @StateObject private var control = ServerControl()
 
     var body: some View {
@@ -186,7 +188,7 @@ struct VPSResourceCardView: View {
             let tools = section.showsTools ? (snapshot.toolStatuses ?? []) : []
             let dirs = section.showsDirectories ? (snapshot.largestDirs ?? []) : []
             let workloads = section.showsCoolify ? (snapshot.coolify ?? []) : []
-            let processes = section.showsProcesses ? (snapshot.processes ?? []) : []
+            let processes = section.showsProcesses && showsProcesses ? (snapshot.processes ?? []) : []
             if !processes.isEmpty {
                 processesView(processes)
             }

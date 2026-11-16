@@ -143,6 +143,52 @@ struct DiskCleanerView: View {
             }
 
             if regimen.isEnabled {
+                HStack(spacing: 8) {
+                    Toggle("Empty Trash When Space Is Low", isOn: Binding(
+                        get: { regimen.emptyTrashBelowGB != nil },
+                        set: { on in
+                            regimen.emptyTrashBelowGB = on ? Self.trashValveDefaultGB : nil
+                            regimen = regimen.sanitized()
+                            regimen.save()
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .font(.system(size: 11))
+
+                    Spacer()
+
+                    if regimen.emptyTrashBelowGB != nil {
+                        Picker("Below", selection: Binding(
+                            get: { regimen.emptyTrashBelowGB ?? Self.trashValveDefaultGB },
+                            set: { gb in
+                                regimen.emptyTrashBelowGB = gb
+                                regimen = regimen.sanitized()
+                                regimen.save()
+                            }
+                        )) {
+                            ForEach(Self.trashValveThresholds, id: \.self) { gb in
+                                Text("\(Int(gb)) GB Free").tag(gb)
+                            }
+                            if let current = regimen.emptyTrashBelowGB,
+                               !Self.trashValveThresholds.contains(current) {
+                                // A line a hand-edited blob or Infisical set
+                                // outside the picker stays visible instead
+                                // of leaving the menu blank.
+                                Text("\(Int(current)) GB Free").tag(current)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .font(.system(size: 11))
+                        .labelsHidden()
+                    }
+                }
+
+                Text("The Trash empties permanently during a scheduled run when free space is at or below this line.\u{00A0} Nothing in it can be recovered afterwards.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
                 if let next = regimenRunner.nextRunDate {
                     Text("Next run \(next.formatted(date: .abbreviated, time: .shortened))")
                         .font(.system(size: 10))
@@ -172,6 +218,10 @@ struct DiskCleanerView: View {
 
     /// The intervals the picker offers, in hours.
     private static let regimenIntervals: [Double] = [1, 4, 12, 24]
+
+    /// Where the trash valve starts, and the lines the picker offers.
+    private static let trashValveDefaultGB: Double = 40
+    private static let trashValveThresholds: [Double] = [15, 25, 40, 60, 80]
 
     // MARK: - Tier Selector & Disclaimer
 

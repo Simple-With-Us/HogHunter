@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The App Group the iPhone app and the widget extension share.
+
+  Both iOS targets sign with this one file, so the two can never drift
+  apart: the app writes the Mac snapshot into this group's UserDefaults
+  suite (key last_snapshot) and the widget reads it back.  Without the
+  entitlement the shared container does not exist on device,
+  FileManager.containerURL(forSecurityApplicationGroupIdentifier:)
+  returns nil, the app writes nothing, and the widget can only ever draw
+  its empty state.  That was issue #65: the widget shipped in PR #33
+  with no entitlements file at all, so it showed "Open Hog Hunter to see
+  your Mac." permanently.
+
+  The group itself is the one the 2026-09-22 bundle ID migration created
+  for the Mac app (see the root HogHunter.entitlements).  It must also be
+  enabled on the two iOS App IDs, com.simplewithus.hoghunter.ios and
+  com.simplewithus.hoghunter.ios.widgets, in the Developer portal;
+  signing is Automatic, so the archive flow registers it, and a failure
+  there fails the archive loudly instead of shipping an empty widget.
+
+  NOTE: this is an XML comment, so it may never contain a double hyphen.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.simplewithus.hoghunter</string>
+	</array>
+</dict>
+</plist>

@@ -18,8 +18,14 @@ import Foundation
 ///    absent from the top-CPU sample is doing real work, not thrashing.
 struct CleanPressure: Equatable, Sendable {
 
-    /// GiB free on the Data volume.
+    /// GiB free on the Data volume.  `0` beside `diskFreeKnown == false`
+    /// means "not measured", never "the disk is full" -- the Python engine
+    /// carries the same flag (`disk_free_known`) for the same reason.
     var diskFreeGB: Double
+
+    /// False when the free-space reading could not be taken.  Anything that
+    /// gates a permanent delete on free space must treat unknown as closed.
+    var diskFreeKnown: Bool = true
     var swapUsedPercent: Double
     var load1: Double
 
@@ -65,6 +71,9 @@ struct CleanPressure: Equatable, Sendable {
     /// thresholds are Infisical-overridable (`hoghunter.reclaim.*FreeGb`);
     /// the built-ins stand when Infisical is not configured.
     var diskBand: String {
+        // An unmeasured disk has no band:  "critical" would open permanent
+        // deletes on a number nobody took.
+        guard diskFreeKnown else { return "unknown" }
         let cache = InfisicalStore.shared
         let critical = cache.double(for: InfisicalKey.reclaimCriticalFreeGb) ?? 25
         let acute = cache.double(for: InfisicalKey.reclaimAcuteFreeGb) ?? 40
@@ -112,7 +121,8 @@ struct CleanPressure: Equatable, Sendable {
     /// runtimes and device support, the biggest wins on this machine and the
     /// biggest I/O bursts.  It opens on disk pressure alone.
     func allowsExpensiveTier(regimen: CleanRegimen) -> Bool {
-        hasSpacePressure && diskFreeGB < regimen.effectiveExpensiveTierFreeGB
+        guard diskFreeKnown else { return false }
+        return hasSpacePressure && diskFreeGB < regimen.effectiveExpensiveTierFreeGB
     }
 
     // MARK: - Reading
@@ -120,9 +130,11 @@ struct CleanPressure: Equatable, Sendable {
     /// Live pressure.  Kept deliberately cheap -- this runs on a timer and
     /// must never become a reason the machine is busy.
     static func current() -> CleanPressure {
-        let freeBytes = DiskSpace.current()?.freeBytes ?? 0
+        let reading = DiskSpace.current()
+        let freeBytes = reading?.freeBytes ?? 0
         return CleanPressure(
             diskFreeGB: Double(freeBytes) / 1_073_741_824,
+            diskFreeKnown: reading != nil,
             swapUsedPercent: swapUsedPercent(),
             load1: currentLoad(),
             cpuIdlePercent: currentCPUIdlePercent(),

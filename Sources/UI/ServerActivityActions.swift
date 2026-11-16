@@ -5,6 +5,7 @@ struct ServerProcessActions: View {
     let process: VPSProcess
     let host: String
     @ObservedObject var control: ServerControl
+    var showsStopButton = false
     var didAct: () -> Void = {}
     @State private var pending: PendingAction?
     @State private var sampleText: String?
@@ -28,6 +29,20 @@ struct ServerProcessActions: View {
     }
 
     var body: some View {
+        HStack(spacing: 3) {
+            if showsStopButton {
+                Button("Stop…") { pending = PendingAction(action: .quit, process: process) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(control.isWorking || !process.can(action: "quit"))
+                    .help(process.protectionReason ?? "Ask this server process to quit after confirmation")
+                    .accessibilityLabel("Stop \(process.name) on server")
+            }
+            actionMenu
+        }
+    }
+
+    private var actionMenu: some View {
         Menu {
             Button("Quit…") { pending = PendingAction(action: .quit, process: process) }.disabled(!process.can(action: "quit"))
             Button("Force Quit…", role: .destructive) { pending = PendingAction(action: .forceQuit, process: process) }
