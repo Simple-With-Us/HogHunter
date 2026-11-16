@@ -1116,15 +1116,7 @@ struct HogHunterPanel: View {
                             Text(HogFormat.memory(row.memoryBytes))
                                 .font(.system(size: 9).monospacedDigit())
                                 .foregroundStyle(.secondary)
-                            Button("Stop…") { pendingQuit = row }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                                .disabled(!row.canQuit || row.keys.isEmpty)
-                                .help(row.quitBlockReason ?? "Ask this Mac process to quit after confirmation")
-                                .accessibilityLabel("Stop \(row.name) on Mac")
-                            if !row.keys.isEmpty {
-                                MacActivityActionsMenu(row: row, store: store)
-                            }
+                            MacProcessActions(row: row, store: store, showsStopButton: true)
                         }
                     }
                     if store.rows.isEmpty {
