@@ -606,7 +606,12 @@ asc_next_shared_build() {
   if [[ "${BUILD_NUMBER_POLICY:-}" == "paired-release" ]]; then
     local source plan
     source="$(git -C "${REPO_ROOT:-.}" rev-parse HEAD)" || return 1
-    plan="$("$ASC_NODE" "$FLEET_DIR/../release-build-policy.mjs" --read-plan "$source" "${REPO_ROOT:-.}")" || return 1
+    # This run's immutable timestamp plan is passed by plan-build. A new
+    # independent build may not borrow the old Mac release's timestamp.
+    [[ -n "${HOGHUNTER_EXECUTION_PLAN_B64:-}" ]] || {
+      logerr "paired release requires this execution's timestamp plan; no old-build reuse"; return 1;
+    }
+    plan="$("$ASC_NODE" "$FLEET_DIR/../release-build-policy.mjs" --validate-execution "$source")" || return 1
     printf '%s' "$plan" | "$ASC_NODE" -e 'let s="";process.stdin.on("data",x=>s+=x);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).build))'
     return
   fi

@@ -4,44 +4,41 @@ import {readFileSync, mkdtempSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {feedFloor, makePlan, selectPlan, validatePlan, isReleasePath, ReleasePending} from './release-build-policy.mjs';
+import {feedFloor, makePlan, selectPlan, validatePlan, isReleasePath, ReleasePending, buildStamp} from './release-build-policy.mjs';
 import {nextIncrementalBuild as next} from './ios-fleet/shared-build.mjs';
 const empty = {iosBuilds: [], macBuilds: [], complete: true};
 const sourceHead = 'a'.repeat(40);
 const evidence = {complete: true, bundleId: 'com.simplewithus.hoghunter.ios', platforms: {IOS: {highestBuildComponent: '202610301656'}, MAC_OS: {highestBuildComponent: '0'}}};
-const create = () => makePlan({sourceHead, evidence, sparkleFloor: '214'});
+const buildStartedAt = '2026-11-16T05:43:00Z';
+const create = () => makePlan({sourceHead, evidence, sparkleFloor: '214', buildStartedAt});
 
-test('counter starts at1000 and continues four-digit or previously uploaded timestamp floors', () => {
-  assert.deepEqual(next(empty), {build: '1000'});
-  assert.deepEqual(next({...empty, iosBuilds: ['1074']}), {build: '1075'});
-  assert.deepEqual(next({...empty, macBuilds: ['1001'], extraFloors: ['1008']}), {build: '1009'});
-  assert.deepEqual(next({...empty, iosBuilds: ['202610301656']}), {build: '202610301657'});
-  assert.deepEqual(next({...empty, iosBuilds: ['202610301656.1'], macBuilds: ['202610301658']}), {build: '202610301659'});
-  assert.throws(() => next({...empty, complete: false}), /complete build inventory/);
-  assert.throws(() => next({...empty, iosBuilds: ['malformed']}), /malformed build inventory/);
-  assert.throws(() => next({...empty, extraFloors: ['999999999999']}), /verified platform range/);
-});
-
-test('one source identity and counter are reused after either platform publishes', () => {
+test('Central run stamps, independent rebuilds, collision and downgrade refusal', () => {
+  assert.equal(buildStamp(buildStartedAt), '202611152343');
+  assert.equal(buildStamp('2026-07-01T05:01:00Z'), '202607010001');
+  assert.throws(() => buildStamp('bad'), /Invalid/);
   const plan = create();
-  assert.equal(plan.marketingVersion, '0.1.0');
-  assert.equal(plan.build, '202610301657');
-  assert.equal(plan.sourceHead, sourceHead);
-  const reused = makePlan({sourceHead, evidence: {...evidence, platforms: {IOS: {highestBuildComponent: plan.build}, MAC_OS: {highestBuildComponent: '0'}}}, sparkleFloor: plan.build, existingPlan: plan});
-  assert.deepEqual(reused, plan);
-  const later = makePlan({sourceHead: 'b'.repeat(40), evidence, sparkleFloor: plan.build, existingPlan: plan});
-  assert.equal(later.build, '202610301658');
+  assert.equal(plan.build, '202611152343');
+  const later = makePlan({sourceHead, evidence, sparkleFloor: plan.build, existingPlan: plan, buildStartedAt: '2026-11-16T05:44:00Z'});
+  assert.equal(later.build, '202611152344');
+  assert.equal(selectPlan({plan, requestedHead: sourceHead, sparkleFloor: plan.build}), plan);
+  assert.throws(() => makePlan({sourceHead, evidence, sparkleFloor: plan.build, existingPlan: plan, buildStartedAt}), /not above/);
+  assert.throws(() => makePlan({sourceHead, evidence, sparkleFloor: '209912312359', buildStartedAt}), /not above/);
 });
-
+test('legacy manifests remain readable without allocating new counters', () => {
+  const legacy = {schemaVersion: 1, sourceHead, marketingVersion: '0.1.0', build: '202610301657', complete: true,
+    platformFloors: {ios: '202610301656', mac: '0', sparkle: '214'}};
+  assert.equal(validatePlan(legacy), legacy);
+  assert.equal(makePlan({sourceHead, evidence, sparkleFloor: legacy.build, existingPlan: legacy, buildStartedAt}).build, '202611152343');
+});
 test('partial, unknown or inconsistent plans cannot allocate or select a release', () => {
   const plan = create();
-  for (const bad of [{...plan, complete: false}, {...plan, extra: true}, {...plan, sourceHead: 'unknown'}, {...plan, marketingVersion: '1.0.214'}, {...plan, build: '202610301658'}, {...plan, platformFloors: {ios: '1'}}]) {
+  for (const bad of [{...plan, complete: false}, {...plan, extra: true}, {...plan, sourceHead: 'unknown'}, {...plan, marketingVersion: '1.0.214'}, {...plan, build: '202611152344'}, {...plan, platformFloors: {ios: '1'}}]) {
     assert.throws(() => validatePlan(bad));
     assert.throws(() => selectPlan({plan: bad, requestedHead: sourceHead, sparkleFloor: plan.build}));
   }
   assert.throws(() => makePlan({sourceHead, evidence: {...evidence, complete: false}, sparkleFloor: '214'}));
   assert.throws(() => makePlan({sourceHead, evidence, sparkleFloor: '214', existingPlan: plan}), /disagree/);
-  assert.throws(() => makePlan({sourceHead, evidence: {...evidence, platforms: {IOS: {highestBuildComponent: '202610301658'}, MAC_OS: {highestBuildComponent: '0'}}}, sparkleFloor: plan.build, existingPlan: plan}), /newer uploaded build/);
+  assert.throws(() => makePlan({sourceHead, evidence: {...evidence, platforms: {IOS: {highestBuildComponent: '209912312359'}, MAC_OS: {highestBuildComponent: '0'}}}, sparkleFloor: plan.build, existingPlan: plan, buildStartedAt}), /not above/);
 });
 
 test('docs-only newer main reuses the published source while relevant or unrelated revisions defer', () => {
@@ -106,7 +103,7 @@ test('an existing published release fails without upload, replacement or latest 
   } finally {rmSync(dir, {recursive: true, force: true});}
 });
 
-test('explicit paired uploads must match the published counter and marketing version while exports remain isolated', () => {
+test('explicit paired uploads must match the execution timestamp and marketing version while exports remain isolated', () => {
   const script = readFileSync(new URL('./ios-fleet/ship-testflight.sh', import.meta.url), 'utf8');
   const declaration = script.match(/assert_paired_release_identity\(\) \{[\s\S]*?\n\}/)[0];
   const run = extra => spawnSync('bash', ['-eu', '-c', `${declaration}\nasc_next_shared_build() { printf '%s' "$EXPECTED"; }\nassert_paired_release_identity`], {
@@ -117,4 +114,27 @@ test('explicit paired uploads must match the published counter and marketing ver
   assert.equal(run({MARKETING: '1.0.214'}).status, 1);
   assert.equal(run({EXPORT_ONLY: '1', BUILD_NUM: '202610301658', EXPECTED: ''}).status, 0);
   assert.ok(script.indexOf('\nassert_paired_release_identity || die') < script.indexOf('xcrun altool --upload-package'));
+});
+
+test('execution plan validation binds immutable timestamp and source without network', () => {
+  const plan = create();
+  const run = (p, head = sourceHead) => spawnSync(process.execPath, ['scripts/release-build-policy.mjs', '--validate-execution', head], {
+    encoding: 'utf8', cwd: new URL('..', import.meta.url), env: {...process.env, HOGHUNTER_EXECUTION_PLAN_B64: Buffer.from(JSON.stringify(p)).toString('base64')}
+  });
+  assert.equal(run(plan).status, 0);
+  assert.notEqual(run(plan, 'b'.repeat(40)).status, 0);
+  assert.notEqual(run({...plan, build: '202611152344'}).status, 0);
+  assert.notEqual(run({...plan, buildStartedAt: 'bad'}).status, 0);
+});
+
+test('independent iOS runs use fresh plan mode and carry the plan through jobs', () => {
+  const ios = readFileSync(new URL('../.github/workflows/ios-testflight.yml', import.meta.url), 'utf8');
+  assert.ok(ios.includes('mode=--ios-plan'));
+  assert.ok(ios.includes('plan_b64: ${{ steps.plan.outputs.plan_b64 }}'));
+  assert.ok(ios.includes('HOGHUNTER_EXECUTION_PLAN_B64: ${{ needs.plan-build.outputs.plan_b64 }}'));
+  const script = readFileSync(new URL('./ios-fleet/ship-testflight.sh', import.meta.url), 'utf8');
+  const route = script.split('asc_next_shared_build() {')[1].split('  # Read-only query:')[0];
+  assert.ok(route.includes('--validate-execution'));
+  assert.ok(!route.includes('--read-plan'));
+  assert.ok(isReleasePath('scripts/build-run-stamp.sh'));
 });

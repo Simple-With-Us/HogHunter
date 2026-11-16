@@ -29,6 +29,7 @@ on:
       - '!scripts/ios-fleet/test-*.sh'
       - '!scripts/ios-fleet/README.md'
       - 'scripts/release-build-policy.mjs'
+      - 'scripts/build-run-stamp.sh'
       - 'scripts/release-inventory.mjs'
       - '.github/workflows/ios-testflight.yml'
       - '.github/actions/infisical-secrets/**'
