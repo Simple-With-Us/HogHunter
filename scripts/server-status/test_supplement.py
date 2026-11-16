@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('supplement', Path(__file__).with_name('supplement.py'))
 module = importlib.util.module_from_spec(spec)
@@ -374,14 +376,84 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(output['processes'], [{'name': 'fixture'}])
         self.assertEqual(output['coolify'], {'state': 'fixture'})
 
-    def test_live_collection_propagates_a_collector_failure(self):
+    def test_live_collection_omits_only_the_failed_section(self):
+        """One broken collector must not abort the whole enriched write:  the
+        old unguarded .result() calls let a single failure skip the publish,
+        leaving readers with the base watch's vitals and no processes."""
         def broken():
             raise RuntimeError('fixture failure')
 
-        with self.assertRaises(RuntimeError):
-            module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
-                              lambda _: None, lambda _: 'unknown', containers=[],
-                              processes=lambda: [], coolify=broken, collect_live=True, pressure=lambda: None, storage=lambda: {})
+        output = module.supplement({}, Path('/fixture'), lambda _: None, ([], True),
+                                   lambda _: None, lambda _: 'unknown', containers=[],
+                                   processes=lambda: [{'name': 'fixture'}], coolify=broken,
+                                   collect_live=True, pressure=lambda: None, storage=lambda: {})
+        self.assertNotIn('coolify', output)
+        self.assertEqual(output['processes'], [{'name': 'fixture'}])
+        self.assertIn('storage_diagnostics', output)
+        self.assertIn('memory_pressure', output)
+
+    def test_live_collection_failure_drops_a_stale_section_value(self):
+        """A section that fails must not republish the value it carried in:
+        an old reading presented as fresh is worse than an honest gap."""
+        def broken():
+            raise RuntimeError('fixture failure')
+
+        output = module.supplement({'coolify': {'stale': True}}, Path('/fixture'), lambda _: None, ([], True),
+                                   lambda _: None, lambda _: 'unknown', containers=[],
+                                   processes=lambda: [], coolify=broken, collect_live=True,
+                                   pressure=lambda: None, storage=lambda: {})
+        self.assertNotIn('coolify', output)
+
+    def test_wrapper_stages_the_base_watch_and_publishes_only_via_supplement(self):
+        wrapper = Path(__file__).with_name('run-watch.sh').read_text()
+        self.assertIn('VPS_STORAGE_SNAPSHOT="$state/base.json"', wrapper)
+        self.assertIn('--base "$state/base.json"', wrapper)
+        self.assertIn('--snapshot /root/vps-storage-status.json', wrapper)
+
+    def test_main_publishes_only_the_enriched_snapshot_to_the_canonical_path(self):
+        """Single publisher:  the base watch's staging file is the supplement's
+        input, and the canonical path only ever receives the enriched write —
+        a base-only file (vitals, no processes) can never land there."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            canonical = root / 'vps-storage-status.json'
+            base.write_text(json.dumps({'generated_at': '2026-01-01T00:00:00Z', 'host': 'fixture'}))
+            enriched = {'generated_at': '2026-01-01T00:00:00Z', 'host': 'fixture',
+                        'processes': [{'name': 'fixture'}]}
+            argv = ['supplement', '--snapshot', str(canonical), '--base', str(base),
+                    '--home', str(root), '--history', str(root)]
+            with mock.patch.object(module, 'supplement', return_value=dict(enriched)) as supplement_stub, \
+                    mock.patch.object(module, 'database_samples', return_value=[]), \
+                    mock.patch.object(module, 'directory_samples', return_value=[]), \
+                    mock.patch.object(sys, 'argv', argv):
+                module.main()
+            self.assertEqual(supplement_stub.call_args[0][0]['host'], 'fixture')
+            published = json.loads(canonical.read_text())
+            self.assertEqual(published['processes'], [{'name': 'fixture'}])
+            # The staging file is left exactly as the base watch wrote it.
+            self.assertNotIn('processes', json.loads(base.read_text()))
+
+    def test_main_failure_leaves_the_canonical_snapshot_untouched(self):
+        """A wholesale supplement failure exits without touching the canonical
+        file:  fully stale beats vitals-only with an empty process list."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            canonical = root / 'vps-storage-status.json'
+            base.write_text(json.dumps({'generated_at': '2026-01-01T00:00:00Z', 'host': 'fixture'}))
+            canonical.write_text('{"previous": true}\n')
+
+            def broken(*args, **kwargs):
+                raise RuntimeError('fixture failure')
+
+            argv = ['supplement', '--snapshot', str(canonical), '--base', str(base),
+                    '--home', str(root), '--history', str(root)]
+            with mock.patch.object(module, 'supplement', broken), \
+                    mock.patch.object(sys, 'argv', argv):
+                with self.assertRaises(RuntimeError):
+                    module.main()
+            self.assertEqual(canonical.read_text(), '{"previous": true}\n')
 
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:

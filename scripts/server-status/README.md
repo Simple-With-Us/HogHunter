@@ -17,7 +17,16 @@ python3 -S /root/vps-status-supplement.py --snapshot /root/vps-storage-status.js
 ```
 
 Run it immediately after a successful watch, within the same exclusive scheduler
-lock.  Do not create a second independently writing job.  The helper also checks
+lock.  Do not create a second independently writing job.
+
+The deployed wrapper (`run-watch.sh`) keeps a single publisher for the canonical
+snapshot:  it points the base watch at a staging file
+(`VPS_STORAGE_SNAPSHOT=$state/base.json`) and passes that file to the supplement
+as `--base`, so `/root/vps-storage-status.json` is only ever replaced by the
+supplement's atomic rename and readers never see the base watch's
+processes-less file.  Each live section is collected under its own guard:  a
+failed collector omits only its key and logs to stderr.  If the supplement
+fails wholesale, the canonical file keeps its previous contents.  The helper also checks
 that its input did not change and publishes with an atomic rename, but that check
 is not a replacement for the shared writer lock.  Keep the original watch and
 schedule; this supplement does not replace their database checks or alert state.

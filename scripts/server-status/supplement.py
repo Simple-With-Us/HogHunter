@@ -711,15 +711,23 @@ def supplement(snapshot, home, measure=directory_bytes, inventory=None, services
         # The CPU tick window sleeps and the docker reads wait on the daemon;
         # neither needs the other, so they overlap and a slow daemon no longer
         # adds its time on top of the tick window.  Each keeps its own timeouts.
+        # Each section is also guarded on its own:  a failed collector omits
+        # only its key (and says so on stderr) instead of aborting the whole
+        # enriched write, which used to leave the base watch's processes-less
+        # staging content unpublished-or-partial for whole cycles.
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            processes_future = pool.submit(top_processes if processes is None else processes)
-            coolify_future = pool.submit(coolify_resources if coolify is None else coolify)
-            pressure_future = pool.submit(memory_pressure if pressure is None else pressure)
-            storage_future = pool.submit(storage_diagnostics if storage is None else storage)
-            result['storage_diagnostics'] = storage_future.result()
-            result['memory_pressure'] = pressure_future.result()
-            result['processes'] = processes_future.result()
-            result['coolify'] = coolify_future.result()
+            futures = {
+                'storage_diagnostics': pool.submit(storage_diagnostics if storage is None else storage),
+                'memory_pressure': pool.submit(memory_pressure if pressure is None else pressure),
+                'processes': pool.submit(top_processes if processes is None else processes),
+                'coolify': pool.submit(coolify_resources if coolify is None else coolify),
+            }
+            for key, future in futures.items():
+                try:
+                    result[key] = future.result()
+                except Exception as error:
+                    print(f'vps-status-supplement: {key} collection failed: {error}', file=sys.stderr)
+                    result.pop(key, None)
     elif processes is not None:
         result['processes'] = processes()
     elif coolify is not None:
@@ -812,6 +820,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--storage-blobs', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--snapshot', type=Path)
+    parser.add_argument('--base', type=Path,
+                        help='base watch snapshot to enrich; the canonical --snapshot is only ever '
+                             'written, never read as the base (defaults to --snapshot, the legacy '
+                             'single-file layout)')
     parser.add_argument('--history', type=Path, default=Path('/root/.vps-storage-watch'))
     parser.add_argument('--home', type=Path, default=Path.home())
     args = parser.parse_args()
@@ -820,13 +832,18 @@ def main():
         return
     if args.snapshot is None:
         parser.error('--snapshot is required')
-    original = json.loads(args.snapshot.read_text())
+    # Single publisher:  the base watch writes only its staging file, and this
+    # atomic write is the one place the canonical snapshot is ever replaced.
+    # Any failure above it leaves the previous canonical file untouched.
+    source = args.base if args.base is not None else args.snapshot
+    original = json.loads(source.read_text())
     # Prevent applying measurements to a snapshot published during the scan.
     output = supplement(original, args.home, collect_live=True)
     output['database_samples'] = database_samples(original, args.history)
     output['directory_samples'] = directory_samples(output, args.history)
-    storage_baseline(output['storage_diagnostics'], args.history, output.get('host', ''))
-    current = json.loads(args.snapshot.read_text())
+    if 'storage_diagnostics' in output:
+        storage_baseline(output['storage_diagnostics'], args.history, output.get('host', ''))
+    current = json.loads(source.read_text())
     if current != original:
         raise SystemExit('Snapshot changed during collection; leaving it untouched.')
     atomic_write(args.snapshot, output)
