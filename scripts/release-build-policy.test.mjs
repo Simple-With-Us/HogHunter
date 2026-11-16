@@ -138,3 +138,13 @@ test('independent iOS runs use fresh plan mode and carry the plan through jobs',
   assert.ok(!route.includes('--read-plan'));
   assert.ok(isReleasePath('scripts/build-run-stamp.sh'));
 });
+
+test('execution input diagnostics name the nonsecret plan variable', () => {
+  for (const value of ['', 'not-base64!']) {
+    const result = spawnSync(process.execPath, ['scripts/release-build-policy.mjs', '--validate-execution', sourceHead], {
+      encoding: 'utf8', cwd: new URL('..', import.meta.url), env: {...process.env, HOGHUNTER_EXECUTION_PLAN_B64: value}
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /HOGHUNTER_EXECUTION_PLAN_B64 is missing or malformed/);
+  }
+});

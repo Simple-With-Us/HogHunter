@@ -518,6 +518,32 @@ class InstallerSwapTests(unittest.TestCase):
         self.assertEqual(self.marker(), "OLD")
         self.assertNotIn("pkill", self.calls())
 
+    def test_a_legacy_dotted_build_can_update_but_future_dotted_build_cannot(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "214.2.1"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = plistlib.loads(info.read_bytes())
+        data["CFBundleVersion"] = "209912312359.1"
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no downgrade", result.stderr)
+
+    def test_an_unreadable_installed_identity_is_reported_not_silently_skipped(self) -> None:
+        app = self.previous_copy(self.dest)
+        info = app / "Contents" / "Info.plist"
+        data = plistlib.loads(info.read_bytes())
+        del data["CFBundleVersion"]
+        info.write_bytes(plistlib.dumps(data))
+        result = self.adhoc()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read the installed build identity", result.stderr)
+        self.assertEqual(self.marker(), "OLD")
+
     def test_a_finished_install_replaces_the_copy_and_leaves_nothing_behind(self) -> None:
         self.previous_copy(self.dest)
         result = self.adhoc()

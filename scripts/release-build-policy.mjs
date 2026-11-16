@@ -106,7 +106,7 @@ async function main() {
   const [mode, sourceHead, repoRoot] = process.argv.slice(2);
   if (mode === '--validate-execution') {
     const encoded = process.env.HOGHUNTER_EXECUTION_PLAN_B64;
-    if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('This build execution plan is missing');
+    if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('HOGHUNTER_EXECUTION_PLAN_B64 is missing or malformed');
     const plan = validatePlan(JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')));
     if (plan.schemaVersion !== 2 || plan.sourceHead !== sourceHead) throw new Error('Execution plan source mismatch');
     console.log(JSON.stringify(plan));
