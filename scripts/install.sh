@@ -285,7 +285,16 @@ version_of() {
 echo "Generating the Xcode project."
 xcodegen generate
 
-BUILD_COUNT="${HOGHUNTER_BUILD_NUMBER:-1000}"
+# Fleet policy: the build number is the main-merge timestamp, Central time
+# (YYYYMMDDHHMM), unless HOGHUNTER_BUILD_NUMBER names one for a planned
+# release.  A fresh timestamp always sorts above the builds Sparkle has
+# already published, so a local install is never "updated" onto an older
+# published download.
+if [[ -n "${HOGHUNTER_BUILD_NUMBER:-}" ]]; then
+  BUILD_COUNT="$HOGHUNTER_BUILD_NUMBER"
+else
+  BUILD_COUNT="$(TZ=America/Chicago git log -1 --format=%cd --date=format-local:%Y%m%d%H%M 2>/dev/null)"
+fi
 [[ "$BUILD_COUNT" =~ ^[1-9][0-9]{3,11}$ ]] || { echo "Invalid build number; expected an integer of at least1000." >&2; exit 1; }
 MARKETING_VERSION="0.1.0"
 echo "Building Release version $MARKETING_VERSION (build $BUILD_COUNT)."
