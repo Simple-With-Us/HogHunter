@@ -503,6 +503,27 @@ struct HogHunterPanel: View {
             activitySection
                 .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
 
+            // Panel action feedback.  The dashboard shows notices and errors
+            // in captions; the panel has no captions, so outcomes from the
+            // row actions (tame, sample) surface here, above the footer, and
+            // only while there is something to say.
+            if store.lastNotice != nil || store.lastError != nil {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let notice = store.lastNotice {
+                        Text(notice)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let error = store.lastError {
+                        Text(error)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             Divider()
 
             // Footer
@@ -515,7 +536,7 @@ struct HogHunterPanel: View {
 
                 Spacer()
 
-                Button("Clean…") {
+                Button("Open Cleaner…") {
                     DetachedWindowManager.shared.openCleaner(store: store)
                 }
                 .buttonStyle(.bordered)
@@ -1101,6 +1122,9 @@ struct HogHunterPanel: View {
                                 .disabled(!row.canQuit || row.keys.isEmpty)
                                 .help(row.quitBlockReason ?? "Ask this Mac process to quit after confirmation")
                                 .accessibilityLabel("Stop \(row.name) on Mac")
+                            if !row.keys.isEmpty {
+                                MacActivityActionsMenu(row: row, store: store)
+                            }
                         }
                     }
                     if store.rows.isEmpty {

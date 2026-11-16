@@ -189,6 +189,21 @@
       ]
     },
     {
+      "name": "temp-staged",
+      "tier": "semi-safe",
+      "op": "delete",
+      "title": "OS-staged temp deletion items (per-user X dir)",
+      "maxFreeGb": 25,
+      "$rationale": "The sibling X of DARWIN_USER_TEMP_DIR's T: macOS moves retired temp items there and deletes them itself on its own schedule, so reclaiming only hurries the OS along.  Measured 2026-11-14: 7.3 GB sat in X while the disk read 100% free 4.3 GB and no rule looked at it.  The directory name alone is not proof, so every entry passes the full gate and the rule stays pressure-gated at the 25 GB line until host behavior proves a wider tier.",
+      "skipWhenAny": [
+        "the X dir or the entry is a symlink, or either is owned by another user",
+        "the entry's newest file is younger than the 3h scratch idle window",
+        "any process holds it open, on a fresh open-file listing taken again right before the delete",
+        "a .janitor-keep marker on it, above it or inside it, or the marker walk could not answer",
+        "more than 25 GB free, read again from df right before the delete"
+      ]
+    },
+    {
       "name": "xcode-scratch",
       "tier": "safe",
       "op": "delete",
