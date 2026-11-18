@@ -689,7 +689,7 @@ final class CleanRegimenRunner: ObservableObject {
             finish(result, regimen: regimen)
             return
         }
-        let pending = decision.items + valveItems + snapshotItems
+        let filePending = decision.items + valveItems
 
         // Pressure decides the burst size, never the burst count.  An
         // overdue run takes the pressured shape without asking the gauges:
@@ -709,17 +709,33 @@ final class CleanRegimenRunner: ObservableObject {
         // dozens of chunks would pin dozens of them and keep the space it just
         // deleted from coming back.  The first chunk takes it.
         var snapshotTaken = false
+        // Snapshot rows clean in one final batch of their own, after every
+        // file item.  Thinning is irreversible and purges local snapshots --
+        // including this run's rollback point -- and inside `DiskCleaner.clean`
+        // a thin runs before that call's own deletions, so a snapshot row
+        // sharing a chunked batch with file items would purge the rollback
+        // point and then delete those files unprotected.  Apart, the order is
+        // safe: file batches run under the rollback point, and the thin the
+        // owner enabled consumes it only once nothing is left to protect.
+        // (Seer finding on PR #375.)
+        var batches: [[CleanItem]] = []
         var index = 0
-        while index < pending.count {
+        while index < filePending.count {
+            let end = min(index + chunk, filePending.count)
+            batches.append(Array(filePending[index..<end]))
+            index = end
+        }
+        if !snapshotItems.isEmpty { batches.append(snapshotItems) }
+        var batchIndex = 0
+        while batchIndex < batches.count {
             if Task.isCancelled { break }
-            let end = min(index + chunk, pending.count)
-            let batch = Array(pending[index..<end])
+            let batch = batches[batchIndex]
             let takeSnapshot = regimen.createSnapshotBeforeClean && !snapshotTaken
             let cleaned = await cleanProvider(batch, exclusions, takeSnapshot)
             result.itemsRemoved += cleaned.itemsRemoved
             result.bytesReclaimed += cleaned.bytesReclaimed
             result.errors.append(contentsOf: cleaned.errors)
-            index = end
+            batchIndex += 1
 
             if takeSnapshot {
                 if cleaned.snapshotName != nil {
@@ -740,7 +756,7 @@ final class CleanRegimenRunner: ObservableObject {
                 }
             }
 
-            if index < pending.count && pause > 0 {
+            if batchIndex < batches.count && pause > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000))
             }
         }

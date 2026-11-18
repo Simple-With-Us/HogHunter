@@ -1486,6 +1486,62 @@ final class CleanRegimenRunnerTests: XCTestCase {
         XCTAssertFalse(runner.isScheduling, "the last holder stops it")
     }
 
+    func testSnapshotRowsCleanInAFinalBatchAfterEveryFileItem() async {
+        // Thinning purges the run's own safety snapshot, so snapshot rows
+        // must never share or precede a batch that deletes files (Seer
+        // finding on PR #375).  An overdue run forces the pressured chunk
+        // size, which is what makes the batching observable.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches", "snapshots"])
+        regimen.requireIdleMinutes = 30
+        regimen.pressuredTargetsPerChunk = 2
+        regimen.pressuredChunkPauseSeconds = 0
+        regimen.chunkPauseSeconds = 0
+        regimen.createSnapshotBeforeClean = true
+        let defaults = makeDefaults()
+        defaults.set(now.addingTimeInterval(-11 * 3600), forKey: "hoghunter.cleaner.regimen.lastRunAt")
+        let caches = (1...3).map { i in
+            CleanItem(category: .userCaches, title: "Cache\(i)", subtitle: "~/Library/Caches/C\(i)",
+                      url: URL(fileURLWithPath: "/tmp/hh-batch-cache-\(i)"), bytes: 1_000, fileCount: 1,
+                      lastModified: nil, isSelected: true, detail: nil)
+        }
+        let snaps = (1...2).map { i in
+            CleanItem(category: .apfsSnapshots, title: "Snapshot \(i)", subtitle: "Local snapshot",
+                      url: URL(fileURLWithPath: "/"), bytes: 5_000_000_000, fileCount: 1,
+                      lastModified: nil, isSelected: false, detail: nil)
+        }
+        let report = CleanScanReport(
+            categories: [
+                CleanCategoryReport(category: .userCaches, items: caches, totalBytes: 3_000, selectedBytes: 3_000, itemCount: 3),
+                CleanCategoryReport(category: .apfsSnapshots, items: snaps, totalBytes: 10_000_000_000, selectedBytes: 0, itemCount: 2),
+            ],
+            totalBytes: 10_000_003_000, totalSelectedBytes: 3_000, scannedAt: now, tier: .standard)
+        var batches: [[CleanCategory]] = []
+        var snapshotFlags: [Bool] = []
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 },
+            scanProvider: { _ in report },
+            cleanProvider: { items, _, takeSnapshot in
+                batches.append(items.map(\.category))
+                snapshotFlags.append(takeSnapshot)
+                return CleanResult(bytesReclaimed: 1_000, itemsRemoved: items.count, errors: [],
+                                   cleanedAt: now, snapshotName: takeSnapshot ? "snap-1" : nil)
+            }
+        )
+
+        await runner.tick(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 5)
+        XCTAssertEqual(batches.count, 3, "two file batches of two and one, then the snapshot batch")
+        XCTAssertEqual(batches.last, [.apfsSnapshots, .apfsSnapshots], "snapshot rows clean last, together")
+        XCTAssertTrue(batches.dropLast().allSatisfy { !$0.contains(.apfsSnapshots) },
+                      "no file batch contains a snapshot row")
+        XCTAssertEqual(snapshotFlags, [true, false, false], "one rollback point, taken by the first batch")
+    }
+
     func testTheAppHasOneSharedRunner() {
         // The storage panel and the settings window both need the runner and
         // neither owns it.
