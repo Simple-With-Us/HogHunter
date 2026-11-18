@@ -1751,7 +1751,7 @@ final class CompanionModel {
                 CompanionStorageCategorySummary(id: "trash", title: "Trash Bins", description: "Items sitting in the macOS Trash bin.", icon: "trash", isExcluded: true, isExtremeOnly: false),
                 CompanionStorageCategorySummary(id: "developer", title: "Developer Junk", description: "Xcode DerivedData, Archives, iOS DeviceSupport, and package manager caches.", icon: "hammer", isExcluded: false, isExtremeOnly: false),
                 CompanionStorageCategorySummary(id: "orphanedData", title: "Orphaned App Leftovers", description: "Support folders remaining from applications no longer installed.", icon: "app.dashed", isExcluded: false, isExtremeOnly: true),
-                CompanionStorageCategorySummary(id: "aiArtifacts", title: "AI & Agent Junk", description: "Inactive AI agent session transcripts (>7 days) and temporary update downloads.", icon: "sparkles", isExcluded: false, isExtremeOnly: true),
+                CompanionStorageCategorySummary(id: "aiArtifacts", title: "AI & Agent Junk", description: "Inactive AI agent session transcripts (>7 days) and temporary update downloads.", icon: "sparkles", isExcluded: false, isExtremeOnly: false),
                 CompanionStorageCategorySummary(id: "localAIModels", title: "Local AI & LLM Models", description: "Downloaded LLM and model weights (.gguf, .safetensors, .bin) from Ollama, Hugging Face, LM Studio, and Whisper.", icon: "brain.head.profile", isExcluded: false, isExtremeOnly: true),
                 CompanionStorageCategorySummary(id: "largeAndOldFiles", title: "Large & Old Files", description: "Files over 100 MB, or over 20 MB untouched for 6+ months.", icon: "clock.arrow.circlepath", isExcluded: false, isExtremeOnly: true)
             ],

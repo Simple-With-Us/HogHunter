@@ -93,10 +93,12 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertNil(onlyTemp.skipReason)
 
         XCTAssertTrue(CleanRegimen.schedulableRules.contains("tmp-files"))
-        XCTAssertFalse(
-            CleanRegimen.defaultRules.contains("tmp-files"),
-            "temp files stay opt-in for unattended runs, like snapshots"
-        )
+        // Owner directive 2026-11-17: tmp-files is a default rule, like
+        // snapshots.  Default-on scopes the category into a fresh regimen;
+        // what a run may delete still rests on the scan's per-item verdicts,
+        // and scanTempFiles pre-selects nothing.
+        XCTAssertTrue(CleanRegimen.defaultRules.contains("tmp-files"))
+        XCTAssertTrue(CleanRegimen.defaultRules.contains("snapshots"))
     }
 
     func testStaleBackupsNeverScheduleUnattended() {
@@ -154,10 +156,13 @@ final class CleanRegimenTests: XCTestCase {
     }
 
     func testEngineOnlyRulesAreNotOfferedToTheRegimen() {
-        // The regimen runs DiskCleaner.  These four live only in the engine, so
+        // The regimen runs DiskCleaner.  These live only in the engine, so
         // a stored regimen naming them is left with nothing rather than a
-        // switch that looks on and does nothing.
-        for rule in ["duplicate-sim-runtimes", "tool-versions", "xcode-scratch", "stale-build-output"] {
+        // switch that looks on and does nothing.  app-staging, sqlite-wal,
+        // brew, and simulator-runtimes were offered until 2026-11-18 despite
+        // no cleaner category ever answering to them.
+        for rule in ["duplicate-sim-runtimes", "tool-versions", "xcode-scratch", "stale-build-output",
+                     "app-staging", "sqlite-wal", "brew", "simulator-runtimes"] {
             XCTAssertFalse(CleanRegimen.schedulableRules.contains(rule), rule)
             XCTAssertFalse(CleanRegimen.defaultRules.contains(rule), rule)
             var regimen = CleanRegimen()
@@ -208,8 +213,10 @@ final class CleanRegimenTests: XCTestCase {
     func testSanitizeDropsRulesThatAreNotSchedulable() {
         var r = CleanRegimen()
         // A hand-edited or future-written blob must not smuggle in a rule the
-        // scheduler has no business running.
-        r.enabledRules = ["dev-caches", "ask-first", "totally-made-up"]
+        // scheduler has no business running.  Names the regimen once offered
+        // and no longer does (brew, app-staging) drop the same way, which is
+        // what migrates stored regimens off them.
+        r.enabledRules = ["dev-caches", "ask-first", "totally-made-up", "brew", "app-staging"]
         let fixed = r.sanitized()
         XCTAssertEqual(fixed.enabledRules, ["dev-caches"])
     }
@@ -258,5 +265,118 @@ final class CleanRegimenTests: XCTestCase {
         XCTAssertNotNil(decoded)
         XCTAssertEqual(decoded?.isEnabled, true)
         XCTAssertEqual(decoded?.intervalHours, 8)
+    }
+
+    // MARK: - Reachability honesty (2026-11-17)
+
+    /// One pre-selected item per category, so only the rule mapping and
+    /// the scan tier can keep it from a regimen.
+    private func reachabilityItem(for category: CleanCategory) -> CleanItem {
+        CleanItem(
+            category: category,
+            title: category.rawValue,
+            subtitle: category.rawValue,
+            url: URL(fileURLWithPath: "/tmp/hoghunter-reachability-\(category.rawValue)"),
+            bytes: 10,
+            fileCount: 1,
+            lastModified: nil,
+            isSelected: true,
+            detail: nil
+        )
+    }
+
+    func testEverySchedulableRuleSelectsAStandardTierCategory() {
+        // The regimen scans at the standard tier, so a schedulable rule is
+        // honest only if it selects at least one category that tier
+        // includes.  A rule selecting nothing -- or only Extreme-only
+        // categories -- is a dead switch in the regimen's vocabulary.
+        for rule in CleanRegimen.schedulableRules {
+            let categories = CleanRegimenRunner.scanCategories(for: [rule])
+            XCTAssertFalse(categories.isEmpty, "\(rule) selects no category")
+            XCTAssertTrue(
+                categories.contains { CleanTier.standard.isCategoryIncluded($0) },
+                "\(rule) selects only categories the regimen scan tier excludes"
+            )
+        }
+    }
+
+    func testEveryDefaultRuleSelectsSomething() {
+        for rule in CleanRegimen.defaultRules {
+            XCTAssertFalse(
+                CleanRegimenRunner.scanCategories(for: [rule]).isEmpty,
+                "default rule \(rule) selects nothing"
+            )
+        }
+    }
+
+    func testEveryCategoryMappingIsHonest() {
+        // For every category exactly one of three honest states holds: it
+        // answers to no rule (the Trash, reachable only through the owner's
+        // Trash valve), it answers only to ask-first (review-only), or it
+        // answers to schedulable rules and the regimen's standard scan tier
+        // includes it.
+        for category in CleanCategory.allCases {
+            let names = CleanRegimenRunner.ruleNames(for: reachabilityItem(for: category))
+            if names.isEmpty {
+                XCTAssertEqual(category, .trash, "\(category) answers to no rule")
+            } else if names == ["ask-first"] {
+                XCTAssertFalse(
+                    CleanRegimenRunner.scanCategories(for: Set(CleanRegimen.schedulableRules)).contains(category),
+                    "\(category) is ask-first yet reachable by a schedulable rule"
+                )
+            } else {
+                XCTAssertTrue(
+                    names.isSubset(of: Set(CleanRegimen.schedulableRules)),
+                    "\(category) answers to unschedulable rules \(names)"
+                )
+                XCTAssertTrue(
+                    CleanTier.standard.isCategoryIncluded(category),
+                    "\(category) answers to \(names) but the regimen scan tier excludes it"
+                )
+            }
+        }
+    }
+
+    func testReviewOnlyCategoriesStayUnreachableUnattended() {
+        // Orphaned app data, local AI models, and large/old user files
+        // joined tool-made backups and stale temp repos in ask-first on
+        // 2026-11-18: no schedulable rule -- and not the full default set
+        // either -- may hand their items to a regimen.
+        let reviewOnly: [CleanCategory] = [.orphanedData, .localAIModels, .largeAndOldFiles, .staleBackups, .staleTempRepos]
+        for category in reviewOnly {
+            let candidate = reachabilityItem(for: category)
+            XCTAssertEqual(CleanRegimenRunner.ruleName(for: candidate), "ask-first", "\(category)")
+            let byEveryRule = CleanRegimenRunner.pendingItems(
+                from: [candidate], rules: Set(CleanRegimen.schedulableRules))
+            XCTAssertTrue(byEveryRule.items.isEmpty, "\(category) reached by a schedulable rule")
+            let byDefaults = CleanRegimenRunner.pendingItems(
+                from: [candidate], rules: CleanRegimen.defaultRules)
+            XCTAssertTrue(byDefaults.items.isEmpty, "\(category) reached by the default rules")
+        }
+    }
+
+    func testAgentStateReachesAIArtifactsUnderTheRegimenScan() {
+        // The positive half of the 2026-11-18 fix: the agent-state rule
+        // finally selects its category, and the category sits in the tier
+        // the regimen scans.  (What a run then deletes still rests on the
+        // scan's per-item pre-selection, which scanAIArtifacts grants only
+        // to abandoned update packages.)
+        XCTAssertTrue(CleanRegimenRunner.scanCategories(for: ["agent-state"]).contains(.aiArtifacts))
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
+        let pending = CleanRegimenRunner.pendingItems(
+            from: [reachabilityItem(for: .aiArtifacts)], rules: ["agent-state"])
+        XCTAssertEqual(pending.items.count, 1)
+    }
+
+    func testDefaultExclusionsExcludeNoCategory() {
+        // Fresh state excludes nothing: snapshot thinning is standard
+        // maintenance, and the old apfsSnapshots default silently vetoed
+        // it even for an owner who enabled the snapshots rule.  A stored
+        // exclusion is user state and still wins.
+        XCTAssertTrue(CleanerExclusions().excludedCategories.isEmpty)
+        let stored = try? JSONDecoder().decode(
+            CleanerExclusions.self,
+            from: Data(#"{"excludedCategories":["apfsSnapshots"],"excludedPaths":[]}"#.utf8))
+        XCTAssertEqual(stored?.isCategoryExcluded(.apfsSnapshots), true)
     }
 }

@@ -156,24 +156,33 @@ struct CleanRegimen: Codable, Equatable, Sendable {
         self.emptyTrashBelowGB = emptyTrashBelowGB
     }
 
-    /// The engine's rule names.  `ask-first` is deliberately absent: nothing
-    /// in that tier is ever deleted without a human, so a regimen has no
-    /// business listing it.
+    /// The rule names a fresh regimen starts with.  `ask-first` is
+    /// deliberately absent: nothing in that tier is ever deleted without a
+    /// human, so a regimen has no business listing it.  Every name here is
+    /// answered by a cleaner category (see `schedulableRules`).  The
+    /// engine-only names no category answers to -- `app-staging`,
+    /// `sqlite-wal`, `brew` -- were removed on 2026-11-18, and `snapshots`
+    /// and `tmp-files` joined by owner directive of 2026-11-17: local
+    /// snapshots pinning deleted blocks were the force multiplier in two
+    /// disk emergencies, and a default regimen that cannot thin them is
+    /// not maintaining the disk.
     static let defaultRules: Set<String> = [
-        "app-staging", "dev-caches", "app-caches", "agent-state",
-        "xcode-artifacts", "logs", "sqlite-wal", "brew",
+        "dev-caches", "app-caches", "agent-state",
+        "xcode-artifacts", "logs", "snapshots", "tmp-files",
     ]
 
     /// Rule names a stored regimen may keep.  `ask-first` is not in here.  The
-    /// regimen runs `DiskCleaner`, not `scripts/hoghunter-clean`, so a name here
-    /// does real work only if `CleanRegimenRunner.ruleNames(for:)` maps a cleaner
-    /// category to it.  `simulator-runtimes` and a few others are older names
-    /// that select nothing.  A rule that lives only in the engine, such as
-    /// `stale-build-output`, stays out of this list.
+    /// regimen runs `DiskCleaner`, not `scripts/hoghunter-clean`, so every name
+    /// here must be one `CleanRegimenRunner.ruleNames(for:)` maps a cleaner
+    /// category to: a name that selects nothing is a switch that looks on and
+    /// does nothing.  Rules that live only in the engine -- `app-staging`,
+    /// `sqlite-wal`, `brew`, `simulator-runtimes`, `stale-build-output`, and
+    /// the rest -- stay out of this list; a stored regimen naming one loses
+    /// it at `sanitized()`, which is the migration.
     static let schedulableRules: [String] = [
-        "snapshots", "tmp-files", "app-staging", "dev-caches",
+        "snapshots", "tmp-files", "dev-caches",
         "app-caches", "agent-state",
-        "xcode-artifacts", "simulator-runtimes", "logs", "sqlite-wal", "brew",
+        "xcode-artifacts", "logs",
     ]
 
     var isValid: Bool {
