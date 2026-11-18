@@ -667,13 +667,29 @@ final class CleanRegimenRunner: ObservableObject {
             ? scanned.filter { $0.category == .trash }
             : []
         let decision = Self.pendingItems(from: scanned, rules: regimen.enabledRules)
-        guard decision.skipReason == nil || !valveItems.isEmpty else {
+        // Snapshot rows ride beside the rule-selected ones when the owner
+        // enabled the snapshots rule.  Thinning is one volume-wide `tmutil`
+        // call, so a snapshot row's pre-check state never was a per-item
+        // verdict -- it is the manual panel's don't-pre-check default, and
+        // passing any one row thins every local snapshot regardless.  The
+        // rule is the opt-in, so the rows are lifted past the pre-check
+        // filter the way the valve's are.  A stored exclusion of the
+        // category still wins: unlike the valve, this lift never removes
+        // the exclusion from the scan, so an excluded category's rows
+        // never reach this run at all.
+        let decidedIDs = Set(decision.items.map(\.id))
+        let snapshotItems = regimen.enabledRules.contains("snapshots")
+            ? scan.categories.flatMap { $0.items }.filter {
+                $0.category == .apfsSnapshots && !decidedIDs.contains($0.id)
+            }
+            : []
+        guard decision.skipReason == nil || !valveItems.isEmpty || !snapshotItems.isEmpty else {
             result.skippedReason = result.skippedReason ?? decision.skipReason
             recordsRun = false
             finish(result, regimen: regimen)
             return
         }
-        let pending = decision.items + valveItems
+        let pending = decision.items + valveItems + snapshotItems
 
         // Pressure decides the burst size, never the burst count.  An
         // overdue run takes the pressured shape without asking the gauges:
@@ -841,7 +857,17 @@ final class CleanRegimenRunner: ObservableObject {
             return ["snapshots"]
         case .aiArtifacts: return ["agent-state", "xcode-artifacts"]
         case .orphanedData, .localAIModels, .largeAndOldFiles:
-            return ["xcode-artifacts"]
+            // No unattended rule owns these.  Their scan verdicts are
+            // identity and existence heuristics over user data -- an
+            // uninstalled app's support folder (pre-selected, and on a
+            // name mismatch a live app's data), downloaded model weights
+            // with no staleness gate, a large file in Documents -- not
+            // proofs of regenerability, so they stay on the manual Extreme
+            // surface and answer to ask-first, like tool-made backups and
+            // stale temp repos below.  They used to answer to
+            // xcode-artifacts, which implied a reach the Extreme tier
+            // blocked on every run.
+            return ["ask-first"]
         case .staleBackups:
             // No engine rule owns tool-made backups: a regimen must never take
             // them unattended, and "ask-first" is not schedulable, so items in

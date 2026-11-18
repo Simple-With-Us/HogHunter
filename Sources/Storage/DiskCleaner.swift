@@ -116,11 +116,20 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Whether this category is restricted to the Extreme Clean tier.
+    ///
+    /// `aiArtifacts` is standard-tier: every item its scan lists is gated by
+    /// age, rotation, or archival, and the only items it pre-selects are
+    /// abandoned update packages past a day-long grace period, so the
+    /// unattended regimen -- which deletes only pre-selected items -- can
+    /// reach exactly those verdicts and no further.  The remaining
+    /// Extreme-only categories are verdicts over user data (an uninstalled
+    /// app's folders, downloaded model weights, large files in personal
+    /// folders, temp repo copies), which stay review-only.
     var isExtremeOnly: Bool {
         switch self {
-        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots, .tempFiles, .staleBackups:
+        case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots, .tempFiles, .staleBackups, .aiArtifacts:
             return false
-        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles, .staleTempRepos:
+        case .orphanedData, .localAIModels, .largeAndOldFiles, .staleTempRepos:
             return true
         }
     }
@@ -141,11 +150,12 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
 
 /// Degrees of disk cleaning supported by Hog Hunter.
 enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
-    /// Safe major clutter removal: caches, logs, trash, developer junk, and stale temp files.
+    /// Safe major clutter removal: caches, logs, trash, developer junk, stale
+    /// temp files, and stale AI agent artifacts.
     /// Preserves full recoverability via APFS snapshot & Trash Put-Back.
     case standard
     /// Aggressive deep clean: everything in standard PLUS orphaned app leftovers,
-    /// stale AI agent transcripts/models (>7 days), and large/old files.
+    /// local AI model weights, and large/old files.
     case extreme
 
     var id: String { rawValue }
@@ -183,7 +193,13 @@ enum CleanTier: String, Codable, CaseIterable, Identifiable, Sendable {
 
 /// User exclusions for disk scanning and cleaning.
 struct CleanerExclusions: Codable, Equatable, Sendable {
-    var excludedCategories: Set<String> = [CleanCategory.apfsSnapshots.rawValue]
+    /// No category is excluded by default.  Local snapshots used to be,
+    /// which silently disabled snapshot thinning -- the maintenance that
+    /// frees the blocks deleted files still pin -- even for an owner who
+    /// enabled the regimen's snapshots rule.  An owner can still exclude
+    /// any category here; a stored exclusion is user state and always wins
+    /// over this default.
+    var excludedCategories: Set<String> = []
     var excludedPaths: [String] = []
 
     static let defaultsKey = "hoghunter.cleaner.exclusions"

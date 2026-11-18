@@ -943,6 +943,98 @@ final class CleanRegimenRunnerTests: XCTestCase {
                       "a run the valve cannot serve never walks the disk at all")
     }
 
+    // MARK: - Snapshot rule reachability
+
+    private func snapshotItem(selected: Bool = false) -> CleanItem {
+        CleanItem(category: .apfsSnapshots, title: "SnapshotRow", subtitle: "Time Machine Local Snapshot",
+                  url: URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.2026-11-17-010000.local"),
+                  bytes: 1_000, fileCount: 1, lastModified: nil, isSelected: selected, detail: nil)
+    }
+
+    func testTheSnapshotsRuleCleansUnselectedSnapshotRows() async {
+        // Thinning is one volume-wide tmutil call, so a snapshot row's
+        // pre-check state is the panel's don't-pre-check default, not a
+        // per-item verdict.  With the rule on, the unselected row a real
+        // scan produces must still reach the cleaner -- otherwise the rule
+        // stays a dead switch below the defaults and exclusions gates that
+        // were its first two.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["snapshots"])
+        regimen.createSnapshotBeforeClean = false
+        let cleaned = LockedBox<[CleanItem]>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in self.reportWith([self.snapshotItem()]) },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 1_000, itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
+
+        XCTAssertEqual(cleaned.value.map(\.title), ["SnapshotRow"])
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 1)
+        XCTAssertNil(runner.lastRun?.skippedReason)
+    }
+
+    func testSnapshotRowsStayOutWithoutTheSnapshotsRule() async {
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"])
+        regimen.createSnapshotBeforeClean = false
+        let cleaned = LockedBox<[CleanItem]>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in self.reportWith([self.snapshotItem(), self.cacheItem()]) },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 1_000, itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
+
+        XCTAssertEqual(cleaned.value.map(\.title), ["CacheItem"],
+                       "snapshot rows ride only on their own rule")
+    }
+
+    func testAStoredSnapshotExclusionOutranksTheSnapshotsRule() async {
+        // Unlike the Trash valve, the snapshots lift never removes the
+        // owner's exclusion from the scan: an excluded category's rows
+        // never reach the run, so there is nothing to thin.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["snapshots"])
+        regimen.createSnapshotBeforeClean = false
+        let cleaned = LockedBox<[CleanItem]>([])
+        let sawExclusion = LockedBox<Bool>(false)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { exclusions in
+                sawExclusion.value = exclusions.isCategoryExcluded(.apfsSnapshots)
+                return self.reportWith([])
+            },
+            exclusionsProvider: {
+                CleanerExclusions(excludedCategories: [CleanCategory.apfsSnapshots.rawValue],
+                                  excludedPaths: [])
+            },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
+
+        XCTAssertTrue(sawExclusion.value, "the stored exclusion must survive into the scan")
+        XCTAssertTrue(cleaned.value.isEmpty)
+    }
+
     func testUnknownFreeSpaceClosesTheExpensiveTier() {
         // The disk-band contract:  an unmeasured disk has no band and opens
         // no bulk delete, whatever zero would read as.
