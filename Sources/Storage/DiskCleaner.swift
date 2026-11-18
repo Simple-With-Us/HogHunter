@@ -27,6 +27,11 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
     /// Stale tool-made backups an agent left behind (Cursor database backups
     /// `state.vscdb.bak-*`), older than 7 days.  The live files are never listed.
     case staleBackups
+    /// Git checkouts sitting in the temp root that are provably redundant:
+    /// HEAD is contained in a remote-tracking branch, there are no unpushed
+    /// commits and no content changes, and the copy has been untouched for
+    /// at least 3 days.  Copies holding any unique work are never listed.
+    case staleTempRepos
 
     var id: String { rawValue }
 
@@ -43,6 +48,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .apfsSnapshots: return "APFS Local Snapshots"
         case .tempFiles: return "Temp Files"
         case .staleBackups: return "Stale Backups"
+        case .staleTempRepos: return "Stale Temp Repo Copies"
         }
     }
 
@@ -70,6 +76,8 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
             return "Temporary files in /tmp meeting the configured untouched time.\u{00A0} Preserves Git checkouts, source projects, staging, locks, and links."
         case .staleBackups:
             return "Tool-made backups older than 7 days (Cursor database backups).\u{00A0} Live files are never listed."
+        case .staleTempRepos:
+            return "Git checkouts in /tmp verified redundant against their remote: HEAD is already pushed, no unpushed commits, no content changes, untouched for 3+ days.\u{00A0} Copies holding unique work are never listed."
         }
     }
 
@@ -86,6 +94,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .apfsSnapshots: return "camera.metering.matrix"
         case .tempFiles: return "timer"
         case .staleBackups: return "archivebox"
+        case .staleTempRepos: return "arrow.triangle.branch"
         }
     }
 
@@ -102,6 +111,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         case .apfsSnapshots: return 8
         case .tempFiles: return 9
         case .staleBackups: return 10
+        case .staleTempRepos: return 11
         }
     }
 
@@ -110,7 +120,7 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .apfsSnapshots, .tempFiles, .staleBackups:
             return false
-        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles:
+        case .orphanedData, .aiArtifacts, .localAIModels, .largeAndOldFiles, .staleTempRepos:
             return true
         }
     }
@@ -120,9 +130,10 @@ enum CleanCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .userCaches, .logsAndDiagnostics, .trash, .developer, .orphanedData, .staleBackups:
             return true
-        case .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots, .tempFiles:
-            // Large/old files, AI agent artifacts, local snapshots, and temp
-            // files require explicit user review to prevent accidental deletion
+        case .aiArtifacts, .localAIModels, .largeAndOldFiles, .apfsSnapshots, .tempFiles, .staleTempRepos:
+            // Large/old files, AI agent artifacts, local snapshots, temp
+            // files, and stale temp repo copies require explicit user review
+            // to prevent accidental deletion
             return false
         }
     }
@@ -288,8 +299,12 @@ enum CleanerScanCommand {
                       let input = try? FileHandle(forReadingFrom: outputURL) else { return nil }
                 defer { try? input.close() }
                 // Refuse truncated inventory rather than treating its prefix as complete.
-                guard let data = try? input.read(upToCount: 1_048_577), data.count <= 1_048_576 else { return nil }
-                return data
+                do {
+                    // A successful empty Git inventory is EOF, not failure.
+                    let data = try input.read(upToCount: 1_048_577) ?? Data()
+                    guard data.count <= 1_048_576 else { return nil }
+                    return data
+                } catch { return nil }
             }
         }
         if process.isRunning { process.terminate() }
@@ -793,6 +808,11 @@ final class DiskCleaner: @unchecked Sendable {
     private let tempWalkTimeLimit: TimeInterval
     typealias TempEnumerationProvider = (URL, FileManager.DirectoryEnumerationOptions, ((URL, Error) -> Bool)?) -> FileManager.DirectoryEnumerator?
     private let tempEnumerationProvider: TempEnumerationProvider
+    /// Tests substitute canned git probe results so the stale-temp-repo
+    /// verdict is verifiable without real repositories.  The default probe
+    /// shells out to `git` with local data only (remote-tracking refs); it
+    /// never fetches or touches the network.
+    private let tempRepoProbeProvider: (URL) -> TempRepoProbe?
 
     init(fileManager: FileManager = .default,
          freeBytesProvider: @escaping () -> UInt64? = { DiskSpace.current()?.freeBytes },
@@ -811,7 +831,8 @@ final class DiskCleaner: @unchecked Sendable {
          tempEntryCap: Int = 25_000,
          tempUptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          tempWalkTimeLimit: TimeInterval = 2,
-         tempEnumerationProvider: TempEnumerationProvider? = nil) {
+         tempEnumerationProvider: TempEnumerationProvider? = nil,
+         tempRepoProbeProvider: @escaping (URL) -> TempRepoProbe? = DiskCleaner.defaultTempRepoProbe) {
         self.mountPathsProvider = mountPathsProvider
         self.scanUptime = scanUptime
         self.freeBytesProvider = freeBytesProvider
@@ -835,6 +856,7 @@ final class DiskCleaner: @unchecked Sendable {
         self.tempEnumerationProvider = tempEnumerationProvider ?? { url, options, handler in
             fileManager.enumerator(at: url, includingPropertiesForKeys: nil, options: options, errorHandler: handler)
         }
+        self.tempRepoProbeProvider = tempRepoProbeProvider
     }
 
     // MARK: - Full Scan
@@ -908,6 +930,8 @@ final class DiskCleaner: @unchecked Sendable {
             return scanAPFSSnapshots()
         case .tempFiles:
             return scanTempFiles()
+        case .staleTempRepos:
+            return scanStaleTempRepos()
         case .staleBackups:
             return scanStaleBackups()
         }
@@ -1007,6 +1031,194 @@ final class DiskCleaner: @unchecked Sendable {
         }
         guard !enumerationFailed, !scanShouldStop(), policy == tempPolicyProvider() else { return [] }
         return items.sorted { $0.bytes > $1.bytes }
+    }
+
+    // MARK: - Stale Temp Repo Copies
+
+    /// A temp-root git checkout must sit untouched at least this long before
+    /// it can be listed: agent seats park copies in /tmp for days at a time,
+    /// and a copy in active use must never be offered for cleaning.
+    static let staleTempRepoMinimumIdle: TimeInterval = 3 * 24 * 3600
+
+    /// Per-candidate walk budget for the stale-repo test.  A checkout that
+    /// cannot be fully observed inside the budget is never listed.
+    static let tempRepoWalkTimeLimit: TimeInterval = 20
+    static let tempRepoEntryCap = 250_000
+
+    /// No untracked or ignored content is inferred disposable from its name.
+    /// A tracked build/ directory can contain a unique untracked note, and
+    /// ignored paths can hold credentials or work absent from Git entirely.
+    /// Raw local git facts about one checkout.  Every field comes from
+    /// plumbing that reads only the local repository and its remote-tracking
+    /// refs; nothing here fetches or asks a network service whether work is
+    /// backed up.
+    struct TempRepoProbe: Sendable {
+        /// HEAD is contained in at least one remote-tracking branch.
+        var headContainedByRemoteBranch: Bool
+        /// Commits reachable from any ref, HEAD or reflog absent from remote-tracking refs.
+        var unpushedCommitCount: Int
+        /// `git diff --numstat HEAD` output (added, deleted, path per line).
+        var diffNumstat: String
+        /// Full NUL-delimited untracked and ignored paths. None may be discarded.
+        var untrackedTopLevelNames: [String]
+    }
+
+    /// The redundancy verdict, kept pure so tests can drive it with canned
+    /// probes.  A copy is redundant only when every fact agrees: its HEAD is
+    /// already on a remote branch, it carries no unpushed commits, its
+    /// worktree adds or changes no content (file-mode-only churn and pure
+    /// deletions carry no unique content; binary diffs fail closed because
+    /// numstat cannot tell a deletion from a modification), and no
+    /// untracked or ignored entry remains, even inside a build-output directory.
+    static func tempRepoIsRedundant(_ probe: TempRepoProbe) -> Bool {
+        guard probe.headContainedByRemoteBranch, probe.unpushedCommitCount == 0 else { return false }
+        for line in probe.diffNumstat.split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { return false }
+            if fields[0] == "-" || fields[1] == "-" { return false }
+            guard let added = Int(fields[0]), added == 0 else { return false }
+        }
+        return probe.untrackedTopLevelNames.isEmpty
+    }
+
+    /// Default probe: local `git` plumbing against the checkout.  Any failed
+    /// or timed-out command returns nil, and nil never lists a copy.
+    @TaskLocal private static var tempRepoProbeDeadline: TimeInterval?
+
+    static func defaultTempRepoProbe(_ url: URL) -> TempRepoProbe? {
+        let deadline = tempRepoProbeDeadline ?? (ProcessInfo.processInfo.systemUptime + 8)
+        func git(_ arguments: [String]) -> String? {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard !Task.isCancelled, remaining > 0,
+                  let data = CleanerScanCommand.run(executable: "/usr/bin/git",
+                    arguments: ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", url.path] + arguments,
+                    timeout: min(10, remaining)) else { return nil }
+            return String(decoding: data, as: UTF8.self)
+        }
+        guard git(["rev-parse", "--git-dir"]) != nil,
+              let contains = git(["branch", "-r", "--contains", "HEAD"]),
+              let unpushed = git(["rev-list", "--all", "--reflog", "HEAD", "--not", "--remotes"]),
+              let numstat = git(["diff", "--numstat", "HEAD"]),
+              let untracked = git(["ls-files", "--others", "--exclude-standard", "-z"]),
+              let ignored = git(["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]),
+              let stash = git(["stash", "list"]), stash.isEmpty,
+              let flags = git(["ls-files", "-v", "-z"]),
+              !flags.split(separator: "\0").contains(where: { $0.first == "S" || $0.first?.isLowercase == true })
+        else { return nil }
+        return TempRepoProbe(
+            headContainedByRemoteBranch: !contains.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            unpushedCommitCount: unpushed.split(separator: "\n").count,
+            diffNumstat: numstat,
+            untrackedTopLevelNames: (untracked + ignored).split(separator: "\0").map(String.init))
+    }
+
+    /// Lists standalone git clones sitting directly in the temp root that
+    /// are provably redundant (see `tempRepoIsRedundant`) and untouched for
+    /// at least `staleTempRepoMinimumIdle`.  Linked worktrees (`.git` file),
+    /// registered worktrees, batch staging, and anything with unique content
+    /// are never listed.  Incomplete enumeration lists nothing.
+    func scanStaleTempRepos() -> [CleanItem] {
+        if Self.scanContext == nil { return withScanBudget { scanStaleTempRepos() } }
+        var enumerationFailed = false
+        guard scanAllows(tempRootURL) else { return [] }
+        guard let entries = tempEnumerationProvider(tempRootURL,
+            [.skipsSubdirectoryDescendants], { _, _ in enumerationFailed = true; return false }) else { return [] }
+        let worktrees = Set(worktreePathsProvider().map(Self.resolvedPath))
+        let cutoff = tempNow().addingTimeInterval(-Self.staleTempRepoMinimumIdle)
+        var visited = 0
+        var items: [CleanItem] = []
+        while let entry = entries.nextObject() {
+            guard !scanShouldStop(), !enumerationFailed, visited < tempEntryCap,
+                  let url = entry as? URL else { markScanIncomplete(); return [] }
+            visited += 1
+            Self.scanContext?.remaining -= 1
+            guard scanAllows(url) else { continue }
+            guard let candidate = staleTempRepoCandidate(url, cutoff: cutoff, worktrees: worktrees) else { continue }
+            items.append(candidate)
+        }
+        guard !enumerationFailed, !scanShouldStop() else { return [] }
+        return items.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// One candidate, or nil when the directory is not a provably redundant
+    /// stale checkout.  Shared by the scan and the delete-time revalidation
+    /// so both apply exactly the same test.
+    private func staleTempRepoCandidate(_ url: URL, cutoff: Date, worktrees: Set<String>) -> CleanItem? {
+        let root = tempRootURL.path
+        let path = Self.resolvedPath(url.path)
+        guard url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path == root,
+              path.hasPrefix(root + "/"), path != root,
+              !worktrees.contains(path),
+              !Self.batchStagingNamePrefixes.contains(where: { url.lastPathComponent.lowercased().hasPrefix($0) })
+        else { return nil }
+        // Standalone clones only: a `.git` file marks a linked worktree whose
+        // registration lives in another repo, and a symlink is never followed.
+        var isDirectory: ObjCBool = false
+        let gitPath = url.appendingPathComponent(".git").path
+        guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        // Keep the full activity check before Git reads. A later live
+        // revalidation still fails closed if those reads advanced atime: we
+        // cannot safely distinguish our reads from another user's activity.
+        guard !hasAdjacentTempLock(url),
+              let stats = tempRepoWalk(url, cutoff: cutoff), stats.bytes > 0 else { return nil }
+        guard !scanShouldStop() else { return nil }
+        let remaining = max(0, (Self.scanContext?.deadline ?? (scanUptime() + 8)) - scanUptime())
+        let probe = Self.$tempRepoProbeDeadline.withValue(ProcessInfo.processInfo.systemUptime + remaining) {
+            tempRepoProbeProvider(url)
+        }
+        guard !scanShouldStop(), let probe, Self.tempRepoIsRedundant(probe) else { return nil }
+        let itemURL = URL(fileURLWithPath: path)
+        return CleanItem(
+            category: .staleTempRepos, title: url.lastPathComponent, subtitle: itemURL.path,
+            url: itemURL, bytes: stats.bytes, fileCount: stats.fileCount,
+            lastModified: stats.lastModified, isSelected: false,
+            detail: "Verified redundant checkout: HEAD is on a remote branch, no unpushed commits, no content changes, untouched for at least 3 days.\u{00A0} Review it before cleaning.")
+    }
+
+    /// Bounded full walk of one candidate checkout.  Every entry's latest
+    /// activity (lstat: modification, status change, birth, and file access)
+    /// must be at or before the cutoff — a single newer file anywhere
+    /// disqualifies the copy.  Symlinks are measured by lstat and never
+    /// followed, so a link's target is never read or credited.  Any
+    /// enumeration or metadata failure, deadline overrun, or entry-cap
+    /// overrun returns nil: an incompletely observed tree cannot prove it
+    /// is stale.
+    private func tempRepoWalk(_ url: URL, cutoff: Date) -> DirectoryStats? {
+        let remaining = max(0, (Self.scanContext?.deadline ?? (scanUptime() + Self.tempRepoWalkTimeLimit)) - scanUptime())
+        let deadline = tempUptime() + min(Self.tempRepoWalkTimeLimit, remaining)
+        var bytes: UInt64 = 0
+        var count = 0
+        var visited = 0
+        var latestModified: Date?
+        func inspect(_ entry: URL) -> Bool {
+            guard !scanShouldStop(), tempUptime() < deadline, visited < Self.tempRepoEntryCap,
+                  let info = try? tempMetadataProvider(entry),
+                  info.latestActivity.timeIntervalSince1970.isFinite,
+                  info.latestActivity <= cutoff else { return false }
+            visited += 1
+            Self.scanContext?.remaining -= 1
+            latestModified = max(latestModified ?? info.modified, info.modified)
+            if info.isRegularFile { bytes &+= info.bytes; count += 1 }
+            return true
+        }
+        guard inspect(url) else { return nil }
+        var enumerationFailed = false
+        guard let entries = tempEnumerationProvider(url, [], { _, _ in enumerationFailed = true; return false }) else { return nil }
+        while let entry = entries.nextObject() {
+            guard !enumerationFailed, let child = entry as? URL, inspect(child) else { return nil }
+        }
+        guard !enumerationFailed else { return nil }
+        return DirectoryStats(bytes: bytes, fileCount: count, lastModified: latestModified)
+    }
+
+    /// Delete-time revalidation for a stale temp repo copy: the same
+    /// candidate test the scan applied, rerun against the live directory so
+    /// a copy that gained unique work after the scan is refused.
+    private func isStaleTempRepoSafeNow(_ url: URL) -> Bool {
+        let cutoff = tempNow().addingTimeInterval(-Self.staleTempRepoMinimumIdle)
+        return staleTempRepoCandidate(url, cutoff: cutoff,
+            worktrees: Set(worktreePathsProvider().map(Self.resolvedPath))) != nil
     }
 
     /// Protect recognizable project material even when Git metadata was never
@@ -2596,6 +2808,9 @@ final class DiskCleaner: @unchecked Sendable {
 
         case .tempFiles:
             return isTempEntrySafeNow(url)
+
+        case .staleTempRepos:
+            return isStaleTempRepoSafeNow(url)
 
         case .staleBackups:
             // Only versioned Cursor database backups under globalStorage.  The

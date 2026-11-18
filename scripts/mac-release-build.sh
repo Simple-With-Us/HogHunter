@@ -18,8 +18,8 @@
 # Developer ID team.
 #
 # Versions: marketing stays 0.1.0; the official workflow supplies one shared
-# counter planned from complete ASC and published Sparkle floors.
-# A nonpublishing local build defaults to 1000.
+# Central-time start timestamp checked against complete ASC and Sparkle floors.
+# A nonpublishing local build uses its current Central-time build start stamp.
 #
 # Auto-update: a staged bundle always carries the Sparkle feed and public key
 # in its Info.plist (SUFeedURL, SUPublicEDKey, automatic checks/install, hourly
@@ -33,6 +33,7 @@ set -euo pipefail
 
 MODE="${1:---build-only}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_BUILD_STAMP="$(bash "$ROOT_DIR/scripts/build-run-stamp.sh")"
 DIST_DIR="$ROOT_DIR/dist"
 APP_NAME="Hog Hunter"
 EXECUTABLE_NAME="HogHunter"
@@ -98,13 +99,16 @@ short_version() {
 }
 
 bundle_version() {
-  local build="${HOGHUNTER_BUILD_NUMBER:-1000}"
-  if [[ ! "$build" =~ ^[1-9][0-9]{3,11}$ ]]; then
-    echo "error: release build must be an integer of at least1000 within the verified platform range." >&2
+  local build="${HOGHUNTER_BUILD_NUMBER:-}"
+  if [[ -z "$build" ]]; then
+    build="$RUN_BUILD_STAMP"
+  fi
+  if [[ ! "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+    echo "error: release build must be YYYYMMDDHHMM Central time." >&2
     return 1
   fi
   if [[ "$MODE" == "--release" && -z "${HOGHUNTER_BUILD_NUMBER:-}" ]]; then
-    echo "error: publishing requires the workflow's observed-floor build plan." >&2
+    echo "error: publishing requires the workflow's timestamp build plan." >&2
     return 1
   fi
   printf '%s\n' "$build"
