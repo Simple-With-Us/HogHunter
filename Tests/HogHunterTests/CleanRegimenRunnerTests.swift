@@ -943,6 +943,98 @@ final class CleanRegimenRunnerTests: XCTestCase {
                       "a run the valve cannot serve never walks the disk at all")
     }
 
+    // MARK: - Snapshot rule reachability
+
+    private func snapshotItem(selected: Bool = false) -> CleanItem {
+        CleanItem(category: .apfsSnapshots, title: "SnapshotRow", subtitle: "Time Machine Local Snapshot",
+                  url: URL(fileURLWithPath: "/.snapshots/com.apple.TimeMachine.2026-11-17-010000.local"),
+                  bytes: 1_000, fileCount: 1, lastModified: nil, isSelected: selected, detail: nil)
+    }
+
+    func testTheSnapshotsRuleCleansUnselectedSnapshotRows() async {
+        // Thinning is one volume-wide tmutil call, so a snapshot row's
+        // pre-check state is the panel's don't-pre-check default, not a
+        // per-item verdict.  With the rule on, the unselected row a real
+        // scan produces must still reach the cleaner -- otherwise the rule
+        // stays a dead switch below the defaults and exclusions gates that
+        // were its first two.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["snapshots"])
+        regimen.createSnapshotBeforeClean = false
+        let cleaned = LockedBox<[CleanItem]>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in self.reportWith([self.snapshotItem()]) },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 1_000, itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
+
+        XCTAssertEqual(cleaned.value.map(\.title), ["SnapshotRow"])
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 1)
+        XCTAssertNil(runner.lastRun?.skippedReason)
+    }
+
+    func testSnapshotRowsStayOutWithoutTheSnapshotsRule() async {
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches"])
+        regimen.createSnapshotBeforeClean = false
+        let cleaned = LockedBox<[CleanItem]>([])
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in self.reportWith([self.snapshotItem(), self.cacheItem()]) },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 1_000, itemsRemoved: items.count, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
+
+        XCTAssertEqual(cleaned.value.map(\.title), ["CacheItem"],
+                       "snapshot rows ride only on their own rule")
+    }
+
+    func testAStoredSnapshotExclusionOutranksTheSnapshotsRule() async {
+        // Unlike the Trash valve, the snapshots lift never removes the
+        // owner's exclusion from the scan: an excluded category's rows
+        // never reach the run, so there is nothing to thin.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["snapshots"])
+        regimen.createSnapshotBeforeClean = false
+        let cleaned = LockedBox<[CleanItem]>([])
+        let sawExclusion = LockedBox<Bool>(false)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { exclusions in
+                sawExclusion.value = exclusions.isCategoryExcluded(.apfsSnapshots)
+                return self.reportWith([])
+            },
+            exclusionsProvider: {
+                CleanerExclusions(excludedCategories: [CleanCategory.apfsSnapshots.rawValue],
+                                  excludedPaths: [])
+            },
+            cleanProvider: { items, _, _ in
+                cleaned.value += items
+                return CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+
+        await runner.runNow(regimen: regimen, scheduled: true)?.value
+
+        XCTAssertTrue(sawExclusion.value, "the stored exclusion must survive into the scan")
+        XCTAssertTrue(cleaned.value.isEmpty)
+    }
+
     func testUnknownFreeSpaceClosesTheExpensiveTier() {
         // The disk-band contract:  an unmeasured disk has no band and opens
         // no bulk delete, whatever zero would read as.
@@ -1392,6 +1484,62 @@ final class CleanRegimenRunnerTests: XCTestCase {
 
         runner.release()
         XCTAssertFalse(runner.isScheduling, "the last holder stops it")
+    }
+
+    func testSnapshotRowsCleanInAFinalBatchAfterEveryFileItem() async {
+        // Thinning purges the run's own safety snapshot, so snapshot rows
+        // must never share or precede a batch that deletes files (Seer
+        // finding on PR #375).  An overdue run forces the pressured chunk
+        // size, which is what makes the batching observable.
+        let now = Date()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4, rules: ["app-caches", "snapshots"])
+        regimen.requireIdleMinutes = 30
+        regimen.pressuredTargetsPerChunk = 2
+        regimen.pressuredChunkPauseSeconds = 0
+        regimen.chunkPauseSeconds = 0
+        regimen.createSnapshotBeforeClean = true
+        let defaults = makeDefaults()
+        defaults.set(now.addingTimeInterval(-11 * 3600), forKey: "hoghunter.cleaner.regimen.lastRunAt")
+        let caches = (1...3).map { i in
+            CleanItem(category: .userCaches, title: "Cache\(i)", subtitle: "~/Library/Caches/C\(i)",
+                      url: URL(fileURLWithPath: "/tmp/hh-batch-cache-\(i)"), bytes: 1_000, fileCount: 1,
+                      lastModified: nil, isSelected: true, detail: nil)
+        }
+        let snaps = (1...2).map { i in
+            CleanItem(category: .apfsSnapshots, title: "Snapshot \(i)", subtitle: "Local snapshot",
+                      url: URL(fileURLWithPath: "/"), bytes: 5_000_000_000, fileCount: 1,
+                      lastModified: nil, isSelected: false, detail: nil)
+        }
+        let report = CleanScanReport(
+            categories: [
+                CleanCategoryReport(category: .userCaches, items: caches, totalBytes: 3_000, selectedBytes: 3_000, itemCount: 3),
+                CleanCategoryReport(category: .apfsSnapshots, items: snaps, totalBytes: 10_000_000_000, selectedBytes: 0, itemCount: 2),
+            ],
+            totalBytes: 10_000_003_000, totalSelectedBytes: 3_000, scannedAt: now, tier: .standard)
+        var batches: [[CleanCategory]] = []
+        var snapshotFlags: [Bool] = []
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 },
+            scanProvider: { _ in report },
+            cleanProvider: { items, _, takeSnapshot in
+                batches.append(items.map(\.category))
+                snapshotFlags.append(takeSnapshot)
+                return CleanResult(bytesReclaimed: 1_000, itemsRemoved: items.count, errors: [],
+                                   cleanedAt: now, snapshotName: takeSnapshot ? "snap-1" : nil)
+            }
+        )
+
+        await runner.tick(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.itemsRemoved, 5)
+        XCTAssertEqual(batches.count, 3, "two file batches of two and one, then the snapshot batch")
+        XCTAssertEqual(batches.last, [.apfsSnapshots, .apfsSnapshots], "snapshot rows clean last, together")
+        XCTAssertTrue(batches.dropLast().allSatisfy { !$0.contains(.apfsSnapshots) },
+                      "no file batch contains a snapshot row")
+        XCTAssertEqual(snapshotFlags, [true, false, false], "one rollback point, taken by the first batch")
     }
 
     func testTheAppHasOneSharedRunner() {

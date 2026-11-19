@@ -344,7 +344,6 @@ extension CompanionModel {
             ),
         ]
         guard state == "ready" else { return CompanionCleanReport(state: state, tier: tier, history: history) }
-        let extreme = tier == "extreme"
         var categories = [
             CompanionCleanCategory(
                 id: "userCaches", title: "User Caches", description: "Application cache directories that can be safely rebuilt.", icon: "arrow.triangle.2.circlepath",
@@ -364,13 +363,13 @@ extension CompanionModel {
                 ]
             ),
         ]
-        if extreme {
-            categories.append(CompanionCleanCategory(
-                id: "aiArtifacts", title: "AI & Agent Junk", description: "Inactive AI agent session transcripts (>7 days) and temporary update downloads.", icon: "sparkles",
-                isExtremeOnly: true, totalBytes: 1_800_000_000, totalText: "1.7 GB", itemCount: 1,
-                items: [CompanionCleanItem(id: "2.0", title: "Agent session", subtitle: "~/.codex/archived_sessions/2026-09-01", bytes: 1_800_000_000, sizeText: "1.7 GB", fileCount: 310, detail: "Archived Codex transcript", isSelected: false)]
-            ))
-        }
+        // AI & Agent Junk is a standard-tier category: it rides in both
+        // demo tiers, like User Caches and Developer Junk above.
+        categories.append(CompanionCleanCategory(
+            id: "aiArtifacts", title: "AI & Agent Junk", description: "Inactive AI agent session transcripts (>7 days) and temporary update downloads.", icon: "sparkles",
+            isExtremeOnly: false, totalBytes: 1_800_000_000, totalText: "1.7 GB", itemCount: 1,
+            items: [CompanionCleanItem(id: "2.0", title: "Agent session", subtitle: "~/.codex/archived_sessions/2026-09-01", bytes: 1_800_000_000, sizeText: "1.7 GB", fileCount: 310, detail: "Archived Codex transcript", isSelected: false)]
+        ))
         let total = categories.reduce(0) { $0 + $1.totalBytes }
         return CompanionCleanReport(
             state: "ready", scanId: scanId, tier: tier, scannedAt: Date(), totalBytes: total, totalText: iPhoneStorage.format(bytes: total),

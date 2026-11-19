@@ -145,7 +145,10 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.apfsSnapshots))
         XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.staleBackups))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.orphanedData))
-        XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
+        // AI agent artifacts are standard-tier: the scan gates every item by
+        // age, rotation, or archival, and pre-selects only abandoned update
+        // packages, so both a standard clean and the regimen can reach them.
+        XCTAssertTrue(CleanTier.standard.isCategoryIncluded(.aiArtifacts))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.localAIModels))
         XCTAssertFalse(CleanTier.standard.isCategoryIncluded(.largeAndOldFiles))
 
