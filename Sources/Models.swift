@@ -401,6 +401,24 @@ enum HogFormat {
         return String(format: "%.0f KB", kb)
     }
 
+    /// The display bucket `memory(_:)` puts a byte count in, as one integer:
+    /// two counts share a bucket exactly when they format to the same
+    /// string.  The branch and the printed number are both recovered
+    /// arithmetically (printf rounds half to even, which is what
+    /// `rounded(.toNearestOrEven)` does), so a caller that only needs to
+    /// know whether two counts print alike never pays for a
+    /// `String(format:)`.  The sort comparators in `HogStore` ask that
+    /// question on every comparison, over the whole process list, on
+    /// every refresh tick, which was part of the HOGHUNTER-G hang shape.
+    static func memoryBucket(_ bytes: UInt64) -> Int64 {
+        let gb = Double(bytes) / 1_073_741_824
+        let mb = Double(bytes) / 1_048_576
+        let kb = Double(bytes) / 1024
+        if mb >= 1023.5 { return 2_000_000_000 + Int64((gb * 10).rounded(.toNearestOrEven)) }
+        if kb >= 1023.5 { return 1_000_000_000 + Int64(mb.rounded(.toNearestOrEven)) }
+        return Int64(kb.rounded(.toNearestOrEven))
+    }
+
     /// "12 MB/s", "1.4 GB/s", "0 KB/s".
     static func rate(_ bytesPerSecond: Double) -> String {
         guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return "0 KB/s" }

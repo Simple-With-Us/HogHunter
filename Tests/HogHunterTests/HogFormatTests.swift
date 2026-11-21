@@ -159,4 +159,33 @@ final class HogFormatTests: XCTestCase {
         XCTAssertFalse(HogFormat.count(1_115).contains(" "))
         XCTAssertFalse(HogFormat.count(1_115).contains("\u{202f}"))
     }
+
+    // MARK: - HogFormat.memoryBucket
+
+    /// The bucket is the sort comparators' stand-in for the formatted
+    /// string: two counts share a bucket exactly when they print the
+    /// same.  Sweep the unit boundaries and the rounding edges, where
+    /// the arithmetic and printf could disagree.
+    func testMemoryBucketMatchesFormattedStringEquality() {
+        var values: [UInt64] = [0, 1, 100, 511, 512, 513, 1023, 1024, 1536, 2048, 2560, 3584]
+        for exponent in [10, 20, 30] {
+            let base = UInt64(1) << UInt64(exponent)
+            for delta in [-2048, -1025, -1024, -513, -512, -511, -1, 0, 1, 511, 512, 513, 1024, 2048] {
+                let v = Int64(base) + Int64(delta)
+                if v >= 0 { values.append(UInt64(v)) }
+            }
+        }
+        values.append(1_073_741_823)
+        values.append(1_073_741_824)
+        values.append(16 * 1_073_741_824)
+        for a in values {
+            for b in values {
+                XCTAssertEqual(
+                    HogFormat.memory(a) == HogFormat.memory(b),
+                    HogFormat.memoryBucket(a) == HogFormat.memoryBucket(b),
+                    "bucket mismatch for \(a) vs \(b): \(HogFormat.memory(a)) vs \(HogFormat.memory(b))"
+                )
+            }
+        }
+    }
 }
