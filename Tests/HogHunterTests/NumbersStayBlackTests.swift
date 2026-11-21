@@ -10,6 +10,8 @@ final class NumbersStayBlackTests: XCTestCase {
         "severityColor(",
         "driveSeverityColor(",
         "rowColor(",
+        "foregroundStyle(color(",
+        "foregroundColor(color(",
         "ServerFormat.color(",
         "Percent >= 100 ?",
         "Percent > 90 ?",
