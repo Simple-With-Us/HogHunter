@@ -1383,7 +1383,7 @@ struct DashboardView: View {
                             } else {
                                 Text(row.cpuText)
                                     .font(.body.weight(.bold).monospacedDigit())
-                                    .foregroundStyle(rowColor(row.severity))
+                                    .foregroundStyle(.primary)
                                 Text(row.memoryText)
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(Color.secondary)
@@ -1557,7 +1557,7 @@ struct DashboardView: View {
                         Spacer()
                         Text(String(format: "%.0f%% Used", storage.usedPercent))
                             .font(.subheadline.weight(.semibold).monospacedDigit())
-                            .foregroundStyle(storage.usedPercent > 90 ? Color.red : (storage.usedPercent > 75 ? Color.orange : Color.primary))
+                            .foregroundStyle(.primary)
                     }
 
                     ProgressView(value: min(max(storage.usedPercent / 100.0, 0), 1.0))
@@ -1702,7 +1702,7 @@ struct DashboardView: View {
                         Spacer()
                         Text(String(format: "%.0f%% Used", phoneStorage.usedPercent))
                             .font(.subheadline.weight(.semibold).monospacedDigit())
-                            .foregroundStyle(phoneStorage.usedPercent > 90 ? Color.red : (phoneStorage.usedPercent > 80 ? Color.orange : Color.primary))
+                            .foregroundStyle(.primary)
                     }
 
                     ProgressView(value: min(max(phoneStorage.usedPercent / 100.0, 0), 1.0))
@@ -2136,7 +2136,7 @@ struct DashboardView: View {
                 Spacer()
                 Text(drive.usedPercent.map { String(format: "%.0f%% used", $0) } ?? "unavailable")
                     .font(.subheadline.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(driveSeverityColor(drive.severity))
+                    .foregroundStyle(.primary)
             }
 
             if let percent = drive.usedPercent {

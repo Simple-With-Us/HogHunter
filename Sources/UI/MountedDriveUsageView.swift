@@ -19,7 +19,7 @@ struct MountedDriveUsageView: View {
                         Spacer()
                         Text(drive.usedPercent.map { String(format: "%.0f%% used", $0) } ?? "unavailable")
                             .font(.system(size: 10).monospacedDigit())
-                            .foregroundStyle(color(drive.severity))
+                            .foregroundStyle(.primary)
                     }
                     if let percent = drive.usedPercent {
                         ProgressView(value: percent, total: 100)

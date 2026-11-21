@@ -147,7 +147,7 @@ struct HogHunterSmallWidgetView: View {
                         Spacer()
                         Text(snap.pulse.cpuText)
                             .font(.system(.footnote, design: .monospaced).weight(.semibold))
-                            .foregroundStyle(WidgetColor.severityColor(snap.pulse.cpuSeverity))
+                            .foregroundStyle(.primary)
                     }
                     ProgressView(value: min(max(snap.pulse.cpuPercent / 100, 0), 1))
                         .tint(WidgetColor.severityColor(snap.pulse.cpuSeverity))
@@ -165,7 +165,7 @@ struct HogHunterSmallWidgetView: View {
                         Spacer()
                         Text(snap.pulse.memoryText)
                             .font(.system(.caption, design: .monospaced).weight(.semibold))
-                            .foregroundStyle(WidgetColor.severityColor(snap.pulse.pressureSeverity))
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                     }
                     ProgressView(value: min(max(snap.pulse.memoryPercent / 100, 0), 1))
@@ -230,7 +230,7 @@ struct HogHunterMediumWidgetView: View {
                             Spacer()
                             Text(snap.pulse.cpuText)
                                 .font(.system(.footnote, design: .monospaced).weight(.bold))
-                                .foregroundStyle(WidgetColor.severityColor(snap.pulse.cpuSeverity))
+                                .foregroundStyle(.primary)
                         }
                         ProgressView(value: min(max(snap.pulse.cpuPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.cpuSeverity))
@@ -248,7 +248,7 @@ struct HogHunterMediumWidgetView: View {
                             Spacer()
                             Text(snap.pulse.memoryText)
                                 .font(.system(.caption, design: .monospaced).weight(.bold))
-                                .foregroundStyle(WidgetColor.severityColor(snap.pulse.pressureSeverity))
+                                .foregroundStyle(.primary)
                                 .lineLimit(1)
                         }
                         ProgressView(value: min(max(snap.pulse.memoryPercent / 100, 0), 1))
@@ -283,7 +283,7 @@ struct HogHunterMediumWidgetView: View {
                                 Spacer()
                                 Text(topHog.cpuText)
                                     .font(.system(.caption, design: .monospaced).weight(.bold))
-                                    .foregroundStyle(WidgetColor.severityColor(topHog.severity))
+                                    .foregroundStyle(.primary)
                             }
                         }
                     }
@@ -362,7 +362,7 @@ struct HogHunterLargeWidgetView: View {
                             .foregroundStyle(.secondary)
                         Text(snap.pulse.cpuText)
                             .font(.title3.weight(.bold).monospacedDigit())
-                            .foregroundStyle(WidgetColor.severityColor(snap.pulse.cpuSeverity))
+                            .foregroundStyle(.primary)
                         ProgressView(value: min(max(snap.pulse.cpuPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.cpuSeverity))
                         .controlSize(.mini)
@@ -382,7 +382,7 @@ struct HogHunterLargeWidgetView: View {
                             .foregroundStyle(.secondary)
                         Text(snap.pulse.memoryText)
                             .font(.subheadline.weight(.bold).monospacedDigit())
-                            .foregroundStyle(WidgetColor.severityColor(snap.pulse.pressureSeverity))
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                         ProgressView(value: min(max(snap.pulse.memoryPercent / 100, 0), 1))
                             .tint(WidgetColor.severityColor(snap.pulse.pressureSeverity))
@@ -416,7 +416,7 @@ struct HogHunterLargeWidgetView: View {
                             Spacer()
                             Text(row.cpuText)
                                 .font(.caption.weight(.semibold).monospacedDigit())
-                                .foregroundStyle(WidgetColor.severityColor(row.severity))
+                                .foregroundStyle(.primary)
                             Text(row.memoryText)
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
