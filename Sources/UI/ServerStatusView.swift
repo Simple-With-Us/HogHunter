@@ -106,18 +106,21 @@ struct VPSStatusStripView: View {
     /// the child views' own text, so anything the marker shows visually has
     /// to be said here or a screen reader never hears it.
     private var accessibilityLabel: String {
-        Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale)
+        Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale,
+                        cpuTextOverride: store.displayCpu.map { String(format: "%.0f%%", $0.pct) })
     }
 
     /// The strip's spoken label, so it can be pinned by a test: the host,
     /// then each reading, then how old the reading is and whether it is
-    /// stale.
-    static func stripLabel(snapshot: VPSStatusSnapshot?, isStale: Bool = false) -> String {
+    /// stale.  `cpuTextOverride` says the CPU the strip actually shows — the
+    /// live reading while it is fresh — so a screen reader speaks the same
+    /// number a sighted reader sees.
+    static func stripLabel(snapshot: VPSStatusSnapshot?, isStale: Bool = false, cpuTextOverride: String? = nil) -> String {
         guard let snapshot, let headline = snapshot.headline else {
             return "Remote server status"
         }
         var parts = ["Server \(headline.host)"]
-        if let cpu = headline.cpuText { parts.append("CPU \(cpu)") }
+        if let cpu = cpuTextOverride ?? headline.cpuText { parts.append("CPU \(cpu)") }
         if let memory = headline.memoryText { parts.append("RAM \(memory)") }
         if let disk = headline.diskText { parts.append("disk \(disk)") }
         if let extra = headline.extraDiskText { parts.append("fleet-extra \(extra)") }

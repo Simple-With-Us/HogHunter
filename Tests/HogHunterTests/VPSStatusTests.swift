@@ -366,6 +366,13 @@ final class VPSStatusTests: XCTestCase {
             0.5 0.4 0.3 1/1 1
             16
             """))
+        // A truncated printout missing its tail is no reading either: never
+        // a zero-core, zero-load host invented from missing lines.
+        XCTAssertNil(VPSStatusStore.parseLiveCpu("""
+            cpu 1000 0 1000 2000 0 0 0 0
+            cpu 1050 0 1050 2100 0 0 0 0
+            ---
+            """))
     }
 
     /// A live read publishes the server's CPU between snapshots and feeds
@@ -398,6 +405,10 @@ final class VPSStatusTests: XCTestCase {
         }, liveCpuFetcher: { _ in
             throw NSError(domain: "test", code: 1, userInfo: nil)
         })
+
+        store.fetch(force: true)
+        for _ in 0..<100 where store.isLoading { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertNotNil(store.snapshot, "The stub fetch must publish before the fallback can be checked")
 
         store.fetchLiveCpu()
         // The failing probe publishes nothing; give it the time to fail.

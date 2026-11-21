@@ -57,6 +57,10 @@ final class VPSStatusStore: ObservableObject {
     private var liveStalenessTimer: Timer?
     private var activeFetchTask: Task<Void, Never>?
     private var activeLiveCpuTask: Task<Void, Never>?
+    /// Bumped every time a live probe task starts, so a probe cancelled by
+    /// `stopPolling` that finishes tearing down after the next probe has
+    /// taken the slot does not wipe that probe's task handle.
+    private var liveCpuGeneration = 0
     /// A forced read asked for while another was in flight.  It runs once
     /// that read ends, so a Refresh never lands on a read that started before
     /// it and is silently dropped.  Several asks while busy make one read.
@@ -151,17 +155,20 @@ final class VPSStatusStore: ObservableObject {
         RunLoop.main.add(t, forMode: .common)
         timer = t
 
-        let lt = Timer(timeInterval: Self.liveCpuPollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.fetchLiveCpu()
-            }
-        }
-        lt.tolerance = 1
-        RunLoop.main.add(lt, forMode: .common)
-        liveCpuTimer = lt
-        // A fresh host wants a live reading now, on the same terms the
-        // snapshot gets one.
+        // The live beat runs only while there is a server to read: with no
+        // host configured a five-second timer would wake the runloop forever
+        // for a fetch that early-returns.
         if !configuredHost.isEmpty {
+            let lt = Timer(timeInterval: Self.liveCpuPollInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.fetchLiveCpu()
+                }
+            }
+            lt.tolerance = 1
+            RunLoop.main.add(lt, forMode: .common)
+            liveCpuTimer = lt
+            // A fresh host wants a live reading now, on the same terms the
+            // snapshot gets one.
             fetchLiveCpu()
         }
     }
@@ -306,9 +313,18 @@ final class VPSStatusStore: ObservableObject {
         // reads instead, so a slow server cannot queue reads against itself.
         guard activeLiveCpuTask == nil else { return }
         let fetcher = liveCpuFetcher
+        liveCpuGeneration += 1
+        let generation = liveCpuGeneration
         activeLiveCpuTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.activeLiveCpuTask = nil }
+            defer {
+                // Clear only this probe's handle: a cancelled probe whose
+                // teardown lands after the next probe started must not wipe
+                // that probe's reference and let reads overlap.
+                if self.liveCpuGeneration == generation {
+                    self.activeLiveCpuTask = nil
+                }
+            }
             do {
                 let cpu = try await fetcher(host)
                 guard !Task.isCancelled, self.configuredHost == host else { return }
@@ -553,7 +569,9 @@ final class VPSStatusStore: ObservableObject {
 
     /// Turns the live probe's printout into a reading: the busy share of the
     /// window between the two aggregate /proc/stat lines, the load average
-    /// and the core count.  Busy is every tick but idle, iowait included —
+    /// and the core count.  Every part must parse: a truncated printout is
+    /// no reading at all, never a zero-core, zero-load host invented from
+    /// missing lines.  Busy is every tick but idle, iowait included —
     /// the same accounting the server watch's snapshot CPU uses (its
     /// CPU_PCT is (1 - idle / total) over the same one-second window).  A
     /// short, non-numeric or reset window is no reading at all, never a
@@ -586,7 +604,7 @@ final class VPSStatusStore: ObservableObject {
                 }
             }
         }
-        guard statLines.count >= 2 else { return nil }
+        guard statLines.count >= 2, let load1, let cores else { return nil }
         func busyAndTotal(_ f: [Double]) -> (busy: Double, total: Double) {
             let total = f[0] + f[1] + f[2] + f[3] + f[4] + (f.count > 5 ? f[5] : 0) + (f.count > 6 ? f[6] : 0) + (f.count > 7 ? f[7] : 0)
             return (total - f[3], total)
@@ -597,6 +615,6 @@ final class VPSStatusStore: ObservableObject {
         let totalDelta = after.total - before.total
         guard totalDelta > 0, busyDelta >= 0 else { return nil }
         let pct = min(100, max(0, busyDelta / totalDelta * 100))
-        return VPSCPU(pct: pct, load1: load1 ?? 0, cores: cores ?? 0, source: "live proc-stat tick delta 1s")
+        return VPSCPU(pct: pct, load1: load1, cores: cores, source: "live proc-stat tick delta 1s")
     }
 }
