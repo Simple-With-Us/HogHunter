@@ -314,4 +314,96 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertEqual(maintainStore.coolifyHost, "coolify-prod")
         XCTAssertEqual(maintainStore.vpsStore.configuredHost, "coolify-prod")
     }
+
+    /// The live probe's printout becomes a reading with the server watch's
+    /// own accounting: busy is every tick but idle, iowait included, over
+    /// the one-second window between the two aggregate /proc/stat lines.
+    func testParseLiveCpu() {
+        let reading = VPSStatusStore.parseLiveCpu("""
+            cpu 1000 0 1000 2000 0 0 0 0
+            cpu 1050 0 1050 2100 0 0 0 0
+            ---
+            1.93 0.80 0.40 2/1234 5678
+            16
+            """)
+        XCTAssertEqual(reading?.pct ?? -1, 50, accuracy: 0.001)
+        XCTAssertEqual(reading?.load1 ?? -1, 1.93, accuracy: 0.001)
+        XCTAssertEqual(reading?.cores, 16)
+        XCTAssertEqual(reading?.source, "live proc-stat tick delta 1s")
+
+        // Two hundred ticks of nothing but iowait are a fully busy window:
+        // the server watch counts iowait as busy, so the live number must
+        // too, or the two CPU numbers on screen would disagree on a host
+        // waiting on its disk.
+        let ioWait = VPSStatusStore.parseLiveCpu("""
+            cpu 1000 0 1000 2000 0 0 0 0
+            cpu 1000 0 1000 2000 200 0 0 0
+            ---
+            0.50 0.40 0.30 1/100 999
+            16
+            """)
+        XCTAssertEqual(ioWait?.pct ?? -1, 100, accuracy: 0.001)
+    }
+
+    /// A short, non-numeric or reset window is no reading at all, never a
+    /// fictitious zero.
+    func testParseLiveCpuRejectsBadWindows() {
+        XCTAssertNil(VPSStatusStore.parseLiveCpu(""))
+        XCTAssertNil(VPSStatusStore.parseLiveCpu("cpu 1000 0 1000 2000 0 0 0 0"))
+        XCTAssertNil(VPSStatusStore.parseLiveCpu("""
+            cpu nope nope nope nope
+            cpu nope nope nope nope
+            ---
+            0.5 0.4 0.3 1/1 1
+            16
+            """))
+        // Counters only ever grow; a smaller second read is a reset, not a
+        // reading.
+        XCTAssertNil(VPSStatusStore.parseLiveCpu("""
+            cpu 2000 0 2000 4000 0 0 0 0
+            cpu 1000 0 1000 2000 0 0 0 0
+            ---
+            0.5 0.4 0.3 1/1 1
+            16
+            """))
+    }
+
+    /// A live read publishes the server's CPU between snapshots and feeds
+    /// the minute history, so the server's graph fills in like the Mac's.
+    @MainActor
+    func testLiveCpuProbePublishes() async throws {
+        let live = VPSCPU(pct: 42, load1: 1.5, cores: 16, source: "live proc-stat tick delta 1s")
+        let store = VPSStatusStore(initialHost: "coolify", fetcher: { _ in
+            throw NSError(domain: "test", code: 1, userInfo: nil)
+        }, liveCpuFetcher: { _ in live })
+
+        XCTAssertNil(store.liveCpu)
+        store.fetchLiveCpu()
+        for _ in 0..<100 where store.liveCpu == nil { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(store.liveCpu, live, "The stub live read did not publish")
+        XCTAssertNotNil(store.liveCpuAt)
+        XCTAssertFalse(store.isLiveCpuStale)
+        XCTAssertEqual(store.displayCpu, live)
+        XCTAssertEqual(store.cpuHistory.bars(at: Date()).compactMap { $0 }.last ?? -1, 42, accuracy: 0.001)
+        store.stopPolling()
+    }
+
+    /// When the live probe cannot read, the panel falls back to the full
+    /// snapshot's CPU: old, but never invented.
+    @MainActor
+    func testDisplayCpuFallsBackToTheSnapshot() async throws {
+        let snapshot = try JSONDecoder().decode(VPSStatusSnapshot.self, from: sampleJSON)
+        let store = VPSStatusStore(initialHost: "coolify", fetcher: { _ in
+            snapshot
+        }, liveCpuFetcher: { _ in
+            throw NSError(domain: "test", code: 1, userInfo: nil)
+        })
+
+        store.fetchLiveCpu()
+        // The failing probe publishes nothing; give it the time to fail.
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(store.liveCpu)
+        XCTAssertEqual(store.displayCpu, snapshot.cpu)
+        store.stopPolling()
+    }
 }

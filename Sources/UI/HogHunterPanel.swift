@@ -735,9 +735,14 @@ struct HogHunterPanel: View {
                 Text("Mac")
                     .font(.system(size: 9.5, weight: .medium))
                 Spacer(minLength: 2)
+                // Value digits read in the primary color, not the severity
+                // color: Jay (2026-11-20) asked for black numbers because the
+                // yellow severity text was too hard to read.  The severity
+                // color stays on the graph bars, where it carries the same
+                // state without costing legibility.
                 Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
                     .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Severity.forMachineCpu(store.pulse.cpuPercent).color)
+                    .foregroundStyle(.primary)
             }
 
             CpuHistoryBarsView(history: store.cpuMinuteHistory, height: 26)
@@ -762,7 +767,10 @@ struct HogHunterPanel: View {
     }
 
     private var serverCPUColumn: some View {
-        let cpu = store.maintain.vpsStore.snapshot?.cpu
+        // displayCpu is the live five-second reading while it is fresh, else
+        // the once-a-minute snapshot's: the server's number now ticks on the
+        // Mac's own beat (Jay, 2026-11-20).
+        let cpu = store.maintain.vpsStore.displayCpu
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Image(systemName: "server.rack")
@@ -771,14 +779,18 @@ struct HogHunterPanel: View {
                 Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
                     .font(.system(size: 9.5, weight: .medium))
                     .lineLimit(1)
-                if store.maintain.vpsStore.isStale {
+                // Stale marks the snapshot being old or the live CPU reading
+                // being old; the column reads live every five seconds now, so
+                // either being old means the number on screen is no longer
+                // the server's.
+                if store.maintain.vpsStore.isStale || store.maintain.vpsStore.isLiveCpuStale {
                     serverStaleChip
                 }
                 Spacer(minLength: 2)
                 if let cpu {
                     Text(String(format: "%.0f%%", cpu.pct))
                         .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(cpu.severity.color)
+                        .foregroundStyle(.primary)
                 } else {
                     Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
                 }
@@ -887,7 +899,7 @@ struct HogHunterPanel: View {
                         Spacer()
                         Text(String(format: "%.0f%% (%@ / %@)", mem.usedPercentage, HogFormat.memory(UInt64(max(0, mem.usedBytes))), HogFormat.memory(UInt64(max(0, mem.totalBytes)))))
                             .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(mem.severity.color)
+                            .foregroundStyle(.primary)
                     }
 
                     GeometryReader { geo in
@@ -1033,7 +1045,7 @@ struct HogHunterPanel: View {
                 if let fraction = usedFraction {
                     Text("\(HogFormat.memory(freeBytes)) free (\(Int(fraction * 100))%)")
                         .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Severity.forDisk(fraction).color)
+                        .foregroundStyle(.primary)
                 } else {
                     Text("\(HogFormat.memory(freeBytes)) free")
                         .font(.system(size: 9, weight: .semibold).monospacedDigit())
