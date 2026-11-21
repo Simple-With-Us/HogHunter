@@ -701,7 +701,7 @@ final class HogStore: ObservableObject {
             record(snapshot.processes, groupKeys: groupKeyByProcess, coreCount: snapshot.pulse.coreCount)
         }
         if ApplicationRunMode.current.allowsLiveProbes && (tickIndex % Self.diskRefreshEvery == 0 || diskSpace == nil) {
-            diskSpace = DiskSpace.current()
+            refreshDiskSpace()
         }
         if tickIndex % 60 == 0 {
             resolver.prune(live: Set(samples.keys))
@@ -709,6 +709,34 @@ final class HogStore: ObservableObject {
         if window != .now { refreshHistory() }
         publishCompanion()
         refreshMenuBar()
+    }
+
+    /// Whether a disk-space measurement is already running on the sampling
+    /// queue, so a slow one is never stacked behind itself.
+    private var diskSpaceRefreshInFlight = false
+
+    /// `DiskSpace.current()` reads `volumeAvailableCapacityForImportantUsage`,
+    /// which makes CacheDelete account for the volume's purgeable space on
+    /// the calling thread.  On a nearly full disk that accounting took
+    /// seconds, and because it ran inside `apply` it hung the main thread
+    /// (HOGHUNTER-5: the hang stack bottoms out in `-[CacheDeleteVolume
+    /// used]`).  Measure on the sampling queue and publish the result back
+    /// instead; the cadence and the nil-means-unmeasured contract are
+    /// unchanged.
+    private func refreshDiskSpace() {
+        guard !diskSpaceRefreshInFlight else { return }
+        diskSpaceRefreshInFlight = true
+        queue.async { [weak self] in
+            let space = DiskSpace.current()
+            DispatchQueue.main.async { [weak self] in
+                self?.applyDiskSpace(space)
+            }
+        }
+    }
+
+    private func applyDiskSpace(_ space: DiskSpace?) {
+        diskSpaceRefreshInFlight = false
+        diskSpace = space
     }
 
     private func record(_ processes: [ProcessSample], groupKeys: [ProcessKey: String], coreCount: Int) {
@@ -933,9 +961,7 @@ final class HogStore: ObservableObject {
             }
             return aCpu > bCpu
         case .memory:
-            let aMemStr = HogFormat.memory(a.footprintBytes)
-            let bMemStr = HogFormat.memory(b.footprintBytes)
-            if aMemStr == bMemStr {
+            if HogFormat.memoryBucket(a.footprintBytes) == HogFormat.memoryBucket(b.footprintBytes) {
                 if abs(a.cpuPercent - b.cpuPercent) >= 0.05 {
                     return a.cpuPercent > b.cpuPercent
                 }
@@ -961,9 +987,7 @@ final class HogStore: ObservableObject {
             }
             return aCpu > bCpu
         case .memory:
-            let aMemStr = HogFormat.memory(a.memoryBytes)
-            let bMemStr = HogFormat.memory(b.memoryBytes)
-            if aMemStr == bMemStr {
+            if HogFormat.memoryBucket(a.memoryBytes) == HogFormat.memoryBucket(b.memoryBytes) {
                 if abs(a.cpuPercent - b.cpuPercent) >= 0.05 {
                     return a.cpuPercent > b.cpuPercent
                 }
