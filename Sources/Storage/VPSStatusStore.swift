@@ -133,12 +133,20 @@ final class VPSStatusStore: ObservableObject {
         return Date().timeIntervalSince(liveCpuAt) > Self.liveCpuStaleAfter
     }
 
+    /// The CPU reading the panel shows and whether it is the live probe,
+    /// decided in one pass: a view's number and its stale marker both come
+    /// from this, so they can never disagree about which reading is on
+    /// screen at the staleness deadline.
+    var displayCpuWithSource: (cpu: VPSCPU?, isLive: Bool) {
+        if let liveCpu, !isLiveCpuStale { return (liveCpu, true) }
+        return (snapshot?.cpu, false)
+    }
+
     /// The CPU reading the panel shows: the live probe while it is fresh,
     /// else the full snapshot's CPU, which is up to a minute old but never
     /// invented.
     var displayCpu: VPSCPU? {
-        if let liveCpu, !isLiveCpuStale { return liveCpu }
-        return snapshot?.cpu
+        displayCpuWithSource.cpu
     }
 
     func startPolling() {

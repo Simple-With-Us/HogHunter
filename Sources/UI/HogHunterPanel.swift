@@ -767,14 +767,12 @@ struct HogHunterPanel: View {
     }
 
     private var serverCPUColumn: some View {
-        // displayCpu is the live five-second reading while it is fresh, else
-        // the once-a-minute snapshot's: the server's number now ticks on the
-        // Mac's own beat (Jay, 2026-11-20).
-        let cpu = store.maintain.vpsStore.displayCpu
-        // The marker judges the source the number comes from: a fresh live
-        // reading over an old snapshot is not stale, and a fresh snapshot
-        // under an aged-out live reading is not either.
-        let showingLiveCpu = store.maintain.vpsStore.liveCpu != nil && !store.maintain.vpsStore.isLiveCpuStale
+        // The number and its stale marker come from one evaluation, so they
+        // cannot disagree about which reading is on screen at the staleness
+        // deadline: a fresh live reading over an old snapshot is not stale,
+        // and a fresh snapshot under an aged-out live reading is not either.
+        let shownCpu = store.maintain.vpsStore.displayCpuWithSource
+        let cpu = shownCpu.cpu
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Image(systemName: "server.rack")
@@ -783,7 +781,7 @@ struct HogHunterPanel: View {
                 Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
                     .font(.system(size: 9.5, weight: .medium))
                     .lineLimit(1)
-                if !showingLiveCpu && store.maintain.vpsStore.isStale {
+                if !shownCpu.isLive && store.maintain.vpsStore.isStale {
                     serverStaleChip
                 }
                 Spacer(minLength: 2)

@@ -107,7 +107,7 @@ struct VPSStatusStripView: View {
     /// to be said here or a screen reader never hears it.
     private var accessibilityLabel: String {
         Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale,
-                        cpuTextOverride: store.displayCpu.map { String(format: "%.0f%%", $0.pct) })
+                        cpuTextOverride: store.displayCpuWithSource.cpu.map { String(format: "%.0f%%", $0.pct) })
     }
 
     /// The strip's spoken label, so it can be pinned by a test: the host,
@@ -134,7 +134,7 @@ struct VPSStatusStripView: View {
     private func headline(_ snapshot: VPSStatusSnapshot) -> some View {
         if let headline = snapshot.headline {
             HStack(spacing: 10) {
-                metric("CPU", store.displayCpu.map { String(format: "%.0f%%", $0.pct) } ?? headline.cpuText)
+                metric("CPU", store.displayCpuWithSource.cpu.map { String(format: "%.0f%%", $0.pct) } ?? headline.cpuText)
                 metric("RAM", headline.memoryText)
                 metric("Disk", headline.diskText)
                 if let extra = headline.extraDiskText {

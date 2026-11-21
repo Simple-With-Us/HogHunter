@@ -391,6 +391,8 @@ final class VPSStatusTests: XCTestCase {
         XCTAssertNotNil(store.liveCpuAt)
         XCTAssertFalse(store.isLiveCpuStale)
         XCTAssertEqual(store.displayCpu, live)
+        XCTAssertEqual(store.displayCpuWithSource.cpu, live)
+        XCTAssertTrue(store.displayCpuWithSource.isLive)
         XCTAssertEqual(store.cpuHistory.bars(at: Date()).compactMap { $0 }.last ?? -1, 42, accuracy: 0.001)
         store.stopPolling()
     }
@@ -415,6 +417,8 @@ final class VPSStatusTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertNil(store.liveCpu)
         XCTAssertEqual(store.displayCpu, snapshot.cpu)
+        XCTAssertEqual(store.displayCpuWithSource.cpu, snapshot.cpu)
+        XCTAssertFalse(store.displayCpuWithSource.isLive)
         store.stopPolling()
     }
 }
