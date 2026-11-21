@@ -58,6 +58,8 @@ APP = "hoghunter"
 CRON_SCHEDULES: dict[str, str] = {
     # .github/workflows/ios-testflight.yml: hourly scheduled ship gate.
     "Hog Hunter iOS TestFlight": "41 * * * *",
+    # .github/workflows/auto-merge-prs.yml: fleet auto-merge sweep (15 min).
+    "Auto-merge PRs": "*/15 * * * *",
 }
 
 DEFAULT_CHECKIN_MARGIN_MINUTES = 15

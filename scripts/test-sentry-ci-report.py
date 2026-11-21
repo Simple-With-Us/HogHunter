@@ -42,9 +42,14 @@ class FingerprintTests(unittest.TestCase):
             frozenset({"failure", "timed_out", "startup_failure"}),
         )
 
-    def test_cron_schedules_map_the_testflight_lane(self):
+    def test_cron_schedules_map_the_scheduled_lanes(self):
         self.assertEqual(
-            reporter.CRON_SCHEDULES, {"Hog Hunter iOS TestFlight": "41 * * * *"})
+            reporter.CRON_SCHEDULES,
+            {
+                "Hog Hunter iOS TestFlight": "41 * * * *",
+                "Auto-merge PRs": "*/15 * * * *",
+            },
+        )
         self.assertEqual(reporter.find_cron_schedule_drift(reporter.discover_workflow_names()), [])
 
     def test_every_scheduled_workflow_is_mapped_with_its_cron(self):
@@ -157,6 +162,32 @@ class EnvelopeTests(unittest.TestCase):
         self.assertFalse(
             any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
 
+    def test_scheduled_auto_merge_run_sends_checkin_not_drift(self):
+        rc, posts = self.captured_send(
+            {
+                "SENTRY_FLEET_DSN": "https://abc123@o1.ingest.example.test/42",
+                "WORKFLOW_NAME": "Auto-merge PRs",
+                "WORKFLOW_BRANCH": "main",
+            },
+            conclusion="success",
+            event="schedule",
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(posts), 1)
+        items = [json.loads(line) for line in posts[0]["body"].split(b"\n") if line.strip()]
+        checkins = [item for item in items if "monitor_slug" in item]
+        self.assertEqual(len(checkins), 1)
+        checkin = checkins[0]
+        self.assertEqual(checkin["status"], "ok")
+        self.assertEqual(
+            checkin["monitor_config"]["schedule"], {"type": "crontab", "value": "*/15 * * * *"})
+        # Default margin: no per-lane override without an actual policy reason.
+        self.assertEqual(
+            checkin["monitor_config"]["checkin_margin"],
+            reporter.DEFAULT_CHECKIN_MARGIN_MINUTES)
+        self.assertFalse(
+            any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
+
     def test_malformed_dsn_never_fails_the_job(self):
         rc, posts = self.captured_send({"SENTRY_FLEET_DSN": "not-a-dsn"})
         self.assertEqual(rc, 0)
@@ -186,6 +217,7 @@ class WorkflowNameTests(unittest.TestCase):
         self.assertIn("CI", names)
         self.assertIn("Sentry CI Report", names)
         self.assertIn("Hog Hunter iOS TestFlight", names)
+        self.assertIn("Auto-merge PRs", names)
 
 
 if __name__ == "__main__":
