@@ -583,6 +583,7 @@ export async function countPublicTesters({ api, appId }) {
 export async function publicBuildReadiness({ api, appId, buildId, externalBuildState }) {
   const members = await countPublicTesters({ api, appId });
   if (!members.ok) return { rc: 6, reason: "public group membership unreadable" };
+  if (members.groups === 0 || !members.groupId) return { rc: 8, reason: "public group missing", testers: 0 };
   if (members.testers === 0) return { rc: 5, reason: "public group has no testers", testers: 0 };
   if (typeof externalBuildState !== "string" || !externalBuildState) {
     return { rc: 6, reason: "external approval state unknown", testers: members.testers };

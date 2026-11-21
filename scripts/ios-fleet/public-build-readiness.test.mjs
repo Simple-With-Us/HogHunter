@@ -7,14 +7,14 @@ import { spawnSync } from 'node:child_process';
 import { publicBuildReadiness } from './asc-api.mjs';
 import { tfReadyOutcomeLine, tfReadySummaryLabel, tfReadyGithubAnnotation } from '../ios-report-post-sync-tf-ready.mjs';
 
-function fixture({ state = 'IN_BETA_TESTING', assigned = true, members = true, assignmentError = false, expired = false, processingState = 'VALID', paginated = false } = {}) {
+function fixture({ state = 'IN_BETA_TESTING', assigned = true, members = true, assignmentError = false, missingGroup = false, expired = false, processingState = 'VALID', paginated = false } = {}) {
   const calls = [];
   const group = { id: 'public', attributes: { name: 'Public Beta', isInternalGroup: false, publicLinkEnabled: true } };
   const build = { id: 'wanted', attributes: { version: '202611210620', expired, processingState } };
   const api = async (method, url) => {
     calls.push({ method, url });
     assert.equal(method, 'GET', 'readiness must never mutate Apple settings');
-    if (url.includes('/apps/app/betaGroups')) return { ok: true, parsed: { data: [group] } };
+    if (url.includes('/apps/app/betaGroups')) return { ok: true, parsed: { data: missingGroup ? [] : [group] } };
     if (url.includes('/betaTesters')) return { ok: true, parsed: { data: members ? [{ id: 'tester', attributes: { email: 'synthetic@example.invalid' } }] : [] } };
     if (url.includes('/builds')) {
       if (assignmentError) return { ok: false, status: 403 };
@@ -114,7 +114,21 @@ cat ${JSON.stringify(join(dir, 'last-ship'))}
     if (interpreterFails) assert.match(r.stdout, /evidence formatting unavailable/);
     else assert.match(r.stdout, /this build is not assigned to public group/);
     assert.doesNotMatch(r.stdout, /Apple approval pending|Review pending/);
+    assert.match(r.stdout, /::warning::TestFlight external distribution needs attention/);
     assert.match(r.stdout, /ship-gate: recorded success/);
     assert.match(r.stdout, /abcdef0123456789/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('missing public group is attention, not empty tester count', async () => {
+  const r = await fixture({ missingGroup: true }).run();
+  assert.equal(r.rc, 8); assert.equal(r.reason, 'public group missing');
+  assert.equal((await fixture({ members: false }).run()).rc, 5);
+});
+test('unknown readiness shell diagnostics do not misattribute every cause to group reads', () => {
+  const source = readFileSync(new URL('./ship-testflight.sh', import.meta.url), 'utf8');
+  const start = source.indexOf('  if [[ $rc -eq 6 ]]; then', source.indexOf('ensure_tf_ready() {'));
+  const block = source.slice(start, source.indexOf('  log "warning: ensure-tf-ready failed', start));
+  assert.match(block, /external approval, public groups or exact build assignment/);
+  assert.doesNotMatch(block, /could not read the beta groups/);
 });

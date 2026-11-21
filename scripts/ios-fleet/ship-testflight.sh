@@ -1605,6 +1605,9 @@ ensure_tf_ready() {
   fi
   if [[ $rc -eq 8 ]]; then
     log "external distribution needs attention; upload success is recorded independently"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning::TestFlight external distribution needs attention for ${BUNDLE_ID} build ${BUILD_NUM}; upload succeeded; inspect readiness evidence above"
+    fi
     return 0
   fi
   if [[ $rc -eq 7 ]]; then
@@ -1644,9 +1647,9 @@ ensure_tf_ready() {
   if [[ $rc -eq 6 ]]; then
     # The groups could not be read, so installability is unverified.  Saying so
     # is honest; claiming export compliance is not.
-    log "warning: could not read the beta groups for ${BUNDLE_ID}; installability is unverified"
+    log "warning: could not verify external approval, public groups or exact build assignment for ${BUNDLE_ID}; installability is unverified"
     if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-      echo "::warning::ensure-tf-ready could not read the beta groups for ${BUNDLE_ID}; installability is unverified"
+      echo "::warning::ensure-tf-ready could not verify external approval, public groups or exact build assignment for ${BUNDLE_ID}; installability is unverified"
     fi
     return 0
   fi
