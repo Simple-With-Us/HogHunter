@@ -1120,6 +1120,16 @@ struct HogHunterPanel: View {
                                 .font(.system(size: 9.5, weight: .medium))
                                 .lineLimit(1)
                             Spacer()
+                            if row.cpuPercent.isFinite && row.cpuPercent >= 100 {
+                                // The number stays black; this small mark is the only
+                                // color, and only on a row using a full core or more (the per-core
+                                // value, the same rule Severity.forProcessCpu calls elevated).
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.yellow)
+                                    .help("Using a full CPU core or more")
+                                    .accessibilityLabel("High CPU")
+                            }
                             Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
                                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                                 .foregroundStyle(.primary)
@@ -1170,6 +1180,16 @@ struct HogHunterPanel: View {
                                     .lineLimit(1)
                             }
                             Spacer()
+                            if process.cpuPercent.isFinite && process.cpuPercent >= 100 {
+                                // The number stays black; this small mark is the only
+                                // color, and only on a row using a full core or more (the per-core
+                                // value, the same rule Severity.forProcessCpu calls elevated).
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.yellow)
+                                    .help("Using a full CPU core or more")
+                                    .accessibilityLabel("High CPU")
+                            }
                             Text(String(format: "%.0f%%", process.cpuPercent))
                                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                                 .foregroundStyle(.primary)
