@@ -380,7 +380,7 @@ private struct MachineCard: View {
             Spacer(minLength: 4)
             Text(value ?? ServerFormat.dash)
                 .monospacedDigit()
-                .foregroundStyle(value == nil || severity == nil || severity == "calm" ? Color.primary : ServerFormat.color(severity))
+                .foregroundStyle(.primary)
         }
         .font(.caption)
     }
