@@ -270,9 +270,12 @@ struct VPSResourceCardView: View {
                 Text("CPU")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
+                // Value digits read in the primary color (Jay, 2026-11-20:
+                // black numbers; the yellow was too hard to read).  The
+                // severity color stays on the progress bar.
                 Text(String(format: "%.1f%%", cpu.pct))
                     .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(cpu.severity.color)
+                    .foregroundStyle(.primary)
             }
             ProgressView(value: min(max(cpu.pct / 100, 0), 1))
                 .tint(cpu.severity.color)
@@ -293,7 +296,7 @@ struct VPSResourceCardView: View {
                 Spacer()
                 Text(String(format: "%.0f%%", mem.usedPercentage))
                     .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(mem.severity.color)
+                    .foregroundStyle(.primary)
             }
             ProgressView(value: min(max(mem.usedPercentage / 100, 0), 1))
                 .tint(mem.severity.color)
@@ -315,7 +318,7 @@ struct VPSResourceCardView: View {
                 if let frac = device.usedFraction {
                     Text(String(format: "%.0f%% used", frac * 100))
                         .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(Severity.forDisk(frac).color)
+                        .foregroundStyle(.primary)
                 }
             }
             if let frac = device.usedFraction {
@@ -340,7 +343,7 @@ struct VPSResourceCardView: View {
                 Spacer()
                 Text(String(format: "%.0f%%", swap.usedPercentage))
                     .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(swap.severity.color)
+                    .foregroundStyle(.primary)
             }
             ProgressView(value: min(max(swap.usedPercentage / 100, 0), 1))
                 .tint(swap.severity.color)

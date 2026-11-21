@@ -735,9 +735,14 @@ struct HogHunterPanel: View {
                 Text("Mac")
                     .font(.system(size: 9.5, weight: .medium))
                 Spacer(minLength: 2)
+                // Value digits read in the primary color, not the severity
+                // color: Jay (2026-11-20) asked for black numbers because the
+                // yellow severity text was too hard to read.  The severity
+                // color stays on the graph bars, where it carries the same
+                // state without costing legibility.
                 Text(store.hasBaseline ? String(format: "%.0f%%", store.pulse.cpuPercent) : "—")
                     .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Severity.forMachineCpu(store.pulse.cpuPercent).color)
+                    .foregroundStyle(.primary)
             }
 
             CpuHistoryBarsView(history: store.cpuMinuteHistory, height: 26)
@@ -762,7 +767,12 @@ struct HogHunterPanel: View {
     }
 
     private var serverCPUColumn: some View {
-        let cpu = store.maintain.vpsStore.snapshot?.cpu
+        // The number and its stale marker come from one evaluation, so they
+        // cannot disagree about which reading is on screen at the staleness
+        // deadline: a fresh live reading over an old snapshot is not stale,
+        // and a fresh snapshot under an aged-out live reading is not either.
+        let shownCpu = store.maintain.vpsStore.displayCpuWithSource
+        let cpu = shownCpu.cpu
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Image(systemName: "server.rack")
@@ -771,14 +781,14 @@ struct HogHunterPanel: View {
                 Text(store.maintain.vpsStore.snapshot?.host ?? store.maintain.vpsStore.configuredHost)
                     .font(.system(size: 9.5, weight: .medium))
                     .lineLimit(1)
-                if store.maintain.vpsStore.isStale {
+                if !shownCpu.isLive && store.maintain.vpsStore.isStale {
                     serverStaleChip
                 }
                 Spacer(minLength: 2)
                 if let cpu {
                     Text(String(format: "%.0f%%", cpu.pct))
                         .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(cpu.severity.color)
+                        .foregroundStyle(.primary)
                 } else {
                     Text("—").font(.system(size: 9.5)).foregroundStyle(.secondary)
                 }
@@ -887,7 +897,7 @@ struct HogHunterPanel: View {
                         Spacer()
                         Text(String(format: "%.0f%% (%@ / %@)", mem.usedPercentage, HogFormat.memory(UInt64(max(0, mem.usedBytes))), HogFormat.memory(UInt64(max(0, mem.totalBytes)))))
                             .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(mem.severity.color)
+                            .foregroundStyle(.primary)
                     }
 
                     GeometryReader { geo in
@@ -1033,7 +1043,7 @@ struct HogHunterPanel: View {
                 if let fraction = usedFraction {
                     Text("\(HogFormat.memory(freeBytes)) free (\(Int(fraction * 100))%)")
                         .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Severity.forDisk(fraction).color)
+                        .foregroundStyle(.primary)
                 } else {
                     Text("\(HogFormat.memory(freeBytes)) free")
                         .font(.system(size: 9, weight: .semibold).monospacedDigit())
