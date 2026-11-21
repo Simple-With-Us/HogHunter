@@ -9,10 +9,13 @@ import SwiftUI
 /// there.  The strip puts the answer on the Activity tab, where it is always
 /// on screen, and the Server tab holds the full card.
 ///
-/// The strip is one line: the host, then CPU, memory and disk, each coloured
-/// by its own severity so a reader sees *which* number is the problem.  It
-/// appears only when a host is configured: with no server there is nothing to
-/// say, and the Server tab explains how to set one up.
+/// The strip is one line: the host, then CPU, memory and disk.  The CPU
+/// number is the live five-second reading while it is fresh, else the
+/// snapshot's, so the strip ticks on the same beat as the panel (Jay,
+/// 2026-11-20).  Value digits read in the primary color: Jay the same day
+/// asked for black numbers because the yellow severity text was too hard to
+/// read.  It appears only when a host is configured: with no server there is
+/// nothing to say, and the Server tab explains how to set one up.
 struct VPSStatusStripView: View {
     @ObservedObject var store: VPSStatusStore
     /// Opens the Server tab.
@@ -103,18 +106,21 @@ struct VPSStatusStripView: View {
     /// the child views' own text, so anything the marker shows visually has
     /// to be said here or a screen reader never hears it.
     private var accessibilityLabel: String {
-        Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale)
+        Self.stripLabel(snapshot: store.snapshot, isStale: store.isStale,
+                        cpuTextOverride: store.displayCpuWithSource.cpu.map { String(format: "%.0f%%", $0.pct) })
     }
 
     /// The strip's spoken label, so it can be pinned by a test: the host,
     /// then each reading, then how old the reading is and whether it is
-    /// stale.
-    static func stripLabel(snapshot: VPSStatusSnapshot?, isStale: Bool = false) -> String {
+    /// stale.  `cpuTextOverride` says the CPU the strip actually shows — the
+    /// live reading while it is fresh — so a screen reader speaks the same
+    /// number a sighted reader sees.
+    static func stripLabel(snapshot: VPSStatusSnapshot?, isStale: Bool = false, cpuTextOverride: String? = nil) -> String {
         guard let snapshot, let headline = snapshot.headline else {
             return "Remote server status"
         }
         var parts = ["Server \(headline.host)"]
-        if let cpu = headline.cpuText { parts.append("CPU \(cpu)") }
+        if let cpu = cpuTextOverride ?? headline.cpuText { parts.append("CPU \(cpu)") }
         if let memory = headline.memoryText { parts.append("RAM \(memory)") }
         if let disk = headline.diskText { parts.append("disk \(disk)") }
         if let extra = headline.extraDiskText { parts.append("fleet-extra \(extra)") }
@@ -123,29 +129,29 @@ struct VPSStatusStripView: View {
         return parts.joined(separator: ", ")
     }
 
-    /// CPU, memory and disk, each with its own severity colour.
+    /// CPU, memory and disk, in plain black digits (Jay, 2026-11-20).
     @ViewBuilder
     private func headline(_ snapshot: VPSStatusSnapshot) -> some View {
         if let headline = snapshot.headline {
             HStack(spacing: 10) {
-                metric("CPU", headline.cpuText, headline.cpuSeverity)
-                metric("RAM", headline.memoryText, headline.memorySeverity)
-                metric("Disk", headline.diskText, headline.diskSeverity)
+                metric("CPU", store.displayCpuWithSource.cpu.map { String(format: "%.0f%%", $0.pct) } ?? headline.cpuText)
+                metric("RAM", headline.memoryText)
+                metric("Disk", headline.diskText)
                 if let extra = headline.extraDiskText {
-                    metric("Extra", extra, headline.extraDiskSeverity)
+                    metric("Extra", extra)
                 }
             }
         }
     }
 
-    private func metric(_ label: String, _ value: String?, _ severity: Severity?) -> some View {
+    private func metric(_ label: String, _ value: String?) -> some View {
         HStack(spacing: 3) {
             Text(label)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
             Text(value ?? "—")
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(severity?.color ?? .secondary)
+                .foregroundStyle(.primary)
         }
     }
 }

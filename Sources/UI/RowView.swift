@@ -55,7 +55,7 @@ struct HogRowView: View {
                 } else {
                     Text(HogFormat.cpu(row.cpuPercent, scale: scale, coreCount: coreCount))
                         .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                        .foregroundStyle(cpuColor)
+                        .foregroundStyle(.primary)
                     Text(HogFormat.memory(row.memoryBytes))
                         .font(.system(size: 10.5, design: .rounded).monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -72,16 +72,6 @@ struct HogRowView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .contextMenu { menu }
-    }
-
-    /// A hot row earns its color; a quiet one stays in the ordinary text color
-    /// so the list does not glow blue from top to bottom.  The colour tracks
-    /// the value the user is actually looking at, so a process showing 12.5%
-    /// on the `machineShare` scale (one core on an 8-core machine) is calm,
-    /// even though the same value on the per-core scale would be elevated.
-    private var cpuColor: Color {
-        let severity = Severity.forProcessCpu(row.cpuPercent, scale: scale, coreCount: coreCount)
-        return severity == .calm ? Color.primary : severity.color
     }
 
     @ViewBuilder
