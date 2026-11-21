@@ -570,11 +570,37 @@ export async function countPublicTesters({ api, appId }) {
   return {
     ok: true,
     groups: 1,
+    groupId: group.id,
     groupName: group.attributes?.name || "",
     testers: countInstallableTesters(
       members.rows.map((t) => ({ email: t.attributes?.email, id: t.id }))
     )
   };
+}
+
+// Read-only proof for this exact build. Processing and group membership alone
+// do not prove that Apple approved external testing or assigned this build.
+export async function publicBuildReadiness({ api, appId, buildId, externalBuildState }) {
+  const members = await countPublicTesters({ api, appId });
+  if (!members.ok) return { rc: 6, reason: "public group membership unreadable" };
+  if (members.groups === 0 || !members.groupId) return { rc: 8, reason: "public group missing", testers: 0 };
+  if (members.testers === 0) return { rc: 5, reason: "public group has no testers", testers: 0 };
+  if (typeof externalBuildState !== "string" || !externalBuildState) {
+    return { rc: 6, reason: "external approval state unknown", testers: members.testers };
+  }
+  if (externalBuildState !== "IN_BETA_TESTING") {
+    const pending = ["WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW"].includes(externalBuildState);
+    const known = ["READY_FOR_BETA_SUBMISSION", "BETA_REJECTED", "EXPIRED", "PROCESSING_EXCEPTION", "MISSING_EXPORT_COMPLIANCE", "READY_FOR_BETA_TESTING", "PROCESSING"].includes(externalBuildState);
+    return { rc: pending ? 7 : known ? 8 : 6, reason: pending ? "external Beta App Review pending" : known ? "external state needs attention or distribution verification" : "external state unverified", externalBuildState, testers: members.testers };
+  }
+  const assigned = await ascAllRows({ api, url: `/v1/betaGroups/${members.groupId}/builds?limit=200&fields[builds]=version,expired,processingState` });
+  if (!assigned.ok) return { rc: 6, reason: "build assignment unreadable", testers: members.testers };
+  const build = assigned.rows.find((row) => row.id === buildId);
+  if (!build) return { rc: 8, reason: "this build is not assigned to public group", externalBuildState, testers: members.testers };
+  if (build.attributes?.expired !== false || build.attributes?.processingState !== "VALID") {
+    return { rc: 6, reason: "assigned build is expired or processing validity unproven", testers: members.testers };
+  }
+  return { rc: 0, reason: "external approval and exact build assignment verified", testers: members.testers, groupId: members.groupId, externalBuildState };
 }
 
 async function setWhatToTest({ api, buildId, appId, marketing }) {
@@ -1410,32 +1436,25 @@ async function main() {
       const state = detail.internalBuildState || "";
       console.error(`ensure-tf-ready: poll ${pollNo} enc=${attrs.usesNonExemptEncryption} internal=${state}`);
       if (state === "IN_BETA_TESTING" || state === "READY_FOR_BETA_TESTING") {
-        // READY_FOR_BETA_TESTING only says Apple finished processing.  It does
-        // not say anyone can install the build: a new app record has no beta
-        // group at all, and that is how 14 green ships reached nobody
-        // (GH #1018).  The public group is the only group, so the people who
-        // can install the build are the people in it.  Counting any other
-        // group reports zero for an app that is set up correctly, and the
-        // caller then blamed export compliance for it (2026-11-03).
-        const installable = await countPublicTesters({ api, appId });
-        if (installable.ok) {
-          console.error(`ensure-tf-ready: public group testers=${installable.testers} (groups=${installable.groups})`);
-        } else {
-          console.error(`ensure-tf-ready: could not count public group testers (${installable.error})`);
-        }
-        const nobody = installable.ok && installable.testers === 0;
+        // Processing is only the first gate. External approval, exact build
+        // assignment and readable public-group membership are checked below.
+        const readiness = await publicBuildReadiness({ api, appId, buildId, externalBuildState: detail.externalBuildState });
+        console.error(`ensure-tf-ready: external=${detail.externalBuildState || "unknown"} ${readiness.reason}`);
         console.log(JSON.stringify({
-          ok: true,
+          ok: readiness.rc === 0,
           buildId,
           version,
           internalBuildState: state,
+          externalBuildState: detail.externalBuildState || null,
           usesNonExemptEncryption: attrs.usesNonExemptEncryption,
           testerPolicy,
-          publicTesterCount: installable.ok ? installable.testers : null,
-          installableTesterCount: installable.ok ? installable.testers : null
+          publicTesterCount: readiness.testers ?? null,
+          installableTesterCount: readiness.rc === 0 ? readiness.testers : null,
+          readiness
         }));
-        // 5 = read and zero; 6 = could not be read, so installability is unverified.
-        process.exit(nobody ? 5 : installable.ok ? 0 : 6);
+        // 7 is review pending; 8 requires attention or distribution checks.
+        // Every nonzero result is advisory after upload, never a re-upload.
+        process.exit(readiness.rc);
       }
       await sleep(POLL_MS);
     }

@@ -70,6 +70,10 @@ export function tfReadySummaryLabel(rc) {
       return "processed but no beta-group tester can install yet";
     case 6:
       return "processed but beta group installability is unverified";
+    case 8:
+      return "upload succeeded; external distribution needs attention";
+    case 7:
+      return "processed; external Beta App Review pending";
     case 3:
       return "upload ok; ASC not IN_BETA_TESTING yet";
     case 4:
@@ -86,6 +90,10 @@ export function tfReadyOutcomeLine(rc, { bundleId, buildNum }) {
   switch (rc) {
     case 0:
       return `After tester sync: TestFlight public group testers can install build ${buildNum} for ${bundleId} (ensure-tf-ready rc=0).`;
+    case 8:
+      return `After tester sync: upload succeeded for ${bundleId} build ${buildNum}; external distribution needs attention; inspect the exact readiness reason (rc=8).`;
+    case 7:
+      return `After tester sync: build ${buildNum} is processed for ${bundleId}; external Beta App Review is pending (ensure-tf-ready rc=7).`;
     case 3:
       return `After tester sync: upload recorded but ASC has not reached IN_BETA_TESTING yet for build ${buildNum} (ensure-tf-ready rc=3).`;
     case 4:
@@ -106,8 +114,12 @@ export function tfReadyGithubAnnotation(rc, { bundleId, buildNum }) {
       return `::warning::ensure-tf-ready could not find uploaded build ${buildNum} for ${bundleId}; export compliance not declared`;
     case 5:
       return `::warning::ensure-tf-ready: build ${buildNum} is ready, but the beta group has no tester who can install it`;
+    case 8:
+      return `::warning::external distribution needs attention for ${bundleId} build ${buildNum}; upload succeeded; inspect the exact readiness reason`;
+    case 7:
+      return `::warning::build ${buildNum} for ${bundleId} is processed; external Beta App Review is pending`;
     case 6:
-      return `::warning::ensure-tf-ready could not read the beta groups for ${bundleId}; installability is unverified`;
+      return `::warning::ensure-tf-ready could not verify external approval, public groups or exact build assignment for ${bundleId}; installability is unverified`;
     case 2:
     default:
       if (rc === 3 || rc === 0) return null;
@@ -150,6 +162,9 @@ function main() {
     process.stderr.write(result.stderr);
   }
   const rc = result.status ?? 1;
+  let evidence;
+  try { evidence = JSON.parse(result.stdout || "{}"); } catch { evidence = {}; }
+  console.log(`Readiness evidence: external=${evidence.externalBuildState || "unknown"}; reason=${evidence.readiness?.reason || "no structured readiness reason"}`);
   const ctx = { bundleId, buildNum };
   const line = tfReadyOutcomeLine(rc, ctx);
   const summary = tfReadySummaryLabel(rc);
