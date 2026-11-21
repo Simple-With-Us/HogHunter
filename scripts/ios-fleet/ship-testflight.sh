@@ -1598,6 +1598,22 @@ ensure_tf_ready() {
     log "TestFlight public group testers can install this build"
     return 0
   fi
+  if [[ $rc -eq 7 || $rc -eq 8 || $rc -eq 6 ]]; then
+    local evidence
+    evidence="$("$ASC_NODE" -e 'const fs=require("fs");try{const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify({external:d.externalBuildState||"unknown",reason:d.readiness?.reason||"unavailable"}));}catch{console.log("readiness evidence unavailable");}' "${LOG_DIR}/ensure-tf-ready.json" 2>/dev/null)" || evidence="readiness evidence formatting unavailable"
+    log "upload succeeded; external readiness rc=${rc}; ${evidence}"
+  fi
+  if [[ $rc -eq 8 ]]; then
+    log "external distribution needs attention; upload success is recorded independently"
+    return 0
+  fi
+  if [[ $rc -eq 7 ]]; then
+    log "upload succeeded; external Beta App Review pending"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning::TestFlight external Beta App Review pending for ${BUNDLE_ID} build ${BUILD_NUM}; upload succeeded"
+    fi
+    return 0
+  fi
   if [[ $rc -eq 3 ]]; then
     log "warning: upload succeeded but ASC has not reached IN_BETA_TESTING yet; watch TestFlight"
     return 0
