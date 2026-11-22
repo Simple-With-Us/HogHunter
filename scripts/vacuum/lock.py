@@ -678,18 +678,26 @@ class HousekeeperLock:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._owned:
-            guard = _acquire_guard(self.lock_path)
             try:
-                # The lock directory goes first and the owner file second, so
-                # a failed removal cannot strand a lock that nobody owns.
-                if _remove_lock_directory(self.lock_path, self._identity):
-                    _clear_owner(self.owner_path, only_pid=os.getpid())
+                guard = _acquire_guard(self.lock_path)
+                try:
+                    # The lock directory goes first and the owner file second, so
+                    # a failed removal cannot strand a lock that nobody owns.
+                    if _remove_lock_directory(self.lock_path, self._identity):
+                        _clear_owner(self.owner_path, only_pid=os.getpid())
+                finally:
+                    _release_guard(guard)
+            except TimeoutError:
+                # The guard stayed busy past its bounded wait.  The lock
+                # directory and owner file stay on disk for the stale
+                # takeover to judge; only this process's bookkeeping is
+                # reset below, so the failure cannot wedge local state.
+                pass
             finally:
-                _release_guard(guard)
-            self._owned = False
-            _HELD.pop(self.lock_path, None)
-            if os.environ.get("HOUSEKEEPER_LOCK_OWNER") == "1":
-                del os.environ["HOUSEKEEPER_LOCK_OWNER"]
+                self._owned = False
+                _HELD.pop(self.lock_path, None)
+                if os.environ.get("HOUSEKEEPER_LOCK_OWNER") == "1":
+                    del os.environ["HOUSEKEEPER_LOCK_OWNER"]
 
     def _takeover_possible(self) -> bool:
         """True when the lock on disk is free to be taken over.

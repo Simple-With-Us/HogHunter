@@ -15,6 +15,20 @@ struct DiskCleanerView: View {
     /// accounting on every redraw and hung the panel on a full disk
     /// (HOGHUNTER-5); the store tick already proved that shape.
     @State private var volumeSpace: DiskSpace?
+    @State private var volumeRefreshInFlight = false
+
+    /// One refresh at a time: scan progress flips `store.state` often,
+    /// and stacked purgeable-capacity reads would stall the very panel
+    /// they describe.
+    private func refreshVolumeSpace() {
+        guard !volumeRefreshInFlight else { return }
+        volumeRefreshInFlight = true
+        Task {
+            let space = await Task.detached(priority: .utility) { DiskSpace.current() }.value
+            volumeSpace = space
+            volumeRefreshInFlight = false
+        }
+    }
     /// The unattended clean regimen, as the owner set it.
     @State private var regimen = CleanRegimen.load()
     /// The one runner the app uses.  Observed so the summary and the next
@@ -63,12 +77,8 @@ struct DiskCleanerView: View {
         .onDisappear {
             store.cancelScan()
         }
-        .task {
-            volumeSpace = await Task.detached(priority: .utility) { DiskSpace.current() }.value
-        }
-        .onChange(of: store.state) { _ in
-            Task { volumeSpace = await Task.detached(priority: .utility) { DiskSpace.current() }.value }
-        }
+        .task { refreshVolumeSpace() }
+        .onChange(of: store.state) { _ in refreshVolumeSpace() }
         .sheet(isPresented: $showExclusionsSheet) {
             CleanerExclusionsSheet(store: store)
         }

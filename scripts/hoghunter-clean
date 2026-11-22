@@ -1029,8 +1029,10 @@ def newest_file_age_min(path: str, max_entries: int = 4000, max_seconds: float =
     seen = 0
     stack = [p]
     deadline = time.monotonic() + max_seconds
+    timed_out = False
     while stack and seen < max_entries:
         if seen % 256 == 0 and time.monotonic() >= deadline:
+            timed_out = True
             break
         cur = stack.pop()
         try:
@@ -1047,6 +1049,10 @@ def newest_file_age_min(path: str, max_entries: int = 4000, max_seconds: float =
         else:
             newest = max(newest, st.st_mtime)
             seen += 1
+    if timed_out and newest == 0.0:
+        # An incomplete walk proves nothing about idleness: fail closed
+        # as busy, never as safely idle.
+        return 0.0
     if newest == 0.0:
         return 1e9
     return (time.time() - newest) / 60.0

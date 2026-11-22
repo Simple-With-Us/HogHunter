@@ -1317,7 +1317,8 @@ def test_newest_file_age_min_respects_wall_clock_bound(hh):
         tree.mkdir()
         (tree / "fresh.o").write_text("x\n", encoding="utf-8")
         assert hh.newest_file_age_min(str(tree), max_seconds=60) < 5
-        assert hh.newest_file_age_min(str(tree), max_seconds=0) == 1e9
+        # A timed-out walk fails closed as busy, never as safely idle.
+        assert hh.newest_file_age_min(str(tree), max_seconds=0) == 0.0
         assert hh.newest_file_age_min(str(home / "missing")) == 1e9
     finally:
         shutil.rmtree(home, ignore_errors=True)
