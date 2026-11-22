@@ -198,6 +198,15 @@ enum FlaggedIssueEvaluator {
                     host: .mac,
                     category: .disk
                 ))
+            } else if usedPct >= 85 {
+                issues.append(FlaggedIssue(
+                    id: "mac.drive.\(drive.id).warning",
+                    title: "External Drive Filling Up",
+                    message: "\(drive.name): \(formatBytes(avail)) remaining (\(Int(usedPct))% used).",
+                    priority: .medium,
+                    host: .mac,
+                    category: .disk
+                ))
             }
         }
 

@@ -143,6 +143,30 @@ def _guard_for(lock_path: Path) -> _Guard:
     return guard
 
 
+GUARD_WAIT_SECONDS = 5.0
+
+
+def _flock_with_timeout(fd: int, timeout: float = GUARD_WAIT_SECONDS) -> None:
+    """Take an exclusive flock, giving up after `timeout` seconds.
+
+    A bare blocking flock hangs forever when a peer wedges while holding
+    the guard (the 2026-10-20 reclaim livelock).  Poll with LOCK_NB so a
+    stuck holder surfaces as a TimeoutError the caller can report, never
+    as a silent hang.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"housekeeper guard busy for over {timeout:.0f}s; refusing to hang"
+                ) from None
+            time.sleep(0.05)
+
+
 def _acquire_guard(lock_path: Path) -> _Guard:
     """Take the mutation guard for this lock.
 
@@ -153,7 +177,7 @@ def _acquire_guard(lock_path: Path) -> _Guard:
     """
     guard = _guard_for(lock_path)
     if guard.depth == 0 and fcntl is not None:
-        fcntl.flock(guard.fd, fcntl.LOCK_EX)
+        _flock_with_timeout(guard.fd)
     guard.depth += 1
     return guard
 

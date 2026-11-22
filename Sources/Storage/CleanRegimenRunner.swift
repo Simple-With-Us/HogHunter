@@ -616,7 +616,10 @@ final class CleanRegimenRunner: ObservableObject {
         // categories depend on it, and a valve decision made after the walk
         // would already have paid for a scan that could not include the
         // Trash.
-        let pressure = CleanPressure.current()
+        // Off the main actor: `current()` reads purgeable capacity, the
+        // CacheDelete accounting that hung the panel on a full disk
+        // (HOGHUNTER-5).  Same detached shape as the lock take above.
+        let pressure = await Task.detached(priority: .utility) { CleanPressure.current() }.value
         let exclusions = exclusionsProvider()
         // The valve rides scheduled runs only, and stays shut when the owner
         // excluded the Trash category:  an explicit exclusion outranks the

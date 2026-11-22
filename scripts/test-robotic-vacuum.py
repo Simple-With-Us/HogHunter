@@ -350,6 +350,27 @@ class TestSteps(unittest.TestCase):
         self.assertIn("grok_sessions", ids)
 
 
+class TestGuardLockTimeout(unittest.TestCase):
+    def test_guard_times_out_instead_of_hanging(self):
+        import fcntl as _fcntl
+
+        from vacuum.lock import _flock_with_timeout
+
+        with tempfile.TemporaryDirectory() as td:
+            fd = os.open(str(Path(td) / "guard"), os.O_RDWR | os.O_CREAT, 0o600)
+            peer = os.open(str(Path(td) / "guard"), os.O_RDWR)
+            try:
+                _fcntl.flock(peer, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    _flock_with_timeout(fd, timeout=0.2)
+                self.assertLess(time.monotonic() - started, 5)
+            finally:
+                _fcntl.flock(peer, _fcntl.LOCK_UN)
+                os.close(peer)
+                os.close(fd)
+
+
 class TestLockSkip(unittest.TestCase):
     def test_run_skipped_for_lock(self):
         from vacuum.scheduler import run_skipped_for_lock

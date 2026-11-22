@@ -1308,6 +1308,21 @@ def test_app_staging_offers_idle_shipit_in_the_safe_tier(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_newest_file_age_min_respects_wall_clock_bound(hh):
+    """A huge tree must not wedge the tick: with max_seconds=0 the walk
+    stops at once and reports only what it saw (nothing = safely idle)."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        tree = home / "tree"
+        tree.mkdir()
+        (tree / "fresh.o").write_text("x\n", encoding="utf-8")
+        assert hh.newest_file_age_min(str(tree), max_seconds=60) < 5
+        assert hh.newest_file_age_min(str(tree), max_seconds=0) == 1e9
+        assert hh.newest_file_age_min(str(home / "missing")) == 1e9
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_touched_since_catches_a_recent_file_past_the_walk_cap(hh):
     """newest_file_age_min stops at 4000 entries, so a recent file past the cap
     reads as idle.  The find probe has no cap: it answers on the first recent

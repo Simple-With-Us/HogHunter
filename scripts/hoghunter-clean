@@ -1011,12 +1011,14 @@ def touched_since(path: str, days: float) -> bool:
     return bool(proc.stdout.strip())
 
 
-def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
+def newest_file_age_min(path: str, max_entries: int = 4000, max_seconds: float = 5.0) -> float:
     """Age in minutes of the newest file under path.
 
     0.0 means "something was written just now" -- the thing is live.
     Returns a very large number for a missing/empty path so callers can treat
-    "nothing here" as "safely idle".
+    "nothing here" as "safely idle".  The walk is bounded by wall-clock
+    (`max_seconds`) as well as entry count, so a huge tree cannot wedge
+    the tick; on timeout the answer reflects what was seen so far.
     """
     p = Path(path)
     if not p.exists():
@@ -1026,7 +1028,10 @@ def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
     newest = 0.0
     seen = 0
     stack = [p]
+    deadline = time.monotonic() + max_seconds
     while stack and seen < max_entries:
+        if seen % 256 == 0 and time.monotonic() >= deadline:
+            break
         cur = stack.pop()
         try:
             st = cur.lstat()

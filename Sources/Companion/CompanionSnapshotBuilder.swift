@@ -92,15 +92,27 @@ enum CompanionSnapshotBuilder {
 
     static func currentStorageSummary(
         drives: [MountedDriveUsage] = [],
-        directories: [DirectoryUsageRow] = []
+        directories: [DirectoryUsageRow] = [],
+        diskSpace: DiskSpace? = nil
     ) -> CompanionStorageSummary? {
-        let homeURL = URL(fileURLWithPath: NSHomeDirectory())
-        guard let values = try? homeURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
-              let total = values.volumeTotalCapacity, total > 0 else {
-            return nil
+        // Prefer the store's off-main reading: asking the volume here runs
+        // CacheDelete purgeable accounting on the caller's actor, which
+        // hung the panel on a full disk (HOGHUNTER-5).  The direct read
+        // remains only for callers with no store reading yet.
+        let totalBytes: UInt64
+        let freeBytes: UInt64
+        if let diskSpace {
+            totalBytes = diskSpace.totalBytes
+            freeBytes = diskSpace.freeBytes
+        } else {
+            let homeURL = URL(fileURLWithPath: NSHomeDirectory())
+            guard let values = try? homeURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
+                  let total = values.volumeTotalCapacity, total > 0 else {
+                return nil
+            }
+            totalBytes = UInt64(total)
+            freeBytes = UInt64(max(0, values.volumeAvailableCapacityForImportantUsage ?? Int64(values.volumeAvailableCapacity ?? 0)))
         }
-        let totalBytes = UInt64(total)
-        let freeBytes = UInt64(max(0, values.volumeAvailableCapacityForImportantUsage ?? Int64(values.volumeAvailableCapacity ?? 0)))
         let usedBytes = totalBytes > freeBytes ? totalBytes - freeBytes : 0
         let usedPct = totalBytes > 0 ? (Double(usedBytes) / Double(totalBytes)) * 100.0 : 0.0
         let exclusions = CleanerExclusions.load()

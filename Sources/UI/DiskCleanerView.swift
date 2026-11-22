@@ -10,6 +10,11 @@ struct DiskCleanerView: View {
     var autoScanOnAppear: Bool = true
     var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
+    /// Startup-volume space, refreshed off the main actor.  Reading
+    /// `DiskSpace.current()` in `body` re-ran CacheDelete purgeable
+    /// accounting on every redraw and hung the panel on a full disk
+    /// (HOGHUNTER-5); the store tick already proved that shape.
+    @State private var volumeSpace: DiskSpace?
     /// The unattended clean regimen, as the owner set it.
     @State private var regimen = CleanRegimen.load()
     /// The one runner the app uses.  Observed so the summary and the next
@@ -57,6 +62,12 @@ struct DiskCleanerView: View {
         }
         .onDisappear {
             store.cancelScan()
+        }
+        .task {
+            volumeSpace = await Task.detached(priority: .utility) { DiskSpace.current() }.value
+        }
+        .onChange(of: store.state) { _ in
+            Task { volumeSpace = await Task.detached(priority: .utility) { DiskSpace.current() }.value }
         }
         .sheet(isPresented: $showExclusionsSheet) {
             CleanerExclusionsSheet(store: store)
@@ -473,8 +484,6 @@ struct DiskCleanerView: View {
         }
         .help("Available space includes macOS purgeable capacity.\u{00A0} Selected item sizes do not predict a free-space gain: Trash and safety snapshots can retain blocks.")
     }
-
-    private var volumeSpace: DiskSpace? { DiskSpace.current() }
 
     private var volumeUsedFraction: Double { volumeSpace?.usedFraction ?? 0 }
 
