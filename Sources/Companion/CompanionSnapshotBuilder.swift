@@ -99,13 +99,13 @@ enum CompanionSnapshotBuilder {
         // CacheDelete purgeable accounting on the caller's actor, which
         // hung the panel on a full disk (HOGHUNTER-5).  The direct read
         // remains only for callers with no store reading yet.
+        let homeURL = URL(fileURLWithPath: NSHomeDirectory())
         let totalBytes: UInt64
         let freeBytes: UInt64
         if let diskSpace {
             totalBytes = diskSpace.totalBytes
             freeBytes = diskSpace.freeBytes
         } else {
-            let homeURL = URL(fileURLWithPath: NSHomeDirectory())
             guard let values = try? homeURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
                   let total = values.volumeTotalCapacity, total > 0 else {
                 return nil
