@@ -247,6 +247,203 @@ func TestPlanJournalVacuum(t *testing.T) {
 	}
 }
 
+func TestEmergencyThresholds(t *testing.T) {
+	cfg := DefaultConfig()
+	cases := []struct {
+		name string
+		u    DiskUsage
+		want bool
+	}{
+		{"at emergency percent", DiskUsage{TotalBytes: 100, UsedPercent: 90, FreeBytes: 50}, true},
+		{"over emergency percent", DiskUsage{TotalBytes: 100, UsedPercent: 93, FreeBytes: 8}, true},
+		{"triggered but not emergency", DiskUsage{TotalBytes: 300 << 30, UsedPercent: 85, FreeBytes: 40 << 30}, false},
+		{"emergency free floor alone", DiskUsage{TotalBytes: 300 << 30, UsedPercent: 85, FreeBytes: 15 << 30}, true},
+		{"free exactly at emergency floor", DiskUsage{TotalBytes: 300 << 30, UsedPercent: 85, FreeBytes: 16 << 30}, false},
+		{"empty disk", DiskUsage{}, false},
+	}
+	for _, c := range cases {
+		if got := cfg.Emergency(c.u); got != c.want {
+			t.Errorf("%s: Emergency=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestDefaultConfigJournalAndEmergency(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.JournalTargetBytes != 200<<20 || cfg.JournalFloorBytes != 100<<20 {
+		t.Errorf("journal target/floor = %d/%d, want 200MiB/100MiB", cfg.JournalTargetBytes, cfg.JournalFloorBytes)
+	}
+	if cfg.EmergencyUsedPercent != 90 || cfg.EmergencyMinFreeBytes != 16<<30 {
+		t.Errorf("emergency line = %v%%/%d, want 90%%/16GiB", cfg.EmergencyUsedPercent, cfg.EmergencyMinFreeBytes)
+	}
+	if cfg.ImageKeepPerRepo != 2 {
+		t.Errorf("ImageKeepPerRepo=%d, want 2 (current + previous)", cfg.ImageKeepPerRepo)
+	}
+	if cfg.VolumeWatchThresholdBytes != 5<<30 {
+		t.Errorf("VolumeWatchThresholdBytes=%d, want 5GiB", cfg.VolumeWatchThresholdBytes)
+	}
+	dirs := cfg.AgentCacheDirList()
+	if len(dirs) != 5 || dirs[0] != "/home/jay/.npm/_cacache" || dirs[4] != "/home/jay/.cache/node" {
+		t.Errorf("default agent cache dirs=%v", dirs)
+	}
+}
+
+func TestImageRepoTag(t *testing.T) {
+	if repo, tag, ok := ImageRepoTag("yagelvqux9e8l1kztif7bf2o:e2ff91c5"); !ok || repo != "yagelvqux9e8l1kztif7bf2o" || tag != "e2ff91c5" {
+		t.Errorf("plain ref: %q %q %v", repo, tag, ok)
+	}
+	if repo, tag, ok := ImageRepoTag("localhost:5000/app:v1"); !ok || repo != "localhost:5000/app" || tag != "v1" {
+		t.Errorf("registry port must not split as a tag: %q %q %v", repo, tag, ok)
+	}
+	if _, _, ok := ImageRepoTag("app@sha256:deadbeef"); ok {
+		t.Error("digest reference must not parse as a tag")
+	}
+	if _, _, ok := ImageRepoTag("app"); ok {
+		t.Error("untagged reference must not parse")
+	}
+	if _, _, ok := ImageRepoTag(""); ok {
+		t.Error("empty reference must not parse")
+	}
+}
+
+func TestPlanUnusedImages(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	gen := func(id, repo string, age time.Duration) DeployImage {
+		return DeployImage{ID: id, Repo: repo, Tag: id, Created: now.Add(-age), Size: 100}
+	}
+	images := []DeployImage{
+		// Live app "um": four generations; the newest is container-used.
+		gen("um4", "um", time.Hour),
+		gen("um3", "um", 2*time.Hour),
+		gen("um2", "um", 3*time.Hour),
+		gen("um1", "um", 4*time.Hour),
+		// Live app "ct": its OLDEST generation is still referenced by a
+		// stopped container — protected despite sitting beyond keep.
+		gen("ct3", "ct", time.Hour),
+		gen("ct2", "ct", 2*time.Hour),
+		gen("ct1", "ct", 3*time.Hour),
+		// Orphan helper: two generations, no containers at all.
+		gen("help2", "coollabsio/coolify-helper", 24*time.Hour),
+		gen("help1", "coollabsio/coolify-helper", 48*time.Hour),
+		// Orphan app with FOUR generations: inside its grace it must
+		// lose nothing at any index — not even the generations beyond
+		// keep, which a live group would lose on sight.
+		gen("gone4", "gone", time.Hour),
+		gen("gone3", "gone", 2*time.Hour),
+		gen("gone2", "gone", 3*time.Hour),
+		gen("gone1", "gone", 4*time.Hour),
+		// Untagged: never the planner's business.
+		{ID: "dangling", Repo: "", Created: now.Add(-72 * time.Hour)},
+	}
+	used := map[string]bool{"um4": true, "ct1": true}
+
+	// First sight of the orphan group: only beyond-keep generations of
+	// live groups go (um2, um1).  The helper's older generation stays —
+	// its grace clock starts now.
+	del, next := PlanUnusedImages(images, used, 2, map[string]time.Time{}, now, 48*time.Hour)
+	gotIDs := map[string]bool{}
+	for _, d := range del {
+		gotIDs[d.ID] = true
+	}
+	for _, want := range []string{"um2", "um1"} {
+		if !gotIDs[want] {
+			t.Errorf("first pass must delete %s, got %v", want, del)
+		}
+	}
+	for _, notWant := range []string{"um4", "um3", "ct3", "ct2", "ct1", "help2", "help1", "dangling",
+		"gone4", "gone3", "gone2", "gone1"} {
+		if gotIDs[notWant] {
+			t.Errorf("first pass must keep %s, got %v", notWant, del)
+		}
+	}
+	if since, ok := next["coollabsio/coolify-helper"]; !ok || !since.Equal(now) {
+		t.Errorf("orphan clock must start at first sight: %v", next)
+	}
+	if _, ok := next["um"]; ok {
+		t.Error("a live group must not carry an orphan clock")
+	}
+
+	// 49 hours later, still unreferenced: the helper's older generation
+	// goes; its newest stays.  The four-generation orphan app loses
+	// everything but its newest.  The clock keeps its original start.
+	later := now.Add(49 * time.Hour)
+	del, next = PlanUnusedImages(images, used, 2, next, later, 48*time.Hour)
+	gotIDs = map[string]bool{}
+	for _, d := range del {
+		gotIDs[d.ID] = true
+	}
+	if !gotIDs["help1"] || gotIDs["help2"] {
+		t.Errorf("expired orphan pass must delete only help1, got %v", del)
+	}
+	for _, want := range []string{"gone3", "gone2", "gone1"} {
+		if !gotIDs[want] {
+			t.Errorf("expired orphan pass must delete %s, got %v", want, del)
+		}
+	}
+	if gotIDs["gone4"] {
+		t.Errorf("an orphan group always keeps its newest generation, got %v", del)
+	}
+	if since := next["coollabsio/coolify-helper"]; !since.Equal(now) {
+		t.Errorf("orphan clock must keep its first-sight start, got %v", since)
+	}
+
+	// The group gains a container again: the clock is dropped, so a
+	// later orphanhood starts a fresh grace.
+	used["help1"] = true
+	_, next = PlanUnusedImages(images, used, 2, next, later, 48*time.Hour)
+	if _, ok := next["coollabsio/coolify-helper"]; ok {
+		t.Error("a group with a container again must drop its orphan clock")
+	}
+}
+
+func TestValidateAgentCacheDir(t *testing.T) {
+	for _, bad := range []string{"/", "/home/jay", "/home/jay/.claude", "/home/jay/Code/app",
+		"/home/jay/.cache", "/home/jay/.npm", "/home/jay/.npm/_logs",
+		"/etc/.cache/x", "/var/lib/docker/volumes", "/home/jay/apps/lanes/x/.cache", "relative/.cache"} {
+		if ok, _ := ValidateAgentCacheDir(bad); ok {
+			t.Errorf("ValidateAgentCacheDir(%q) must refuse", bad)
+		}
+	}
+	for _, good := range []string{"/home/jay/.npm/_cacache", "/home/jay/.npm/_npx",
+		"/home/jay/.cache/deno", "/home/jay/.cache/pnpm", "/home/jay/.cache/node"} {
+		if ok, reason := ValidateAgentCacheDir(good); !ok {
+			t.Errorf("ValidateAgentCacheDir(%q) refused: %s", good, reason)
+		}
+	}
+}
+
+func TestFindLargeNewFiles(t *testing.T) {
+	now := time.Date(2026, 11, 21, 18, 0, 0, 0, time.UTC)
+	entries := []VolumeFileEntry{
+		{Volume: "st-data", Path: "/v/st-data/_data/.backup-repair/snapshot.db", Size: 21 << 30, ModTime: now.Add(-time.Hour), Regular: true}, // finding
+		{Volume: "st-data", Path: "/v/st-data/_data/app.db", Size: 23 << 30, ModTime: now.Add(-30 * 24 * time.Hour), Regular: true},           // large but old
+		{Volume: "um-data", Path: "/v/um-data/_data/new.bin", Size: 6 << 30, ModTime: now.Add(-2 * time.Hour), Regular: true},                 // finding
+		{Volume: "um-data", Path: "/v/um-data/_data/small.bin", Size: 1 << 30, ModTime: now.Add(-time.Hour), Regular: true},                   // new but small
+		{Volume: "um-data", Path: "/v/um-data/_data/link", Size: 9 << 30, ModTime: now.Add(-time.Hour), Symlink: true},                        // symlink
+		{Volume: "um-data", Path: "/v/um-data/_data/skew.bin", Size: 9 << 30, ModTime: now.Add(time.Hour), Regular: true},                     // future mtime counts as new
+	}
+	got := FindLargeNewFiles(entries, 5<<30, 24*time.Hour, now, 20)
+	if len(got) != 3 {
+		t.Fatalf("findings=%v, want 3", got)
+	}
+	// Largest first.
+	if got[0].Size != 21<<30 || got[1].Size != 9<<30 || got[2].Size != 6<<30 {
+		t.Fatalf("findings must sort largest first: %v", got)
+	}
+	if got[0].Volume != "st-data" {
+		t.Errorf("finding must name its volume: %+v", got[0])
+	}
+	// The clock-skewed file (9 GiB, future mtime) is a finding, but its
+	// recorded age is clamped to 0, never negative.
+	if got[1].AgeSeconds != 0 {
+		t.Errorf("future-mtime finding AgeSeconds=%d, want 0 (clamped)", got[1].AgeSeconds)
+	}
+	// The cap holds.
+	if capped := FindLargeNewFiles(entries, 5<<30, 24*time.Hour, now, 2); len(capped) != 2 {
+		t.Errorf("cap: got %d findings, want 2", len(capped))
+	}
+}
+
 func TestDumpNameClassification(t *testing.T) {
 	if !isDumpName("app-2026-11-07.db") || !isDumpName("dump.sql.gz") || !isDumpName("x.tar.zst") {
 		t.Error("dump names must classify as dumps")

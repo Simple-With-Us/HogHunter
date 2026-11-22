@@ -11,12 +11,18 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
 // Client talks to the Docker daemon at the given socket path.
 type Client struct {
 	http *http.Client
+
+	verMu    sync.Mutex
+	verDone  bool
+	verMajor int
+	verMinor int
 }
 
 // New returns a client for sock (usually /var/run/docker.sock).
@@ -69,11 +75,15 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 
 // Container is the subset of the Docker API we need.
 type Container struct {
-	ID     string `json:"Id"`
-	Names  []string `json:"Names"`
-	Image  string `json:"Image"`
-	State  string `json:"State"`
-	Status string `json:"Status"`
+	ID    string   `json:"Id"`
+	Names []string `json:"Names"`
+	Image string   `json:"Image"`
+	// ImageID is the ID of the image the container was created from.
+	// Retention planners key on it: an image ID referenced by ANY
+	// container, running or stopped, is never a deletion candidate.
+	ImageID string `json:"ImageID"`
+	State   string `json:"State"`
+	Status  string `json:"Status"`
 }
 
 // List returns all containers (running and stopped).
@@ -91,15 +101,15 @@ func (c *Client) List() ([]Container, error) {
 
 // Stats is a one-shot (non-streaming) stats sample.
 type Stats struct {
-	CPUPercent  float64 `json:"cpu_percent"`
-	MemUsage    uint64  `json:"mem_usage"`
-	MemLimit    uint64  `json:"mem_limit"`
-	BlockRead   uint64  `json:"block_read"`
-	BlockWrite  uint64  `json:"block_write"`
-	NetRx       uint64  `json:"net_rx"`
-	NetTx       uint64  `json:"net_tx"`
-	PIDs        uint64  `json:"pids"`
-	OOMKills    uint64  `json:"oom_kills"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemUsage   uint64  `json:"mem_usage"`
+	MemLimit   uint64  `json:"mem_limit"`
+	BlockRead  uint64  `json:"block_read"`
+	BlockWrite uint64  `json:"block_write"`
+	NetRx      uint64  `json:"net_rx"`
+	NetTx      uint64  `json:"net_tx"`
+	PIDs       uint64  `json:"pids"`
+	OOMKills   uint64  `json:"oom_kills"`
 }
 
 // Stats fetches one sample for a container, computing CPU% from the
@@ -128,8 +138,8 @@ func (c *Client) Stats(id string) (Stats, error) {
 			SystemUsage uint64 `json:"system_cpu_usage"`
 		} `json:"precpu_stats"`
 		MemoryStats struct {
-			Usage uint64 `json:"usage"`
-			Limit uint64 `json:"limit"`
+			Usage uint64            `json:"usage"`
+			Limit uint64            `json:"limit"`
 			Stats map[string]uint64 `json:"stats"`
 		} `json:"memory_stats"`
 		BlkioStats struct {
@@ -227,12 +237,44 @@ func (c *Client) UpdateLimits(id string, memoryBytes int64, nanoCPUs int64) erro
 	return nil
 }
 
+// ImageUniqueBytes totals the uniquely-held bytes of every image:
+// sum of (Size - SharedSize) from `docker system df`.  Virtual sizes
+// double-count layers shared between images, so a retention run that
+// deletes images measures its reclaim as the delta of this total
+// instead of summing the deleted images' sizes — the same
+// measure-before/after discipline the journal category uses.
+func (c *Client) ImageUniqueBytes() (uint64, error) {
+	data, code, err := c.do("GET", "/system/df", nil)
+	if err != nil {
+		return 0, err
+	}
+	if code >= 400 {
+		return 0, fmt.Errorf("docker system df: HTTP %d", code)
+	}
+	var raw struct {
+		Images []struct {
+			Size       int64 `json:"Size"`
+			SharedSize int64 `json:"SharedSize"`
+		} `json:"Images"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, im := range raw.Images {
+		if unique := im.Size - im.SharedSize; unique > 0 {
+			total += uint64(unique)
+		}
+	}
+	return total, nil
+}
+
 // DiskUsage mirrors `docker system df -v`.
 type DiskUsage struct {
-	Images      []map[string]any `json:"images"`
-	Containers  []map[string]any `json:"containers"`
-	Volumes     []map[string]any `json:"volumes"`
-	BuildCache  []map[string]any `json:"build_cache"`
+	Images     []map[string]any `json:"images"`
+	Containers []map[string]any `json:"containers"`
+	Volumes    []map[string]any `json:"volumes"`
+	BuildCache []map[string]any `json:"build_cache"`
 }
 
 // SystemDF returns verbose disk usage.
@@ -258,6 +300,121 @@ func (c *Client) SystemDF() (DiskUsage, error) {
 	return df, nil
 }
 
+// ImageInfo is one image from GET /images/json.
+type ImageInfo struct {
+	ID       string   `json:"Id"`
+	RepoTags []string `json:"RepoTags"`
+	// Created is the image build time, Unix seconds.  It is NOT a pull
+	// or last-used time — retention rules must not treat it as one.
+	Created int64             `json:"Created"`
+	Size    int64             `json:"Size"`
+	Labels  map[string]string `json:"Labels"`
+}
+
+// Images lists every image on the daemon.
+func (c *Client) Images() ([]ImageInfo, error) {
+	data, code, err := c.do("GET", "/images/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("docker images: HTTP %d", code)
+	}
+	var out []ImageInfo
+	return out, json.Unmarshal(data, &out)
+}
+
+// DeleteImage removes one image by ID.  No force: the daemon refuses
+// (409) while any container references the image, which is a safety
+// property the autoclean retention planner relies on as its backstop —
+// a planner bug can waste a run, but it cannot delete an image out from
+// under a stopped container the inventory read raced with.
+func (c *Client) DeleteImage(id string) error {
+	_, code, err := c.do("DELETE", "/images/"+id, nil)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("docker delete image %s: HTTP %d", id, code)
+	}
+	return nil
+}
+
+// apiVersion returns the daemon's API version as (major, minor),
+// discovered from the unversioned /version endpoint and cached per
+// client — but only a SUCCESS is cached.  A transient probe failure
+// (daemon restarting, a wedged socket) must not pin the client to the
+// fallback version for its whole lifetime: in the daemon deployment
+// the client lives as long as the process, and a permanent fallback
+// would silently degrade every later build-cache prune to
+// dangling-only.  A failed probe is retried on the next call.
+func (c *Client) apiVersion() (int, int, bool) {
+	c.verMu.Lock()
+	defer c.verMu.Unlock()
+	if c.verDone {
+		return c.verMajor, c.verMinor, true
+	}
+	req, err := http.NewRequest("GET", "http://localhost/version", nil)
+	if err != nil {
+		return 0, 0, false
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer resp.Body.Close()
+	var raw struct {
+		APIVersion string `json:"ApiVersion"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&raw); err != nil {
+		return 0, 0, false
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(raw.APIVersion, "%d.%d", &major, &minor); err != nil {
+		return 0, 0, false
+	}
+	c.verMajor, c.verMinor, c.verDone = major, minor, true
+	return major, minor, true
+}
+
+// buildPruneVersion picks the API version for the build-prune call.
+// The `all` parameter only exists from API 1.42; a request pinned to an
+// older version is silently pruned dangling-only — exactly the failure
+// that left Coolify's regular build cache untouched while hh-agent
+// reported success.  Negotiate up from the client's 1.41 baseline
+// toward the daemon's own version, capped at 1.45 (a version this
+// client is written against), and never above what the daemon reports.
+func (c *Client) buildPruneVersion() string {
+	major, minor, ok := c.apiVersion()
+	if !ok || major != 1 {
+		return "v1.41"
+	}
+	if minor > 45 {
+		minor = 45
+	}
+	if minor < 42 {
+		// Daemon too old for `all`: the call still works dangling-only,
+		// which the caller's reclaimed-bytes report shows honestly.
+		return "v1.41"
+	}
+	return fmt.Sprintf("v1.%d", minor)
+}
+
+// doVersioned is do() against an explicit API version prefix.
+func (c *Client) doVersioned(version, method, path string) ([]byte, int, error) {
+	req, err := http.NewRequest(method, "http://localhost/"+version+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	return data, resp.StatusCode, err
+}
+
 // PruneResult is the reclaimed-bytes summary.
 type PruneResult struct {
 	ReclaimedBytes uint64 `json:"reclaimed_bytes"`
@@ -280,7 +437,17 @@ func (c *Client) Prune(target string, all bool) (PruneResult, error) {
 	case "volumes":
 		data, code, err = c.do("POST", "/volumes/prune", nil)
 	case "build-cache":
-		data, code, err = c.do("POST", "/build/prune", nil)
+		// Equivalent of `docker builder prune -af` when all=true: every
+		// cache record not in use by a running build goes, including the
+		// regular (non-dangling) cache Coolify deploys accumulate.  Cache
+		// a build is actively using at this instant is BuildKit's call —
+		// it is never interrupted.  Without all, the endpoint prunes
+		// dangling records only and Coolify's cache survives untouched.
+		path := "/build/prune"
+		if all {
+			path += "?all=1"
+		}
+		data, code, err = c.doVersioned(c.buildPruneVersion(), "POST", path)
 	case "containers":
 		data, code, err = c.do("POST", "/containers/prune", nil)
 	default:

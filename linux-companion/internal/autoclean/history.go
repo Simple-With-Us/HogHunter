@@ -35,6 +35,15 @@ type CleanupHistoryRecord struct {
 	Trigger string `json:"trigger,omitempty"`
 	// Categories carries the per-category outcome for this run.
 	Categories []CategoryResult `json:"categories,omitempty"`
+	// Alerts carries the large-new-file watch's findings for this run
+	// (report-only; nothing listed here was deleted).  A run that
+	// raised an alert is recorded even when it reclaimed nothing, so
+	// the alert is visible in the history surface.
+	Alerts []VolumeFinding `json:"alerts,omitempty"`
+	// BackupsRetentionBytes is the total size of the local backup
+	// roots at this run — the structural-creep line, recorded so the
+	// retention total's growth is visible across runs.
+	BackupsRetentionBytes uint64 `json:"backups_retention_bytes,omitempty"`
 	// DryRun marks a report-only run.  Dry runs are recorded in the audit
 	// log only, never here — history mirrors reclaimed space, and a dry
 	// run reclaims nothing (the Mac store's rule).

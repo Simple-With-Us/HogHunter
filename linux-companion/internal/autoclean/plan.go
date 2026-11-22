@@ -205,6 +205,246 @@ func SelectStaleTmp(entries []TmpEntry, now time.Time, minAge time.Duration) []s
 	return out
 }
 
+// --- Unused deploy images: keep the rollback window per repository ------
+
+// DeployImage is one tagged image in the retention planner's inventory.
+// Repo is the repository part of its single tag ("" for untagged or
+// digest-only images, which this planner never touches — dangling
+// images belong to the dangling-images category).
+type DeployImage struct {
+	ID      string
+	Repo    string
+	Tag     string
+	Created time.Time
+	Size    int64
+}
+
+// ImageRepoTag splits a tag reference into repository and tag.  The tag
+// separator is the last colon AFTER the last slash, so a registry port
+// (localhost:5000/app:v1) is not mistaken for a tag.
+func ImageRepoTag(ref string) (repo, tag string, ok bool) {
+	if ref == "" || strings.Contains(ref, "@") {
+		return "", "", false // digest reference: no tag to group by
+	}
+	slash := strings.LastIndex(ref, "/")
+	colon := strings.LastIndex(ref, ":")
+	if colon <= slash {
+		return "", "", false
+	}
+	return ref[:colon], ref[colon+1:], true
+}
+
+// PlanUnusedImages decides which deploy images may be deleted, and the
+// next orphan-since state to persist.  Pure: the runner supplies the
+// inventory, the set of image IDs any container references, and the
+// orphan state carried from earlier runs.
+//
+// Safety invariants, all pinned by tests:
+//
+//   - an image referenced by ANY container (running or stopped) is
+//     never a candidate — the runner also deletes without force, so the
+//     daemon itself refuses if an inventory race slips one through
+//   - per repository, the newest keep generations always survive
+//     (the rollback window: current + previous at the default keep=2)
+//   - a repository no container references (an orphan group — a removed
+//     app, a helper image like coolify-helper) only loses generations
+//     beyond its newest ONE, and only after the group has been observed
+//     unreferenced continuously for orphanGrace: orphanhood is a state
+//     that must persist across runs, never a single observation, so the
+//     window inside a deploy (old container removed, new one not yet
+//     created) can never trigger it
+//   - untagged images and images tagged into more than one repository
+//     are never candidates: their ownership is ambiguous by definition
+func PlanUnusedImages(images []DeployImage, usedIDs map[string]bool, keep int, orphanSince map[string]time.Time, now time.Time, orphanGrace time.Duration) (delete []DeployImage, nextOrphan map[string]time.Time) {
+	if keep < 1 {
+		keep = 1
+	}
+	byRepo := map[string][]DeployImage{}
+	for _, im := range images {
+		if im.Repo == "" {
+			continue
+		}
+		byRepo[im.Repo] = append(byRepo[im.Repo], im)
+	}
+	nextOrphan = map[string]time.Time{}
+	repos := make([]string, 0, len(byRepo))
+	for repo := range byRepo {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		group := byRepo[repo]
+		sort.Slice(group, func(i, j int) bool {
+			if group[i].Created.Equal(group[j].Created) {
+				return group[i].ID < group[j].ID
+			}
+			return group[i].Created.After(group[j].Created)
+		})
+		live := false
+		for _, im := range group {
+			if usedIDs[im.ID] {
+				live = true
+				break
+			}
+		}
+		orphanExpired := false
+		if !live {
+			since, seen := orphanSince[repo]
+			if !seen {
+				since = now
+			}
+			nextOrphan[repo] = since
+			orphanExpired = now.Sub(since) >= orphanGrace
+		}
+		for i, im := range group {
+			if usedIDs[im.ID] {
+				continue
+			}
+			switch {
+			case live && i >= keep:
+				// Live group, beyond the rollback window: the window
+				// is the contract, and generations past it go on
+				// sight.
+				delete = append(delete, im)
+			case !live && orphanExpired && i >= 1:
+				// Orphan group past its grace: everything but the
+				// newest generation goes.  An orphan group inside its
+				// grace loses NOTHING at any index — orphanhood must
+				// persist across runs, so the transient container-less
+				// window inside a deploy can never cost a generation.
+				delete = append(delete, im)
+			}
+		}
+	}
+	return delete, nextOrphan
+}
+
+// --- Agent caches ---------------------------------------------------------
+
+// ValidateAgentCacheDir refuses cache roots where a planning bug could
+// do real damage: anything that is not plainly a tool cache directory
+// under a user home.  The purge deletes file contents, so the bar is
+// the same as for backup roots — the path must look like exactly what
+// it claims to be.
+func ValidateAgentCacheDir(path string) (ok bool, reason string) {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return false, "refusing agent cache dir " + clean + ": path must be absolute"
+	}
+	lower := strings.ToLower(clean)
+	for _, prefix := range []string{
+		"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
+		"/proc", "/run", "/sbin", "/sys", "/usr", "/var",
+	} {
+		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			return false, "refusing agent cache dir " + clean + ": system path"
+		}
+	}
+	for _, frag := range []string{"/lanes/", "/.git", "/var/lib/docker"} {
+		if strings.Contains(lower, frag) {
+			return false, "refusing agent cache dir " + clean + ": looks like live data or a working tree"
+		}
+	}
+	// A home root itself, or any shallow path, is never a cache dir.
+	parts := strings.Split(strings.Trim(clean, "/"), "/")
+	if len(parts) < 3 {
+		return false, "refusing agent cache dir " + clean + ": too shallow to be a cache directory"
+	}
+	// The path must be anchored on a per-tool cache shape: npm's named
+	// stores (<.../.npm/_cacache or _npx), or ONE tool's directory
+	// directly under a .cache (<.../.cache/<tool>) — in each case the
+	// named directory itself or anything beneath it.  A bare .cache
+	// root is refused: it is every tool's cache tree at once, not one
+	// tool's regenerable store, and purging it would reach far beyond
+	// the categories this validator exists to bound.
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == ".npm" && (parts[i+1] == "_cacache" || parts[i+1] == "_npx") {
+			return true, ""
+		}
+		if parts[i] == ".cache" && parts[i+1] != "" {
+			return true, ""
+		}
+	}
+	return false, "refusing agent cache dir " + clean + ": does not look like a tool cache directory"
+}
+
+// SelectStaleCache picks cache files that may be deleted, under the
+// same rules as SelectStaleTmp (regular files only, never symlinks,
+// never open files, at least minAge old).  It is a separate entry point
+// because the two categories' age semantics differ — temp staleness is
+// a week; a cache file only has to be older than any install that could
+// be reading it right now — and a future rule change for one must not
+// silently change the other.
+func SelectStaleCache(entries []TmpEntry, now time.Time, minAge time.Duration) []string {
+	return SelectStaleTmp(entries, now, minAge)
+}
+
+// --- Large-new-file watch inside Docker volumes (report-only) ------------
+
+// VolumeFileEntry is one file found by the volume watch's walk.
+type VolumeFileEntry struct {
+	Volume  string
+	Path    string
+	Size    int64
+	ModTime time.Time
+	Regular bool
+	Symlink bool
+}
+
+// VolumeFinding is one large, new file inside a Docker volume.  A
+// finding is a report, never a deletion plan: the file may be a live
+// database's repair snapshot whose disposition belongs to its owner.
+type VolumeFinding struct {
+	Volume string `json:"volume"`
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	// AgeSeconds is how old the file was when the run observed it.
+	AgeSeconds int64 `json:"age_seconds"`
+}
+
+// FindLargeNewFiles filters the watch inventory to findings: regular
+// files (never symlinks) larger than thresholdBytes whose mtime is
+// inside the window before now.  A future mtime (clock skew on the
+// writer) counts as new.  Findings sort largest first and are capped,
+// so one runaway volume cannot flood the report.
+func FindLargeNewFiles(entries []VolumeFileEntry, thresholdBytes uint64, window time.Duration, now time.Time, maxFindings int) []VolumeFinding {
+	var out []VolumeFinding
+	for _, e := range entries {
+		if !e.Regular || e.Symlink {
+			continue
+		}
+		if e.Size < 0 || uint64(e.Size) <= thresholdBytes {
+			continue
+		}
+		age := now.Sub(e.ModTime)
+		if age > window {
+			continue
+		}
+		if age < 0 {
+			// A future mtime (clock skew on the writer) counts as
+			// new, but its recorded age is 0, never negative — the
+			// value persists into history JSON and CLI output.
+			age = 0
+		}
+		out = append(out, VolumeFinding{
+			Volume:     e.Volume,
+			Path:       e.Path,
+			Size:       e.Size,
+			AgeSeconds: int64(age.Seconds()),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Size != out[j].Size {
+			return out[i].Size > out[j].Size
+		}
+		return out[i].Path < out[j].Path
+	})
+	if maxFindings > 0 && len(out) > maxFindings {
+		out = out[:maxFindings]
+	}
+	return out
+}
+
 // --- Journal vacuum -------------------------------------------------------
 
 // PlanJournalVacuum decides the vacuum target.  It returns ok=false when

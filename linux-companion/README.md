@@ -22,9 +22,14 @@ runs the daemon, `hh-agent <cmd>` controls the local host.  Full design in
 - `internal/safety/` — the single choke point for destructive actions.
 - `internal/audit/` — append-only JSONL audit log.
 - `internal/autoclean/` — automatic root-disk cleanup (SPEC.md §14):
-  threshold-triggered, safe categories only, with the pure planners
-  (backup keep-1, stale-tmp, journal vacuum) split from the runner so
-  the safety logic is unit-tested without a filesystem.
+  threshold-triggered with an emergency tier that bypasses the
+  cooldown in free fall, safe categories only (build cache pruned
+  `builder prune -af`-style, dangling images, deploy-image retention
+  past the rollback window, backup keep-1, agent caches, journal
+  vacuum, stale-tmp), plus two report-only watchers (large new files
+  inside Docker volumes; backups-retention totals), with the pure
+  planners split from the runner so the safety logic is unit-tested
+  without a filesystem.
 - `deploy/` — systemd oneshot + timer for hosts that prefer scheduled
   `hh-agent autoclean --yes` runs over the daemon's built-in loop.
 

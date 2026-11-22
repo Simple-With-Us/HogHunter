@@ -476,6 +476,14 @@ Design, implemented in `internal/autoclean`:
   happens only when root is at or over 80% used or under 30 GiB free —
   the fleet guardrail lines.  A 6-hour cooldown separates applied runs,
   so a disk that stays over the line is not pruned on every check.
+- **Emergency tier (2026-11-21).**  Above 90% used or under 16 GiB
+  free, the cooldown does not apply: runs repeat on every check until
+  the disk drops back under the line.  The incident that forced this:
+  on 2026-11-21 the root disk lost ~14 GB in 90 minutes (a 21.3 GB
+  backup-repair snapshot landing inside a live Docker volume, plus
+  deploy build cache) while checks at 87–93% used were skipped for
+  the cooldown.  The emergency tier widens only WHEN a run may happen,
+  never WHAT it may delete.
 - **Opt-in, off by default.**  `HH_AGENT_AUTOCLEAN=1` enables the loop
   in `hh-agent serve`.  This mirrors the Mac app's automatic clean
   regimen (`CleanRegimen.isEnabled`, also off by default): an unattended
@@ -494,17 +502,43 @@ Design, implemented in `internal/autoclean`:
   reclaimed.  Automatic deployment is the host-native systemd timer
   in `deploy/` (or a host-native daemon); an explicit CLI run inside
   any environment remains the operator's call.
-- **Safe categories only.**  Docker build cache; dangling Docker images
-  (never all-unused, never volumes); superseded local backups, keeping
-  exactly the newest complete dump per app (the fleet keep-1 rule — B2
-  holds the off-host replica); the systemd journal vacuumed to a
-  500 MiB target with a hard 200 MiB retention floor; stale temp files
-  (regular files at least 7 days old, not open in any process, never
-  directories or symlinks).  Backup roots are validated before scanning:
+- **Safe categories only.**  Docker build cache, pruned the way
+  `docker builder prune -af` prunes it — all cache not in use by a
+  running build, not just dangling records (the dangling-only API
+  default reclaimed 0 bytes in every run on 2026-11-21 while 8.9 GB
+  of Coolify deploy cache sat on disk; the prune call negotiates its
+  API version up from the client's baseline because the `all`
+  parameter only exists from API 1.42); dangling Docker images (never
+  all-unused, never volumes); unused deploy images beyond the rollback
+  window — per image repository the newest 2 generations are kept
+  (current + previous), an image any container references is never a
+  candidate, deletion is by ID without force so the daemon refuses
+  races, and a repository no container references must stay
+  unreferenced for 48 hours (tracked across runs) before its older
+  generations go, so a mid-deploy window is harmless; superseded local
+  backups, keeping exactly the newest complete dump per app (the fleet
+  keep-1 rule — B2 holds the off-host replica); agent tool caches
+  under the seat's home (npm `_cacache`/`_npx`, deno, pnpm, node —
+  contents only, files under an hour old survive so a running install
+  is never pulled apart, cache roots are validated and symlinks
+  refused); the systemd journal vacuumed to a 200 MiB target with a
+  hard 100 MiB retention floor; stale temp files (regular files at
+  least 7 days old, not open in any process, never directories or
+  symlinks).  Backup roots are validated before scanning:
   `/`, Docker's data root, lane trees, and `.git` paths are refused.
   An in-flight backup dump (no completion sidecar, younger than the
   2-hour grace) is never deleted, and a group with no complete dump
   loses nothing.
+- **Report-only watchers.**  Two watchers ride along with every run
+  (and with cooldown-skipped checks) and never delete anything.  The
+  large-new-file watch scans Docker volumes (bounded depth) for files
+  over 5 GiB modified in the last 24 hours and surfaces them in the
+  run summary, the audit log, and the history record — a file like the
+  21.3 GB repair snapshot gets a human decision instead of being
+  discovered at 93% used.  The backups-retention line states each
+  backup root's total size in every run's output, so the structural
+  growth of the local retention copies (52 GB on 2026-11-21) is
+  visible instead of silent.
 - **Never touched:** live app data, Docker volumes, running containers,
   tagged images, lanes and working trees, user files, the sole local
   backup copy of any app.
@@ -515,7 +549,9 @@ Design, implemented in `internal/autoclean`:
   the trigger text — readable via `hh-agent autoclean --history` and
   `GET /v1/autoclean/history`.  Dry runs are audit-logged only, never
   history-recorded, matching the Mac rule that history mirrors
-  reclaimed space only.
+  reclaimed space only — with one extension: an applied run whose
+  volume watch raised an alert is recorded even at zero reclaimed, so
+  the alert is visible in the history surface.
 - **Surfaces.**  The daemon loop (automatic); `POST /v1/autoclean`
   (device token, dry-run by default, `force` bypasses trigger and
   cooldown) and `GET /v1/autoclean` (status: enabled, would-trigger,

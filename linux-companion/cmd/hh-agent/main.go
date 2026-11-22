@@ -455,8 +455,12 @@ func cmdAutoclean(args []string) int {
 	}
 	fmt.Printf("root %s: %.1f%% used, %s free — triggered: %v\n",
 		sum.DiskBefore.Path, sum.DiskBefore.UsedPercent, humanBytes(int64(sum.DiskBefore.FreeBytes)), sum.Triggered)
+	if sum.Emergency {
+		fmt.Println("EMERGENCY tier: over the emergency line — cooldown bypassed")
+	}
 	if sum.InCooldown {
 		fmt.Println("skipped: inside the cooldown since the last applied run (use --force to override)")
+		printWatchReport(sum)
 		return exitOK
 	}
 	if !sum.Triggered && !*force && !*dryRun {
@@ -478,7 +482,22 @@ func cmdAutoclean(args []string) int {
 	} else {
 		fmt.Printf("total reclaimed: %s\n", humanBytes(int64(sum.BytesReclaimed)))
 	}
+	printWatchReport(sum)
 	return exitOK
+}
+
+// printWatchReport prints the report-only watchers' output: large new
+// files inside Docker volumes (alerts — never deleted by autoclean) and
+// the local backups retention total.
+func printWatchReport(sum autoclean.RunSummary) {
+	for _, line := range sum.BackupsRetention {
+		fmt.Printf("backups retention: %s holds %s (%s in %d dumps)\n",
+			line.Dir, humanBytes(int64(line.TotalBytes)), humanBytes(int64(line.DumpBytes)), line.Dumps)
+	}
+	for _, a := range sum.Alerts {
+		fmt.Printf("ALERT: large new file in docker volume %s: %s (%s, %ds old) — not deleted; disposition is a human decision\n",
+			a.Volume, a.Path, humanBytes(a.Size), a.AgeSeconds)
+	}
 }
 
 func cmdStopKill(args []string, action string) int {
