@@ -325,6 +325,13 @@ func TestPlanUnusedImages(t *testing.T) {
 		// Orphan helper: two generations, no containers at all.
 		gen("help2", "coollabsio/coolify-helper", 24*time.Hour),
 		gen("help1", "coollabsio/coolify-helper", 48*time.Hour),
+		// Orphan app with FOUR generations: inside its grace it must
+		// lose nothing at any index — not even the generations beyond
+		// keep, which a live group would lose on sight.
+		gen("gone4", "gone", time.Hour),
+		gen("gone3", "gone", 2*time.Hour),
+		gen("gone2", "gone", 3*time.Hour),
+		gen("gone1", "gone", 4*time.Hour),
 		// Untagged: never the planner's business.
 		{ID: "dangling", Repo: "", Created: now.Add(-72 * time.Hour)},
 	}
@@ -343,7 +350,8 @@ func TestPlanUnusedImages(t *testing.T) {
 			t.Errorf("first pass must delete %s, got %v", want, del)
 		}
 	}
-	for _, notWant := range []string{"um4", "um3", "ct3", "ct2", "ct1", "help2", "help1", "dangling"} {
+	for _, notWant := range []string{"um4", "um3", "ct3", "ct2", "ct1", "help2", "help1", "dangling",
+		"gone4", "gone3", "gone2", "gone1"} {
 		if gotIDs[notWant] {
 			t.Errorf("first pass must keep %s, got %v", notWant, del)
 		}
@@ -356,7 +364,8 @@ func TestPlanUnusedImages(t *testing.T) {
 	}
 
 	// 49 hours later, still unreferenced: the helper's older generation
-	// goes; its newest stays.  The clock keeps its original start.
+	// goes; its newest stays.  The four-generation orphan app loses
+	// everything but its newest.  The clock keeps its original start.
 	later := now.Add(49 * time.Hour)
 	del, next = PlanUnusedImages(images, used, 2, next, later, 48*time.Hour)
 	gotIDs = map[string]bool{}
@@ -365,6 +374,14 @@ func TestPlanUnusedImages(t *testing.T) {
 	}
 	if !gotIDs["help1"] || gotIDs["help2"] {
 		t.Errorf("expired orphan pass must delete only help1, got %v", del)
+	}
+	for _, want := range []string{"gone3", "gone2", "gone1"} {
+		if !gotIDs[want] {
+			t.Errorf("expired orphan pass must delete %s, got %v", want, del)
+		}
+	}
+	if gotIDs["gone4"] {
+		t.Errorf("an orphan group always keeps its newest generation, got %v", del)
 	}
 	if since := next["coollabsio/coolify-helper"]; !since.Equal(now) {
 		t.Errorf("orphan clock must keep its first-sight start, got %v", since)
@@ -381,6 +398,7 @@ func TestPlanUnusedImages(t *testing.T) {
 
 func TestValidateAgentCacheDir(t *testing.T) {
 	for _, bad := range []string{"/", "/home/jay", "/home/jay/.claude", "/home/jay/Code/app",
+		"/home/jay/.cache", "/home/jay/.npm", "/home/jay/.npm/_logs",
 		"/etc/.cache/x", "/var/lib/docker/volumes", "/home/jay/apps/lanes/x/.cache", "relative/.cache"} {
 		if ok, _ := ValidateAgentCacheDir(bad); ok {
 			t.Errorf("ValidateAgentCacheDir(%q) must refuse", bad)
@@ -414,6 +432,11 @@ func TestFindLargeNewFiles(t *testing.T) {
 	}
 	if got[0].Volume != "st-data" {
 		t.Errorf("finding must name its volume: %+v", got[0])
+	}
+	// The clock-skewed file (9 GiB, future mtime) is a finding, but its
+	// recorded age is clamped to 0, never negative.
+	if got[1].AgeSeconds != 0 {
+		t.Errorf("future-mtime finding AgeSeconds=%d, want 0 (clamped)", got[1].AgeSeconds)
 	}
 	// The cap holds.
 	if capped := FindLargeNewFiles(entries, 5<<30, 24*time.Hour, now, 2); len(capped) != 2 {

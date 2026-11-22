@@ -301,12 +301,17 @@ func PlanUnusedImages(images []DeployImage, usedIDs map[string]bool, keep int, o
 				continue
 			}
 			switch {
-			case i >= keep:
-				// Beyond the rollback window, referenced or not.
+			case live && i >= keep:
+				// Live group, beyond the rollback window: the window
+				// is the contract, and generations past it go on
+				// sight.
 				delete = append(delete, im)
 			case !live && orphanExpired && i >= 1:
 				// Orphan group past its grace: everything but the
-				// newest generation goes.
+				// newest generation goes.  An orphan group inside its
+				// grace loses NOTHING at any index — orphanhood must
+				// persist across runs, so the transient container-less
+				// window inside a deploy can never cost a generation.
 				delete = append(delete, im)
 			}
 		}
@@ -345,11 +350,18 @@ func ValidateAgentCacheDir(path string) (ok bool, reason string) {
 	if len(parts) < 3 {
 		return false, "refusing agent cache dir " + clean + ": too shallow to be a cache directory"
 	}
-	// Some component must name it a cache location: the npm tree, a
-	// .cache subtree, or a pnpm store.
-	for _, comp := range parts {
-		switch comp {
-		case ".npm", ".cache", ".pnpm-store", "_cacache", "_npx":
+	// The path must be anchored on a per-tool cache shape: npm's named
+	// stores (<.../.npm/_cacache or _npx), or ONE tool's directory
+	// directly under a .cache (<.../.cache/<tool>) — in each case the
+	// named directory itself or anything beneath it.  A bare .cache
+	// root is refused: it is every tool's cache tree at once, not one
+	// tool's regenerable store, and purging it would reach far beyond
+	// the categories this validator exists to bound.
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == ".npm" && (parts[i+1] == "_cacache" || parts[i+1] == "_npx") {
+			return true, ""
+		}
+		if parts[i] == ".cache" && parts[i+1] != "" {
 			return true, ""
 		}
 	}
@@ -407,6 +419,12 @@ func FindLargeNewFiles(entries []VolumeFileEntry, thresholdBytes uint64, window 
 		age := now.Sub(e.ModTime)
 		if age > window {
 			continue
+		}
+		if age < 0 {
+			// A future mtime (clock skew on the writer) counts as
+			// new, but its recorded age is 0, never negative — the
+			// value persists into history JSON and CLI output.
+			age = 0
 		}
 		out = append(out, VolumeFinding{
 			Volume:     e.Volume,

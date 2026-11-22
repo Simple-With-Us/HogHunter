@@ -92,6 +92,46 @@ func TestPruneBuildCacheOldDaemonFallsBack(t *testing.T) {
 	}
 }
 
+func TestVersionProbeFailureIsNotCached(t *testing.T) {
+	probes := 0
+	client, d := newTestDaemon(t, func(path string) (int, string) {
+		if path == "/version" {
+			probes++
+			if probes == 1 {
+				return 500, `{"message":"daemon restarting"}`
+			}
+			return 200, `{"ApiVersion":"1.56"}`
+		}
+		return 200, `{"SpaceReclaimed": 1}`
+	})
+	// First prune: the probe fails, so the request falls back to the
+	// baseline version.
+	if _, err := client.Prune("build-cache", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.last(); got != "POST /v1.41/build/prune?all=1" {
+		t.Errorf("failed-probe prune request=%q, want the v1.41 fallback", got)
+	}
+	// Second prune: the probe is retried, succeeds, and the negotiated
+	// version applies.  A cached failure would pin v1.41 forever.
+	if _, err := client.Prune("build-cache", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.last(); got != "POST /v1.45/build/prune?all=1" {
+		t.Errorf("recovered-probe prune request=%q, want POST /v1.45/build/prune?all=1", got)
+	}
+	if probes != 2 {
+		t.Errorf("probes=%d, want exactly 2 (failure retried, success cached)", probes)
+	}
+	// Third prune: the success is cached — no third probe.
+	if _, err := client.Prune("build-cache", true); err != nil {
+		t.Fatal(err)
+	}
+	if probes != 2 {
+		t.Errorf("probes=%d after a success, want 2 (cached)", probes)
+	}
+}
+
 func TestPruneImagesDanglingFilter(t *testing.T) {
 	client, d := newTestDaemon(t, func(string) (int, string) {
 		return 200, `{"SpaceReclaimed": 7}`

@@ -21,7 +21,6 @@ type Client struct {
 
 	verMu    sync.Mutex
 	verDone  bool
-	verOK    bool
 	verMajor int
 	verMinor int
 }
@@ -342,15 +341,19 @@ func (c *Client) DeleteImage(id string) error {
 }
 
 // apiVersion returns the daemon's API version as (major, minor),
-// discovered once per client from the unversioned /version endpoint.
-// ok=false when the daemon does not answer or reports garbage.
+// discovered from the unversioned /version endpoint and cached per
+// client — but only a SUCCESS is cached.  A transient probe failure
+// (daemon restarting, a wedged socket) must not pin the client to the
+// fallback version for its whole lifetime: in the daemon deployment
+// the client lives as long as the process, and a permanent fallback
+// would silently degrade every later build-cache prune to
+// dangling-only.  A failed probe is retried on the next call.
 func (c *Client) apiVersion() (int, int, bool) {
 	c.verMu.Lock()
 	defer c.verMu.Unlock()
 	if c.verDone {
-		return c.verMajor, c.verMinor, c.verOK
+		return c.verMajor, c.verMinor, true
 	}
-	c.verDone = true
 	req, err := http.NewRequest("GET", "http://localhost/version", nil)
 	if err != nil {
 		return 0, 0, false
@@ -366,11 +369,12 @@ func (c *Client) apiVersion() (int, int, bool) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&raw); err != nil {
 		return 0, 0, false
 	}
-	if _, err := fmt.Sscanf(raw.APIVersion, "%d.%d", &c.verMajor, &c.verMinor); err != nil {
+	var major, minor int
+	if _, err := fmt.Sscanf(raw.APIVersion, "%d.%d", &major, &minor); err != nil {
 		return 0, 0, false
 	}
-	c.verOK = true
-	return c.verMajor, c.verMinor, true
+	c.verMajor, c.verMinor, c.verDone = major, minor, true
+	return major, minor, true
 }
 
 // buildPruneVersion picks the API version for the build-prune call.
