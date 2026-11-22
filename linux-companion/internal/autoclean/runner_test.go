@@ -26,6 +26,12 @@ type fakeWorld struct {
 	audits    []string
 	journalSz uint64
 	now       time.Time
+
+	images        []docker.ImageInfo
+	containers    []docker.Container
+	deletedImages []string
+	storeBytes    uint64
+	deleteErr     map[string]error
 }
 
 func (w *fakeWorld) deps() Deps {
@@ -36,6 +42,16 @@ func (w *fakeWorld) deps() Deps {
 			w.pruneAll = append(w.pruneAll, all)
 			return docker.PruneResult{ReclaimedBytes: 1000}, nil
 		},
+		Images:     func() ([]docker.ImageInfo, error) { return w.images, nil },
+		Containers: func() ([]docker.Container, error) { return w.containers, nil },
+		DeleteImage: func(id string) error {
+			if err, bad := w.deleteErr[id]; bad {
+				return err
+			}
+			w.deletedImages = append(w.deletedImages, id)
+			return nil
+		},
+		ImageStoreBytes: func() (uint64, error) { return w.storeBytes, nil },
 		Vacuum: func(to uint64) error {
 			w.vacuumed = true
 			w.vacuumTo = to
@@ -64,6 +80,9 @@ func testConfig(t *testing.T, w *fakeWorld) Config {
 	cfg.BackupDirs = []string{filepath.Join(t.TempDir(), "backups")}
 	cfg.JournalDir = filepath.Join(t.TempDir(), "journal")
 	cfg.TmpDirs = []string{filepath.Join(t.TempDir(), "tmp")}
+	// Hermetic agent caches: an empty temp cache dir, so the category
+	// runs but finds nothing — and never the host's real /home.
+	cfg.AgentCacheDirs = []string{filepath.Join(t.TempDir(), ".cache", "deno")}
 	cfg.Cooldown = 0
 	return cfg
 }
@@ -149,14 +168,18 @@ func TestRunnerAppliedRunEndToEnd(t *testing.T) {
 	if !sum.Triggered {
 		t.Fatal("92% used must trigger")
 	}
-	// Docker: build cache and dangling images, both dangling-only.
+	// Docker: build cache first, then dangling images.  The build
+	// cache is pruned with all=true (the `builder prune -af` behavior —
+	// with all=false, Coolify's regular cache survives and the category
+	// reclaims 0); images stay all=false forever (dangling only).
 	if len(w.pruned) != 2 || w.pruned[0] != "build-cache" || w.pruned[1] != "images" {
 		t.Fatalf("pruned=%v, want [build-cache images]", w.pruned)
 	}
-	for _, all := range w.pruneAll {
-		if all {
-			t.Fatal("autoclean must never prune with all=true (dangling only)")
-		}
+	if !w.pruneAll[0] {
+		t.Error("build cache must be pruned with all=true")
+	}
+	if w.pruneAll[1] {
+		t.Error("images must never be pruned with all=true (dangling only)")
 	}
 	// The newest um dump and its generation survive; the old generation
 	// and its checksum go.  Fresh tmp survives; stale tmp goes.
@@ -180,9 +203,9 @@ func TestRunnerAppliedRunEndToEnd(t *testing.T) {
 			t.Errorf("%s must be removed", p)
 		}
 	}
-	// Journal vacuumed to the 500MiB target, above the floor.
-	if !w.vacuumed || w.vacuumTo != 500<<20 {
-		t.Errorf("vacuumed=%v to=%d, want 500MiB", w.vacuumed, w.vacuumTo)
+	// Journal vacuumed to the 200MiB target, above the 100MiB floor.
+	if !w.vacuumed || w.vacuumTo != 200<<20 {
+		t.Errorf("vacuumed=%v to=%d, want 200MiB", w.vacuumed, w.vacuumTo)
 	}
 	// History: exactly one record, with the categories that removed
 	// something and a nonzero total.
@@ -253,8 +276,11 @@ func TestRunnerDryRunDeletesNothingAndWritesNoHistory(t *testing.T) {
 
 func TestRunnerCooldownSuppressesSecondRun(t *testing.T) {
 	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	// Triggered (85% ≥ 80%) but NOT emergency (under 90%, free over
+	// the 16 GiB emergency floor): the cooldown must hold.  The
+	// emergency bypass has its own test below.
 	w := &fakeWorld{
-		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 255 << 30, FreeBytes: 40 << 30, UsedPercent: 85},
 		now:   now,
 	}
 	cfg := testConfig(t, w)
@@ -288,7 +314,7 @@ func TestRunnerCooldownSuppressesSecondRun(t *testing.T) {
 func TestRunnerCooldownSurvivesRestart(t *testing.T) {
 	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	w := &fakeWorld{
-		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 255 << 30, FreeBytes: 40 << 30, UsedPercent: 85},
 		now:   now,
 	}
 	cfg := testConfig(t, w)
@@ -315,6 +341,321 @@ func TestRunnerCooldownSurvivesRestart(t *testing.T) {
 	}
 	if len(w.pruned) != prunedAfterFirst {
 		t.Error("a cooldown-suppressed run after restart must not prune again")
+	}
+}
+
+func TestRunnerEmergencyBypassesCooldown(t *testing.T) {
+	now := time.Date(2026, 11, 21, 18, 0, 0, 0, time.UTC)
+	mkRunner := func(w *fakeWorld, hist string) *Runner {
+		cfg := testConfig(t, w)
+		cfg.Cooldown = 6 * time.Hour
+		d := w.deps()
+		d.HistoryPath = hist
+		return NewRunner(cfg, d)
+	}
+	// Percent emergency: 92% used.  First run applies; the second,
+	// minutes later and deep inside the cooldown, must run anyway.
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	hist := filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := mkRunner(w, hist)
+	if _, err := r.RunOnce(false, false); err != nil {
+		t.Fatal(err)
+	}
+	prunedAfterFirst := len(w.pruned)
+	sum, err := r.RunOnce(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.InCooldown {
+		t.Error("an emergency run must not be suppressed by the cooldown")
+	}
+	if !sum.Emergency {
+		t.Error("the bypassed run must be marked emergency")
+	}
+	if len(w.pruned) <= prunedAfterFirst {
+		t.Error("the emergency run must actually prune again")
+	}
+	// Free-space emergency: 85% used but free under the 16 GiB floor.
+	w2 := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 255 << 30, FreeBytes: 10 << 30, UsedPercent: 85},
+		now:   now,
+	}
+	r2 := mkRunner(w2, filepath.Join(t.TempDir(), "cleanup-history.jsonl"))
+	if _, err := r2.RunOnce(false, false); err != nil {
+		t.Fatal(err)
+	}
+	sum2, err := r2.RunOnce(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum2.InCooldown || !sum2.Emergency {
+		t.Errorf("free-floor emergency must bypass the cooldown: %+v", sum2)
+	}
+	// And the control case: triggered but not emergency stays
+	// suppressed (also covered by TestRunnerCooldownSuppressesSecondRun).
+	w3 := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 255 << 30, FreeBytes: 40 << 30, UsedPercent: 85},
+		now:   now,
+	}
+	r3 := mkRunner(w3, filepath.Join(t.TempDir(), "cleanup-history.jsonl"))
+	if _, err := r3.RunOnce(false, false); err != nil {
+		t.Fatal(err)
+	}
+	sum3, err := r3.RunOnce(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum3.InCooldown || sum3.Emergency {
+		t.Errorf("a non-emergency run inside the cooldown must stay suppressed: %+v", sum3)
+	}
+}
+
+func TestRunnerUnusedImages(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	img := func(id, repo string, age time.Duration) docker.ImageInfo {
+		return docker.ImageInfo{
+			ID:       id,
+			RepoTags: []string{repo + ":" + id},
+			Created:  now.Add(-age).Unix(),
+			Size:     1000,
+		}
+	}
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+		images: []docker.ImageInfo{
+			img("um4", "um", time.Hour), img("um3", "um", 2*time.Hour),
+			img("um2", "um", 3*time.Hour), img("um1", "um", 4*time.Hour),
+			{ID: "dangling", RepoTags: []string{"<none>:<none>"}, Created: now.Add(-72 * time.Hour).Unix(), Size: 5},
+		},
+		containers: []docker.Container{{ID: "c1", ImageID: "um4"}},
+	}
+	cfg := testConfig(t, w)
+	d := w.deps()
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Beyond keep=2 goes; the used newest and the previous stay; the
+	// dangling image is not this category's business.
+	if len(w.deletedImages) != 2 || w.deletedImages[0] != "um1" && w.deletedImages[0] != "um2" {
+		t.Fatalf("deleted=%v, want um1+um2 in some order", w.deletedImages)
+	}
+	for _, c := range sum.Categories {
+		if c.Category == CategoryUnusedImages {
+			if c.ItemsRemoved != 2 {
+				t.Errorf("unused-images ItemsRemoved=%d, want 2", c.ItemsRemoved)
+			}
+			// Store measurement is constant in the fake, so the
+			// fallback (deleted sizes) applies: 2 x 1000.
+			if c.BytesReclaimed != 2000 {
+				t.Errorf("unused-images BytesReclaimed=%d, want 2000 (fallback sizes)", c.BytesReclaimed)
+			}
+		}
+	}
+}
+
+func TestRunnerUnusedImagesOrphanAcrossRestarts(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	img := func(id string, age time.Duration) docker.ImageInfo {
+		return docker.ImageInfo{
+			ID:       id,
+			RepoTags: []string{"coollabsio/coolify-helper:" + id},
+			Created:  now.Add(-age).Unix(),
+			Size:     1000,
+		}
+	}
+	hist := filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	run := func(at time.Time) *fakeWorld {
+		w := &fakeWorld{
+			usage:  DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+			now:    at,
+			images: []docker.ImageInfo{img("help2", 24*time.Hour), img("help1", 48*time.Hour)},
+		}
+		cfg := testConfig(t, w)
+		d := w.deps()
+		d.HistoryPath = hist
+		if _, err := NewRunner(cfg, d).RunOnce(false, true); err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	// First sight: nothing deleted — the grace clock starts.
+	if w := run(now); len(w.deletedImages) != 0 {
+		t.Fatalf("first orphan sighting must delete nothing, got %v", w.deletedImages)
+	}
+	// 49h later, via a brand-new Runner over the same state dir (the
+	// systemd oneshot case): the older generation goes, newest stays.
+	if w := run(now.Add(49 * time.Hour)); len(w.deletedImages) != 1 || w.deletedImages[0] != "help1" {
+		t.Fatalf("expired orphan must delete only help1, got %v", w.deletedImages)
+	}
+}
+
+func TestRunnerAgentCaches(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	cacheDir := filepath.Join(t.TempDir(), ".npm", "_cacache")
+	cfg.AgentCacheDirs = []string{cacheDir}
+	oldFile := filepath.Join(cacheDir, "content-v2", "old.bin")
+	freshFile := filepath.Join(cacheDir, "index-v5", "fresh.bin")
+	writeFile(t, oldFile, 500, now.Add(-2*time.Hour))
+	writeFile(t, freshFile, 500, now.Add(-5*time.Minute))
+	d := w.deps()
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Error("a cache file older than the min age must be purged")
+	}
+	if _, err := os.Stat(freshFile); err != nil {
+		t.Error("a cache file inside the min age must survive (an install may be reading it)")
+	}
+	if info, err := os.Stat(cacheDir); err != nil || !info.IsDir() {
+		t.Error("the cache root itself must survive — only its contents are purged")
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "content-v2")); !os.IsNotExist(err) {
+		t.Error("a subdirectory the purge emptied must be removed")
+	}
+	for _, c := range sum.Categories {
+		if c.Category == CategoryAgentCaches && (c.ItemsRemoved != 1 || c.BytesReclaimed != 500) {
+			t.Errorf("agent-caches result=%+v, want 1 item / 500 bytes", c)
+		}
+	}
+}
+
+func TestRunnerAgentCachesRefusesSymlink(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	target := filepath.Join(t.TempDir(), "real-cache")
+	writeFile(t, filepath.Join(target, "keep.bin"), 100, now.Add(-72*time.Hour))
+	link := filepath.Join(t.TempDir(), ".cache", "deno")
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AgentCacheDirs = []string{link}
+	d := w.deps()
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "keep.bin")); err != nil {
+		t.Error("a symlinked cache dir must never be followed into its target")
+	}
+	for _, c := range sum.Categories {
+		if c.Category == CategoryAgentCaches && !strings.Contains(c.Error, "symlink") {
+			t.Errorf("the symlink refusal must be surfaced, got %+v", c)
+		}
+	}
+}
+
+func TestRunnerVolumeWatchAlertsAndDeletesNothing(t *testing.T) {
+	now := time.Date(2026, 11, 21, 18, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	cfg.DockerVolumesDir = filepath.Join(t.TempDir(), "volumes")
+	cfg.VolumeWatchThresholdBytes = 100
+	big := filepath.Join(cfg.DockerVolumesDir, "st-prod-app-data", "_data", ".backup-repair-20261121", "snapshot.db")
+	writeFile(t, big, 500, now.Add(-time.Hour))
+	old := filepath.Join(cfg.DockerVolumesDir, "st-prod-app-data", "_data", "app.db")
+	writeFile(t, old, 500, now.Add(-72*time.Hour))
+	d := w.deps()
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Alerts) != 1 || sum.Alerts[0].Path != big {
+		t.Fatalf("alerts=%v, want exactly the new snapshot file", sum.Alerts)
+	}
+	if _, err := os.Stat(big); err != nil {
+		t.Error("the watch must never delete: the snapshot file must survive the run")
+	}
+	foundWatch := false
+	for _, a := range w.audits {
+		if strings.HasPrefix(a, "autoclean-watch:") {
+			foundWatch = true
+		}
+	}
+	if !foundWatch {
+		t.Error("a watch finding must be audit-logged")
+	}
+	// An alert alone (nothing reclaimed by any category in this
+	// fixture beyond docker fakes...) — the docker fakes reclaim, so
+	// just assert the record carries the alert.
+	recs, err := ReadHistory(d.HistoryPath)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("history=%v err=%v", recs, err)
+	}
+	if len(recs[0].Alerts) != 1 {
+		t.Errorf("the history record must carry the alert: %+v", recs[0])
+	}
+}
+
+func TestRunnerBackupsRetentionLine(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	w := &fakeWorld{
+		usage: DiskUsage{TotalBytes: 300 << 30, UsedBytes: 276 << 30, FreeBytes: 24 << 30, UsedPercent: 92},
+		now:   now,
+	}
+	cfg := testConfig(t, w)
+	old := now.Add(-72 * time.Hour)
+	writeFile(t, filepath.Join(cfg.BackupDirs[0], "um", "a.db"), 500, old)
+	writeFile(t, filepath.Join(cfg.BackupDirs[0], "um", "a.db.sha256"), 10, old)
+	writeFile(t, filepath.Join(cfg.BackupDirs[0], "um", "b.db"), 700, now.Add(-time.Hour))
+	writeFile(t, filepath.Join(cfg.BackupDirs[0], "um", "b.db.sha256"), 10, now.Add(-time.Hour))
+	writeFile(t, filepath.Join(cfg.BackupDirs[0], "notes.txt"), 50, old)
+	d := w.deps()
+	// The fake DirSize reports the journal size for every path; use
+	// the real walker for this test.
+	d.DirSize = dirSize
+	d.HistoryPath = filepath.Join(t.TempDir(), "cleanup-history.jsonl")
+	r := NewRunner(cfg, d)
+	sum, err := r.RunOnce(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.BackupsRetention) != 1 {
+		t.Fatalf("retention lines=%v, want 1", sum.BackupsRetention)
+	}
+	line := sum.BackupsRetention[0]
+	// a.db is superseded and deleted by the run; the retention line is
+	// measured after the categories, so it reflects what remains:
+	// b.db (700) + its sidecar (10) + notes.txt (50) total, 710 in
+	// 1 dump (sidecars count toward the dump's bytes).
+	if line.TotalBytes != 760 || line.DumpBytes != 710 || line.Dumps != 1 {
+		t.Errorf("retention line=%+v, want total=760 dump=710 dumps=1", line)
+	}
+	recs, err := ReadHistory(d.HistoryPath)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("history=%v err=%v", recs, err)
+	}
+	if recs[0].BackupsRetentionBytes != 760 {
+		t.Errorf("history retention total=%d, want 760", recs[0].BackupsRetentionBytes)
 	}
 }
 

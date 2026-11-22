@@ -2,6 +2,7 @@ package autoclean
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,8 +23,24 @@ type Deps struct {
 	// Stat measures a filesystem (default StatDisk).
 	Stat func(path string) (DiskUsage, error)
 	// Prune runs one Docker prune target (default: the Docker socket
-	// client).  all is always false from autoclean: dangling-only.
+	// client).  autoclean passes all=true ONLY for the build cache,
+	// whose records are pure, regenerable cache; images are always
+	// pruned dangling-only (all=false) — an unused but tagged image may
+	// be the rollback for the next deploy, and tagged-image retention
+	// is the unused-images category's planner-gated job, not a prune's.
 	Prune func(target string, all bool) (docker.PruneResult, error)
+	// Images lists the daemon's images (default: the Docker client).
+	Images func() ([]docker.ImageInfo, error)
+	// Containers lists all containers, running and stopped (default:
+	// the Docker client).
+	Containers func() ([]docker.Container, error)
+	// DeleteImage removes one image by ID, without force (default: the
+	// Docker client).
+	DeleteImage func(id string) error
+	// ImageStoreBytes measures the uniquely-held bytes of all images
+	// (default: the Docker client's system-df total), for
+	// measure-before/after reclaim accounting.
+	ImageStoreBytes func() (uint64, error)
 	// Vacuum runs journalctl --vacuum-size=<bytes> (default: exec).
 	Vacuum func(vacuumToBytes uint64) error
 	// DirSize measures a directory tree in bytes (default: walk).
@@ -45,6 +62,10 @@ type Deps struct {
 	// an in-memory-only clock would let it re-run every 15 minutes
 	// whenever the disk stays over the trigger.
 	LastRunPath string
+	// OrphanStatePath overrides the persisted image-orphan state file
+	// (tests).  Orphanhood must persist across runs to mean anything,
+	// for the same reason the cooldown clock must.
+	OrphanStatePath string
 }
 
 func (d *Deps) fillDefaults(cfg Config) {
@@ -58,6 +79,37 @@ func (d *Deps) fillDefaults(cfg Config) {
 		} else {
 			d.Prune = func(string, bool) (docker.PruneResult, error) {
 				return docker.PruneResult{}, fmt.Errorf("docker socket unavailable")
+			}
+		}
+	}
+	if d.Images == nil || d.Containers == nil || d.DeleteImage == nil || d.ImageStoreBytes == nil {
+		if sock := docker.SocketPath(); sock != "" {
+			client := docker.New(sock)
+			if d.Images == nil {
+				d.Images = client.Images
+			}
+			if d.Containers == nil {
+				d.Containers = client.List
+			}
+			if d.DeleteImage == nil {
+				d.DeleteImage = client.DeleteImage
+			}
+			if d.ImageStoreBytes == nil {
+				d.ImageStoreBytes = client.ImageUniqueBytes
+			}
+		} else {
+			unavailable := fmt.Errorf("docker socket unavailable")
+			if d.Images == nil {
+				d.Images = func() ([]docker.ImageInfo, error) { return nil, unavailable }
+			}
+			if d.Containers == nil {
+				d.Containers = func() ([]docker.Container, error) { return nil, unavailable }
+			}
+			if d.DeleteImage == nil {
+				d.DeleteImage = func(string) error { return unavailable }
+			}
+			if d.ImageStoreBytes == nil {
+				d.ImageStoreBytes = func() (uint64, error) { return 0, unavailable }
 			}
 		}
 	}
@@ -91,6 +143,9 @@ func (d *Deps) fillDefaults(cfg Config) {
 	if d.LastRunPath == "" {
 		d.LastRunPath = filepath.Join(filepath.Dir(d.HistoryPath), "autoclean-lastrun.txt")
 	}
+	if d.OrphanStatePath == "" {
+		d.OrphanStatePath = filepath.Join(filepath.Dir(d.HistoryPath), "autoclean-orphans.json")
+	}
 }
 
 // loadLastRun reads the persisted cooldown clock.  A missing or
@@ -115,6 +170,45 @@ func saveLastRun(path string, t time.Time) error {
 	return os.WriteFile(path, []byte(t.Format(time.RFC3339Nano)+"\n"), 0600)
 }
 
+// loadOrphanState reads the persisted image-orphan clock: repository ->
+// first time a run observed no container referencing any of its images.
+// A missing or unparseable file reads as empty (no orphanhood on
+// record), which is the safe direction: every group starts its grace
+// clock from the next observation.
+func loadOrphanState(path string) map[string]time.Time {
+	out := map[string]time.Time{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	raw := map[string]string{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return out
+	}
+	for repo, ts := range raw {
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			out[repo] = t
+		}
+	}
+	return out
+}
+
+// saveOrphanState persists the orphan clock next to the history file.
+func saveOrphanState(path string, state map[string]time.Time) error {
+	raw := map[string]string{}
+	for repo, t := range state {
+		raw[repo] = t.Format(time.RFC3339Nano)
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0600)
+}
+
 // CategoryResult is one category's outcome in a run.
 type CategoryResult struct {
 	Category       string   `json:"category"`
@@ -123,6 +217,18 @@ type CategoryResult struct {
 	Items          []string `json:"items,omitempty"`
 	Skipped        string   `json:"skipped,omitempty"`
 	Error          string   `json:"error,omitempty"`
+}
+
+// RetentionLine is one backup root's retention total for a run's
+// report: how much space the local backup copies hold, split into the
+// dump files themselves and everything else in the root.  Report-only —
+// retention policy belongs to the backup system, but its growth is
+// structural disk pressure and every run states it plainly.
+type RetentionLine struct {
+	Dir        string `json:"dir"`
+	TotalBytes uint64 `json:"total_bytes"`
+	DumpBytes  uint64 `json:"dump_bytes"`
+	Dumps      int    `json:"dumps"`
 }
 
 // RunSummary is the outcome of one RunOnce call.
@@ -137,6 +243,15 @@ type RunSummary struct {
 	BytesReclaimed uint64           `json:"bytes_reclaimed"`
 	ItemsRemoved   int              `json:"items_removed"`
 	InCooldown     bool             `json:"in_cooldown,omitempty"`
+	// Emergency marks a run that bypassed the cooldown under the
+	// emergency tier.
+	Emergency bool `json:"emergency,omitempty"`
+	// Alerts are the large-new-file watch's findings inside Docker
+	// volumes.  Report-only: nothing here was, or will be, deleted by
+	// autoclean.
+	Alerts []VolumeFinding `json:"alerts,omitempty"`
+	// BackupsRetention is the per-root local-backup retention total.
+	BackupsRetention []RetentionLine `json:"backups_retention,omitempty"`
 }
 
 // Runner executes autoclean runs under one config.  Safe for concurrent
@@ -219,9 +334,25 @@ func (r *Runner) RunOnceAs(actor string, dryRun bool, force bool) (RunSummary, e
 			return sum, nil
 		}
 		if !r.lastRun.IsZero() && now.Sub(r.lastRun) < r.cfg.Cooldown {
-			sum.InCooldown = true
-			_ = r.deps.AuditLog(actor, "autoclean-check", r.cfg.RootPath, sum.Trigger, "skipped: cooldown")
-			return sum, nil
+			if r.cfg.Emergency(before) {
+				// Emergency tier: above the emergency line the cooldown
+				// does not apply.  On 2026-11-21 the disk lost ~14 GB in
+				// 90 minutes while checks at 87–93% used were skipped
+				// for the cooldown; a disk in free fall gets pruned on
+				// every check until it drops back under the line.
+				sum.Emergency = true
+				sum.Trigger += " [emergency: cooldown bypassed]"
+				_ = r.deps.AuditLog(actor, "autoclean-check", r.cfg.RootPath, sum.Trigger, "emergency: cooldown bypassed")
+			} else {
+				sum.InCooldown = true
+				_ = r.deps.AuditLog(actor, "autoclean-check", r.cfg.RootPath, sum.Trigger, "skipped: cooldown")
+				// The watchers still run on a cooldown skip: they delete
+				// nothing, and a large new file inside a volume is
+				// exactly what a human needs to hear about while the
+				// disk sits over the trigger waiting out the cooldown.
+				r.reportWatchers(&sum, actor, now)
+				return sum, nil
+			}
 		}
 	}
 
@@ -244,6 +375,8 @@ func (r *Runner) RunOnceAs(actor string, dryRun bool, force bool) (RunSummary, e
 		sum.DiskAfter = after
 	}
 
+	r.reportWatchers(&sum, actor, now)
+
 	if !dryRun {
 		r.mu.Lock()
 		r.lastRun = now
@@ -254,9 +387,13 @@ func (r *Runner) RunOnceAs(actor string, dryRun bool, force bool) (RunSummary, e
 		if err := saveLastRun(r.deps.LastRunPath, now); err != nil {
 			_ = r.deps.AuditLog(actor, "autoclean", "cooldown", "persist last-run failed", "error: "+err.Error())
 		}
-		// History mirrors reclaimed space only: a run that removed
-		// nothing leaves no row (the Mac store's rule).
-		if sum.ItemsRemoved > 0 || sum.BytesReclaimed > 0 {
+		// History mirrors reclaimed space: a run that removed nothing
+		// leaves no row (the Mac store's rule) — with one extension: a
+		// run whose watch raised an alert DOES leave a row, even at
+		// zero reclaimed.  The alert is the run's outcome, and history
+		// is the surface the operator reads; an alert that left no
+		// record would be invisible there.
+		if sum.ItemsRemoved > 0 || sum.BytesReclaimed > 0 || len(sum.Alerts) > 0 {
 			// The persisted record caps each category's item list at
 			// 50, like ItemTitles below: a run can delete tens of
 			// thousands of stale temp files, and an unbounded list
@@ -278,6 +415,10 @@ func (r *Runner) RunOnceAs(actor string, dryRun bool, force bool) (RunSummary, e
 				Source:         actor,
 				Trigger:        sum.Trigger,
 				Categories:     recCats,
+				Alerts:         sum.Alerts,
+			}
+			for _, line := range sum.BackupsRetention {
+				rec.BackupsRetentionBytes += line.TotalBytes
 			}
 			for _, c := range sum.Categories {
 				if c.ItemsRemoved > 0 || c.BytesReclaimed > 0 {
@@ -307,8 +448,12 @@ func (r *Runner) runCategory(id string, dryRun bool, now time.Time) CategoryResu
 		// Dangling only.  all=false is the whole point: an unused but
 		// tagged image may be the rollback for the next deploy.
 		return r.pruneDocker(id, "images", dryRun)
+	case CategoryUnusedImages:
+		return r.cleanUnusedImages(dryRun, now)
 	case CategoryBackups:
 		return r.cleanBackups(dryRun, now)
+	case CategoryAgentCaches:
+		return r.cleanAgentCaches(dryRun, now)
 	case CategoryJournal:
 		return r.vacuumJournal(dryRun)
 	case CategoryStaleTmp:
@@ -324,7 +469,16 @@ func (r *Runner) pruneDocker(id, target string, dryRun bool) CategoryResult {
 		res.Skipped = "dry-run: docker prune reports reclaimed bytes only when applied"
 		return res
 	}
-	out, err := r.deps.Prune(target, false)
+	// The build cache is pruned with all=true — the `docker builder
+	// prune -af` behavior.  With all=false the endpoint clears only
+	// dangling records, and Coolify's regular build cache (the bulk of
+	// every deploy's output) survives untouched: on 2026-11-21 this
+	// category reported 0 bytes in every run while 8.9 GB of cache sat
+	// on the disk.  Build cache is regenerable by definition, and cache
+	// a build is using at this instant is BuildKit's call, never
+	// interrupted.  Images stay all=false (see runCategory).
+	all := target == "build-cache"
+	out, err := r.deps.Prune(target, all)
 	if err != nil {
 		res.Error = err.Error()
 		return res
@@ -335,6 +489,329 @@ func (r *Runner) pruneDocker(id, target string, dryRun bool) CategoryResult {
 		res.Items = []string{"docker prune " + target}
 	}
 	return res
+}
+
+// cleanUnusedImages applies the retention planner: per repository,
+// generations beyond the rollback window go, plus long-orphaned
+// repositories' older generations.  Deletion is by image ID without
+// force, so the daemon itself refuses anything a container references.
+func (r *Runner) cleanUnusedImages(dryRun bool, now time.Time) CategoryResult {
+	res := CategoryResult{Category: CategoryUnusedImages}
+	images, err := r.deps.Images()
+	if err != nil {
+		res.Error = "images: " + err.Error()
+		return res
+	}
+	containers, err := r.deps.Containers()
+	if err != nil {
+		res.Error = "containers: " + err.Error()
+		return res
+	}
+	usedIDs := map[string]bool{}
+	for _, c := range containers {
+		if c.ImageID != "" {
+			usedIDs[c.ImageID] = true
+		}
+	}
+	var inventory []DeployImage
+	for _, im := range images {
+		di, ok := deployImage(im)
+		if !ok {
+			continue // untagged, digest-only, or multi-repo: not ours
+		}
+		inventory = append(inventory, di)
+	}
+	orphanSince := loadOrphanState(r.deps.OrphanStatePath)
+	candidates, nextOrphan := PlanUnusedImages(inventory, usedIDs, r.cfg.ImageKeepPerRepo, orphanSince, now, r.cfg.ImageOrphanGrace)
+	for _, c := range candidates {
+		res.Items = append(res.Items, c.Repo+":"+c.Tag)
+	}
+	if dryRun {
+		res.ItemsRemoved = len(candidates)
+		return res
+	}
+	// Persist the orphan clock even when nothing is deleted: the
+	// observations ARE the state the grace rule runs on.
+	if err := saveOrphanState(r.deps.OrphanStatePath, nextOrphan); err != nil {
+		_ = r.deps.AuditLog(r.cfg.Actor, "autoclean", CategoryUnusedImages, "persist orphan state failed", "error: "+err.Error())
+	}
+	if len(candidates) == 0 {
+		return res
+	}
+	storeBefore, storeErr := r.deps.ImageStoreBytes()
+	var failures []string
+	var deletedSize int64
+	for _, c := range candidates {
+		if err := r.deps.DeleteImage(c.ID); err != nil {
+			failures = append(failures, c.Repo+":"+c.Tag+": "+err.Error())
+			continue
+		}
+		res.ItemsRemoved++
+		deletedSize += c.Size
+	}
+	switch {
+	case storeErr == nil:
+		if storeAfter, err := r.deps.ImageStoreBytes(); err == nil && storeAfter < storeBefore {
+			// Measured, like the journal: the delta of uniquely-held
+			// image bytes, never the deleted images' virtual sizes
+			// (which double-count shared layers).
+			res.BytesReclaimed = storeBefore - storeAfter
+		} else {
+			// Unmeasurable afterwards: fall back to the deleted
+			// images' sizes (the journal category's precedent).
+			res.BytesReclaimed = uint64(deletedSize)
+		}
+	default:
+		res.BytesReclaimed = uint64(deletedSize)
+	}
+	if len(failures) > 0 {
+		res.Error = fmt.Sprintf("%d deletion(s) failed: %s", len(failures), strings.Join(failures, "; "))
+	}
+	// Items names what was planned; on partial failure the error above
+	// names what did not go.  Keep Items to the deleted set so the
+	// history never claims a removal that failed.
+	if len(failures) > 0 {
+		failed := map[string]bool{}
+		for _, f := range failures {
+			failed[strings.SplitN(f, ": ", 2)[0]] = true
+		}
+		kept := res.Items[:0]
+		for _, item := range res.Items {
+			if !failed[item] {
+				kept = append(kept, item)
+			}
+		}
+		res.Items = kept
+	}
+	return res
+}
+
+// deployImage maps a Docker image to the planner's shape.  ok=false for
+// images the planner must never see: untagged or digest-only images
+// (the dangling category's territory), and images tagged into more
+// than one repository, whose owning app is ambiguous.
+func deployImage(im docker.ImageInfo) (DeployImage, bool) {
+	repos := map[string]string{} // repo -> tag
+	for _, ref := range im.RepoTags {
+		if ref == "" || ref == "<none>:<none>" {
+			continue
+		}
+		repo, tag, ok := ImageRepoTag(ref)
+		if !ok {
+			return DeployImage{}, false
+		}
+		repos[repo] = tag
+	}
+	if len(repos) != 1 {
+		return DeployImage{}, false
+	}
+	for repo, tag := range repos {
+		return DeployImage{
+			ID:      im.ID,
+			Repo:    repo,
+			Tag:     tag,
+			Created: time.Unix(im.Created, 0),
+			Size:    im.Size,
+		}, true
+	}
+	return DeployImage{}, false
+}
+
+// cleanAgentCaches purges the seat's regenerable tool caches.  Files go
+// (never the cache root itself, so the tools keep their directory), and
+// directories left empty by the purge are removed deepest-first.
+func (r *Runner) cleanAgentCaches(dryRun bool, now time.Time) CategoryResult {
+	res := CategoryResult{Category: CategoryAgentCaches}
+	open := r.deps.OpenFiles()
+	var failures []string
+	present := 0
+	for _, dir := range r.cfg.AgentCacheDirList() {
+		if ok, reason := ValidateAgentCacheDir(dir); !ok {
+			failures = append(failures, reason)
+			continue
+		}
+		info, err := os.Lstat(dir)
+		if err != nil {
+			continue // a tool that is not installed has no cache here
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			failures = append(failures, "refusing agent cache dir "+dir+": is a symlink")
+			continue
+		}
+		if !info.IsDir() {
+			continue
+		}
+		present++
+		entries, dirs, err := scanCacheDir(dir, open)
+		if err != nil {
+			failures = append(failures, "scan "+dir+": "+err.Error())
+			continue
+		}
+		sizes := map[string]int64{}
+		for _, e := range entries {
+			sizes[e.Path] = e.Size
+		}
+		for _, path := range SelectStaleCache(entries, now, r.cfg.AgentCacheMinAge) {
+			if !dryRun {
+				if err := r.deps.Remove(path); err != nil {
+					failures = append(failures, path+": "+err.Error())
+					continue
+				}
+			}
+			res.Items = append(res.Items, path)
+			res.ItemsRemoved++
+			res.BytesReclaimed += uint64(sizes[path])
+		}
+		if !dryRun {
+			// Deepest first; Remove on a non-empty directory fails and
+			// is ignored — only directories the purge actually emptied
+			// go away, and never the cache root itself.
+			sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+			for _, d := range dirs {
+				_ = r.deps.Remove(d)
+			}
+		}
+	}
+	switch {
+	case present == 0 && len(failures) == 0:
+		res.Skipped = "no agent cache dirs present"
+	case len(failures) > 0:
+		res.Error = strings.Join(failures, "; ")
+	}
+	return res
+}
+
+// scanCacheDir inventories one cache tree (full depth — a cache's own
+// layout is the tool's, and every file in it is cache by definition)
+// plus its subdirectories, for empty-dir pruning after the purge.
+func scanCacheDir(root string, open map[string]bool) ([]TmpEntry, []string, error) {
+	var entries []TmpEntry
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable entries are skipped, never fatal
+		}
+		if d.IsDir() {
+			if path != root {
+				dirs = append(dirs, path)
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		entries = append(entries, TmpEntry{
+			Path:    path,
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+			Symlink: d.Type()&os.ModeSymlink != 0,
+			Regular: info.Mode().IsRegular(),
+			Open:    open[path],
+		})
+		return nil
+	})
+	return entries, dirs, err
+}
+
+// reportWatchers runs the two report-only watchers into the summary:
+// the large-new-file watch inside Docker volumes, and the backups
+// retention lines.  Neither deletes anything, ever.  Findings are
+// audit-logged individually, so they survive in the audit trail even
+// for runs that write no history record (dry runs, cooldown skips).
+func (r *Runner) reportWatchers(sum *RunSummary, actor string, now time.Time) {
+	if entries, err := scanVolumeWatch(r.cfg.DockerVolumesDir, r.cfg.VolumeWatchMaxDepth); err == nil {
+		sum.Alerts = FindLargeNewFiles(entries, r.cfg.VolumeWatchThresholdBytes, r.cfg.VolumeWatchWindow, now, 20)
+		for _, f := range sum.Alerts {
+			_ = r.deps.AuditLog(actor, "autoclean-watch", f.Path,
+				fmt.Sprintf("large new file in docker volume %s: %d bytes, %ds old — report only, disposition is a human decision", f.Volume, f.Size, f.AgeSeconds),
+				"alert")
+		}
+	}
+	sum.BackupsRetention = r.retentionLines(now)
+}
+
+// retentionLines measures each backup root for the run's report: total
+// bytes in the root, and the dump files' share of it.  Unreadable or
+// refused roots are omitted — the backups category reports its own
+// errors; this is a measurement, not a second error channel.
+func (r *Runner) retentionLines(now time.Time) []RetentionLine {
+	var lines []RetentionLine
+	for _, root := range r.cfg.BackupDirs {
+		if ok, _ := ValidateBackupRoot(root); !ok {
+			continue
+		}
+		total, err := r.deps.DirSize(root)
+		if err != nil {
+			continue
+		}
+		line := RetentionLine{Dir: root, TotalBytes: total}
+		if dumps, err := scanBackupDir(root, now, r.cfg.BackupInFlightGrace); err == nil {
+			for _, d := range dumps {
+				line.Dumps++
+				line.DumpBytes += uint64(d.Size)
+				for _, s := range d.Sidecars {
+					line.DumpBytes += uint64(s.Size)
+				}
+			}
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// scanVolumeWatch inventories files inside Docker volumes: for each
+// volume, its _data directory, walked to at most maxDepth levels below
+// _data.  The depth bound is the cost control — the walk stats files,
+// it never reads them, and live volume data is never modified.
+func scanVolumeWatch(volumesDir string, maxDepth int) ([]VolumeFileEntry, error) {
+	var entries []VolumeFileEntry
+	vols, err := os.ReadDir(volumesDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range vols {
+		if !v.IsDir() {
+			continue
+		}
+		dataDir := filepath.Join(volumesDir, v.Name(), "_data")
+		if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+			continue
+		}
+		_ = filepath.WalkDir(dataDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(dataDir, path)
+			depth := 0
+			if rel != "." {
+				depth = strings.Count(rel, string(filepath.Separator)) + 1
+			}
+			if d.IsDir() {
+				if depth >= maxDepth && path != dataDir {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if depth > maxDepth {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			entries = append(entries, VolumeFileEntry{
+				Volume:  v.Name(),
+				Path:    path,
+				Size:    info.Size(),
+				ModTime: info.ModTime(),
+				Symlink: d.Type()&os.ModeSymlink != 0,
+				Regular: info.Mode().IsRegular(),
+			})
+			return nil
+		})
+	}
+	return entries, nil
 }
 
 func (r *Runner) cleanBackups(dryRun bool, now time.Time) CategoryResult {

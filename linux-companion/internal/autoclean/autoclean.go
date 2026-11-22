@@ -11,12 +11,31 @@
 // at or over UsedPercentTrigger used, or under MinFreeBytes free.  Every
 // category is a safe, regenerable, or superseded-copy category:
 //
-//   - docker build cache (Docker reports the reclaimed bytes itself)
+//   - docker build cache, pruned the way `docker builder prune -af`
+//     prunes it: all cache not in use by a running build, not just the
+//     dangling records (Docker reports the reclaimed bytes itself)
 //   - dangling Docker images only — never all-unused, never volumes
+//   - unused deploy images beyond the rollback window: per image
+//     repository, the newest generations are kept (current + previous
+//     by default); an image any container references is never touched
 //   - superseded local backups: exactly the newest complete dump per app
 //     is kept; B2 holds the off-host replica (fleet backup rule)
+//   - agent tool caches under the seat's home (npm, deno, pnpm, node):
+//     pure caches, regenerated on demand
 //   - the systemd journal, vacuumed down to a target with a hard floor
 //   - stale temp files: old, closed, regular files only
+//
+// Two report-only watchers ride along with every run and never delete
+// anything: a large-new-file watch inside Docker volumes (a multi-GB
+// file appearing in a live app volume is surfaced for a human decision,
+// never removed), and a backups-retention total, so the structural
+// growth of the local backup copies is visible in every run's output.
+//
+// Above the emergency line (90% used or under 16 GiB free by default)
+// the cooldown no longer applies: a disk in free fall is pruned on
+// every check until it drops back under the line.  The 2026-11-21
+// incident is the reason — checks at 87–93% used were skipped for the
+// 6-hour cooldown while the disk lost ~14 GB in 90 minutes.
 //
 // Anything outside that list is never touched: no live app data, no Docker
 // volumes, no running containers, no lane or working trees, and never the
@@ -36,11 +55,13 @@ import (
 // Category ids.  These strings are written to the cleanup history and the
 // audit log, so they are part of the on-disk schema — do not rename them.
 const (
-	CategoryBuildCache = "docker-build-cache"
-	CategoryImages     = "docker-dangling-images"
-	CategoryBackups    = "backups-superseded"
-	CategoryJournal    = "journal"
-	CategoryStaleTmp   = "stale-tmp"
+	CategoryBuildCache   = "docker-build-cache"
+	CategoryImages       = "docker-dangling-images"
+	CategoryUnusedImages = "docker-unused-images"
+	CategoryBackups      = "backups-superseded"
+	CategoryAgentCaches  = "agent-caches"
+	CategoryJournal      = "journal"
+	CategoryStaleTmp     = "stale-tmp"
 )
 
 // AllCategories is every category id, in the order runs execute them.
@@ -50,7 +71,9 @@ func AllCategories() []string {
 	return []string{
 		CategoryBuildCache,
 		CategoryImages,
+		CategoryUnusedImages,
 		CategoryBackups,
+		CategoryAgentCaches,
 		CategoryJournal,
 		CategoryStaleTmp,
 	}
@@ -74,8 +97,45 @@ type Config struct {
 	// Cooldown is the minimum gap between two applied (non-dry-run) runs,
 	// so a disk that stays over the trigger is not pruned every check.
 	Cooldown time.Duration
+	// EmergencyUsedPercent and EmergencyMinFreeBytes are the emergency
+	// line: at or over the percent, or under the free floor, a triggered
+	// run ignores the cooldown.  The emergency tier never widens WHAT a
+	// run may delete — the same safe categories — only WHEN it may run.
+	EmergencyUsedPercent  float64
+	EmergencyMinFreeBytes uint64
 	// Categories toggles each category; a missing key means enabled.
 	Categories map[string]bool
+	// ImageKeepPerRepo is the rollback window for the unused-images
+	// category: per image repository, this many newest generations are
+	// always kept (2 = current + previous deploy).
+	ImageKeepPerRepo int
+	// ImageOrphanGrace: a repository no container references must stay
+	// unreferenced for at least this long (tracked across runs in a
+	// state file) before its beyond-newest generations become
+	// candidates.  The grace is what makes a mid-deploy window — old
+	// container removed, new one not yet created — harmless: orphanhood
+	// has to persist, not just be observed once.
+	ImageOrphanGrace time.Duration
+	// AgentHome is the seat user's home; the default agent-cache dirs
+	// derive from it.  AgentCacheDirs overrides the derived list.
+	AgentHome      string
+	AgentCacheDirs []string
+	// AgentCacheMinAge: cache files touched more recently than this are
+	// never deleted, so a purge cannot pull files out from under an
+	// install that is running right now.
+	AgentCacheMinAge time.Duration
+	// DockerVolumesDir is the Docker volumes root the large-new-file
+	// watch scans (report-only; the watch never deletes).
+	DockerVolumesDir string
+	// VolumeWatchThresholdBytes: a volume file larger than this counts
+	// as large for the watch.
+	VolumeWatchThresholdBytes uint64
+	// VolumeWatchWindow: a large volume file counts as new when its
+	// mtime is inside this window before the run.
+	VolumeWatchWindow time.Duration
+	// VolumeWatchMaxDepth bounds the watch's walk under each volume's
+	// _data directory, keeping the scan cheap on a busy host.
+	VolumeWatchMaxDepth int
 	// BackupDirs are the local backup roots scanned for superseded dumps.
 	BackupDirs []string
 	// BackupInFlightGrace: a dump with no completion marker counts as
@@ -101,24 +161,56 @@ type Config struct {
 
 // DefaultConfig returns the shipped defaults, tuned for the Coolify host:
 // trigger at 80% used or under 30 GiB free, check every 15 minutes, at
-// most one applied run per 6 hours.
+// most one applied run per 6 hours — except above the emergency line
+// (90% used or under 16 GiB free), where the cooldown does not apply.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:             false,
-		RootPath:            "/",
-		UsedPercentTrigger:  80,
-		MinFreeBytes:        30 << 30,
-		CheckInterval:       15 * time.Minute,
-		Cooldown:            6 * time.Hour,
-		Categories:          map[string]bool{},
-		BackupDirs:          []string{"/backups"},
-		BackupInFlightGrace: 2 * time.Hour,
-		JournalTargetBytes:  500 << 20,
-		JournalFloorBytes:   200 << 20,
-		JournalDir:          "/var/log/journal",
-		TmpDirs:             []string{"/tmp", "/var/tmp"},
-		TmpMinAge:           7 * 24 * time.Hour,
-		Actor:               "autoclean",
+		Enabled:                   false,
+		RootPath:                  "/",
+		UsedPercentTrigger:        80,
+		MinFreeBytes:              30 << 30,
+		CheckInterval:             15 * time.Minute,
+		Cooldown:                  6 * time.Hour,
+		EmergencyUsedPercent:      90,
+		EmergencyMinFreeBytes:     16 << 30,
+		Categories:                map[string]bool{},
+		ImageKeepPerRepo:          2,
+		ImageOrphanGrace:          48 * time.Hour,
+		AgentHome:                 "/home/jay",
+		AgentCacheMinAge:          time.Hour,
+		BackupDirs:                []string{"/backups"},
+		BackupInFlightGrace:       2 * time.Hour,
+		JournalTargetBytes:        200 << 20,
+		JournalFloorBytes:         100 << 20,
+		JournalDir:                "/var/log/journal",
+		TmpDirs:                   []string{"/tmp", "/var/tmp"},
+		TmpMinAge:                 7 * 24 * time.Hour,
+		DockerVolumesDir:          "/var/lib/docker/volumes",
+		VolumeWatchThresholdBytes: 5 << 30,
+		VolumeWatchWindow:         24 * time.Hour,
+		VolumeWatchMaxDepth:       3,
+		Actor:                     "autoclean",
+	}
+}
+
+// AgentCacheDirList returns the effective agent-cache directories: the
+// explicit override when set, else the known regenerable caches under
+// the seat's home — the exact set the 2026-11-21 manual reclaim cleared
+// (npm's cache and npx store, and the deno, pnpm, and node caches).
+func (c Config) AgentCacheDirList() []string {
+	if len(c.AgentCacheDirs) > 0 {
+		return c.AgentCacheDirs
+	}
+	home := c.AgentHome
+	if home == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(home, ".npm", "_cacache"),
+		filepath.Join(home, ".npm", "_npx"),
+		filepath.Join(home, ".cache", "deno"),
+		filepath.Join(home, ".cache", "pnpm"),
+		filepath.Join(home, ".cache", "node"),
 	}
 }
 
@@ -153,6 +245,32 @@ func ConfigFromEnv() Config {
 	}
 	if v, err := strconv.Atoi(os.Getenv("HH_AGENT_AUTOCLEAN_COOLDOWN_HOURS")); err == nil && v >= 0 {
 		c.Cooldown = time.Duration(v) * time.Hour
+	}
+	if v, err := strconv.ParseFloat(os.Getenv("HH_AGENT_AUTOCLEAN_EMERGENCY_PCT"), 64); err == nil && v > 0 && v < 100 {
+		c.EmergencyUsedPercent = v
+	}
+	if v, err := strconv.ParseUint(os.Getenv("HH_AGENT_AUTOCLEAN_EMERGENCY_MIN_FREE_GB"), 10, 64); err == nil && v > 0 {
+		c.EmergencyMinFreeBytes = v << 30
+	}
+	if v, err := strconv.Atoi(os.Getenv("HH_AGENT_AUTOCLEAN_IMAGE_KEEP")); err == nil && v >= 1 {
+		c.ImageKeepPerRepo = v
+	}
+	if v := os.Getenv("HH_AGENT_AUTOCLEAN_AGENT_HOME"); v != "" {
+		c.AgentHome = v
+	}
+	if v := os.Getenv("HH_AGENT_AUTOCLEAN_AGENT_CACHE_DIRS"); v != "" {
+		var dirs []string
+		for _, d := range strings.Split(v, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				dirs = append(dirs, d)
+			}
+		}
+		if len(dirs) > 0 {
+			c.AgentCacheDirs = dirs
+		}
+	}
+	if v, err := strconv.ParseUint(os.Getenv("HH_AGENT_AUTOCLEAN_VOLUME_WATCH_GB"), 10, 64); err == nil && v > 0 {
+		c.VolumeWatchThresholdBytes = v << 30
 	}
 	if v := os.Getenv("HH_AGENT_AUTOCLEAN_BACKUP_DIRS"); v != "" {
 		var dirs []string
@@ -250,6 +368,20 @@ func (c Config) ShouldRun(u DiskUsage) bool {
 		return false
 	}
 	return u.UsedPercent >= c.UsedPercentTrigger || u.FreeBytes < c.MinFreeBytes
+}
+
+// Emergency is the emergency-tier decision, kept pure like ShouldRun:
+// the disk is in free fall when usage is at or over the emergency
+// percent OR free space is under the emergency floor.  Exactly at the
+// line counts, same as the trigger.  Emergency does not depend on
+// Enabled — it classifies a measurement; the runner decides what the
+// classification means (cooldown bypass for a run that already
+// triggered).
+func (c Config) Emergency(u DiskUsage) bool {
+	if u.TotalBytes == 0 {
+		return false
+	}
+	return u.UsedPercent >= c.EmergencyUsedPercent || u.FreeBytes < c.EmergencyMinFreeBytes
 }
 
 // HistoryPath is the append-only cleanup history file.  The name matches
