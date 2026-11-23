@@ -16,17 +16,23 @@ struct DiskCleanerView: View {
     /// (HOGHUNTER-5); the store tick already proved that shape.
     @State private var volumeSpace: DiskSpace?
     @State private var volumeRefreshInFlight = false
+    @State private var volumeRefreshPending = false
 
     /// One refresh at a time: scan progress flips `store.state` often,
     /// and stacked purgeable-capacity reads would stall the very panel
-    /// they describe.
+    /// they describe.  A change that lands mid-read is remembered and
+    /// gets one trailing refresh, so the gauge never sticks stale.
     private func refreshVolumeSpace() {
-        guard !volumeRefreshInFlight else { return }
+        guard !volumeRefreshInFlight else { volumeRefreshPending = true; return }
         volumeRefreshInFlight = true
         Task {
             let space = await Task.detached(priority: .utility) { DiskSpace.current() }.value
             volumeSpace = space
             volumeRefreshInFlight = false
+            if volumeRefreshPending {
+                volumeRefreshPending = false
+                refreshVolumeSpace()
+            }
         }
     }
     /// The unattended clean regimen, as the owner set it.
