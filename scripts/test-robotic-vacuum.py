@@ -804,7 +804,9 @@ class _EngineHome(unittest.TestCase):
         self.addCleanup(shutil.rmtree, str(self.home), True)
         self.cfg = load_config(home=self.home)
         self.cfg["housekeeper_lock"] = str(self.home / ".housekeeper.lock")
-        self.engine = VacuumEngine(self.cfg, home=self.home)
+        # A fixed disk reading: a test that does not exercise the measurement
+        # must not be made flaky by the host writing to its own disk.
+        self.engine = VacuumEngine(self.cfg, home=self.home, disk_free=lambda: 0)
 
     def fake_cleaner(self) -> str:
         path = self.home / "hoghunter-clean"
@@ -2231,6 +2233,92 @@ class TestTickBudget(unittest.TestCase):
             [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
         )
         self.assertEqual(out.stdout.strip(), "False", out.stderr)
+
+
+class TestTickStoppedReclaim(unittest.TestCase):
+    """A reclaim the tick's budget stopped still freed bytes, and the run has
+    to say so.
+
+    The cleaner prints its report when it finishes.  A cleaner the tick's
+    budget killed never gets there, so the parent used to throw the whole
+    step away and the run was recorded as zero bytes freed.  That is how a
+    reclaim that really deleted gigabytes looked like a reclaim that did
+    nothing at all, on a disk that was visibly full.
+    """
+
+    def _engine(self, readings):
+        from vacuum.engine import VacuumEngine
+        from vacuum.config import load_config
+
+        home = Path(tempfile.mkdtemp(prefix="hhtick-"))
+        self.addCleanup(shutil.rmtree, str(home), True)
+        cfg = load_config(home=home)
+        cfg["housekeeper_lock"] = str(home / ".housekeeper.lock")
+        cleaner = home / "hoghunter-clean"
+        cleaner.write_text("#!/bin/sh\n", encoding="utf-8")
+        cleaner.chmod(0o755)
+        cfg["hoghunter_clean"] = str(cleaner)
+        left = list(readings)
+
+        def fake_free() -> int:
+            return left.pop(0) if len(left) > 1 else left[0]
+
+        return VacuumEngine(cfg, home=home, disk_free=fake_free)
+
+    def test_a_cleaner_the_tick_stopped_reports_what_it_actually_freed(self):
+        engine = self._engine([100 * 1024 ** 3, 100 * 1024 ** 3 + 500 * 1024 ** 2])
+        with patch("vacuum.engine._run_in_own_group", return_value=(-1, "", "", True)):
+            freed, reason, status = engine._hoghunter_reclaim("cheap")
+        self.assertEqual(freed, 500 * 1024 ** 2)
+        self.assertEqual(status, StepStatus.FAILED)
+        self.assertIn("measured", reason)
+
+    def test_a_cleaner_the_tick_stopped_never_reports_a_negative(self):
+        """The host can write more while the reclaim works, so the net change
+        can be negative.  A negative number reaches the panel as
+        "reclaimed -51.2 MB", which reads as a bug."""
+        engine = self._engine([100 * 1024 ** 3, 99 * 1024 ** 3])
+        with patch("vacuum.engine._run_in_own_group", return_value=(-1, "", "", True)):
+            freed, _reason, _status = engine._hoghunter_reclaim("cheap")
+        self.assertEqual(freed, 0)
+
+    def test_a_cleaner_the_tick_stopped_is_marked_incomplete(self):
+        """The reclaim did not finish, so the run is a partial one even when
+        it freed something."""
+        engine = self._engine([100 * 1024 ** 3, 101 * 1024 ** 3])
+        with patch("vacuum.engine._run_in_own_group", return_value=(-1, "", "", True)):
+            engine._hoghunter_reclaim("cheap")
+        self.assertTrue(engine._step_incomplete)
+
+    def test_the_disk_measurement_is_injectable(self):
+        from vacuum.engine import VacuumEngine
+        from vacuum.config import load_config
+
+        home = Path(tempfile.mkdtemp(prefix="hhtick-"))
+        self.addCleanup(shutil.rmtree, str(home), True)
+        engine = VacuumEngine(load_config(home=home), home=home, disk_free=lambda: 42)
+        self.assertEqual(engine._disk_free(), 42)
+
+    def test_a_child_the_tick_stopped_keeps_the_output_it_printed(self):
+        """The child was killed because the tick ran out of time.  Its output
+        is handed back rather than raising, because raising threw the whole
+        step away and the step is what reports the bytes."""
+        from vacuum import budget as work
+        from vacuum.engine import _run_in_own_group
+
+        # The budget is long enough for the interpreter to start and print,
+        # and the child then sleeps, so the timeout closes with the output
+        # already written.  A budget shorter than the interpreter's startup
+        # would kill it before it printed, and the assertion on the preserved
+        # output would fail intermittently.
+        with work.scope(work.WorkBudget(1.5)):
+            code, out, err, timed_out = _run_in_own_group(
+                [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(5)"],
+                30,
+            )
+        self.assertTrue(timed_out)
+        self.assertEqual(code, -1)
+        self.assertIn("started", out, err)
 
 
 class TestHousekeeperLock(unittest.TestCase):
