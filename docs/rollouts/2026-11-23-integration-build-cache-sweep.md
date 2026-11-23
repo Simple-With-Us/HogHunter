@@ -1,0 +1,29 @@
+# Integration-tree build caches join xcode-scratch (2026-11-23)
+
+Jay's 2026-11-23 request: "aggressively clean disk space on mac and server and find out why mac keeps getting full so fast and make hog hunter work better at stopping that".  This change is the "work better at stopping that" half for the Mac.
+
+## Root cause
+
+Every `xcodebuild` run without `-derivedDataPath` writes `build/` beside the project file.  The human integration trees under `~/Code` are merged into constantly, so no checkout-activity gate can ever open for them, the caches regenerate between builds, and `xcode-scratch` only looked at `/private/tmp` and `~/.clutch/derived-data`.  Measured this day: `~/Code/HogHunter/build`, 4.1 GB, idle 4 days, removed by hand; free space went from 6.8 GB to 136 GB (the purgeable release did the rest).  The AFC guard regex that protects all of `~/Code` from `mac-auto-cleanup.sh` is untouched and still right for that program: this rule only ever names a checkout's `build/` directory, never sources or `.git`.
+
+## Gates (all reused, none new)
+
+- Positive identification through `_derived_data_identity_refusal`: an `info.plist` naming a `WorkspacePath`, `Build/` holding only Products and Intermediates.noindex, `Logs/` or `Index.noindex/` beside it, no link at the top, on the home folder's volume.
+- `has_keep_sentinel` on the path, then the deep `holds_keep_sentinel` walk at scan time; the verdict must be known and clean, and the scan-time verdict is carried so the delete trusts it (PR 274 review).
+- `is_forbidden` still applies: nothing under `.muse` or `~/apps/botfleet-*`, and every other forbidden path.
+- Idle 24 hours by the newest file in the whole tree (`IDLE_MIN_XCODE_SCRATCH`) with nothing holding it open; at least `MIN_CANDIDATE_BYTES`.
+- Only the `build/` directory is named; a symlink `build/` is skipped, and merges touching `.git` and sources do not block a cache that has not been written.
+
+## Pressure line and recheck unchanged
+
+`xcode-scratch` stays in `PRESSURE_RULES`: a delete only happens at 60 GB free or less, so always at or under the 25 GB critical line, and `apply_candidate` reads df again before each delete.  The `recheck` closure re-asks identity, no-running-build, and the 24 h idle gate against a fresh open-file listing inside the capped recheck budget; a refusal there is `refused_count`, not a failure.
+
+## Tests
+
+Five new tests in `scripts/test-hoghunter-clean.py` (`test_integration_build_cache_*`, `test_fresh_integration_cache_waits_for_idleness`): swept cache with sources intact, survives active merges, needs the Xcode shape, waits for idleness, and keeps `.janitor-keep` markers.  251/251 pass, including the cross-checks against the real `Sources`, `docs`, and `AGENTS.md`.
+
+## Not changed
+
+- No new rule and no cleaner category: the same `xcode-scratch` rule gains a candidate pool, and `config/reclaim-policy.json` wording is updated to match.
+- The clean regimen (`DiskCleaner`) is untouched; `CleanRegimen.schedulableRules` does not change.
+- `stale-build-output` and `tmp-build-trees` stay report only, under the owner's 2026-11-04 narrowing.
