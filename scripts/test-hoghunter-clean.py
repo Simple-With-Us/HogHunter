@@ -5394,6 +5394,36 @@ def test_the_probes_answer_without_bsd_quit(hh):
             assert hh.touched_since(str(quiet), 1.0), "a fresh file reads as touched without -quit"
 
 
+def test_integration_cache_respects_the_pressure_line(hh):
+    """The pool rides the xcode-scratch category, so the 60 GB line gates the
+    scan, the clean, and the df re-read at the delete exactly as the review
+    round demanded."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        for free in (60.01, 80.0, 200.0):
+            report = clean_main(hh, ["--clean", "--json", "--band=full", "--categories=xcode-artifacts"], free)
+            assert report["applied_count"] == 0 and build.exists(), (free, report["applied_count"])
+        scan = clean_main(hh, ["--scan", "--json", "--categories=xcode-artifacts"], 80.0)
+        assert [c["op"] for c in scan["candidates"]] == ["delete"], "a scan still lists what it would take"
+        assert scan["actionable_count"] == 0
+        [cand] = [c for c in hh.rule_xcode_artifacts() if c.path == str(build)]
+        with mock.patch.object(hh, "read_disk_free", return_value=61.0):
+            hh.apply_candidate(cand)
+        assert build.exists(), "the df re-read at the delete still applies the line"
+        with mock.patch.object(hh, "read_disk_free", return_value=10.0):
+            hh.apply_candidate(cand)
+        assert not build.exists(), "at or under the line it deletes"
+
+
+def test_integration_cache_recheck_reruns_the_gates(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        [cand] = [c for c in hh.rule_xcode_artifacts() if c.path == str(build)]
+        (build / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        hh.apply_candidate(cand)
+        assert build.exists(), "a marker placed after the scan keeps the cache"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

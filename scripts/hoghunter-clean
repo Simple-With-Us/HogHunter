@@ -1944,6 +1944,28 @@ def _hoghunter_lane_refusal(s: str) -> str | None:
     return None
 
 
+def _integration_cache_refusal(s: str) -> str | None:
+    """Why this ~/Code checkout's build cache must stay, or None.  Asked at
+    the scan and again right before the delete on a fresh open-file listing,
+    the same shape as the lane refusal above."""
+    d = Path(s)
+    if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+        return "not a plain folder, forbidden, or marked to keep"
+    if process_names_path(s) or repo_has_process_cwd(s):
+        return "a process names it or runs from inside it"
+    refusal = _derived_data_identity_refusal(d)
+    if refusal is not None:
+        return refusal
+    if newest_file_age_min(s) < IDLE_MIN_XCODE_SCRATCH:
+        return "touched in the last 24 hours"
+    if tree_in_use(s):
+        return "held open"
+    verdict = holds_keep_sentinel(s, probe_timeout(60.0))
+    if verdict.found or not verdict.known:
+        return "holds a keep marker, or the look failed"
+    return None
+
+
 def rule_xcode_artifacts() -> list[Candidate]:
     """Xcode build products and simulator runtimes.
 
@@ -1997,15 +2019,17 @@ def rule_xcode_artifacts() -> list[Candidate]:
                 recheck=recheck,
             ))
 
-    # Integration-tree build caches (owner direction 2026-11-15, HH-229):
-    # an xcodebuild run without -derivedDataPath drops a build/ beside the
-    # project, and the human integration trees under ~/Code are merged into
-    # constantly, so a checkout-activity gate would never open for them.
-    # The cache's own idleness is the gate instead:  merges touch .git and
-    # sources, never the cache, and 24 h without a write reads as spent
-    # output (measured:  ~/Code/HogHunter/build, 4.1 GB, idle 4 days).
+    # Integration-tree build caches (owner direction 2026-11-23, HH-229
+    # lineage): an xcodebuild run without -derivedDataPath drops a build/
+    # beside the project, and the human integration trees under ~/Code are
+    # merged into constantly, so a checkout-activity gate would never open
+    # for them.  The cache's own idleness is the gate instead:  merges touch
+    # .git and sources, never the cache, and 24 h without a write reads as
+    # spent output (measured:  ~/Code/HogHunter/build, 4.1 GB, idle 4 days).
     # Only a positively identified DerivedData-shaped directory qualifies,
     # only the build/ directory is ever named, and sources stay untouched.
+    # The category is xcode-scratch so the 60 GB pressure line gates the
+    # delete exactly as it gates the /private/tmp roots.
     code_root = HOME / "Code"
     if code_root.is_dir():
         for d in sorted(code_root.iterdir()):
@@ -2015,17 +2039,7 @@ def rule_xcode_artifacts() -> list[Candidate]:
             build = d / "build"
             if not build.is_dir() or build.is_symlink():
                 continue
-            if is_forbidden(str(build)) or has_keep_sentinel(str(build)):
-                continue
-            if _derived_data_identity_refusal(build) is not None:
-                continue
-            if newest_file_age_min(str(build)) < IDLE_MIN_XCODE_SCRATCH or open_handles(str(build)):
-                continue
-            # The deep keep-marker walk runs here, so the scan-time verdict
-            # is true and the delete can trust it:  a marker deep inside the
-            # cache keeps the whole cache (review of PR 274).
-            verdict = holds_keep_sentinel(str(build), probe_timeout(60.0))
-            if verdict.found or not verdict.known:
+            if _integration_cache_refusal(str(build)) is not None:
                 continue
             size = dir_bytes(str(build))
             if size < MIN_CANDIDATE_BYTES:
@@ -2037,16 +2051,13 @@ def rule_xcode_artifacts() -> list[Candidate]:
                     return "the path now holds something else"
                 if _build_running():
                     return "a build is running"
-                refusal = _derived_data_identity_refusal(Path(build))
-                if refusal is not None:
-                    return refusal
-                if newest_file_age_min(build) < IDLE_MIN_XCODE_SCRATCH:
-                    return "touched in the last 24 hours"
-                return None
+                return _integration_cache_refusal(build)
 
             cands.append(Candidate(
-                category="xcode-artifacts", path=str(build), bytes=size,
+                category="xcode-scratch", path=str(build), bytes=size,
                 reason="Integration checkout's xcodebuild cache, idle 24h+, no build running",
+                # The recheck walks for a marker right before the delete, so
+                # apply_delete does not need to walk the tree a second time.
                 keep_verdict=MarkerVerdict(False, True),
                 recheck=recheck,
             ))
