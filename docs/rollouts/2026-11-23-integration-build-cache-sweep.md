@@ -18,6 +18,16 @@ Every `xcodebuild` run without `-derivedDataPath` writes `build/` beside the pro
 
 `xcode-scratch` stays in `PRESSURE_RULES`: a delete only happens at 60 GB free or less, so always at or under the 25 GB critical line, and `apply_candidate` reads df again before each delete.  The `recheck` closure re-asks identity, no-running-build, and the 24 h idle gate against a fresh open-file listing inside the capped recheck budget; a refusal there is `refused_count`, not a failure.
 
+## Review round (same day)
+
+The review round on this PR caught three things and each fix landed:
+
+- **The pressure line had no teeth in code.**  The first draft emitted `category="xcode-artifacts"`, which is not in `PRESSURE_RULES`, so `apply_candidate` would have skipped the df re-read and deleted at any free level -- contradicting everything this note says.  Both reviewers caught it; the pool now emits `xcode-scratch` and `test_integration_cache_respects_the_pressure_line` walks the line from both sides.
+- **The recheck now re-asks every gate.**  A helper (`_integration_cache_refusal`) holds the whole gate sequence -- plain folder, forbidden, surface marker, processes naming or running from it, Xcode identity, 24 h idle, open handles, deep marker walk -- and the recheck calls it again on a fresh open-file listing, so a marker placed or a handle opened after the scan stops the delete.
+- **The scan asks `tree_in_use`, not a raw lsof count.**  The first draft called `open_handles` directly; on Linux CI, where `/usr/sbin/lsof` does not exist, the probe fails closed to "open" and correctly refused every candidate -- the second CI-only failure this branch taught the suite.  `tree_in_use` is the rule-level question the sibling lane sweep already asks, and `gates_open` patches it the same way.
+
+`test_integration_cache_recheck_reruns_the_gates` places a `.janitor-keep` marker after the scan and proves the delete stops.
+
 ## Tests
 
 Five new tests in `scripts/test-hoghunter-clean.py` (`test_integration_build_cache_*`, `test_fresh_integration_cache_waits_for_idleness`): swept cache with sources intact, survives active merges, needs the Xcode shape, waits for idleness, and keeps `.janitor-keep` markers.  251/251 pass, including the cross-checks against the real `Sources`, `docs`, and `AGENTS.md`.
