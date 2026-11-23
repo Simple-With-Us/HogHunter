@@ -5376,6 +5376,24 @@ def test_integration_cache_keeps_markers(hh):
             "a keep marker anywhere in the cache keeps the whole cache"
 
 
+def test_the_probes_answer_without_bsd_quit(hh):
+    """GNU find (Linux CI) refuses -quit outright, so the marker probe and the
+    touched probe must answer identically without it -- this is the exact
+    failure the first CI run caught on this branch."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        deep = build / "Build" / "Intermediates.noindex" / "deep"
+        deep.mkdir(parents=True, exist_ok=True)
+        (deep / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        _, quiet = integration_cache(home, name="OtherApp")
+        with mock.patch.object(hh, "FIND_QUIT", ()):
+            verdict = hh.holds_keep_sentinel(str(build), 30.0)
+            assert verdict.found and verdict.known, "the deep marker is found without -quit"
+            assert not hh.touched_since(str(quiet), 1.0), "a quiet tree reads as idle without -quit"
+            (quiet / "fresh.o").write_text("x", encoding="utf-8")
+            assert hh.touched_since(str(quiet), 1.0), "a fresh file reads as touched without -quit"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

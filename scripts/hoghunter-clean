@@ -190,6 +190,10 @@ FORBIDDEN_PREFIXES = (
     str(HOME / ".grok/worktrees"),
 )
 KEEP_SENTINEL = ".janitor-keep"
+# BSD find answers with -quit after the first match; GNU find (Linux CI)
+# refuses the option outright, so on Linux the probes run without it and pay
+# a bounded full walk instead.  The answer is identical either way.
+FIND_QUIT: tuple[str, ...] = ("-quit",) if sys.platform == "darwin" else ()
 # APFS system volume + sealed paths.  Deleting any of these bricks the Mac.
 FORBIDDEN_EXACT = (
     "/System", "/Library", "/private/var/db", "/private/var/folders/zz",
@@ -653,10 +657,15 @@ def holds_keep_sentinel(path: str, timeout: float, name: str = KEEP_SENTINEL) ->
 
     A probe that could not answer at all -- a timeout, or `find` failing to
     run -- is reported as unknown, and an unknown tree is never deleted.
+
+    `-quit` is BSD's stop-after-the-first-match; GNU find (Linux CI) refuses
+    the option outright, so there the probe asks without it and pays a
+    bounded full walk instead.  The answer is identical either way and the
+    timeout still caps the cost.
     """
     try:
         proc = subprocess.run(
-            ["find", path, "-iname", name, "-print", "-quit"],
+            ["find", path, "-iname", name, "-print", *FIND_QUIT],
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -994,6 +1003,9 @@ def touched_since(path: str, days: float) -> bool:
     days" outright.  find then exits non-zero, this fails closed to "touched",
     and the idle gate rejects every candidate -- so the rule silently frees
     nothing, with no error anywhere to say why.  Minutes parse on both.
+
+    As in the marker probe, `-quit` is BSD-only: GNU find (Linux CI) gets the
+    same command without it and walks the whole bounded tree instead.
     """
     try:
         # A full find walk can take minutes on a big tree, and it is called
@@ -1001,7 +1013,7 @@ def touched_since(path: str, days: float) -> bool:
         # share like every other scan probe here.  A timeout fails closed to
         # "touched" below, so a clamp never turns into a delete.
         proc = subprocess.run(
-            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
+            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", *FIND_QUIT],
             capture_output=True, text=True, timeout=probe_timeout(120.0),
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):

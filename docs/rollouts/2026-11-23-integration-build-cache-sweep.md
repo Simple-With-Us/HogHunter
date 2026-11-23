@@ -22,6 +22,10 @@ Every `xcodebuild` run without `-derivedDataPath` writes `build/` beside the pro
 
 Five new tests in `scripts/test-hoghunter-clean.py` (`test_integration_build_cache_*`, `test_fresh_integration_cache_waits_for_idleness`): swept cache with sources intact, survives active merges, needs the Xcode shape, waits for idleness, and keeps `.janitor-keep` markers.  251/251 pass, including the cross-checks against the real `Sources`, `docs`, and `AGENTS.md`.
 
+## Portable probe flags (CI fix, same day)
+
+The first CI run on this branch caught the real find probes failing closed on Linux: GNU find refuses BSD's `-quit` outright, so `holds_keep_sentinel` answered unknown and `touched_since` read every tree as touched, which correctly refused the new candidates and failed the two acceptance tests.|GAP|Both probes now build their command from `FIND_QUIT` (`-quit` on macOS, absent on Linux), and `test_the_probes_answer_without_bsd_quit` runs both probes with the flag removed.|GAP|Production macOS behavior is unchanged; the Linux probes pay a full bounded walk instead of an early exit.
+
 ## Not changed
 
 - No new rule and no cleaner category: the same `xcode-scratch` rule gains a candidate pool, and `config/reclaim-policy.json` wording is updated to match.
