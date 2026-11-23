@@ -2306,7 +2306,12 @@ class TestTickStoppedReclaim(unittest.TestCase):
         from vacuum import budget as work
         from vacuum.engine import _run_in_own_group
 
-        with work.scope(work.WorkBudget(0.05)):
+        # The budget is long enough for the interpreter to start and print,
+        # and the child then sleeps, so the timeout closes with the output
+        # already written.  A budget shorter than the interpreter's startup
+        # would kill it before it printed, and the assertion on the preserved
+        # output would fail intermittently.
+        with work.scope(work.WorkBudget(1.5)):
             code, out, err, timed_out = _run_in_own_group(
                 [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(5)"],
                 30,

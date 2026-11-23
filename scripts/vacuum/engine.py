@@ -182,7 +182,10 @@ def _disk_free_bytes() -> int:
         try:
             return int(st.f_bavail * st.f_frsize)
         except (AttributeError, TypeError, ValueError):
-            return 0
+            # This volume's free-space arithmetic did not work.  The next
+            # path is still worth trying, so the loop continues rather than
+            # reporting zero free space for a volume that was readable.
+            continue
     return 0
 
 
