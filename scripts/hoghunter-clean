@@ -4086,7 +4086,90 @@ def read_band() -> Band:
 # Driver
 # --------------------------------------------------------------------------
 
-def scan(cats: Sequence[str] | None, skip: Iterable[str] = ()) -> list[Candidate]:
+# The scan walks the rules in a fixed order, and the scan's share of the
+# budget can run out before the walk finishes.  Without a cursor every run
+# repeats the same prefix: the rules after the cut are never reached, so a run
+# on a busy host finds nothing, reports "nothing reclaimable", and the next
+# run repeats the same prefix.  That is the livelock -- the disk keeps filling
+# while every run says there was nothing to do.  The cursor remembers the rule
+# the last truncated scan stopped at, so the next run carries on from there and
+# the rules rotate instead of repeating.
+#
+# The rules are not independent, so the rotation cannot simply shuffle them.
+# botfleet-releases fills _RELEASES_TAKEN and stale-build-output fills
+# _STALE_BUILD_LISTED, and ask-first reads both of them, so ask-first has to
+# run after them.  A rotation that put ask-first first would have it list the
+# same folder twice.  So the two rules that feed ask-first always run first,
+# ask-first always runs last, and the rotation covers only the rules that
+# stand alone.
+SCAN_RULE_FEEDERS = ("botfleet-releases", "stale-build-output")
+SCAN_RULE_LAST = ("ask-first",)
+
+
+def scan_cursor_path() -> Path:
+    """Where the scan cursor lives.
+
+    Resolved on every call rather than once at import, so a test that points
+    HOME somewhere else writes the cursor there and not into the real home.
+    """
+    return HOME / ".local/state/hoghunter/scan-cursor.json"
+
+
+def read_scan_cursor() -> str | None:
+    """The rule name the last truncated scan stopped at, or None.
+
+    A name that is not in RULES any more is ignored, so a rule that was
+    renamed or removed does not strand the cursor on a rule that never runs.
+    """
+    try:
+        data = json.loads(scan_cursor_path().read_text())
+        name = data.get("rule")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(name, str) or name not in RULES:
+        return None
+    return name
+
+
+def write_scan_cursor(rule: str | None) -> None:
+    """Remember where the next scan starts.
+
+    A None rule means the pass finished every rule, so the next scan starts
+    at the first rule again.  The write is best effort: a scan that cannot
+    remember where it was still works, it just repeats itself.
+    """
+    try:
+        path = scan_cursor_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"rule": rule, "at": int(time.time())}
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _scan_rule_order(ordered: list[tuple[str, tuple]]) -> list[tuple[str, tuple]]:
+    """The rule order for a rotated scan.
+
+    The rules that feed ask-first come first and ask-first comes last, so the
+    rotation cannot break the order they depend on.  The rules in between are
+    the ones that stand alone, and those are the ones that rotate.
+    """
+    feeders = [item for item in ordered if item[0] in SCAN_RULE_FEEDERS]
+    last = [item for item in ordered if item[0] in SCAN_RULE_LAST]
+    free = [item for item in ordered
+            if item[0] not in SCAN_RULE_FEEDERS and item[0] not in SCAN_RULE_LAST]
+    resume = read_scan_cursor()
+    if resume:
+        index = next((i for i, (n, _) in enumerate(free) if n == resume), None)
+        if index:
+            free = free[index:] + free[:index]
+    return feeders + free + last
+
+
+def scan(cats: Sequence[str] | None, skip: Iterable[str] = (),
+         advance_cursor: bool = False) -> list[Candidate]:
     global _SCAN_BUDGET_EXHAUSTED, _SCAN_PHASE
     _SCAN_BUDGET_EXHAUSTED = False
     _STALE_BUILD_MEMO.clear()
@@ -4101,13 +4184,24 @@ def scan(cats: Sequence[str] | None, skip: Iterable[str] = ()) -> list[Candidate
     # bounded by the scan share and the reserve the deletes need is intact
     # when the apply phase starts.
     _SCAN_PHASE = True
+    # A caller that names its categories asked for exactly those rules, so the
+    # cursor does not apply there: it would change what the caller asked for.
+    ordered = list(RULES.items())
+    rotate = not cats
+    if rotate:
+        ordered = _scan_rule_order(ordered)
     try:
-        for name, (fn, _desc) in RULES.items():
+        for position in range(len(ordered)):
+            name, (fn, _desc) = ordered[position]
             if name in skipped or (cats and name not in cats):
                 continue
             if scan_budget_left() <= 0:
                 if _SCAN_DEADLINE is not None:
                     _SCAN_BUDGET_EXHAUSTED = True
+                # This rule did not run.  The next scan starts here, so the
+                # rules after it are reached instead of being cut off again.
+                if rotate and advance_cursor:
+                    write_scan_cursor(name)
                 break
             try:
                 found = fn()
@@ -4133,8 +4227,39 @@ def scan(cats: Sequence[str] | None, skip: Iterable[str] = ()) -> list[Candidate
                 seen.add(key)
                 out.append(c)
             if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
-                _SCAN_BUDGET_EXHAUSTED = True
+                # What is left after this rule decides whether the pass is
+                # complete.  A rule that was skipped on purpose is not left
+                # over: it is not going to run either way.
+                pending = [n for n, _ in ordered[position + 1:]
+                           if n not in skipped and not (cats and n not in cats)]
+                if not pending:
+                    # Every rule that was going to run has run.  The budget
+                    # ran out after the last one, which is not a reason to
+                    # call the scan truncated.
+                    if rotate and advance_cursor:
+                        write_scan_cursor(None)
+                else:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    # The next rule did not run.  Start there next time, so the
+                    # rules after this one are reached instead of being cut off
+                    # again on every run.
+                    if rotate and advance_cursor:
+                        write_scan_cursor(pending[0])
                 break
+        else:
+            # The loop finished without the budget stopping it.  The rotation
+            # is only reset when every rule ran.  A pass that skipped a rule
+            # did not cover that rule, and clearing the cursor there would put
+            # the rotation back at the start and repeat the same prefix.
+            #
+            # Only a rule that was actually walked can suppress the reset.  A
+            # skip entry for a rule this pass never reached says nothing about
+            # whether the pass was complete, and letting it block the reset
+            # leaves a stale cursor behind that makes the next run rotate
+            # instead of starting fresh.
+            walked = {n for n, _ in ordered}
+            if rotate and advance_cursor and not (skipped & walked):
+                write_scan_cursor(None)
     finally:
         # The scan is over.  Everything after this point -- the apply phase,
         # the band re-read between chunks -- is bounded by the whole budget.
@@ -4383,7 +4508,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The early warning sizes the ask-first trees, so it can say which to review.
     if early_warning:
         SIZE_ASK_FIRST = True
-    cands = scan(cats or None, skip=skip)
+    cands = scan(cats or None, skip=skip, advance_cursor=args.clean)
 
     log(f"band={args.band} pressure={band.pressure_label} "
         f"({band.cpu_idle_pct:.0f}% idle, load1 {band.load1:.0f}, "
@@ -4560,7 +4685,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(f"CleanMyMac CLI sweeps skipped: {cleanmymac_report['skipped']}.")
         if not cands:
-            print("nothing reclaimable.")
+            if scan_truncated:
+                print("nothing reclaimable in the part of the rules this run reached; "
+                      "the next run carries on from where this one stopped.")
+            else:
+                print("nothing reclaimable.")
         by_cat: dict[str, list[Candidate]] = {}
         for c in cands:
             by_cat.setdefault(c.category, []).append(c)
