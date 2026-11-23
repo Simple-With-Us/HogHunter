@@ -5306,6 +5306,76 @@ def test_a_skip_for_a_rule_the_pass_never_walked_does_not_block_the_reset(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+# --- integration-tree build caches (HH-229) -------------------------------
+
+def integration_cache(home, days=30, name="HogHunter"):
+    repo = home / "Code" / name
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    sources = repo / "Sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    (sources / "App.swift").write_text("x", encoding="utf-8")
+    (repo / "Package.swift").write_text("// swift-tools-version:5.9", encoding="utf-8")
+    build = xcode_tree(home, name="build", days=days, root=repo)
+    return repo, build
+
+
+def test_integration_build_cache_is_swept_and_sources_stay(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        sources = repo / "Sources"
+        sources.mkdir(parents=True, exist_ok=True)
+        (sources / "App.swift").write_text("x", encoding="utf-8")
+
+        found = hh.rule_xcode_artifacts()
+        assert str(build) in rule_paths(found), "the positively identified cache is the candidate"
+
+        cand = next(c for c in found if c.path == str(build))
+        hh.apply_candidate(cand)
+
+        assert not build.exists(), "the cache is reclaimed"
+        assert (repo / ".git").is_dir(), "the checkout stays"
+        assert (sources / "App.swift").exists(), "sources stay"
+
+
+def test_integration_build_cache_survives_active_merges(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home, days=30)
+        age(repo / ".git", 0)
+        age(repo / "Sources", 0)
+
+        found = hh.rule_xcode_artifacts()
+        assert str(build) in rule_paths(found), "an active checkout does not hide an idle cache"
+
+
+def test_integration_build_cache_needs_the_xcode_shape(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = home / "Code" / "HogHunter"
+        repo.mkdir(parents=True, exist_ok=True)
+        build = repo / "build"
+        build.mkdir()
+        (build / "stuff").write_text("x", encoding="utf-8")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a build/ that is not positively Xcode's stays"
+
+
+def test_fresh_integration_cache_waits_for_idleness(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home, days=0.5)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a cache written in the last 24 hours is not spent output"
+
+
+def test_integration_cache_keeps_markers(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        marker = build / "Build" / "Products" / hh.KEEP_SENTINEL
+        marker.write_text("", encoding="utf-8")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a keep marker anywhere in the cache keeps the whole cache"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

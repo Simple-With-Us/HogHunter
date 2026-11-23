@@ -1984,6 +1984,60 @@ def rule_xcode_artifacts() -> list[Candidate]:
                 keep_verdict=MarkerVerdict(False, True),
                 recheck=recheck,
             ))
+
+    # Integration-tree build caches (owner direction 2026-11-15, HH-229):
+    # an xcodebuild run without -derivedDataPath drops a build/ beside the
+    # project, and the human integration trees under ~/Code are merged into
+    # constantly, so a checkout-activity gate would never open for them.
+    # The cache's own idleness is the gate instead:  merges touch .git and
+    # sources, never the cache, and 24 h without a write reads as spent
+    # output (measured:  ~/Code/HogHunter/build, 4.1 GB, idle 4 days).
+    # Only a positively identified DerivedData-shaped directory qualifies,
+    # only the build/ directory is ever named, and sources stay untouched.
+    code_root = HOME / "Code"
+    if code_root.is_dir():
+        for d in sorted(code_root.iterdir()):
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            build = d / "build"
+            if not build.is_dir() or build.is_symlink():
+                continue
+            if is_forbidden(str(build)) or has_keep_sentinel(str(build)):
+                continue
+            if _derived_data_identity_refusal(build) is not None:
+                continue
+            if newest_file_age_min(str(build)) < IDLE_MIN_XCODE_SCRATCH or open_handles(str(build)):
+                continue
+            # The deep keep-marker walk runs here, so the scan-time verdict
+            # is true and the delete can trust it:  a marker deep inside the
+            # cache keeps the whole cache (review of PR 274).
+            verdict = holds_keep_sentinel(str(build), probe_timeout(60.0))
+            if verdict.found or not verdict.known:
+                continue
+            size = dir_bytes(str(build))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+
+            def recheck(build: str = str(build),
+                        identity=path_identity(str(build))) -> str | None:
+                if path_identity(build) != identity:
+                    return "the path now holds something else"
+                if _build_running():
+                    return "a build is running"
+                refusal = _derived_data_identity_refusal(Path(build))
+                if refusal is not None:
+                    return refusal
+                if newest_file_age_min(build) < IDLE_MIN_XCODE_SCRATCH:
+                    return "touched in the last 24 hours"
+                return None
+
+            cands.append(Candidate(
+                category="xcode-artifacts", path=str(build), bytes=size,
+                reason="Integration checkout's xcodebuild cache, idle 24h+, no build running",
+                keep_verdict=MarkerVerdict(False, True),
+                recheck=recheck,
+            ))
     support = HOME / "Library/Developer/Xcode/iOS DeviceSupport"
     if support.is_dir() and newest_file_age_min(str(support)) > 60 * 24 * 7:
         cands.append(Candidate(
