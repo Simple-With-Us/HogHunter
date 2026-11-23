@@ -5276,6 +5276,36 @@ def test_the_budget_running_out_after_the_last_rule_is_not_a_truncated_pass(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_a_skip_for_a_rule_the_pass_never_walked_does_not_block_the_reset(hh):
+    """A skip entry for a rule this pass never reached says nothing about
+    whether the pass was complete.
+
+    The reset used to test the whole skip set, so an unrelated entry blocked
+    it and a stale cursor survived a complete pass.  The next run then
+    rotated instead of starting fresh, and repeated rules that had already
+    run.
+    """
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-unrelated-"))
+    original_rules = hh.RULES
+    original_home = hh.HOME
+    try:
+        hh.HOME = home
+        cursor = hh.scan_cursor_path()
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text(json.dumps({"rule": "one"}))
+        _cursor_rules(hh, ["one", "two"])
+        hh.set_budget(600)
+        try:
+            hh.scan(None, skip={"a-rule-that-is-not-walked"}, advance_cursor=True)
+            assert hh.read_scan_cursor() is None, "a complete pass must reset the rotation"
+        finally:
+            hh.set_budget(0)
+    finally:
+        hh.RULES = original_rules
+        hh.HOME = original_home
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

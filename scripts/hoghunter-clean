@@ -4251,7 +4251,14 @@ def scan(cats: Sequence[str] | None, skip: Iterable[str] = (),
             # is only reset when every rule ran.  A pass that skipped a rule
             # did not cover that rule, and clearing the cursor there would put
             # the rotation back at the start and repeat the same prefix.
-            if rotate and advance_cursor and not skipped:
+            #
+            # Only a rule that was actually walked can suppress the reset.  A
+            # skip entry for a rule this pass never reached says nothing about
+            # whether the pass was complete, and letting it block the reset
+            # leaves a stale cursor behind that makes the next run rotate
+            # instead of starting fresh.
+            walked = {n for n, _ in ordered}
+            if rotate and advance_cursor and not (skipped & walked):
                 write_scan_cursor(None)
     finally:
         # The scan is over.  Everything after this point -- the apply phase,
