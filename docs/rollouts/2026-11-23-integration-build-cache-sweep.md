@@ -28,9 +28,11 @@ The review round on this PR caught three things and each fix landed:
 
 `test_integration_cache_recheck_reruns_the_gates` places a `.janitor-keep` marker after the scan and proves the delete stops.
 
+The second review page asked for the rest of the xcode-scratch chain, and the helper now carries it whole: the three idleness clocks (ctime, shallow, deep), `_derived_data_precious_refusal` (a key, archive, project or note anywhere in the tree keeps it), and `regenerable_clones_only` (no repository inside but a clean SwiftPM clone).  One gate is deliberately left out: `process_names_path(tree.name)`, which `xcode-scratch` runs on distinctive scratch names -- `build` is a word half this Mac's command lines carry (`swift build`, `cargo build`), it would starve the pool, and the full-path probe names the cache specifically already.  The `~/Code` listing is wrapped like the sibling lanes pool, so an unreadable tree costs a log line, not the rest of the rule.  `test_integration_cache_refuses_precious_and_nested_state` covers both refusals and the recovery when the key is removed.
+
 ## Tests
 
-Five new tests in `scripts/test-hoghunter-clean.py` (`test_integration_build_cache_*`, `test_fresh_integration_cache_waits_for_idleness`): swept cache with sources intact, survives active merges, needs the Xcode shape, waits for idleness, and keeps `.janitor-keep` markers.  251/251 pass, including the cross-checks against the real `Sources`, `docs`, and `AGENTS.md`.
+Nine new tests in `scripts/test-hoghunter-clean.py`: five from the first draft (swept cache with sources intact, survives active merges, needs the Xcode shape, waits for idleness, keeps `.janitor-keep` markers) and four from the CI and review rounds (the probes answer without BSD `-quit`, the pressure line holds from both sides, the recheck stops a post-scan marker, precious and nested state refuse with recovery).  255/255 pass, including the cross-checks against the real `Sources`, `docs`, and `AGENTS.md`.
 
 ## Portable probe flags (CI fix, same day)
 
