@@ -1080,7 +1080,10 @@ class TestMaintenanceTimingAndIncomplete(_EngineHome):
         with patch.dict(sys.modules, {spec.name: cleaner}):
             loader.exec_module(cleaner)
         candidate = cleaner.Candidate("synthetic", str(self.home / "synthetic"), 9_000_000_000, "synthetic")
-        def scan(*args, skip=()):
+        def scan(*args, skip=(), advance_cursor=False):
+            # The engine's scan() takes advance_cursor so only a clean run
+            # moves the scan cursor.  The stub replaces scan() wholesale, so it
+            # has to accept the same call shape the engine makes.
             cleaner._SCAN_BUDGET_EXHAUSTED = True
             return [candidate]
         def apply(item):
