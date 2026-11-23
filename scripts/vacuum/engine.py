@@ -167,6 +167,25 @@ def _subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProces
     return work.run_process(cmd, **kwargs)
 
 
+def _disk_free_bytes() -> int:
+    """Free bytes on the data volume, or 0 when it cannot be measured.
+
+    The cleaner measures and reports its own delta when it finishes.  A
+    cleaner the tick's budget killed never prints that report, and the disk is
+    the only witness left, so the parent measures it around the child.
+    """
+    for path in ("/System/Volumes/Data", "/"):
+        try:
+            st = os.statvfs(path)
+        except OSError:
+            continue
+        try:
+            return int(st.f_bavail * st.f_frsize)
+        except (AttributeError, TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bool]:
     """Run cmd in its own process group and return (exit code, stdout, stderr, timed_out).  On a timeout the whole
     group is killed, so the find, lsof or du the child started cannot outlive it and keep the disk busy.  Any other
@@ -186,14 +205,30 @@ def _run_in_own_group(cmd: list[str], timeout: float) -> tuple[int, str, str, bo
     try:
         out, err = proc.communicate(timeout=timeout)
         work.unregister(proc)
-        work.check()
+        try:
+            work.check()
+        except work.BudgetExceeded:
+            # The child finished and printed its report; the tick's deadline
+            # passed while the parent was waiting for it.  That report is the
+            # truth about what the child did, so it is handed back rather than
+            # thrown away.  The caller's next step sees the spent budget and
+            # the tick ends there, with this step's result kept.
+            return proc.returncode, out or "", err or "", False
         return proc.returncode, out or "", err or "", False
     except subprocess.TimeoutExpired as exc:
         # A second communicate() waits for pipe EOF, which an escaped session
         # can hold indefinitely.  Keep the bytes already read and reap only
         # the owned leader/group through the common cleanup path.
         work.kill_group(proc)
-        work.check()
+        try:
+            work.check()
+        except work.BudgetExceeded:
+            # The tick ran out of time.  The bytes the child had already freed
+            # are real and the output it managed to print is real, so both are
+            # handed back instead of raising and losing the step.  The
+            # caller's next step sees the spent budget and the tick ends
+            # there, with this step's result kept.
+            pass
         return -1, partial_text(exc.output), partial_text(exc.stderr), True
     except BaseException:
         work.kill_group(proc)
@@ -211,6 +246,7 @@ class VacuumEngine:
         on_step: Optional[Callable[[RunRecord], None]] = None,
         monotonic: Callable[[], float] = time.monotonic,
         work_budget_seconds: Optional[float] = None,
+        disk_free: Optional[Callable[[], int]] = None,
     ) -> None:
         self.home = home or Path.home()
         self.cfg = cfg
@@ -222,6 +258,8 @@ class VacuumEngine:
         self._monotonic = monotonic
         self._work_budget_seconds = (TICK_WATCHDOG_SEC - _RECLAIM_RESERVE_SECONDS
                                      if work_budget_seconds is None else work_budget_seconds)
+        # Injectable for tests: the disk-free measurement around a reclaim.
+        self._disk_free = disk_free or _disk_free_bytes
         self._active_record = None
         self._step_freed = 0
         self._step_incomplete = False
@@ -914,6 +952,21 @@ class VacuumEngine:
         work.run_process([brew, "cleanup", "--prune=all"], capture_output=True, timeout=600)
         return 0, "brew cleanup --prune=all finished", StepStatus.RAN
 
+    def _measured_freed_bytes(self, free_before: int) -> int:
+        """Bytes the disk gained since free_before, never negative.
+
+        The host spends space while a reclaim runs, so the net change can be
+        negative.  A negative number reaches the panel as "reclaimed -51.2 MB",
+        which reads as a bug, so the floor is zero and the reason says what
+        the host spent.
+        """
+        if free_before <= 0:
+            return 0
+        free_after = self._disk_free()
+        if free_after <= 0:
+            return 0
+        return max(0, free_after - free_before)
+
     def _hoghunter_reclaim(self, band: str) -> tuple[int, str, StepStatus]:
         """Run hoghunter-clean with a time budget, report the bytes it really freed, and treat "budget spent" as
         a good partial run: it removes the most valuable things first and the next run rescans and carries on.
@@ -928,11 +981,19 @@ class VacuumEngine:
                 raise work.BudgetExceeded("maintenance work budget exhausted; insufficient reclaim shutdown reserve")
             budget = min(budget, max(1, int(remaining - _RECLAIM_GRACE_SECONDS)))
         cmd = [str(path), "--clean", f"--band={band}", "--json", f"--budget-sec={budget}"]
+        # The disk is measured around the child, so a child the tick's budget
+        # stops is reported with what it actually freed.  The cleaner reports
+        # its own delta when it finishes, and that one is preferred; this is
+        # the witness for the runs that never get to print.
+        free_before = self._disk_free()
         code, out, err, timed_out = _run_in_own_group(cmd, budget + _RECLAIM_GRACE_SECONDS)
         if timed_out:
+            freed = self._measured_freed_bytes(free_before)
+            self._step_incomplete = True
             return (
-                0,
-                f"stopped: hoghunter-clean overran its {budget}s budget by more than {_RECLAIM_GRACE_SECONDS}s",
+                freed,
+                f"stopped: hoghunter-clean overran its {budget}s budget by more than "
+                f"{_RECLAIM_GRACE_SECONDS}s; {lanes.format_size(freed)} measured before it was stopped",
                 StepStatus.FAILED,
             )
         if code != 0:
