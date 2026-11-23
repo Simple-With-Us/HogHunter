@@ -5091,6 +5091,114 @@ def test_temp_staged_escapes_the_writer_pattern(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_the_scan_cursor_carries_on_where_the_last_scan_stopped(hh):
+    """A truncated scan must not repeat the same prefix for ever.
+
+    The scan walks the rules in a fixed order and the scan's share of the
+    budget can run out before the walk finishes.  Without a cursor the rules
+    after the cut are never reached: every run scans the same prefix, finds
+    nothing, and reports "nothing reclaimable" while the disk keeps filling.
+    That is the livelock.  The cursor makes the next run carry on from the
+    rule that did not run, so the rules rotate instead of repeating.
+    """
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-"))
+    cursor = home / "scan-cursor.json"
+    original_rules = hh.RULES
+    original_cursor_path = hh.SCAN_CURSOR_PATH
+    try:
+        hh.SCAN_CURSOR_PATH = cursor
+        clock = FakeClock()
+        called = []
+
+        def slow_rule():
+            called.append("slow")
+            clock.now += 8.0      # past the scan's 6 s share, short of the 10 s run budget
+            return []
+
+        def later_rule():
+            called.append("later")
+            return []
+
+        hh.RULES = {"slow": (slow_rule, ""), "later": (later_rule, "")}
+
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hh.main(["--clean", "--json", "--budget-sec=10"])
+        assert called == ["slow"], called
+        assert cursor.exists(), "a truncated clean run must remember where it stopped"
+        assert json.loads(cursor.read_text())["rule"] == "later", cursor.read_text()
+
+        # The next run starts at the rule that did not run, so "later" is
+        # reached instead of the prefix being scanned for a second time.
+        called.clear()
+        clock.now = 0.0
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hh.main(["--clean", "--json", "--budget-sec=10"])
+        assert called == ["later", "slow"], called
+    finally:
+        hh.RULES = original_rules
+        hh.SCAN_CURSOR_PATH = original_cursor_path
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_read_only_scan_does_not_move_the_cursor(hh):
+    """--scan is read-only, so it must not write the cursor.  A scan that
+    changed the state would mean the next clean run started somewhere the
+    operator never asked for."""
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-ro-"))
+    cursor = home / "scan-cursor.json"
+    original_rules = hh.RULES
+    original_cursor_path = hh.SCAN_CURSOR_PATH
+    try:
+        hh.SCAN_CURSOR_PATH = cursor
+        clock = FakeClock()
+        called = []
+
+        def slow_rule():
+            called.append("slow")
+            clock.now += 8.0
+            return []
+
+        def later_rule():
+            called.append("later")
+            return []
+
+        hh.RULES = {"slow": (slow_rule, ""), "later": (later_rule, "")}
+        out, err = io.StringIO(), io.StringIO()
+        with fake_time(hh, clock), \
+                mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hh.main(["--scan", "--json", "--budget-sec=10"])
+        assert called == ["slow"], called
+        assert not cursor.exists(), "a read-only scan must not write the cursor"
+    finally:
+        hh.RULES = original_rules
+        hh.SCAN_CURSOR_PATH = original_cursor_path
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_cursor_naming_a_rule_that_is_gone_is_ignored(hh):
+    """A rule that was renamed or removed must not strand the cursor: the
+    scan starts at the first rule again rather than never running the rest."""
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-stale-"))
+    cursor = home / "scan-cursor.json"
+    original_rules = hh.RULES
+    original_cursor_path = hh.SCAN_CURSOR_PATH
+    try:
+        hh.SCAN_CURSOR_PATH = cursor
+        cursor.write_text(json.dumps({"rule": "a-rule-that-no-longer-exists"}))
+        assert hh.read_scan_cursor() is None
+    finally:
+        hh.RULES = original_rules
+        hh.SCAN_CURSOR_PATH = original_cursor_path
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
