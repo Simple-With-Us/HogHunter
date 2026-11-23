@@ -4094,7 +4094,25 @@ def read_band() -> Band:
 # while every run says there was nothing to do.  The cursor remembers the rule
 # the last truncated scan stopped at, so the next run carries on from there and
 # the rules rotate instead of repeating.
-SCAN_CURSOR_PATH = HOME / ".local/state/hoghunter/scan-cursor.json"
+#
+# The rules are not independent, so the rotation cannot simply shuffle them.
+# botfleet-releases fills _RELEASES_TAKEN and stale-build-output fills
+# _STALE_BUILD_LISTED, and ask-first reads both of them, so ask-first has to
+# run after them.  A rotation that put ask-first first would have it list the
+# same folder twice.  So the two rules that feed ask-first always run first,
+# ask-first always runs last, and the rotation covers only the rules that
+# stand alone.
+SCAN_RULE_FEEDERS = ("botfleet-releases", "stale-build-output")
+SCAN_RULE_LAST = ("ask-first",)
+
+
+def scan_cursor_path() -> Path:
+    """Where the scan cursor lives.
+
+    Resolved on every call rather than once at import, so a test that points
+    HOME somewhere else writes the cursor there and not into the real home.
+    """
+    return HOME / ".local/state/hoghunter/scan-cursor.json"
 
 
 def read_scan_cursor() -> str | None:
@@ -4104,7 +4122,7 @@ def read_scan_cursor() -> str | None:
     renamed or removed does not strand the cursor on a rule that never runs.
     """
     try:
-        data = json.loads(SCAN_CURSOR_PATH.read_text())
+        data = json.loads(scan_cursor_path().read_text())
         name = data.get("rule")
     except (OSError, ValueError, AttributeError):
         return None
@@ -4116,18 +4134,38 @@ def read_scan_cursor() -> str | None:
 def write_scan_cursor(rule: str | None) -> None:
     """Remember where the next scan starts.
 
-    A None rule means the pass finished, so the next scan starts at the first
-    rule again.  The write is best effort: a scan that cannot remember where
-    it was still works, it just repeats itself.
+    A None rule means the pass finished every rule, so the next scan starts
+    at the first rule again.  The write is best effort: a scan that cannot
+    remember where it was still works, it just repeats itself.
     """
     try:
-        SCAN_CURSOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+        path = scan_cursor_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"rule": rule, "at": int(time.time())}
-        tmp = SCAN_CURSOR_PATH.with_name(SCAN_CURSOR_PATH.name + ".tmp")
+        tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload))
-        tmp.replace(SCAN_CURSOR_PATH)
+        tmp.replace(path)
     except OSError:
         pass
+
+
+def _scan_rule_order(ordered: list[tuple[str, tuple]]) -> list[tuple[str, tuple]]:
+    """The rule order for a rotated scan.
+
+    The rules that feed ask-first come first and ask-first comes last, so the
+    rotation cannot break the order they depend on.  The rules in between are
+    the ones that stand alone, and those are the ones that rotate.
+    """
+    feeders = [item for item in ordered if item[0] in SCAN_RULE_FEEDERS]
+    last = [item for item in ordered if item[0] in SCAN_RULE_LAST]
+    free = [item for item in ordered
+            if item[0] not in SCAN_RULE_FEEDERS and item[0] not in SCAN_RULE_LAST]
+    resume = read_scan_cursor()
+    if resume:
+        index = next((i for i, (n, _) in enumerate(free) if n == resume), None)
+        if index:
+            free = free[index:] + free[:index]
+    return feeders + free + last
 
 
 def scan(cats: Sequence[str] | None, skip: Iterable[str] = (),
@@ -4151,11 +4189,7 @@ def scan(cats: Sequence[str] | None, skip: Iterable[str] = (),
     ordered = list(RULES.items())
     rotate = not cats
     if rotate:
-        resume = read_scan_cursor()
-        if resume:
-            index = next((i for i, (n, _) in enumerate(ordered) if n == resume), None)
-            if index:
-                ordered = ordered[index:] + ordered[:index]
+        ordered = _scan_rule_order(ordered)
     try:
         for position in range(len(ordered)):
             name, (fn, _desc) = ordered[position]
@@ -4193,19 +4227,31 @@ def scan(cats: Sequence[str] | None, skip: Iterable[str] = (),
                 seen.add(key)
                 out.append(c)
             if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
-                _SCAN_BUDGET_EXHAUSTED = True
-                # The next rule did not run.  Start there next time, so the
-                # rules after this one are reached instead of being cut off
-                # again on every run.
-                if rotate and advance_cursor:
-                    nxt = (ordered[position + 1][0] if position + 1 < len(ordered)
-                           else ordered[0][0])
-                    write_scan_cursor(nxt)
+                # What is left after this rule decides whether the pass is
+                # complete.  A rule that was skipped on purpose is not left
+                # over: it is not going to run either way.
+                pending = [n for n, _ in ordered[position + 1:]
+                           if n not in skipped and not (cats and n not in cats)]
+                if not pending:
+                    # Every rule that was going to run has run.  The budget
+                    # ran out after the last one, which is not a reason to
+                    # call the scan truncated.
+                    if rotate and advance_cursor:
+                        write_scan_cursor(None)
+                else:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    # The next rule did not run.  Start there next time, so the
+                    # rules after this one are reached instead of being cut off
+                    # again on every run.
+                    if rotate and advance_cursor:
+                        write_scan_cursor(pending[0])
                 break
         else:
-            # Every rule ran, so the next scan starts at the first one again
-            # and the rotation begins afresh.
-            if rotate and advance_cursor:
+            # The loop finished without the budget stopping it.  The rotation
+            # is only reset when every rule ran.  A pass that skipped a rule
+            # did not cover that rule, and clearing the cursor there would put
+            # the rotation back at the start and repeat the same prefix.
+            if rotate and advance_cursor and not skipped:
                 write_scan_cursor(None)
     finally:
         # The scan is over.  Everything after this point -- the apply phase,

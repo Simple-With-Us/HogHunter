@@ -5091,35 +5091,39 @@ def test_temp_staged_escapes_the_writer_pattern(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _cursor_rules(hh, names, clock=None, slow=None):
+    """Point RULES at stub rules and return the list that records the order."""
+    called = []
+
+    def make(name):
+        def rule():
+            called.append(name)
+            if slow == name and clock is not None:
+                clock.now += 8.0   # past the scan's 6 s share, short of a 10 s run budget
+            return []
+        return rule
+
+    hh.RULES = {n: (make(n), n) for n in names}
+    return called
+
+
 def test_the_scan_cursor_carries_on_where_the_last_scan_stopped(hh):
     """A truncated scan must not repeat the same prefix for ever.
 
     The scan walks the rules in a fixed order and the scan's share of the
     budget can run out before the walk finishes.  Without a cursor the rules
-    after the cut are never reached: every run scans the same prefix, finds
+    after the cut are never reached, so every run scans the same prefix, finds
     nothing, and reports "nothing reclaimable" while the disk keeps filling.
     That is the livelock.  The cursor makes the next run carry on from the
     rule that did not run, so the rules rotate instead of repeating.
     """
     home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-"))
-    cursor = home / "scan-cursor.json"
     original_rules = hh.RULES
-    original_cursor_path = hh.SCAN_CURSOR_PATH
+    original_home = hh.HOME
     try:
-        hh.SCAN_CURSOR_PATH = cursor
+        hh.HOME = home
         clock = FakeClock()
-        called = []
-
-        def slow_rule():
-            called.append("slow")
-            clock.now += 8.0      # past the scan's 6 s share, short of the 10 s run budget
-            return []
-
-        def later_rule():
-            called.append("later")
-            return []
-
-        hh.RULES = {"slow": (slow_rule, ""), "later": (later_rule, "")}
+        called = _cursor_rules(hh, ["slow", "later"], clock=clock, slow="slow")
 
         out, err = io.StringIO(), io.StringIO()
         with fake_time(hh, clock), \
@@ -5127,6 +5131,7 @@ def test_the_scan_cursor_carries_on_where_the_last_scan_stopped(hh):
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             hh.main(["--clean", "--json", "--budget-sec=10"])
         assert called == ["slow"], called
+        cursor = hh.scan_cursor_path()
         assert cursor.exists(), "a truncated clean run must remember where it stopped"
         assert json.loads(cursor.read_text())["rule"] == "later", cursor.read_text()
 
@@ -5142,7 +5147,7 @@ def test_the_scan_cursor_carries_on_where_the_last_scan_stopped(hh):
         assert called == ["later", "slow"], called
     finally:
         hh.RULES = original_rules
-        hh.SCAN_CURSOR_PATH = original_cursor_path
+        hh.HOME = original_home
         shutil.rmtree(home, ignore_errors=True)
 
 
@@ -5151,34 +5156,22 @@ def test_a_read_only_scan_does_not_move_the_cursor(hh):
     changed the state would mean the next clean run started somewhere the
     operator never asked for."""
     home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-ro-"))
-    cursor = home / "scan-cursor.json"
     original_rules = hh.RULES
-    original_cursor_path = hh.SCAN_CURSOR_PATH
+    original_home = hh.HOME
     try:
-        hh.SCAN_CURSOR_PATH = cursor
+        hh.HOME = home
         clock = FakeClock()
-        called = []
-
-        def slow_rule():
-            called.append("slow")
-            clock.now += 8.0
-            return []
-
-        def later_rule():
-            called.append("later")
-            return []
-
-        hh.RULES = {"slow": (slow_rule, ""), "later": (later_rule, "")}
+        called = _cursor_rules(hh, ["slow", "later"], clock=clock, slow="slow")
         out, err = io.StringIO(), io.StringIO()
         with fake_time(hh, clock), \
                 mock.patch.object(hh, "read_band", return_value=calm_band(hh)), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             hh.main(["--scan", "--json", "--budget-sec=10"])
         assert called == ["slow"], called
-        assert not cursor.exists(), "a read-only scan must not write the cursor"
+        assert not hh.scan_cursor_path().exists(), "a read-only scan must not write the cursor"
     finally:
         hh.RULES = original_rules
-        hh.SCAN_CURSOR_PATH = original_cursor_path
+        hh.HOME = original_home
         shutil.rmtree(home, ignore_errors=True)
 
 
@@ -5186,16 +5179,100 @@ def test_a_cursor_naming_a_rule_that_is_gone_is_ignored(hh):
     """A rule that was renamed or removed must not strand the cursor: the
     scan starts at the first rule again rather than never running the rest."""
     home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-stale-"))
-    cursor = home / "scan-cursor.json"
     original_rules = hh.RULES
-    original_cursor_path = hh.SCAN_CURSOR_PATH
+    original_home = hh.HOME
     try:
-        hh.SCAN_CURSOR_PATH = cursor
+        hh.HOME = home
+        cursor = hh.scan_cursor_path()
+        cursor.parent.mkdir(parents=True, exist_ok=True)
         cursor.write_text(json.dumps({"rule": "a-rule-that-no-longer-exists"}))
         assert hh.read_scan_cursor() is None
     finally:
         hh.RULES = original_rules
-        hh.SCAN_CURSOR_PATH = original_cursor_path
+        hh.HOME = original_home
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_run_that_skips_a_rule_does_not_clear_the_cursor(hh):
+    """A pass that skipped a rule did not cover it.
+
+    The cursor is only cleared when every rule ran.  Clearing it on a pass
+    that skipped a rule would put the rotation back at the start, and the same
+    prefix would be scanned again on every run.
+    """
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-skip-"))
+    original_rules = hh.RULES
+    original_home = hh.HOME
+    try:
+        hh.HOME = home
+        cursor = hh.scan_cursor_path()
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text(json.dumps({"rule": "two"}))
+        _cursor_rules(hh, ["one", "two"])
+        hh.set_budget(600)
+        try:
+            hh.scan(None, skip={"two"}, advance_cursor=True)
+            assert hh.read_scan_cursor() == "two", "a skipped rule must not clear the rotation"
+        finally:
+            hh.set_budget(0)
+    finally:
+        hh.RULES = original_rules
+        hh.HOME = original_home
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ask_first_still_runs_after_the_rules_that_feed_it(hh):
+    """The rules are not independent and the rotation must not break that.
+
+    botfleet-releases and stale-build-output fill the memos that ask-first
+    reads, so ask-first has to run after them.  A rotation that put ask-first
+    first would have it list the same folder twice.
+    """
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-order-"))
+    original_rules = hh.RULES
+    original_home = hh.HOME
+    try:
+        hh.HOME = home
+        cursor = hh.scan_cursor_path()
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text(json.dumps({"rule": "middle"}))
+        called = _cursor_rules(hh, ["middle", "ask-first", "botfleet-releases"])
+        hh.set_budget(600)
+        try:
+            hh.scan(None, advance_cursor=True)
+        finally:
+            hh.set_budget(0)
+        assert called.index("botfleet-releases") < called.index("ask-first"), called
+        assert called[-1] == "ask-first", called
+    finally:
+        hh.RULES = original_rules
+        hh.HOME = original_home
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_the_budget_running_out_after_the_last_rule_is_not_a_truncated_pass(hh):
+    """A pass where the budget runs out after the last rule is complete.
+
+    Nothing was left to scan, so the run is not truncated and the rotation
+    starts fresh instead of pointing at a rule that had already run.
+    """
+    home = Path(tempfile.mkdtemp(prefix="hoghunter-cursor-last-"))
+    original_rules = hh.RULES
+    original_home = hh.HOME
+    try:
+        hh.HOME = home
+        clock = FakeClock()
+        _cursor_rules(hh, ["one", "two"], clock=clock, slow="two")
+        hh.set_budget(10)
+        try:
+            hh.scan(None, advance_cursor=True)
+            assert hh._SCAN_BUDGET_EXHAUSTED is False, "the pass was complete, not truncated"
+            assert hh.read_scan_cursor() is None, "a complete pass starts the rotation over"
+        finally:
+            hh.set_budget(0)
+    finally:
+        hh.RULES = original_rules
+        hh.HOME = original_home
         shutil.rmtree(home, ignore_errors=True)
 
 

@@ -31,11 +31,11 @@ on a busy host. The disk filled while every run said there was nothing to do.
 
 The engine keeps a scan cursor: the rule name the last truncated scan stopped at.
 
-- `scripts/hoghunter-clean` gains `SCAN_CURSOR_PATH`, `read_scan_cursor()` and
-  `write_scan_cursor()`, and `scan()` takes an `advance_cursor` argument.
+- `scripts/hoghunter-clean` gains `scan_cursor_path()`, `read_scan_cursor()`,
+  `write_scan_cursor()` and `_scan_rule_order()`, and `scan()` takes an
+  `advance_cursor` argument.
 - The rule walk starts at the cursor and wraps around, so the rules rotate instead of
   repeating.
-- A run that reaches every rule resets the cursor, so the rotation begins afresh.
 - Only a `--clean` run advances the cursor. `--scan` is read-only and still writes
   nothing.
 - A caller that names its own `--categories` gets exactly those rules: the cursor does
@@ -45,6 +45,36 @@ The engine keeps a scan cursor: the rule name the last truncated scan stopped at
 - The summary line no longer says `nothing reclaimable` when the scan was cut short. It
   says the run found nothing in the part of the rules it reached, and that the next run
   carries on from where this one stopped.
+
+### The rules are not independent, and the rotation respects that
+
+`botfleet-releases` fills `_RELEASES_TAKEN` and `stale-build-output` fills
+`_STALE_BUILD_LISTED`, and `ask-first` reads both of them. A rotation that put
+`ask-first` first would have it list the same folder twice, because the memos it reads
+would still be empty.
+
+So the rotation does not shuffle the whole list. The two rules that feed `ask-first`
+always run first, `ask-first` always runs last, and only the rules that stand alone
+rotate.
+
+### Three review findings, and what they changed
+
+The first cut of this change was reviewed on the pull request and three findings came
+back. All three were real and all three are fixed here.
+
+1. **A pass that skipped a rule cleared the rotation.** The reset ran whenever the loop
+   finished without the budget stopping it, even when a rule had been skipped on
+   purpose. That put the rotation back at the start and the prefix repeated, which is
+   the failure this change exists to cure. The cursor is now cleared only when every
+   rule ran.
+2. **The budget running out after the last rule was called a truncated pass.** Nothing
+   was left to scan, so the pass was complete, but the run said it was truncated and the
+   cursor pointed at a rule that had already run. A pass with nothing left to run is now
+   reported as complete.
+3. **The cursor path was resolved at import time.** A test that pointed `HOME`
+   somewhere else wrote the cursor into the real home directory. It is resolved on every
+   call now, so the tests point `HOME` at a temporary directory and the cursor follows
+   it.
 
 ## What did not change
 
@@ -58,9 +88,13 @@ The engine keeps a scan cursor: the rule name the last truncated scan stopped at
 
 ## Verification
 
-- `scripts/test-hoghunter-clean.py`: 242 of 242 pass, including three new tests for the
-  cursor (it advances and rotates, a read-only scan does not move it, and a stale rule
-  name is ignored).
+- `scripts/test-hoghunter-clean.py`: 245 of 245 pass, including six tests for the
+  cursor. It advances and rotates, a read-only scan does not move it, a stale rule name
+  is ignored, a pass that skipped a rule does not clear it, `ask-first` still runs after
+  the rules that feed it, and a budget that runs out after the last rule is a complete
+  pass.
+- `scripts/test-robotic-vacuum.py`: 480 tests pass.
+- `scripts/server-status`: 74 tests pass.
 - A live run on Nov 22, 2026 with `--clean --band=full --budget-sec=60` stopped at the
   `agent-state` rule, wrote `{"rule": "agent-state"}` to the cursor file, and reported
   `nothing reclaimable in the part of the rules this run reached; the next run carries on
@@ -73,4 +107,4 @@ the step finishes inside the watchdog and reports its real bytes. The separate
 `~/.claude-disk-janitor/janitor.sh` path still calls the engine with `--clean
 --band=full` and no `--budget-sec` inside a 300 second watchdog, so that path is killed
 mid-run and reports zero bytes. It is a different script from this repo's vacuum
-package and is tracked separately.
+package, and it is tracked as AFC-888.
