@@ -5424,6 +5424,25 @@ def test_integration_cache_recheck_reruns_the_gates(hh):
         assert build.exists(), "a marker placed after the scan keeps the cache"
 
 
+def test_integration_cache_refuses_precious_and_nested_state(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        products = build / "Build" / "Products"
+        (products / "clone").mkdir(parents=True, exist_ok=True)
+        (products / "clone" / ".git").mkdir(parents=True, exist_ok=True)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a repository nested in the products keeps the cache"
+        shutil.rmtree(products / "clone")
+        (products / "release-key.p12").write_bytes(b"x")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a signing key anywhere in the cache keeps it"
+        (products / "release-key.p12").unlink()
+        settle(build, 30)
+        assert str(build) in rule_paths(hh.rule_xcode_artifacts()), \
+            "with the key gone the cache is a candidate again"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

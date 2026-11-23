@@ -1947,22 +1947,38 @@ def _hoghunter_lane_refusal(s: str) -> str | None:
 def _integration_cache_refusal(s: str) -> str | None:
     """Why this ~/Code checkout's build cache must stay, or None.  Asked at
     the scan and again right before the delete on a fresh open-file listing,
-    the same shape as the lane refusal above."""
+    the same shape as the lane refusal above.  The rest is the full
+    xcode-scratch chain -- identity, the three idleness clocks, precious
+    contents, deep marker, nested clones, open handles, cwd and full-path
+    probes -- so the pool keeps every promise the policy JSON makes.  The one
+    gate left out is the bare-folder-name probe:  `build` is a word half this
+    Mac's command lines carry, it would starve the pool, and the full-path
+    probe below names the cache specifically already."""
     d = Path(s)
     if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
         return "not a plain folder, forbidden, or marked to keep"
-    if process_names_path(s) or repo_has_process_cwd(s):
-        return "a process names it or runs from inside it"
     refusal = _derived_data_identity_refusal(d)
     if refusal is not None:
         return refusal
-    if newest_file_age_min(s) < IDLE_MIN_XCODE_SCRATCH:
-        return "touched in the last 24 hours"
+    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
+            or _shallow_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH
+            or _deep_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH):
+        return "used in the last 24 hours"
+    precious = _derived_data_precious_refusal(d)
+    if precious is not None:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(d)
+    if nested is not None:
+        return nested
     if tree_in_use(s):
         return "held open"
-    verdict = holds_keep_sentinel(s, probe_timeout(60.0))
-    if verdict.found or not verdict.known:
-        return "holds a keep marker, or the look failed"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s):
+        return "a running process names it"
     return None
 
 
@@ -2032,7 +2048,12 @@ def rule_xcode_artifacts() -> list[Candidate]:
     # delete exactly as it gates the /private/tmp roots.
     code_root = HOME / "Code"
     if code_root.is_dir():
-        for d in sorted(code_root.iterdir()):
+        try:
+            checkouts = sorted(code_root.iterdir())
+        except OSError as exc:
+            log(f"xcode-artifacts skipped {code_root}: {type(exc).__name__}: {exc}")
+            checkouts = []
+        for d in checkouts:
             if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
                 _SCAN_BUDGET_EXHAUSTED = True
                 return cands
