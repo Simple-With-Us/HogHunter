@@ -1960,10 +1960,20 @@ def _integration_cache_refusal(s: str) -> str | None:
     refusal = _derived_data_identity_refusal(d)
     if refusal is not None:
         return refusal
+    # Cheap gates first, so an active or held-open cache never pays the three
+    # full-tree walks (precious, deep marker, clones) this helper ends with
+    # (review of PR 390).  The gates are conjunctive, so the order only
+    # changes what a refusal costs, never which trees refuse.
     if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
             or _shallow_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH
             or _deep_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH):
         return "used in the last 24 hours"
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s):
+        return "a running process names it"
     precious = _derived_data_precious_refusal(d)
     if precious is not None:
         return precious
@@ -1973,12 +1983,6 @@ def _integration_cache_refusal(s: str) -> str | None:
     nested = regenerable_clones_only(d)
     if nested is not None:
         return nested
-    if tree_in_use(s):
-        return "held open"
-    if repo_has_process_cwd(s):
-        return "a process runs from it"
-    if process_names_path(s):
-        return "a running process names it"
     return None
 
 
