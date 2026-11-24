@@ -122,6 +122,10 @@ IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release m
 
 # Below this a candidate is not worth the delete.  Same floor the cache rules use.
 MIN_CANDIDATE_BYTES = 8 * 1024 * 1024
+# Report floor for tmp-large-trees: a seat scratch tree this size under
+# /private/tmp belongs on a person's screen whatever its name (2026-11-24).
+TMP_LARGE_TREE_BYTES = 1024 * 1024 * 1024
+TMP_LARGE_TREES_MIN_SHARE_SEC = 60.0
 
 # Owner's condition for this rule: it deletes only under real disk pressure.
 # `--band=full` alone is not that, because the pressure triggers also fire on a
@@ -151,7 +155,7 @@ PRESSURE_ONLY_RULES = frozenset(PRESSURE_RULES)
 # folder), and they reclaim almost nothing once every gate holds.  A clean run
 # has no reader for the report and does not pay for the walks.  xcode-scratch
 # left this set on Nov 5 (HH-219): it deletes what it can positively identify.
-REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output", "tmp-build-trees"})
+REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output", "tmp-build-trees", "tmp-large-trees"})
 
 # The early warning (HH-219).  Under this much free space, the ask-first trees
 # are sized, and when the report-only rows add up to more than the floor, the
@@ -3905,6 +3909,82 @@ def rule_tmp_build_trees() -> list[Candidate]:
         ))
     return cands
 
+def rule_tmp_large_trees() -> list[Candidate]:
+    """Large trees under /private/tmp, whatever their name.
+
+    Report only at every disk level, skipped on healthy-band cleans like the
+    other report-only walks.  tmp-build-trees only names agent candidate and
+    rebase checkouts, so a seat's scratch tree with an ordinary name is
+    invisible to the app at a healthy band -- measured 2026-11-23: four such
+    trees totalling about 21 GB under /private/tmp while the disk showed
+    144 GB free.  A person decides; this rule never deletes, whatever the
+    tree's write age, and a .janitor-keep marker is surfaced with the row
+    rather than hiding it.
+    """
+    global _SCAN_BUDGET_EXHAUSTED
+    if not XCODE_SCRATCH_ROOT.is_dir():
+        return []
+    # Sizing a 20 GB tree is a python-side walk with no subprocess for the
+    # scan-share guard to bound, so the rule stands down while less than a
+    # minute of the share remains and leaves it to the rules behind it;
+    # the stand-down marks the scan budget exhausted, so the truncation
+    # cursor carries the rest to the next run instead of the run reading
+    # as a complete pass over this rule.
+    if scan_budget_left() < TMP_LARGE_TREES_MIN_SHARE_SEC:
+        _SCAN_BUDGET_EXHAUSTED = True
+        return []
+    try:
+        children = sorted(XCODE_SCRATCH_ROOT.iterdir())
+    except OSError:
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for tree in children:
+        if rule_out_of_time(deadline):
+            return cands
+        if tree.is_symlink() or not tree.is_dir():
+            continue
+        if _TMP_BUILD_TREE_RE.fullmatch(tree.name):
+            # tmp-build-trees already reports candidate and rebase checkouts;
+            # a second row would double-count the bytes in top_report_only.
+            continue
+        size = dir_bytes(str(tree))
+        if size < TMP_LARGE_TREE_BYTES:
+            continue
+        keep = ""
+        if has_keep_sentinel(str(tree)):
+            keep = "; carries a " + KEEP_SENTINEL + " marker"
+        cands.append(Candidate(
+            category="tmp-large-trees", path=str(tree), bytes=size,
+            reason=f"Large tree under /private/tmp, {_age_phrase(tree)} (report only{keep})",
+            tier="ask-first", op="report",
+        ))
+    return cands
+
+
+def _age_phrase(tree: Path) -> str:
+    """How recently this tree was written, phrased for a report row.
+
+    The capped walk runs first and is conclusive when it finds a fresh file;
+    only a tree that read old pays the unbounded find, and when that probe
+    cannot prove the tree quiet -- a timeout and a fresh file past the cap
+    look the same to it -- the row says so instead of asserting a write age
+    nobody measured.  A tree with no files at all says so instead of
+    rendering the sentinel.
+    """
+    idle = newest_file_age_min(str(tree))
+    if idle < IDLE_MIN_OK:
+        return f"newest write {idle:.0f} min ago"
+    if idle < 24 * 60:
+        # The unbounded find cannot add information inside its own window
+        # that the capped walk has not already answered.
+        return f"newest write {idle / 60.0:.1f} h ago"
+    if touched_since(str(tree), 1.0):
+        return "unbounded probe could not prove the tree quiet"
+    if idle >= 1e9:
+        return "no files"
+    return f"newest write {idle / 60.0:.1f} h ago"
+
 
 
 # --------------------------------------------------------------------------
@@ -4287,6 +4367,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "brew": (rule_brew, "Homebrew obsolete versions"),
     "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
     "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
+    "tmp-large-trees": (rule_tmp_large_trees, "Large trees under /private/tmp, any name (report only)"),
     "stale-build-output": (rule_stale_build_output, "Stale ignored build output in main checkouts (report only)"),
     "ask-first": (rule_ask_first_inventory, "Ask-first inventory (report only)"),
 }
