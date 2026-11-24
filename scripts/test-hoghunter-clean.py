@@ -5492,6 +5492,34 @@ def test_tmp_large_trees_surfaces_keep_marker_and_skips_symlinks(hh):
         assert not any(c.path.endswith("/link") for c in found.values()), "a symlink is never named"
 
 
+def test_tmp_large_trees_leaves_candidate_names_to_tmp_build_trees(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "feature-rebase"
+        blob(tree / "payload.bin", 30)
+        settle(tree, 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path for c in hh.rule_tmp_large_trees()}
+        assert str(tree) not in found, "tmp-build-trees owns candidate and rebase names"
+
+
+def test_tmp_large_trees_phrases_a_fresh_tree_honestly(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "hot-scratch"
+        blob(tree / "payload.bin", 30)
+        (tree / "fresh.bin").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        row = found[str(tree)]
+        assert "written in the last 24 h" in row.reason, \
+            "a fresh file past the capped walk reads as fresh, not idle"
+
+
 def test_tmp_large_trees_respects_the_rule_deadline(hh):
     with fake_home(hh) as home, gates_open(hh):
         scratch = home / "private-tmp"
