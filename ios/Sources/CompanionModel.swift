@@ -1338,9 +1338,10 @@ final class CompanionModel {
         // memory), so comparing bytes cannot suppress the reload.  Write
         // every poll the container can actually hold, and rate limit the reload.
         let containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupSuite) != nil
-        // The widget draws nothing from the server, and this copy outlives the
-        // screen in a shared container, so server internals stay out of it.
-        let data = try? CompanionJSON.encode(fetched.withoutServerDetail())
+        // This copy outlives the screen in a shared container, so server
+        // internals stay out of it.  The widget gets only the server's state,
+        // reading times and CPU and memory percentages (`widgetCopy`).
+        let data = try? CompanionJSON.encode(fetched.widgetCopy())
         guard let defaults = sharedWidgetDefaults(), let data else { return }
         defaults.set(data, forKey: "last_snapshot")
         let cleanKeys = [

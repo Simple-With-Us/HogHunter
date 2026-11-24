@@ -374,7 +374,7 @@ struct HogHunterMediumWidgetView: View {
 
                 // Right Column: Top Hog & Clean Action
                 VStack(alignment: .leading, spacing: 6) {
-                    WidgetServerBlock(server: snap.server)
+                    WidgetServerBlock(server: snap.server, compact: true)
 
                     if let topHog = snap.rows.first {
                         VStack(alignment: .leading, spacing: 2) {
@@ -503,10 +503,12 @@ struct HogHunterLargeWidgetView: View {
                     .accessibilityElement(children: .combine)
                 }
 
-                WidgetServerBlock(server: snap.server)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                if let server = snap.server, server.resolvedState() != .notConfigured {
+                    WidgetServerBlock(server: server)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                }
 
                 // Top Hogs Section
                 VStack(alignment: .leading, spacing: 4) {

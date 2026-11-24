@@ -1682,6 +1682,26 @@ extension CompanionSnapshot {
         copy.flaggedIssuesCoverServer = flaggedIssues == nil ? nil : false
         return copy
     }
+
+    /// The copy the widget's shared container holds: no server internals, plus
+    /// the four numbers the widget draws.  The widget used to get none of the
+    /// server, so it showed the Mac alone.  Only the state, the reading times
+    /// and the CPU and memory percentages cross: no host, error text, process,
+    /// workload, database or directory name.  A phone that may not see the
+    /// server (the opt-in is off, or this link reads the plain snapshot) gets
+    /// the stripped copy, as before.
+    func widgetCopy() -> CompanionSnapshot {
+        var copy = withoutServerDetail()
+        guard case .available(let server) = serverAccess else { return copy }
+        copy.server = CompanionServerStatus(
+            state: server.state,
+            generatedAt: server.generatedAt,
+            fetchedAt: server.fetchedAt,
+            cpu: server.cpu.map { CompanionServerCPU(percent: $0.percent, percentText: $0.percentText, severity: $0.severity) },
+            memory: server.memory.map { CompanionServerMeter(percent: $0.percent, percentText: $0.percentText, severity: $0.severity) }
+        )
+        return copy
+    }
 }
 
 enum CompanionJSON {
