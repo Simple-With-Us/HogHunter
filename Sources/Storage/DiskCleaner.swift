@@ -2121,10 +2121,16 @@ final class DiskCleaner: @unchecked Sendable {
                                     if scanShouldStop() { break }
                                     guard let values = try? dayURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
                                           values.isDirectory == true,
-                                          let modDate = values.contentModificationDate,
-                                          modDate < fourteenDaysAgo else { continue }
+                                          let modDate = values.contentModificationDate else { continue }
                                     let stats = directoryStats(at: dayURL)
                                     guard !stats.isApproximate, stats.bytes > 0 else { continue }
+                                    // The folder's own stamp only moves when a direct
+                                    // child is added or removed; a live session
+                                    // appending to its files leaves it untouched.
+                                    // The measured recursive newest write is the
+                                    // age that proves the tree quiet.
+                                    let lastActivity = max(modDate, stats.lastModified ?? modDate)
+                                    guard lastActivity < fourteenDaysAgo else { continue }
                                     items.append(CleanItem(
                                         category: .aiArtifacts,
                                         title: "MiniMax Session Day (\(dayURL.lastPathComponent))",
@@ -2133,7 +2139,7 @@ final class DiskCleaner: @unchecked Sendable {
                                         bytes: stats.bytes,
                                         fileCount: stats.fileCount,
                                         isApproximate: stats.isApproximate,
-                                        lastModified: modDate,
+                                        lastModified: lastActivity,
                                         isSelected: false,
                                         detail: "MiniMax Code session day older than 14 days"
                                     ))
@@ -2149,10 +2155,13 @@ final class DiskCleaner: @unchecked Sendable {
                     if scanShouldStop() { break }
                     guard let values = try? workspaceURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
                           values.isDirectory == true,
-                          let modDate = values.contentModificationDate,
-                          modDate < fourteenDaysAgo else { continue }
+                          let modDate = values.contentModificationDate else { continue }
                     let stats = directoryStats(at: workspaceURL)
                     guard !stats.isApproximate, stats.bytes > 0 else { continue }
+                    // Same age proof as the session days above: the recursive
+                    // newest write, not the folder's own stamp.
+                    let lastActivity = max(modDate, stats.lastModified ?? modDate)
+                    guard lastActivity < fourteenDaysAgo else { continue }
                     items.append(CleanItem(
                         category: .aiArtifacts,
                         title: "MiniMax Workspace (\(workspaceURL.lastPathComponent.prefix(8)))",
@@ -2161,7 +2170,7 @@ final class DiskCleaner: @unchecked Sendable {
                         bytes: stats.bytes,
                         fileCount: stats.fileCount,
                         isApproximate: stats.isApproximate,
-                        lastModified: modDate,
+                        lastModified: lastActivity,
                         isSelected: false,
                         detail: "MiniMax Code workspace tree older than 14 days"
                     ))
