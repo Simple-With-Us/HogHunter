@@ -14,7 +14,7 @@
 
 Mac menu bar utility.  Finds CPU and memory hogs now, over the past hour, and over the past 24 hours.  Quit from the list after confirm.
 
-**Local:** `~/apps/HogHunter`  
+**Local:** `~/Code/HogHunter`  
 **Installed app:** `~/Applications/Hog Hunter.app`  
 **TestFlight authorization:** The owner requested external testing for the
 iPhone companion on 2026-09-27.  The release lane is tracked in issue #22.
