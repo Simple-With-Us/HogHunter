@@ -58,7 +58,7 @@ jobs:
 
   test:
     runs-on: macos-26
-    # Build and test took ~13 min on run 4384823127; a slow runner can need
+    # Build and test took ~13 min on run 43848232127; a slow runner can need
     # two full 2400s capture attempts, so the job budget fits both (~95 min).
     timeout-minutes: 100
     env:
@@ -126,7 +126,7 @@ jobs:
           fi
 
       - name: Require server maintenance render
-        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png" && test -s "${HOGHUNTER_RENDER_DIR}/hh207-server-maintenance-incomplete-inventory.png"
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png" && test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-incomplete-inventory.png"
 
       - name: Build iOS companion
         run: |
