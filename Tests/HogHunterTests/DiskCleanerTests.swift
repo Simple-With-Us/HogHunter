@@ -378,11 +378,14 @@ final class DiskCleanerTests: XCTestCase {
             try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
             try! "payload".write(to: dir.appendingPathComponent("state.bin"), atomically: true, encoding: .utf8)
         }
-        // Set the age after the payload lands, because writing the file moves
-        // the directory's own modification date.
+        // Set the age after the payload lands, and age the payload with the
+        // folder: the scan gates on the newest write anywhere in the tree,
+        // so a fresh payload inside an aged folder would read as live.
         let old = Date().addingTimeInterval(-21 * 24 * 3600)
-        try! fm.setAttributes([.modificationDate: old], ofItemAtPath: staleDay.path)
-        try! fm.setAttributes([.modificationDate: old], ofItemAtPath: staleWorkspace.path)
+        for dir in [staleDay, staleWorkspace] {
+            try! fm.setAttributes([.modificationDate: old], ofItemAtPath: dir.appendingPathComponent("state.bin").path)
+            try! fm.setAttributes([.modificationDate: old], ofItemAtPath: dir.path)
+        }
 
         let items = cleaner.scanCategory(.aiArtifacts)
         let titles = Set(items.map(\.title))
@@ -394,6 +397,14 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(
             titles.contains("MiniMax Workspace (abcdef01)"),
             "a three week old workspace should be offered, found: \(titles.sorted())"
+        )
+        XCTAssertTrue(
+            paths.contains(staleDay.path),
+            "a three week old session day path should be offered, found: \(paths.sorted())"
+        )
+        XCTAssertTrue(
+            paths.contains(staleWorkspace.path),
+            "a three week old workspace path should be offered, found: \(paths.sorted())"
         )
         XCTAssertFalse(paths.contains(freshDay.path), "a fresh session day must not be offered")
         for item in items where item.url.path.contains("/.minimax/") {
