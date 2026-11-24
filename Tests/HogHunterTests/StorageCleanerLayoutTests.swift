@@ -105,7 +105,7 @@ final class StorageCleanerLayoutTests: XCTestCase {
             of: DiskCleanerView(store: store()).frame(width: windowWidth, height: windowHeight),
             size: CGSize(width: windowWidth, height: windowHeight)
         )
-        try savePNG(rep, named: "hh236-storage-cleaner-tab.png")
+        try savePNG(rep, named: "hh236-storage-cleaner-tab")
     }
 
     private func bitmap<V: View>(of view: V, size: CGSize) -> NSBitmapImageRep? {
