@@ -117,6 +117,7 @@ IDLE_MIN_STALE_BUILD = 14 * 24 * 60  # 14d before ignored build output reads as 
 IDLE_MIN_TOOL_VERSION = 7 * 24 * 60  # 7d for superseded tool versions
 IDLE_MIN_TMP_BUILD_TREE = 60          # a throwaway agent checkout idle for an hour reads as left over
 IDLE_MIN_XCODE_SCRATCH = 24 * 60     # 24h before Xcode-shaped scratch reads as idle
+IDLE_MIN_XCODE_SCRATCH_PRESSURE = IDLE_MIN_SCRATCH  # 3h when disk free <= PRESSURE_RULE_FREE_GB
 IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release may go
 
 # Below this a candidate is not worth the delete.  Same floor the cache rules use.
@@ -587,6 +588,13 @@ def is_peer_work(path: str) -> bool:
     except ValueError:
         return False
     if ".muse" in parts:
+        if (len(parts) == 6
+                and parts[0] == "Code"
+                and parts[2] == ".muse"
+                and parts[3] == "worktrees"
+                and parts[4].startswith("subagent-")
+                and parts[5] == ".next"):
+            return False
         return True
     return len(parts) >= 2 and parts[0] == "apps" and parts[1].startswith("botfleet-")
 
@@ -1896,6 +1904,8 @@ def rule_dev_caches() -> list[Candidate]:
         (HOME / "Library/Caches/copilot", "Copilot toolchain"),
         (HOME / "Library/Caches/org.swift.swiftpm", "SwiftPM artifacts"),
         (HOME / "Library/Caches/ms-playwright", "Playwright browsers"),
+        (HOME / ".cache/ms-playwright", "Playwright browsers"),
+        (HOME / ".cache/puppeteer", "Puppeteer browsers"),
         (HOME / "Library/Caches/@mmx-agentelectron-updater", "MMX updater staging"),
         (HOME / ".npm/_cacache", "npm _cacache"),
         (HOME / ".cache/uv", "uv cache"),
@@ -1948,6 +1958,18 @@ def _hoghunter_lane_refusal(s: str) -> str | None:
     return None
 
 
+def _xcode_scratch_idle_min(free_gb: float | None = None) -> tuple[float, str]:
+    """Idle threshold for Xcode scratch and Muse worktree build caches.
+
+    Tightens from 24 hours to 3 hours while free space is at or below
+    PRESSURE_RULE_FREE_GB so rapid multi-build bursts cannot fill the disk
+    before the normal 24h window opens.  An unreadable df fails safe to 24h.
+    """
+    if free_gb is not None and free_gb <= PRESSURE_RULE_FREE_GB:
+        return (IDLE_MIN_XCODE_SCRATCH_PRESSURE, "3 hours")
+    return (IDLE_MIN_XCODE_SCRATCH, "24 hours")
+
+
 def _integration_cache_refusal(s: str) -> str | None:
     """Why this ~/Code checkout's build cache must stay, or None.  Asked at
     the scan and again right before the delete on a fresh open-file listing,
@@ -1968,10 +1990,11 @@ def _integration_cache_refusal(s: str) -> str | None:
     # full-tree walks (precious, deep marker, clones) this helper ends with
     # (review of PR 390).  The gates are conjunctive, so the order only
     # changes what a refusal costs, never which trees refuse.
-    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
-            or _shallow_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH
-            or _deep_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH):
-        return "used in the last 24 hours"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(d) < idle_min
+            or _deep_newest_age_min(d) < idle_min):
+        return f"used in the last {idle_label}"
     if tree_in_use(s):
         return "held open"
     if repo_has_process_cwd(s):
@@ -2693,6 +2716,60 @@ def _agent_transient_dirs(root: Path) -> list[Path]:
     return out
 
 
+def _muse_next_refusal(wt: Path, next_dir: Path, idle_min: float) -> tuple[str | None, int]:
+    """Why a Muse subagent worktree .next cache must stay, or (None, total_bytes).
+
+    Uses one bounded scandir walk to check markers, .git entries, symlinks,
+    mtime idleness, and byte size together, so scan and delete-time recheck
+    share the exact same gate without paying multiple tree walks per worktree.
+    """
+    s = str(next_dir)
+    if next_dir.is_symlink() or not next_dir.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+        return "not a plain folder, forbidden, or marked to keep", 0
+    if changed_age_min(s) < idle_min:
+        return "touched recently", 0
+    if open_handles(s):
+        return "held open", 0
+    if repo_has_process_cwd(str(wt)):
+        return "a process runs from its worktree", 0
+    limit = probe_timeout(30.0)
+    if limit <= 0:
+        return "no scan time left", 0
+    deadline = time.monotonic() + limit
+    cutoff = time.time() - idle_min * 60
+    keep_lower = KEEP_SENTINEL.lower()
+    total_bytes = 0
+    stack = [s]
+    try:
+        if os.lstat(s).st_mtime > cutoff:
+            return "touched recently", 0
+        while stack:
+            if time.monotonic() > deadline:
+                return "walk timed out", 0
+            cur = stack.pop()
+            with os.scandir(cur) as entries:
+                for entry in entries:
+                    if time.monotonic() > deadline:
+                        return "walk timed out", 0
+                    if entry.is_symlink():
+                        return "holds a symlink", 0
+                    lname = entry.name.lower()
+                    if lname == keep_lower:
+                        return "holds a keep marker", 0
+                    if entry.name == ".git":
+                        return "holds a .git entry", 0
+                    st = entry.stat(follow_symlinks=False)
+                    if st.st_mtime > cutoff:
+                        return "touched recently", 0
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(entry.path)
+                    else:
+                        total_bytes += st.st_size
+    except OSError:
+        return "could not read cache tree", 0
+    return None, total_bytes
+
+
 def rule_agent_state() -> list[Candidate]:
     """Transient state left behind by the coding agents that run on this Mac.
 
@@ -2780,6 +2857,143 @@ def rule_agent_state() -> list[Candidate]:
                 # so the apply phase does not walk it again.
                 keep_verdict=verdict,
             ))
+    # MiniMax accumulates thousands of per-task directories under
+    # ~/.minimax/background-tasks/bg_* and multi-GB migration backups under
+    # ~/.minimax/v2/sqlite/backups.  Prune stale entries individually so one
+    # recent task never pins years of old ones, and cap per run so a backlog
+    # never blows the scan budget.
+    bg_root = HOME / ".minimax" / "background-tasks"
+    if bg_root.is_dir() and not bg_root.is_symlink():
+        bg_idle_min = 3 * 24 * 60
+        bg_cutoff = time.time() - bg_idle_min * 60
+        bg_added = 0
+        try:
+            with os.scandir(bg_root) as it:
+                for entry in it:
+                    if bg_added >= 500:
+                        break
+                    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                        _SCAN_BUDGET_EXHAUSTED = True
+                        return cands
+                    if not entry.name.startswith("bg_") or entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        if entry.stat(follow_symlinks=False).st_mtime > bg_cutoff:
+                            continue
+                    except OSError:
+                        continue
+                    target = Path(entry.path)
+                    s = str(target)
+                    if is_forbidden(s) or has_keep_sentinel(s) or not claim(target):
+                        continue
+                    verdict = holds_keep_sentinel(s, probe_timeout(15.0))
+                    if verdict.found or not verdict.known:
+                        continue
+                    if newest_file_age_min(s) < bg_idle_min or touched_since(s, bg_idle_min / (24 * 60)) or open_handles(s):
+                        continue
+                    cands.append(Candidate(
+                        category="agent-state", path=s, bytes=dir_bytes(s),
+                        reason="stale MiniMax background task (>3d, idle, no open handles)",
+                        keep_verdict=verdict,
+                    ))
+                    bg_added += 1
+        except OSError:
+            pass
+    sqlite_backups = HOME / ".minimax" / "v2" / "sqlite" / "backups"
+    if sqlite_backups.is_dir() and not sqlite_backups.is_symlink():
+        try:
+            for entry in sqlite_backups.iterdir():
+                if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    return cands
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                if "-before-" not in entry.name or "-migration-" not in entry.name:
+                    continue
+                if ".sqlite" not in entry.name:
+                    continue
+                s = str(entry)
+                if is_forbidden(s) or has_keep_sentinel(s) or not claim(entry):
+                    continue
+                verdict = holds_keep_sentinel(s, probe_timeout(15.0))
+                if verdict.found or not verdict.known:
+                    continue
+                if not idle_for(s, IDLE_MIN_TOOL_VERSION) or open_handles(s):
+                    continue
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    continue
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                cands.append(Candidate(
+                    category="agent-state", path=s, bytes=size,
+                    reason="superseded MiniMax SQLite migration backup (>7d, no open handles)",
+                    keep_verdict=verdict,
+                ))
+        except OSError:
+            pass
+    # Muse subagent worktrees under ~/Code/<repo>/.muse/worktrees/subagent-*
+    # accumulate multi-GB .next build caches while unmerged work keeps the
+    # worktree itself.  Prune only idle .next caches; never touch sources or git.
+    code_root = HOME / "Code"
+    if code_root.is_dir() and not code_root.is_symlink():
+        muse_idle_min, _ = _xcode_scratch_idle_min(read_disk_free())
+        muse_added = 0
+        try:
+            repos = sorted(code_root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            repos = []
+        for repo in repos:
+            if muse_added >= 20:
+                break
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            if repo.is_symlink() or not repo.is_dir():
+                continue
+            muse_dir = repo / ".muse"
+            if muse_dir.is_symlink() or not muse_dir.is_dir():
+                continue
+            wt_root = muse_dir / "worktrees"
+            if wt_root.is_symlink() or not wt_root.is_dir():
+                continue
+            try:
+                wts = sorted(wt_root.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            for wt in wts:
+                if muse_added >= 20:
+                    break
+                if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    return cands
+                if not wt.name.startswith("subagent-") or wt.is_symlink() or not wt.is_dir():
+                    continue
+                next_dir = wt / ".next"
+                if next_dir.is_symlink() or not next_dir.is_dir():
+                    continue
+                s = str(next_dir)
+                if not claim(next_dir):
+                    continue
+                refusal, size = _muse_next_refusal(wt, next_dir, muse_idle_min)
+                if refusal is not None or size < MIN_CANDIDATE_BYTES:
+                    continue
+
+                def _muse_recheck(wt: Path = wt, next_dir: Path = next_dir,
+                                  identity=path_identity(s)) -> str | None:
+                    if path_identity(str(next_dir)) != identity:
+                        return "the path now holds something else"
+                    cur_idle, _ = _xcode_scratch_idle_min(read_disk_free())
+                    why, _ = _muse_next_refusal(wt, next_dir, cur_idle)
+                    return why
+
+                cands.append(Candidate(
+                    category="agent-state", path=s, bytes=size,
+                    reason="stale Muse subagent .next build cache, idle, no open handles",
+                    recheck=_muse_recheck,
+                ))
+                muse_added += 1
     # The agent session transcripts are Jay's history, not cache.  Report them.
     for name in _AGENT_HOMES:
         root = HOME / name
@@ -3465,10 +3679,11 @@ def _xcode_scratch_refusal(tree: Path) -> str | None:
         return identity
     if is_forbidden(s) or has_keep_sentinel(s):
         return "protected"
-    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
-            or _shallow_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH
-            or _deep_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH):
-        return "used in the last 24 hours"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(tree) < idle_min
+            or _deep_newest_age_min(tree) < idle_min):
+        return f"used in the last {idle_label}"
     precious = _derived_data_precious_refusal(tree)
     if precious:
         return precious
