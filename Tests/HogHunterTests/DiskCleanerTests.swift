@@ -399,11 +399,11 @@ final class DiskCleanerTests: XCTestCase {
             "a three week old workspace should be offered, found: \(titles.sorted())"
         )
         XCTAssertTrue(
-            paths.contains(staleDay.path),
+            paths.contains(staleDay.resolvingSymlinksInPath().path),
             "a three week old session day path should be offered, found: \(paths.sorted())"
         )
         XCTAssertTrue(
-            paths.contains(staleWorkspace.path),
+            paths.contains(staleWorkspace.resolvingSymlinksInPath().path),
             "a three week old workspace path should be offered, found: \(paths.sorted())"
         )
         XCTAssertFalse(paths.contains(freshDay.path), "a fresh session day must not be offered")
