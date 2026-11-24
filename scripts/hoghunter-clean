@@ -121,6 +121,9 @@ IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release m
 
 # Below this a candidate is not worth the delete.  Same floor the cache rules use.
 MIN_CANDIDATE_BYTES = 8 * 1024 * 1024
+# Report floor for tmp-large-trees: a seat scratch tree this size under
+# /private/tmp belongs on a person's screen whatever its name (2026-11-24).
+TMP_LARGE_TREE_BYTES = 1024 * 1024 * 1024
 
 # Owner's condition for this rule: it deletes only under real disk pressure.
 # `--band=full` alone is not that, because the pressure triggers also fire on a
@@ -3679,6 +3682,44 @@ def rule_tmp_build_trees() -> list[Candidate]:
         ))
     return cands
 
+def rule_tmp_large_trees() -> list[Candidate]:
+    """Large trees under /private/tmp, whatever their name.
+
+    Report only at every disk level.  tmp-build-trees only names agent
+    candidate and rebase checkouts, so a seat's scratch tree with an ordinary
+    name is invisible to the app at a healthy band -- measured 2026-11-23:
+    four such trees totalling about 21 GB under /private/tmp while the disk
+    showed 144 GB free.  A person decides; this rule never deletes, and a
+    .janitor-keep marker is surfaced with the row rather than hiding it.
+    """
+    if not XCODE_SCRATCH_ROOT.is_dir():
+        return []
+    try:
+        children = sorted(XCODE_SCRATCH_ROOT.iterdir())
+    except OSError:
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for tree in children:
+        if rule_out_of_time(deadline):
+            return cands
+        if tree.is_symlink() or not tree.is_dir():
+            continue
+        size = dir_bytes(str(tree))
+        if size < TMP_LARGE_TREE_BYTES:
+            continue
+        keep = ""
+        if has_keep_sentinel(str(tree)):
+            keep = "; carries a " + KEEP_SENTINEL + " marker"
+        idle = newest_file_age_min(str(tree))
+        cands.append(Candidate(
+            category="tmp-large-trees", path=str(tree), bytes=size,
+            reason=(f"Large tree under /private/tmp, newest write {idle:.0f} min ago"
+                    f" (report only{keep})"),
+            tier="ask-first", op="report",
+        ))
+    return cands
+
 
 
 # --------------------------------------------------------------------------
@@ -4061,6 +4102,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "brew": (rule_brew, "Homebrew obsolete versions"),
     "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
     "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
+    "tmp-large-trees": (rule_tmp_large_trees, "Large trees under /private/tmp, any name (report only)"),
     "stale-build-output": (rule_stale_build_output, "Stale ignored build output in main checkouts (report only)"),
     "ask-first": (rule_ask_first_inventory, "Ask-first inventory (report only)"),
 }

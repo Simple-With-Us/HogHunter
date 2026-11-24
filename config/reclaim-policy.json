@@ -236,6 +236,14 @@
       "$rationale": "Throwaway checkouts agents leave in /private/tmp (names like hh212-candidate-3 or feature-rebase).  Report only, whatever the disk level, like xcode-scratch and stale-build-output: a tree that may be a git checkout can hold the only copy of unpushed work, and a refuse-list kept missing things in the two rules before it.  Each row says what the checks found: open handles, writes in the last hour, a keep marker, a linked worktree, uncommitted changes, a stash, commits no remote holds."
     },
     {
+      "name": "tmp-large-trees",
+      "tier": "ask-first",
+      "op": "report",
+      "title": "Large trees under /private/tmp, any name (report only)",
+      "reportFloorBytes": 1073741824,
+      "$rationale": "Report only, at every disk level.  tmp-build-trees names only agent candidate and rebase checkouts, so a seat's scratch tree with an ordinary name is invisible to the app at a healthy band: measured 2026-11-23, four trees totalling about 21 GB under /private/tmp while the disk showed 144 GB free.  Jay's 2026-11-24 request to keep training Hog Hunter is the owner decision for the report; a delete stays owner-gated like every HH-222 rule.  A .janitor-keep marker is surfaced with the row, never a reason to hide it."
+    },
+    {
       "name": "stale-build-output",
       "tier": "ask-first",
       "op": "report",

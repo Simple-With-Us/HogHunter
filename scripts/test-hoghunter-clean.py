@@ -5455,6 +5455,56 @@ def test_integration_pool_skips_a_symlinked_checkout(hh):
             "a checkout reached through a symlink is never named"
 
 
+def test_tmp_large_trees_reports_big_trees_of_any_name(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "mm-dd-p3s3"
+        blob(tree / "payload.bin", 30)
+        blob(scratch / "small" / "tiny.bin", 0, size=1024)
+        settle(tree, 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert str(tree) in found, "a big seat scratch tree is surfaced"
+        row = found[str(tree)]
+        assert row.op == "report" and row.tier == "ask-first", "report only, ask-first"
+        assert str(scratch / "small") not in found, "a small tree is not surfaced"
+
+
+def test_tmp_large_trees_surfaces_keep_marker_and_skips_symlinks(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        marked = scratch / "keepme"
+        blob(marked / "data.bin", 30)
+        (marked / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        settle(marked, 30)
+        real = scratch / "realtree"
+        blob(real / "data.bin", 30)
+        settle(real, 30)
+        (scratch / "link").symlink_to(real, target_is_directory=True)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert str(marked) in found, "a marked tree is still surfaced"
+        assert "marker" in found[str(marked)].reason, "the row says it carries a keep marker"
+        assert not any(c.path.endswith("/link") for c in found.values()), "a symlink is never named"
+
+
+def test_tmp_large_trees_respects_the_rule_deadline(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        for n in range(3):
+            blob(scratch / f"tree{n}" / "data.bin", 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "rule_out_of_time", return_value=True):
+            found = hh.rule_tmp_large_trees()
+        assert found == [], "a spent rule deadline reports nothing further"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
