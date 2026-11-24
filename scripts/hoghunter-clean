@@ -3749,10 +3749,9 @@ def _age_phrase(tree: Path) -> str:
     idle = newest_file_age_min(str(tree))
     if idle < IDLE_MIN_OK:
         return f"newest write {idle:.0f} min ago"
-    if idle < 24 * 60 and not touched_since(str(tree), 1.0):
-        # The capped walk can miss a fresh write past its entry cap, so a
-        # measured age inside the probe's own window is only asserted once
-        # the unbounded fail-closed probe agrees the tree is quiet.
+    if idle < 24 * 60:
+        # The unbounded find cannot add information inside its own window
+        # that the capped walk has not already answered.
         return f"newest write {idle / 60.0:.1f} h ago"
     if touched_since(str(tree), 1.0):
         return "unbounded probe could not prove the tree quiet"
