@@ -102,7 +102,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Package manager and toolchain caches",
-      "$rationale": "All rebuild on next use. node-gyp, electron, electron-builder, deno, copilot, swiftpm, ms-playwright, npm _cacache, uv, pip, yarn. pnpm and gradle are only touched when the build fan-out is quiet -- on this Mac the fan-out is what drives load and swap, and disturbing it makes things worse.",
+      "$rationale": "All rebuild on next use. node-gyp, electron, electron-builder, deno, copilot, swiftpm, ms-playwright, puppeteer, npm _cacache, uv, pip, yarn. pnpm and gradle are only touched when the build fan-out is quiet -- on this Mac the fan-out is what drives load and swap, and disturbing it makes things worse.",
       "skipWhenAny": [
         "xcodebuild alive",
         "swift-frontend alive",
@@ -126,7 +126,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Transient state left behind by coding agents",
-      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, cache, debug, shell-snapshots) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.  .tmp is not a delete target: ~/.codex/config.toml names a folder in ~/.codex/.tmp with no .git as a live marketplace source, so it is reported.",
+      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, cache, debug, shell-snapshots, stale >3d MiniMax background-tasks, and >7d MiniMax SQLite migration backups) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.  .tmp is not a delete target: ~/.codex/config.toml names a folder in ~/.codex/.tmp with no .git as a live marketplace source, so it is reported.",
       "skipWhenAny": [
         "a file under the path was touched in the last 90 minutes",
         "any process holds the path open",

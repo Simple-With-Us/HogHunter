@@ -5455,6 +5455,61 @@ def test_integration_pool_skips_a_symlinked_checkout(hh):
             "a checkout reached through a symlink is never named"
 
 
+def test_dev_caches_includes_puppeteer_and_dot_cache_playwright(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0):
+        pup = home / ".cache" / "puppeteer"
+        pw = home / ".cache" / "ms-playwright"
+        for d in (pup, pw):
+            d.mkdir(parents=True)
+            f = d / "chromium.bin"
+            f.write_bytes(b"x" * (9 * 1024 * 1024))
+            settle(f)
+            settle(d)
+        paths = {c.path for c in hh.rule_dev_caches()}
+        assert str(pup) in paths and str(pw) in paths, paths
+
+
+def test_agent_state_prunes_stale_minimax_background_tasks(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0):
+        bg_root = home / ".minimax" / "background-tasks"
+        stale = bg_root / "bg_old-task"
+        fresh = bg_root / "bg_recent-task"
+        kept = bg_root / "bg_kept-task"
+        for d in (stale, fresh, kept):
+            d.mkdir(parents=True)
+            (d / "out.log").write_bytes(b"x" * 1024)
+        (kept / ".janitor-keep").write_text("keep")
+        old_hours = 4 * 24
+        _age(stale / "out.log", old_hours)
+        _age(stale, old_hours)
+        _age(kept / "out.log", old_hours)
+        _age(kept, old_hours)
+        paths = {c.path for c in hh.rule_agent_state()}
+        assert str(stale) in paths, paths
+        assert str(fresh) not in paths, paths
+        assert str(kept) not in paths, paths
+
+
+def test_agent_state_prunes_old_minimax_sqlite_migration_backups(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0):
+        backups = home / ".minimax" / "v2" / "sqlite" / "backups"
+        backups.mkdir(parents=True)
+        old_bak = backups / "runtime-state-before-v2-migration-123.sqlite"
+        fresh_bak = backups / "runtime-state-before-v3-migration-456.sqlite"
+        other = backups / "notes.txt"
+        for f in (old_bak, fresh_bak, other):
+            f.write_bytes(b"x" * (9 * 1024 * 1024))
+        _age(old_bak, 8 * 24)
+        _age(other, 8 * 24)
+        paths = {c.path for c in hh.rule_agent_state()}
+        assert str(old_bak) in paths, paths
+        assert str(fresh_bak) not in paths, paths
+        assert str(other) not in paths, paths
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

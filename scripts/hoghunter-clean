@@ -1892,6 +1892,8 @@ def rule_dev_caches() -> list[Candidate]:
         (HOME / "Library/Caches/copilot", "Copilot toolchain"),
         (HOME / "Library/Caches/org.swift.swiftpm", "SwiftPM artifacts"),
         (HOME / "Library/Caches/ms-playwright", "Playwright browsers"),
+        (HOME / ".cache/ms-playwright", "Playwright browsers"),
+        (HOME / ".cache/puppeteer", "Puppeteer browsers"),
         (HOME / "Library/Caches/@mmx-agentelectron-updater", "MMX updater staging"),
         (HOME / ".npm/_cacache", "npm _cacache"),
         (HOME / ".cache/uv", "uv cache"),
@@ -2776,6 +2778,78 @@ def rule_agent_state() -> list[Candidate]:
                 # so the apply phase does not walk it again.
                 keep_verdict=verdict,
             ))
+    # MiniMax accumulates thousands of per-task directories under
+    # ~/.minimax/background-tasks/bg_* and multi-GB migration backups under
+    # ~/.minimax/v2/sqlite/backups.  Prune stale entries individually so one
+    # recent task never pins years of old ones, and cap per run so a backlog
+    # never blows the scan budget.
+    bg_root = HOME / ".minimax" / "background-tasks"
+    if bg_root.is_dir() and not bg_root.is_symlink():
+        bg_idle_min = 3 * 24 * 60
+        bg_cutoff = time.time() - bg_idle_min * 60
+        bg_added = 0
+        try:
+            with os.scandir(bg_root) as it:
+                for entry in it:
+                    if bg_added >= 500:
+                        break
+                    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                        _SCAN_BUDGET_EXHAUSTED = True
+                        return cands
+                    if not entry.name.startswith("bg_") or entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        if entry.stat(follow_symlinks=False).st_mtime > bg_cutoff:
+                            continue
+                    except OSError:
+                        continue
+                    target = Path(entry.path)
+                    s = str(target)
+                    if is_forbidden(s) or has_keep_sentinel(s) or not claim(target):
+                        continue
+                    verdict = holds_keep_sentinel(s, probe_timeout(15.0))
+                    if verdict.found or not verdict.known:
+                        continue
+                    if newest_file_age_min(s) < bg_idle_min or open_handles(s):
+                        continue
+                    cands.append(Candidate(
+                        category="agent-state", path=s, bytes=dir_bytes(s),
+                        reason="stale MiniMax background task (>3d, idle, no open handles)",
+                        keep_verdict=verdict,
+                    ))
+                    bg_added += 1
+        except OSError:
+            pass
+    sqlite_backups = HOME / ".minimax" / "v2" / "sqlite" / "backups"
+    if sqlite_backups.is_dir() and not sqlite_backups.is_symlink():
+        try:
+            for entry in sqlite_backups.iterdir():
+                if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    return cands
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                if "-before-" not in entry.name or "-migration-" not in entry.name:
+                    continue
+                if ".sqlite" not in entry.name:
+                    continue
+                s = str(entry)
+                if is_forbidden(s) or not claim(entry):
+                    continue
+                if not idle_for(s, IDLE_MIN_TOOL_VERSION) or open_handles(s):
+                    continue
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    continue
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                cands.append(Candidate(
+                    category="agent-state", path=s, bytes=size,
+                    reason="superseded MiniMax SQLite migration backup (>7d, no open handles)",
+                ))
+        except OSError:
+            pass
     # The agent session transcripts are Jay's history, not cache.  Report them.
     for name in _AGENT_HOMES:
         root = HOME / name
