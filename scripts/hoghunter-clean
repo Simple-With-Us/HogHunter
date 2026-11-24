@@ -3728,20 +3728,20 @@ def rule_tmp_large_trees() -> list[Candidate]:
 def _age_phrase(tree: Path) -> str:
     """How recently this tree was written, phrased for a report row.
 
-    newest_file_age_min caps its walk, so a big tree can hide a fresh file
-    past the cap and read older than it is; a report row that says "3 days
-    idle" for a tree written an hour ago would misdirect the person
-    reviewing it.  An unbounded find answers first-hit exactly when it
-    matters, and a tree with no files at all says so instead of rendering
-    the sentinel.
+    The capped walk runs first and is conclusive when it finds a fresh file;
+    only a tree that read old pays the unbounded find, and when that probe
+    cannot prove the tree quiet -- a timeout and a fresh file past the cap
+    look the same to it -- the row says so instead of asserting a write age
+    nobody measured.  A tree with no files at all says so instead of
+    rendering the sentinel.
     """
-    if touched_since(str(tree), 1.0):
-        return "written in the last 24 h"
     idle = newest_file_age_min(str(tree))
+    if idle < IDLE_MIN_OK:
+        return f"newest write {idle:.0f} min ago"
+    if touched_since(str(tree), 1.0):
+        return "unbounded probe could not prove the tree quiet"
     if idle >= 1e9:
         return "no files"
-    if idle < 60.0:
-        return f"newest write {idle:.0f} min ago"
     return f"newest write {idle / 60.0:.1f} h ago"
 
 

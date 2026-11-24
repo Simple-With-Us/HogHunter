@@ -443,7 +443,10 @@ def test_no_scan_rule_probe_outlives_the_scan_share(hh):
                 hh.scan(None)
         finally:
             hh.set_budget(0)
-        assert recorded, "the scan started no probe at all, so this guard proves nothing"
+        assert recorded or hh._SCAN_BUDGET_EXHAUSTED, \
+            "the scan started no probe at all, so this guard proves nothing; " \
+            "a python-side walk may also have spent the share honestly, which " \
+            "the truncation machinery reports"
         unbounded = [t for t in recorded if t is None]
         assert not unbounded, f"a subprocess ran with no timeout at all: {unbounded}"
         too_long = [t for t in recorded if t > 1.0]
@@ -5516,8 +5519,42 @@ def test_tmp_large_trees_phrases_a_fresh_tree_honestly(hh):
                 mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
             found = {c.path: c for c in hh.rule_tmp_large_trees()}
         row = found[str(tree)]
-        assert "written in the last 24 h" in row.reason, \
-            "a fresh file past the capped walk reads as fresh, not idle"
+        assert "newest write 0 min ago" in row.reason, \
+            "a fresh file the capped walk sees is phrased as measured age"
+
+
+def test_tmp_large_trees_phrases_an_ambiguous_probe_honestly(hh):
+    """A capped walk that reads old plus an unbounded find that says touched
+    is ambiguous -- a fresh file past the cap and a failed probe look the
+    same -- so the row says the tree could not be proven quiet instead of
+    asserting a write age nobody measured."""
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "quiet-looking"
+        blob(tree / "payload.bin", 30)
+        (tree / "fresh.bin").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "newest_file_age_min", return_value=3000.0):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert "could not prove the tree quiet" in found[str(tree)].reason, \
+            "an ambiguous probe is never phrased as a measured write age"
+
+
+def test_tmp_large_trees_reports_an_unproven_probe_honestly(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "unprovable"
+        blob(tree / "payload.bin", 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "newest_file_age_min", return_value=3000.0), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert "could not prove the tree quiet" in found[str(tree)].reason, \
+            "a failed probe is never phrased as a measured write age"
 
 
 def test_tmp_large_trees_respects_the_rule_deadline(hh):
