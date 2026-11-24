@@ -2987,7 +2987,6 @@ def rule_agent_state() -> list[Candidate]:
                 cands.append(Candidate(
                     category="agent-state", path=s, bytes=size,
                     reason="stale Muse subagent .next build cache, idle, no open handles",
-                    keep_verdict=MarkerVerdict(False, True),
                     recheck=_muse_recheck,
                 ))
                 muse_added += 1
