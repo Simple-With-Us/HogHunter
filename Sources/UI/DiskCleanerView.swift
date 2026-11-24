@@ -25,7 +25,7 @@ struct DiskCleanerView: View {
     private func refreshVolumeSpace() {
         guard !volumeRefreshInFlight else { volumeRefreshPending = true; return }
         volumeRefreshInFlight = true
-        Task {
+        Task { @MainActor in
             let space = await Task.detached(priority: .utility) { DiskSpace.current() }.value
             volumeSpace = space
             volumeRefreshInFlight = false
