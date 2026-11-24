@@ -207,11 +207,11 @@
       "name": "xcode-scratch",
       "tier": "safe",
       "op": "delete",
-      "title": "Xcode DerivedData roots left in /private/tmp and ~/.clutch/derived-data",
+      "title": "Xcode DerivedData roots left in /private/tmp, ~/.clutch/derived-data, and ~/Code checkouts' build/",
       "maxFreeGb": 60,
-      "$rationale": "What xcodebuild -derivedDataPath leaves behind: four 3.7 GB roots in /private/tmp and 3.4 GB under ~/.clutch/derived-data, measured 2026-11-05 at 24 GB free.  Owner decision 2026-11-05 (HH-219, 'train Hog Hunter to do a better job maintaining its disk space') widened it from report-only to a delete, on positive identification rather than the refuse-list that failed two reviews on 2026-11-04.  It deletes only at 60 GB free or less, so always at the 25 GB line.  ~/Library/Developer/Xcode/DerivedData stays xcode-artifacts' job.",
+      "$rationale": "What xcodebuild -derivedDataPath leaves behind: four 3.7 GB roots in /private/tmp and 3.4 GB under ~/.clutch/derived-data, measured 2026-11-05 at 24 GB free.  Owner decision 2026-11-05 (HH-219, 'train Hog Hunter to do a better job maintaining its disk space') widened it from report-only to a delete, on positive identification rather than the refuse-list that failed two reviews on 2026-11-04.  It deletes only at 60 GB free or less, so always at the 25 GB line.  ~/Library/Developer/Xcode/DerivedData stays xcode-artifacts' job.  Owner direction 2026-11-23 ('aggressively clean disk space and make hog hunter work better at stopping that') added the human integration trees: xcodebuild without -derivedDataPath drops build/ beside the project in every ~/Code checkout, the trees merge constantly so a checkout-activity gate would never open, and the cache's own 24 h idleness is the gate instead.  Measured 2026-11-23: ~/Code/HogHunter/build, 4.1 GB, idle 4 days.",
       "positiveIdentification": [
-        "a direct child of /private/tmp or ~/.clutch/derived-data, a real directory owned by this user, not a symlink or a mount point, on the home folder's volume and never under /Volumes",
+        "a direct child of /private/tmp or ~/.clutch/derived-data, or a ~/Code checkout's build/ directory, a real directory owned by this user, not a symlink or a mount point, on the home folder's volume and never under /Volumes",
         "its top holds only Xcode's own entries, none a link, with Build/ and an Xcode cache beside it, and Logs/ or Index.noindex/",
         "info.plist is a small plain file whose WorkspacePath is set",
         "Build/ holds only Products and Intermediates.noindex, and SourcePackages/ only SwiftPM's stores",
@@ -226,7 +226,7 @@
         "a running process names its path or its folder name",
         "more than 60 GB free, read again from df right before the delete"
       ],
-      "reportOnly": "Any other Xcode-shaped child, such as a git checkout with a build folder inside, stays a report row with what stopped it."
+      "reportOnly": "Any other Xcode-shaped child, in /private/tmp, ~/.clutch/derived-data or a checkout, stays a report row with what stopped it."
     },
     {
       "name": "tmp-build-trees",

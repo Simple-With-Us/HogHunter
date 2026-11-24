@@ -5306,6 +5306,155 @@ def test_a_skip_for_a_rule_the_pass_never_walked_does_not_block_the_reset(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+# --- integration-tree build caches (HH-229) -------------------------------
+
+def integration_cache(home, days=30, name="HogHunter"):
+    repo = home / "Code" / name
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    sources = repo / "Sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    (sources / "App.swift").write_text("x", encoding="utf-8")
+    (repo / "Package.swift").write_text("// swift-tools-version:5.9", encoding="utf-8")
+    build = xcode_tree(home, name="build", days=days, root=repo)
+    return repo, build
+
+
+def test_integration_build_cache_is_swept_and_sources_stay(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        sources = repo / "Sources"
+        sources.mkdir(parents=True, exist_ok=True)
+        (sources / "App.swift").write_text("x", encoding="utf-8")
+
+        found = hh.rule_xcode_artifacts()
+        assert str(build) in rule_paths(found), "the positively identified cache is the candidate"
+
+        cand = next(c for c in found if c.path == str(build))
+        hh.apply_candidate(cand)
+
+        assert not build.exists(), "the cache is reclaimed"
+        assert (repo / ".git").is_dir(), "the checkout stays"
+        assert (sources / "App.swift").exists(), "sources stay"
+
+
+def test_integration_build_cache_survives_active_merges(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home, days=30)
+        age(repo / ".git", 0)
+        age(repo / "Sources", 0)
+
+        found = hh.rule_xcode_artifacts()
+        assert str(build) in rule_paths(found), "an active checkout does not hide an idle cache"
+
+
+def test_integration_build_cache_needs_the_xcode_shape(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = home / "Code" / "HogHunter"
+        repo.mkdir(parents=True, exist_ok=True)
+        build = repo / "build"
+        build.mkdir()
+        (build / "stuff").write_text("x", encoding="utf-8")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a build/ that is not positively Xcode's stays"
+
+
+def test_fresh_integration_cache_waits_for_idleness(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home, days=0.5)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a cache written in the last 24 hours is not spent output"
+
+
+def test_integration_cache_keeps_markers(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        marker = build / "Build" / "Products" / hh.KEEP_SENTINEL
+        marker.write_text("", encoding="utf-8")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a keep marker anywhere in the cache keeps the whole cache"
+
+
+def test_the_probes_answer_without_bsd_quit(hh):
+    """GNU find (Linux CI) refuses -quit outright, so the marker probe and the
+    touched probe must answer identically without it -- this is the exact
+    failure the first CI run caught on this branch."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        deep = build / "Build" / "Intermediates.noindex" / "deep"
+        deep.mkdir(parents=True, exist_ok=True)
+        (deep / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        _, quiet = integration_cache(home, name="OtherApp")
+        with mock.patch.object(hh, "FIND_QUIT", ()):
+            verdict = hh.holds_keep_sentinel(str(build), 30.0)
+            assert verdict.found and verdict.known, "the deep marker is found without -quit"
+            assert not hh.touched_since(str(quiet), 1.0), "a quiet tree reads as idle without -quit"
+            (quiet / "fresh.o").write_text("x", encoding="utf-8")
+            assert hh.touched_since(str(quiet), 1.0), "a fresh file reads as touched without -quit"
+
+
+def test_integration_cache_respects_the_pressure_line(hh):
+    """The pool rides the xcode-scratch category, so the 60 GB line gates the
+    scan, the clean, and the df re-read at the delete exactly as the review
+    round demanded."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        for free in (60.01, 80.0, 200.0):
+            report = clean_main(hh, ["--clean", "--json", "--band=full", "--categories=xcode-artifacts"], free)
+            assert report["applied_count"] == 0 and build.exists(), (free, report["applied_count"])
+        scan = clean_main(hh, ["--scan", "--json", "--categories=xcode-artifacts"], 80.0)
+        assert [c["op"] for c in scan["candidates"]] == ["delete"], "a scan still lists what it would take"
+        assert scan["actionable_count"] == 0
+        [cand] = [c for c in hh.rule_xcode_artifacts() if c.path == str(build)]
+        with mock.patch.object(hh, "read_disk_free", return_value=61.0):
+            hh.apply_candidate(cand)
+        assert build.exists(), "the df re-read at the delete still applies the line"
+        with mock.patch.object(hh, "read_disk_free", return_value=10.0):
+            hh.apply_candidate(cand)
+        assert not build.exists(), "at or under the line it deletes"
+
+
+def test_integration_cache_recheck_reruns_the_gates(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        [cand] = [c for c in hh.rule_xcode_artifacts() if c.path == str(build)]
+        (build / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        hh.apply_candidate(cand)
+        assert build.exists(), "a marker placed after the scan keeps the cache"
+
+
+def test_integration_cache_refuses_precious_and_nested_state(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        products = build / "Build" / "Products"
+        (products / "clone").mkdir(parents=True, exist_ok=True)
+        (products / "clone" / ".git").mkdir(parents=True, exist_ok=True)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a repository nested in the products keeps the cache"
+        shutil.rmtree(products / "clone")
+        (products / "release-key.p12").write_bytes(b"x")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a signing key anywhere in the cache keeps it"
+        (products / "release-key.p12").unlink()
+        settle(build, 30)
+        assert str(build) in rule_paths(hh.rule_xcode_artifacts()), \
+            "with the key gone the cache is a candidate again"
+
+
+def test_integration_pool_skips_a_symlinked_checkout(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        target = home / "elsewhere"
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(repo), str(target / "Repo"))
+        link = home / "Code" / "Linked"
+        link.symlink_to(target / "Repo", target_is_directory=True)
+        assert str(link / "build") not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a checkout reached through a symlink is never named"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

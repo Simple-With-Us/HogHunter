@@ -190,6 +190,10 @@ FORBIDDEN_PREFIXES = (
     str(HOME / ".grok/worktrees"),
 )
 KEEP_SENTINEL = ".janitor-keep"
+# BSD find answers with -quit after the first match; GNU find (Linux CI)
+# refuses the option outright, so on Linux the probes run without it and pay
+# a bounded full walk instead.  The answer is identical either way.
+FIND_QUIT: tuple[str, ...] = ("-quit",) if sys.platform == "darwin" else ()
 # APFS system volume + sealed paths.  Deleting any of these bricks the Mac.
 FORBIDDEN_EXACT = (
     "/System", "/Library", "/private/var/db", "/private/var/folders/zz",
@@ -653,10 +657,15 @@ def holds_keep_sentinel(path: str, timeout: float, name: str = KEEP_SENTINEL) ->
 
     A probe that could not answer at all -- a timeout, or `find` failing to
     run -- is reported as unknown, and an unknown tree is never deleted.
+
+    `-quit` is BSD's stop-after-the-first-match; GNU find (Linux CI) refuses
+    the option outright, so there the probe asks without it and pays a
+    bounded full walk instead.  The answer is identical either way and the
+    timeout still caps the cost.
     """
     try:
         proc = subprocess.run(
-            ["find", path, "-iname", name, "-print", "-quit"],
+            ["find", path, "-iname", name, "-print", *FIND_QUIT],
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -994,6 +1003,9 @@ def touched_since(path: str, days: float) -> bool:
     days" outright.  find then exits non-zero, this fails closed to "touched",
     and the idle gate rejects every candidate -- so the rule silently frees
     nothing, with no error anywhere to say why.  Minutes parse on both.
+
+    As in the marker probe, `-quit` is BSD-only: GNU find (Linux CI) gets the
+    same command without it and walks the whole bounded tree instead.
     """
     try:
         # A full find walk can take minutes on a big tree, and it is called
@@ -1001,7 +1013,7 @@ def touched_since(path: str, days: float) -> bool:
         # share like every other scan probe here.  A timeout fails closed to
         # "touched" below, so a clamp never turns into a delete.
         proc = subprocess.run(
-            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
+            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", *FIND_QUIT],
             capture_output=True, text=True, timeout=probe_timeout(120.0),
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -1932,6 +1944,48 @@ def _hoghunter_lane_refusal(s: str) -> str | None:
     return None
 
 
+def _integration_cache_refusal(s: str) -> str | None:
+    """Why this ~/Code checkout's build cache must stay, or None.  Asked at
+    the scan and again right before the delete on a fresh open-file listing,
+    the same shape as the lane refusal above.  The rest is the full
+    xcode-scratch chain -- identity, the three idleness clocks, precious
+    contents, deep marker, nested clones, open handles, cwd and full-path
+    probes -- so the pool keeps every promise the policy JSON makes.  The one
+    gate left out is the bare-folder-name probe:  `build` is a word half this
+    Mac's command lines carry, it would starve the pool, and the full-path
+    probe below names the cache specifically already."""
+    d = Path(s)
+    if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+        return "not a plain folder, forbidden, or marked to keep"
+    refusal = _derived_data_identity_refusal(d)
+    if refusal is not None:
+        return refusal
+    # Cheap gates first, so an active or held-open cache never pays the three
+    # full-tree walks (precious, deep marker, clones) this helper ends with
+    # (review of PR 390).  The gates are conjunctive, so the order only
+    # changes what a refusal costs, never which trees refuse.
+    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
+            or _shallow_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH
+            or _deep_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH):
+        return "used in the last 24 hours"
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s):
+        return "a running process names it"
+    precious = _derived_data_precious_refusal(d)
+    if precious is not None:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(d)
+    if nested is not None:
+        return nested
+    return None
+
+
 def rule_xcode_artifacts() -> list[Candidate]:
     """Xcode build products and simulator runtimes.
 
@@ -1979,6 +2033,56 @@ def rule_xcode_artifacts() -> list[Candidate]:
             cands.append(Candidate(
                 category="xcode-artifacts", path=s, bytes=dir_bytes(s),
                 reason="Hog Hunter checkout's Debug builds, idle, no build running",
+                # The recheck walks for a marker right before the delete, so
+                # apply_delete does not need to walk the tree a second time.
+                keep_verdict=MarkerVerdict(False, True),
+                recheck=recheck,
+            ))
+
+    # Integration-tree build caches (owner direction 2026-11-23, HH-229
+    # lineage): an xcodebuild run without -derivedDataPath drops a build/
+    # beside the project, and the human integration trees under ~/Code are
+    # merged into constantly, so a checkout-activity gate would never open
+    # for them.  The cache's own idleness is the gate instead:  merges touch
+    # .git and sources, never the cache, and 24 h without a write reads as
+    # spent output (measured:  ~/Code/HogHunter/build, 4.1 GB, idle 4 days).
+    # Only a positively identified DerivedData-shaped directory qualifies,
+    # only the build/ directory is ever named, and sources stay untouched.
+    # The category is xcode-scratch so the 60 GB pressure line gates the
+    # delete exactly as it gates the /private/tmp roots.
+    code_root = HOME / "Code"
+    if code_root.is_dir() and not code_root.is_symlink():
+        try:
+            checkouts = sorted(code_root.iterdir())
+        except OSError as exc:
+            log(f"xcode-artifacts skipped {code_root}: {type(exc).__name__}: {exc}")
+            checkouts = []
+        for d in checkouts:
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            if d.is_symlink():
+                continue
+            build = d / "build"
+            if not build.is_dir() or build.is_symlink():
+                continue
+            if _integration_cache_refusal(str(build)) is not None:
+                continue
+            size = dir_bytes(str(build))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+
+            def recheck(build: str = str(build),
+                        identity=path_identity(str(build))) -> str | None:
+                if path_identity(build) != identity:
+                    return "the path now holds something else"
+                if _build_running():
+                    return "a build is running"
+                return _integration_cache_refusal(build)
+
+            cands.append(Candidate(
+                category="xcode-scratch", path=str(build), bytes=size,
+                reason="Integration checkout's xcodebuild cache, idle 24h+, no build running",
                 # The recheck walks for a marker right before the delete, so
                 # apply_delete does not need to walk the tree a second time.
                 keep_verdict=MarkerVerdict(False, True),
