@@ -124,6 +124,7 @@ MIN_CANDIDATE_BYTES = 8 * 1024 * 1024
 # Report floor for tmp-large-trees: a seat scratch tree this size under
 # /private/tmp belongs on a person's screen whatever its name (2026-11-24).
 TMP_LARGE_TREE_BYTES = 1024 * 1024 * 1024
+TMP_LARGE_TREES_MIN_SHARE_SEC = 60.0
 
 # Owner's condition for this rule: it deletes only under real disk pressure.
 # `--band=full` alone is not that, because the pressure triggers also fire on a
@@ -3696,6 +3697,12 @@ def rule_tmp_large_trees() -> list[Candidate]:
     """
     if not XCODE_SCRATCH_ROOT.is_dir():
         return []
+    # Sizing a 20 GB tree is a python-side walk with no subprocess for the
+    # scan-share guard to bound, so the rule stands down while less than a
+    # minute of the share remains and leaves it to the rules behind it;
+    # the truncation cursor carries the rest to the next run.
+    if scan_budget_left() < TMP_LARGE_TREES_MIN_SHARE_SEC:
+        return []
     try:
         children = sorted(XCODE_SCRATCH_ROOT.iterdir())
     except OSError:
@@ -3738,6 +3745,10 @@ def _age_phrase(tree: Path) -> str:
     idle = newest_file_age_min(str(tree))
     if idle < IDLE_MIN_OK:
         return f"newest write {idle:.0f} min ago"
+    if idle < 24 * 60:
+        # The unbounded find cannot add information inside its own window
+        # that the capped walk has not already answered.
+        return f"newest write {idle / 60.0:.1f} h ago"
     if touched_since(str(tree), 1.0):
         return "unbounded probe could not prove the tree quiet"
     if idle >= 1e9:

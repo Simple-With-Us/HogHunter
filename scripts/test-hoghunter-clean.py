@@ -443,10 +443,7 @@ def test_no_scan_rule_probe_outlives_the_scan_share(hh):
                 hh.scan(None)
         finally:
             hh.set_budget(0)
-        assert recorded or hh._SCAN_BUDGET_EXHAUSTED, \
-            "the scan started no probe at all, so this guard proves nothing; " \
-            "a python-side walk may also have spent the share honestly, which " \
-            "the truncation machinery reports"
+        assert recorded, "the scan started no probe at all, so this guard proves nothing"
         unbounded = [t for t in recorded if t is None]
         assert not unbounded, f"a subprocess ran with no timeout at all: {unbounded}"
         too_long = [t for t in recorded if t > 1.0]
@@ -5555,6 +5552,22 @@ def test_tmp_large_trees_reports_an_unproven_probe_honestly(hh):
             found = {c.path: c for c in hh.rule_tmp_large_trees()}
         assert "could not prove the tree quiet" in found[str(tree)].reason, \
             "a failed probe is never phrased as a measured write age"
+
+
+def test_tmp_large_trees_states_measured_age_inside_the_probe_window(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "hours-old"
+        blob(tree / "payload.bin", 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "newest_file_age_min", return_value=300.0), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        row = found[str(tree)]
+        assert "newest write 5.0 h ago" in row.reason, \
+            "a measured age inside the 24 h window needs no probe phrase"
 
 
 def test_tmp_large_trees_respects_the_rule_deadline(hh):
