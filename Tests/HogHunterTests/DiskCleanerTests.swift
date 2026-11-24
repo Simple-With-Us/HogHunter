@@ -389,7 +389,11 @@ final class DiskCleanerTests: XCTestCase {
 
         let items = cleaner.scanCategory(.aiArtifacts)
         let titles = Set(items.map(\.title))
-        let paths = Set(items.map { $0.url.path })
+        // The scan's URLs come from a filesystem enumeration, which hands
+        // back the resolved `/private/var/...` form, while the fixtures are
+        // built from `temporaryDirectory`'s `/var/...` form.  Standardize
+        // both sides before comparing, as the cache scan tests do.
+        let paths = Set(items.map { $0.url.standardizedFileURL.path })
         XCTAssertTrue(
             titles.contains("MiniMax Session Day (22)"),
             "a three week old session day should be offered, found: \(titles.sorted())"
@@ -399,14 +403,14 @@ final class DiskCleanerTests: XCTestCase {
             "a three week old workspace should be offered, found: \(titles.sorted())"
         )
         XCTAssertTrue(
-            paths.contains(staleDay.resolvingSymlinksInPath().path),
+            paths.contains(staleDay.standardizedFileURL.path),
             "a three week old session day path should be offered, found: \(paths.sorted())"
         )
         XCTAssertTrue(
-            paths.contains(staleWorkspace.resolvingSymlinksInPath().path),
+            paths.contains(staleWorkspace.standardizedFileURL.path),
             "a three week old workspace path should be offered, found: \(paths.sorted())"
         )
-        XCTAssertFalse(paths.contains(freshDay.path), "a fresh session day must not be offered")
+        XCTAssertFalse(paths.contains(freshDay.standardizedFileURL.path), "a fresh session day must not be offered")
         for item in items where item.url.path.contains("/.minimax/") {
             XCTAssertEqual(item.category, .aiArtifacts)
             XCTAssertFalse(item.isSelected, "AI artifacts require explicit review")
