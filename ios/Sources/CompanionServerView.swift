@@ -756,12 +756,18 @@ private struct MeterRow: View {
 /// reading has numbers; any other state keeps the one-line strip.
 struct ServerOverviewSummary: View {
     let server: CompanionServerStatus
+
+    /// True when the reading has a number to draw, so the Overview never
+    /// shows a section of dashes.
+    static func hasNumbers(_ server: CompanionServerStatus) -> Bool {
+        server.cpu != nil || server.memory != nil || server.devices?.isEmpty == false
+    }
     let openServerTab: () -> Void
 
     var body: some View {
         Section {
             if server.resolvedState() == .stale {
-                Text("This reading is stale. The numbers are what the Mac last saw \(ServerFormat.age(server.fetchedAt)).")
+                Text("This reading is stale. The numbers are what the Mac last saw \(ServerFormat.age(server.generatedAt)).")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
