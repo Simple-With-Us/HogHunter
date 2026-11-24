@@ -2051,7 +2051,7 @@ def rule_xcode_artifacts() -> list[Candidate]:
     # The category is xcode-scratch so the 60 GB pressure line gates the
     # delete exactly as it gates the /private/tmp roots.
     code_root = HOME / "Code"
-    if code_root.is_dir():
+    if code_root.is_dir() and not code_root.is_symlink():
         try:
             checkouts = sorted(code_root.iterdir())
         except OSError as exc:
@@ -2061,6 +2061,8 @@ def rule_xcode_artifacts() -> list[Candidate]:
             if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
                 _SCAN_BUDGET_EXHAUSTED = True
                 return cands
+            if d.is_symlink():
+                continue
             build = d / "build"
             if not build.is_dir() or build.is_symlink():
                 continue

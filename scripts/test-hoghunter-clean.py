@@ -5443,6 +5443,18 @@ def test_integration_cache_refuses_precious_and_nested_state(hh):
             "with the key gone the cache is a candidate again"
 
 
+def test_integration_pool_skips_a_symlinked_checkout(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        target = home / "elsewhere"
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(repo), str(target / "Repo"))
+        link = home / "Code" / "Linked"
+        link.symlink_to(target / "Repo", target_is_directory=True)
+        assert str(link / "build") not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a checkout reached through a symlink is never named"
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
