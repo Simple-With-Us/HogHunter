@@ -5513,6 +5513,8 @@ def test_agent_state_prunes_old_minimax_sqlite_migration_backups(hh):
         assert str(old_bak) in paths, paths
         assert str(fresh_bak) not in paths, paths
         assert str(other) not in paths, paths
+        (backups / hh.KEEP_SENTINEL).write_text("keep", encoding="utf-8")
+        assert str(old_bak) not in {c.path for c in hh.rule_agent_state()}
 
 
 def test_xcode_scratch_tightens_idle_window_under_critical_disk_pressure(hh):
@@ -5561,12 +5563,17 @@ def test_agent_state_prunes_idle_muse_worktree_next_cache(hh):
         with mock.patch.object(hh, "repo_has_process_cwd", side_effect=fake_cwd):
             assert hh.is_forbidden(str(stale_wt))
             assert not hh.is_forbidden(str(stale_wt / ".next"))
-            paths = {c.path for c in hh.rule_agent_state()}
+            cands = hh.rule_agent_state()
+            paths = {c.path for c in cands}
         assert str(stale_wt / ".next") in paths, paths
         assert str(fresh_wt / ".next") not in paths, paths
         assert str(kept_wt / ".next") not in paths, paths
         assert str(busy_wt / ".next") not in paths, paths
         assert str(sym_wt / ".next") not in paths, paths
+        cand = next(c for c in cands if c.path == str(stale_wt / ".next"))
+        assert cand.recheck is not None
+        (stale_wt / ".next" / "fresh.bin").write_bytes(b"x")
+        assert cand.recheck() is not None, "recheck must block delete if cache became active"
 
 
 def main() -> int:
