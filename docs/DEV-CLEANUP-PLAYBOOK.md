@@ -166,7 +166,7 @@ The lesson: the inventory came first, and every removal had to name the evidence
 
 ## Tunables
 
-New numeric knobs for the Swift tiers (a DerivedData age, the stale-lane idle days) go in Infisical with an `INFISICAL.md` row when the Swift code lands.  Exclusions and enabled rules stay in UserDefaults.  Merged-worktree retention uses `hoghunter.maintain.janitor.retireMinDays` in Infisical and the mirrored `lanes.retire_min_days` fallback for standalone scheduling.  The valid range is 1 to 90 whole days, default 7; invalid values use 7.  Report age, schema, doctor timeout, and the 24-hour dependency floor stay fixed.  A nondefault retention requires the lane doctor's `--cleaner-retention-days` support; a mismatched report fails closed.
+New numeric knobs for the Swift tiers (a DerivedData age, the stale-lane idle days) go in Infisical with an `INFISICAL.md` row when the Swift code lands.  Exclusions and enabled rules stay in UserDefaults.  Merged-worktree retention uses `hoghunter.maintain.janitor.retireMinDays` in Infisical and the mirrored `lanes.retire_min_days` fallback for standalone scheduling.  The valid range is 1 to 90 whole days, default 3; invalid values use 3.  Report age, schema, doctor timeout, and the 24-hour dependency floor stay fixed.  A nondefault retention requires the lane doctor's `--cleaner-retention-days` support; a mismatched report fails closed.
 
 ## Sequencing
 
