@@ -771,8 +771,12 @@ struct ServerOverviewSummary: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            MeterRow(title: "CPU", value: server.cpu?.percentText, percent: server.cpu?.percent, severity: server.cpu?.severity, detail: cpuDetail)
-            MeterRow(title: "Memory", value: server.memory?.percentText, percent: server.memory?.percent, severity: server.memory?.severity, detail: server.memory?.detail)
+            if server.cpu != nil {
+                MeterRow(title: "CPU", value: server.cpu?.percentText, percent: server.cpu?.percent, severity: server.cpu?.severity, detail: cpuDetail)
+            }
+            if server.memory != nil {
+                MeterRow(title: "Memory", value: server.memory?.percentText, percent: server.memory?.percent, severity: server.memory?.severity, detail: server.memory?.detail)
+            }
             if let disk = server.devices?.first {
                 MeterRow(title: disk.title, value: disk.usedText, percent: disk.usedPercent, severity: disk.severity, detail: nil)
             }
