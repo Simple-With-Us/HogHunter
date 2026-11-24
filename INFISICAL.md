@@ -62,7 +62,7 @@ The table records the built-in defaults used when no connected value overrides t
 | `hoghunter.maintain.coolifySshHost` | `""` | Maintain host: SSH destination for remote Coolify maintenance |
 | `hoghunter.maintain.janitor.maxLoadHard` | `250` | Maintain threshold: janitor hard max 1-minute load average |
 | `hoghunter.maintain.janitor.lowFreeGib` | `80` | Maintain threshold: disk free space (GiB) triggering cache reclaim |
-| `hoghunter.maintain.janitor.retireMinDays` | `7` | Maintain threshold: idle whole days before an old merged worktree may be retired (1–90) |
+| `hoghunter.maintain.janitor.retireMinDays` | `3` | Maintain threshold: idle whole days before an old merged worktree may be retired (1–90) |
 | `hoghunter.maintain.watch.diskFreeWarnGb` | `25` | Maintain threshold: disk free warning threshold (GB) |
 | `hoghunter.maintain.watch.swapUsedPct` | `90` | Maintain threshold: swap memory usage percent warning threshold |
 
