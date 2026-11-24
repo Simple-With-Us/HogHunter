@@ -2831,7 +2831,7 @@ def rule_agent_state() -> list[Candidate]:
                     verdict = holds_keep_sentinel(s, probe_timeout(15.0))
                     if verdict.found or not verdict.known:
                         continue
-                    if newest_file_age_min(s) < bg_idle_min or open_handles(s):
+                    if newest_file_age_min(s) < bg_idle_min or touched_since(s, bg_idle_min / (24 * 60)) or open_handles(s):
                         continue
                     cands.append(Candidate(
                         category="agent-state", path=s, bytes=dir_bytes(s),
