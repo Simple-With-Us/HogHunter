@@ -3086,7 +3086,8 @@ def test_xcode_scratch_refuses_links_and_other_owners(hh):
 
 
 def test_xcode_scratch_per_tree_findings(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home, days=0.5)
         assert "24 hours" in str(hh._xcode_scratch_refusal(tree))
         shutil.rmtree(tree)
@@ -4420,7 +4421,8 @@ def test_hh219_a_symlink_is_never_followed_or_deleted(hh):
 
 
 def test_hh219_a_recently_touched_root_is_not_deleted(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home)
         # Xcode writes each build's log into Logs/Build, which moves that
         # folder, two levels down.
@@ -4438,7 +4440,7 @@ def test_hh219_a_recently_touched_root_is_not_deleted(hh):
         with mock.patch.object(hh, "changed_age_min", return_value=60.0):
             assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "moved in an hour ago"
         age(tree / "Logs" / "Build", 0.5)
-        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 10.0)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
         assert report["applied_count"] == 0 and tree.is_dir()
         row = report["candidates"][0]
         assert row["op"] == "report" and "24 hours" in row["reason"], row
@@ -4650,7 +4652,8 @@ def test_pr274_precious_files_deep_in_the_build_output_keep_the_root(hh):
 
 
 def test_pr274_a_fresh_file_anywhere_in_the_tree_keeps_the_root(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home)
         deep = tree / "Build" / "Intermediates.noindex" / "App.build" / "Release" / "obj.o"
         deep.parent.mkdir(parents=True)
@@ -4751,7 +4754,8 @@ def test_pr274_a_precious_file_anywhere_in_the_root_keeps_it(hh):
 
 
 def test_pr274_the_idle_gate_sees_past_4000_files_and_fails_closed(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home)
         many = tree / "Build" / "Intermediates.noindex" / "App.build" / "Objects"
         many.mkdir(parents=True)
@@ -5360,7 +5364,8 @@ def test_integration_build_cache_needs_the_xcode_shape(hh):
 
 
 def test_fresh_integration_cache_waits_for_idleness(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         repo, build = integration_cache(home, days=0.5)
         assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
             "a cache written in the last 24 hours is not spent output"
@@ -5508,6 +5513,60 @@ def test_agent_state_prunes_old_minimax_sqlite_migration_backups(hh):
         assert str(old_bak) in paths, paths
         assert str(fresh_bak) not in paths, paths
         assert str(other) not in paths, paths
+
+
+def test_xcode_scratch_tightens_idle_window_under_critical_disk_pressure(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home, days=4.0 / 24.0)
+        with mock.patch.object(hh, "read_disk_free", return_value=30.0):
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None and "24 hours" in refusal, refusal
+        with mock.patch.object(hh, "read_disk_free", return_value=20.0):
+            assert hh._xcode_scratch_refusal(tree) is None
+        with mock.patch.object(hh, "read_disk_free", return_value=None):
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None and "24 hours" in refusal, refusal
+
+
+def test_agent_state_prunes_idle_muse_worktree_next_cache(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "read_disk_free", return_value=20.0):
+        wt_root = home / "Code" / "Socratic-Trade" / ".muse" / "worktrees"
+        stale_wt = wt_root / "subagent-v2-stale"
+        fresh_wt = wt_root / "subagent-v2-fresh"
+        kept_wt = wt_root / "subagent-v2-kept"
+        busy_wt = wt_root / "subagent-v2-busy"
+        sym_wt = wt_root / "subagent-v2-sym"
+        elsewhere = home / "elsewhere-next"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "bundle.bin").write_bytes(b"x" * (9 * 1024 * 1024))
+        for wt in (stale_wt, fresh_wt, kept_wt, busy_wt):
+            nd = wt / ".next"
+            nd.mkdir(parents=True)
+            (nd / "cache.bin").write_bytes(b"x" * (9 * 1024 * 1024))
+            (wt / "src").mkdir(parents=True)
+            (wt / "src" / "index.ts").write_text("export {};\n", encoding="utf-8")
+        sym_wt.mkdir(parents=True)
+        (sym_wt / ".next").symlink_to(elsewhere)
+        (kept_wt / ".next" / hh.KEEP_SENTINEL).write_text("keep", encoding="utf-8")
+        for wt in (stale_wt, kept_wt, busy_wt):
+            _age(wt / ".next" / "cache.bin", 5)
+            _age(wt / ".next", 5)
+        _age(kept_wt / ".next" / hh.KEEP_SENTINEL, 5)
+
+        def fake_cwd(path):
+            return path == str(busy_wt)
+
+        with mock.patch.object(hh, "repo_has_process_cwd", side_effect=fake_cwd):
+            assert hh.is_forbidden(str(stale_wt))
+            assert not hh.is_forbidden(str(stale_wt / ".next"))
+            paths = {c.path for c in hh.rule_agent_state()}
+        assert str(stale_wt / ".next") in paths, paths
+        assert str(fresh_wt / ".next") not in paths, paths
+        assert str(kept_wt / ".next") not in paths, paths
+        assert str(busy_wt / ".next") not in paths, paths
+        assert str(sym_wt / ".next") not in paths, paths
 
 
 def main() -> int:

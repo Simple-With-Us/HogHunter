@@ -117,6 +117,7 @@ IDLE_MIN_STALE_BUILD = 14 * 24 * 60  # 14d before ignored build output reads as 
 IDLE_MIN_TOOL_VERSION = 7 * 24 * 60  # 7d for superseded tool versions
 IDLE_MIN_TMP_BUILD_TREE = 60          # a throwaway agent checkout idle for an hour reads as left over
 IDLE_MIN_XCODE_SCRATCH = 24 * 60     # 24h before Xcode-shaped scratch reads as idle
+IDLE_MIN_XCODE_SCRATCH_PRESSURE = IDLE_MIN_SCRATCH  # 3h when disk free <= PRESSURE_RULE_FREE_GB
 IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release may go
 
 # Below this a candidate is not worth the delete.  Same floor the cache rules use.
@@ -583,6 +584,13 @@ def is_peer_work(path: str) -> bool:
     except ValueError:
         return False
     if ".muse" in parts:
+        if (len(parts) == 6
+                and parts[0] == "Code"
+                and parts[2] == ".muse"
+                and parts[3] == "worktrees"
+                and parts[4].startswith("subagent-")
+                and parts[5] == ".next"):
+            return False
         return True
     return len(parts) >= 2 and parts[0] == "apps" and parts[1].startswith("botfleet-")
 
@@ -1946,6 +1954,18 @@ def _hoghunter_lane_refusal(s: str) -> str | None:
     return None
 
 
+def _xcode_scratch_idle_min(free_gb: float | None = None) -> tuple[float, str]:
+    """Idle threshold for Xcode scratch and Muse worktree build caches.
+
+    Tightens from 24 hours to 3 hours while free space is at or below
+    PRESSURE_RULE_FREE_GB so rapid multi-build bursts cannot fill the disk
+    before the normal 24h window opens.  An unreadable df fails safe to 24h.
+    """
+    if free_gb is not None and free_gb <= PRESSURE_RULE_FREE_GB:
+        return (IDLE_MIN_XCODE_SCRATCH_PRESSURE, "3 hours")
+    return (IDLE_MIN_XCODE_SCRATCH, "24 hours")
+
+
 def _integration_cache_refusal(s: str) -> str | None:
     """Why this ~/Code checkout's build cache must stay, or None.  Asked at
     the scan and again right before the delete on a fresh open-file listing,
@@ -1966,10 +1986,11 @@ def _integration_cache_refusal(s: str) -> str | None:
     # full-tree walks (precious, deep marker, clones) this helper ends with
     # (review of PR 390).  The gates are conjunctive, so the order only
     # changes what a refusal costs, never which trees refuse.
-    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
-            or _shallow_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH
-            or _deep_newest_age_min(d) < IDLE_MIN_XCODE_SCRATCH):
-        return "used in the last 24 hours"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(d) < idle_min
+            or _deep_newest_age_min(d) < idle_min):
+        return f"used in the last {idle_label}"
     if tree_in_use(s):
         return "held open"
     if repo_has_process_cwd(s):
@@ -2850,6 +2871,66 @@ def rule_agent_state() -> list[Candidate]:
                 ))
         except OSError:
             pass
+    # Muse subagent worktrees under ~/Code/<repo>/.muse/worktrees/subagent-*
+    # accumulate multi-GB .next build caches while unmerged work keeps the
+    # worktree itself.  Prune only idle .next caches; never touch sources or git.
+    code_root = HOME / "Code"
+    if code_root.is_dir() and not code_root.is_symlink():
+        muse_idle_min, _ = _xcode_scratch_idle_min(read_disk_free())
+        try:
+            repos = sorted(code_root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            repos = []
+        for repo in repos:
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            if repo.is_symlink() or not repo.is_dir():
+                continue
+            muse_dir = repo / ".muse"
+            if muse_dir.is_symlink() or not muse_dir.is_dir():
+                continue
+            wt_root = muse_dir / "worktrees"
+            if wt_root.is_symlink() or not wt_root.is_dir():
+                continue
+            try:
+                wts = sorted(wt_root.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            for wt in wts:
+                if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    return cands
+                if not wt.name.startswith("subagent-") or wt.is_symlink() or not wt.is_dir():
+                    continue
+                next_dir = wt / ".next"
+                if next_dir.is_symlink() or not next_dir.is_dir():
+                    continue
+                s = str(next_dir)
+                if is_forbidden(s) or has_keep_sentinel(s) or not claim(next_dir):
+                    continue
+                verdict = holds_keep_sentinel(s, probe_timeout(15.0))
+                if verdict.found or not verdict.known:
+                    continue
+                has_git = holds_keep_sentinel(s, probe_timeout(15.0), name=".git")
+                if has_git.found or not has_git.known:
+                    continue
+                if newest_file_age_min(s) < muse_idle_min:
+                    continue
+                if touched_since(s, muse_idle_min / (24 * 60)):
+                    continue
+                if open_handles(s):
+                    continue
+                if repo_has_process_cwd(str(wt)):
+                    continue
+                size = dir_bytes(s)
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                cands.append(Candidate(
+                    category="agent-state", path=s, bytes=size,
+                    reason="stale Muse subagent .next build cache, idle, no open handles",
+                    keep_verdict=verdict,
+                ))
     # The agent session transcripts are Jay's history, not cache.  Report them.
     for name in _AGENT_HOMES:
         root = HOME / name
@@ -3535,10 +3616,11 @@ def _xcode_scratch_refusal(tree: Path) -> str | None:
         return identity
     if is_forbidden(s) or has_keep_sentinel(s):
         return "protected"
-    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
-            or _shallow_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH
-            or _deep_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH):
-        return "used in the last 24 hours"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(tree) < idle_min
+            or _deep_newest_age_min(tree) < idle_min):
+        return f"used in the last {idle_label}"
     precious = _derived_data_precious_refusal(tree)
     if precious:
         return precious
