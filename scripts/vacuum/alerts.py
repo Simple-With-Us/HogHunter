@@ -161,18 +161,39 @@ def _dedupe(
     return AlertDecision(False, kind, active_message)
 
 
+def hog_hunter_running() -> bool:
+    """True when the Hog Hunter app is already up.
+
+    Telling an app to display a notification launches it when it is not
+    running, so the vacuum used to open the Hog Hunter window on the owner's
+    screen every time an alert fired.  The banner is posted without the app
+    unless the app is already there.
+    """
+    try:
+        result = subprocess.run(["pgrep", "-x", "HogHunter"], capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def notify_macos(title: str, body: str) -> None:
     if notifications_suppressed():
         return
     if sys.platform != "darwin":
         return
-    script = (
-        'try\n'
-        f'  tell application "Hog Hunter" to display notification "{_escape_apple(body)}" with title "{_escape_apple(title)}"\n'
-        'on error\n'
-        f'  display notification "{_escape_apple(body)}" with title "{_escape_apple(title)}"\n'
-        'end try'
-    )
+    escaped_body = _escape_apple(body)
+    escaped_title = _escape_apple(title)
+    if hog_hunter_running():
+        script = (
+            'try\n'
+            f'  tell application "Hog Hunter" to display notification "{escaped_body}" with title "{escaped_title}"\n'
+            'on error\n'
+            f'  display notification "{escaped_body}" with title "{escaped_title}"\n'
+            'end try'
+        )
+    else:
+        # Script Editor's own command posts the banner and launches nothing.
+        script = f'display notification "{escaped_body}" with title "{escaped_title}"'
     try:
         subprocess.run(["osascript", "-e", script], check=False, timeout=10)
     except (subprocess.TimeoutExpired, FileNotFoundError):

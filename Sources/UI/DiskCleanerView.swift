@@ -4,6 +4,18 @@ import SwiftUI
 
 /// Disk cleaner view inside Hog Hunter's Storage window.
 /// Offers category-by-category breakdown, selective item inspection, and safe one-click reclamation.
+/// How tall the cleaner's scroll region actually got.
+///
+/// The category list was once squeezed into a sliver because the header's
+/// spacer took every spare point, so a layout test needs the real number
+/// rather than a guess about how much space a header takes.
+struct DiskCleanerScrollHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct DiskCleanerView: View {
     @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
@@ -43,19 +55,34 @@ struct DiskCleanerView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            if showInlineTierSelector {
-                tierSelector
+            // One scroll region for the whole tab.  The category list used to
+            // live in a ScrollView of its own below the header and the regimen
+            // block, and the header's spacer took every spare point, so the
+            // list was left a sliver at the bottom of the window and only that
+            // sliver scrolled.  Everything above the action bar scrolls
+            // together now, and the action bar stays pinned where it was.
+            ScrollView {
+                VStack(spacing: 10) {
+                    if showInlineTierSelector {
+                        tierSelector
+                    }
+                    if store.selectedTier == .extreme {
+                        extremeDisclaimerBanner
+                    }
+                    heroHeader
+                    Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    regimenSection
+                    contentBody
+                }
             }
-            if store.selectedTier == .extreme {
-                extremeDisclaimerBanner
-            }
-            heroHeader
-            Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            regimenSection
-            contentBody
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: DiskCleanerScrollHeightKey.self, value: proxy.size.height)
+                }
+            )
             bottomBar
         }
         .onAppear {
@@ -525,25 +552,19 @@ struct DiskCleanerView: View {
     @ViewBuilder
     private var contentBody: some View {
         if let report = store.report {
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(report.categories) { catReport in
-                        CategoryCardView(catReport: catReport, store: store)
-                    }
+            // The list lives inside the tab's one scroll region, so it takes
+            // the room the window has instead of what is left over.
+            LazyVStack(spacing: 8) {
+                ForEach(report.categories) { catReport in
+                    CategoryCardView(catReport: catReport, store: store)
                 }
-                .padding(.vertical, 2)
             }
-        } else {
-            // No progress indicator here.  This branch used to render its own
-            // spinner and the header's `.scanning` case rendered a second one,
-            // and both were on screen for the whole scan: `state` is `.scanning`
-            // while `report` is still nil, because `report` is only assigned
-            // once the scan completes.  Two gates, one question, two spinners.
-            // The same mistake put "Maintain" on screen twice in
-            // `MaintainView.header`.  The status header owns progress now;
-            // the body only has to decide whether there are results to show.
-            Spacer()
+            .padding(.vertical, 2)
         }
+        // No report and no placeholder.  The header's `.scanning` case owns
+        // progress now: it used to render a spinner here as well, and both
+        // were on screen for the whole scan.  The body only has to decide
+        // whether there are results to show.
     }
 
     // MARK: - Bottom Bar

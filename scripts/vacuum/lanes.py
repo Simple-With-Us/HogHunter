@@ -120,7 +120,11 @@ DOCTOR_TIMEOUT_MAX_SECONDS = 900.0
 DOCTOR_TIMEOUT_MARGIN = 1.25
 DOCTOR_TIMEOUT_PAD_SECONDS = 45.0
 DOCTOR_LAST_RUN_NAME = "doctor-last-run.json"
-DEFAULT_RETIRE_MIN_DAYS = 7
+# The floor a doctor report has to agree with when it carries no retention of
+# its own.  It comes from the built-in lane settings so the two can never
+# drift apart: the shipped policy, the code constant and this one are the
+# same number.
+DEFAULT_RETIRE_MIN_DAYS = int(DEFAULT_LANES["retire_min_days"])
 DOCTOR_RETIRE_DAYS_FLAG = "--cleaner-retention-days"
 DEPS_MIN_HOURS = 24.0
 LSOF_CACHE_SECONDS = 30.0

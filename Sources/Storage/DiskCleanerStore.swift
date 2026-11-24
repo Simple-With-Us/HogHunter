@@ -235,6 +235,14 @@ final class DiskCleanerStore: ObservableObject {
     }
 
     /// Initiates a full disk clutter scan for the active tier.
+    #if DEBUG
+    /// Test seam: a scan report without a disk scan, so a layout test can draw
+    /// the category list.  Release builds contain no entry point.
+    func setReportForTest(_ report: CleanScanReport?) {
+        self.report = report
+    }
+    #endif
+
     func scan(depth: DiskCleaner.ScanDepth = .quick) {
         guard ApplicationRunMode.current != .uiHarness else { return }
         cancelScan()

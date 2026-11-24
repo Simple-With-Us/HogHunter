@@ -137,15 +137,18 @@ final class MaintainInfisicalTests: XCTestCase {
         let localFallback = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: 5)
         XCTAssertEqual(localFallback.store.worktreeRetireMinDays, 5)
 
+        // A value the parser refuses falls back to the shipped floor, which is
+        // the same three days the repository policy carries, not a number of
+        // its own.
         let booleanConfig = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: false)
-        XCTAssertEqual(booleanConfig.store.worktreeRetireMinDays, 7)
+        XCTAssertEqual(booleanConfig.store.worktreeRetireMinDays, 3)
         let fractionalConfig = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: 3.5)
-        XCTAssertEqual(fractionalConfig.store.worktreeRetireMinDays, 7)
+        XCTAssertEqual(fractionalConfig.store.worktreeRetireMinDays, 3)
 
         let invalidInfisical = try await makeConfiguredMaintain(
             secrets: [key: "91"], jsonRetireDays: 5
         )
-        XCTAssertEqual(invalidInfisical.store.worktreeRetireMinDays, 7)
+        XCTAssertEqual(invalidInfisical.store.worktreeRetireMinDays, 3)
     }
 
     // MARK: - Writing
@@ -260,7 +263,7 @@ final class MaintainInfisicalTests: XCTestCase {
     func testNoncanonicalRetentionStringsFailSafe() async throws {
         for value in ["03", " 3 ", "3.0", "²", "٣"] {
             let setup = try await makeConfiguredMaintain(secrets: [:], jsonRetireDays: value)
-            XCTAssertEqual(setup.store.worktreeRetireMinDays, 7, value)
+            XCTAssertEqual(setup.store.worktreeRetireMinDays, 3, value)
         }
     }
 }
