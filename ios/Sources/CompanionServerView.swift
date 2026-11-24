@@ -760,7 +760,7 @@ struct ServerOverviewSummary: View {
     /// True when the reading has a number to draw, so the Overview never
     /// shows a section of dashes.
     static func hasNumbers(_ server: CompanionServerStatus) -> Bool {
-        server.cpu != nil || server.memory != nil || server.devices?.isEmpty == false
+        server.cpu != nil || server.memory != nil || server.devices?.isEmpty == false || server.processes?.isEmpty == false
     }
     let openServerTab: () -> Void
 
