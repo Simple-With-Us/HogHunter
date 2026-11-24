@@ -8,6 +8,7 @@ import XCTest
 /// spare point, so the scroll region holding the list got almost nothing and
 /// only that sliver scrolled.  The whole tab scrolls now, with the action bar
 /// pinned at the bottom.
+@MainActor
 final class StorageCleanerLayoutTests: XCTestCase {
 
     private final class Box {
