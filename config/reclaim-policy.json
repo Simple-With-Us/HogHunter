@@ -102,7 +102,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Package manager and toolchain caches",
-      "$rationale": "All rebuild on next use. node-gyp, electron, electron-builder, deno, copilot, swiftpm, ms-playwright, npm _cacache, uv, pip, yarn. pnpm and gradle are only touched when the build fan-out is quiet -- on this Mac the fan-out is what drives load and swap, and disturbing it makes things worse.",
+      "$rationale": "All rebuild on next use. node-gyp, electron, electron-builder, deno, copilot, swiftpm, ms-playwright, puppeteer, npm _cacache, uv, pip, yarn. pnpm and gradle are only touched when the build fan-out is quiet -- on this Mac the fan-out is what drives load and swap, and disturbing it makes things worse.",
       "skipWhenAny": [
         "xcodebuild alive",
         "swift-frontend alive",
@@ -126,7 +126,7 @@
       "tier": "safe",
       "op": "delete",
       "title": "Transient state left behind by coding agents",
-      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, cache, debug, shell-snapshots) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.  .tmp is not a delete target: ~/.codex/config.toml names a folder in ~/.codex/.tmp with no .git as a live marketplace source, so it is reported.",
+      "$rationale": "The agents are the fleet's own workers and they write logs, scratch files and caches beside their state. Those rebuild; the sessions and transcripts beside them do not. So the transient parts (logs, tmp, cache, debug, shell-snapshots, stale >3d MiniMax background-tasks, >7d MiniMax SQLite migration backups, and idle Muse subagent worktree .next build caches under ~/Code/*/.muse/worktrees/subagent-*) are deleted and the session history (sessions, projects, history, conversations) is reported ask-first instead of deleted.  .tmp is not a delete target: ~/.codex/config.toml names a folder in ~/.codex/.tmp with no .git as a live marketplace source, so it is reported.",
       "skipWhenAny": [
         "a file under the path was touched in the last 90 minutes",
         "any process holds the path open",
@@ -209,7 +209,7 @@
       "op": "delete",
       "title": "Xcode DerivedData roots left in /private/tmp, ~/.clutch/derived-data, and ~/Code checkouts' build/",
       "maxFreeGb": 60,
-      "$rationale": "What xcodebuild -derivedDataPath leaves behind: four 3.7 GB roots in /private/tmp and 3.4 GB under ~/.clutch/derived-data, measured 2026-11-05 at 24 GB free.  Owner decision 2026-11-05 (HH-219, 'train Hog Hunter to do a better job maintaining its disk space') widened it from report-only to a delete, on positive identification rather than the refuse-list that failed two reviews on 2026-11-04.  It deletes only at 60 GB free or less, so always at the 25 GB line.  ~/Library/Developer/Xcode/DerivedData stays xcode-artifacts' job.  Owner direction 2026-11-23 ('aggressively clean disk space and make hog hunter work better at stopping that') added the human integration trees: xcodebuild without -derivedDataPath drops build/ beside the project in every ~/Code checkout, the trees merge constantly so a checkout-activity gate would never open, and the cache's own 24 h idleness is the gate instead.  Measured 2026-11-23: ~/Code/HogHunter/build, 4.1 GB, idle 4 days.",
+      "$rationale": "What xcodebuild -derivedDataPath leaves behind: four 3.7 GB roots in /private/tmp and 3.4 GB under ~/.clutch/derived-data, measured 2026-11-05 at 24 GB free.  Owner decision 2026-11-05 (HH-219, 'train Hog Hunter to do a better job maintaining its disk space') widened it from report-only to a delete, on positive identification rather than the refuse-list that failed two reviews on 2026-11-04.  It deletes only at 60 GB free or less, so always at the 25 GB line.  ~/Library/Developer/Xcode/DerivedData stays xcode-artifacts' job.  Owner direction 2026-11-23 ('aggressively clean disk space and make hog hunter work better at stopping that') added the human integration trees and tightened the idle gate under real disk pressure: 3h at <= 25 GB free (so rapid multi-build bursts cannot fill the disk same-day), 24h otherwise.",
       "positiveIdentification": [
         "a direct child of /private/tmp or ~/.clutch/derived-data, or a ~/Code checkout's build/ directory, a real directory owned by this user, not a symlink or a mount point, on the home folder's volume and never under /Volumes",
         "its top holds only Xcode's own entries, none a link, with Build/ and an Xcode cache beside it, and Logs/ or Index.noindex/",
@@ -219,7 +219,7 @@
         "nothing under Build/Products or SourcePackages/artifacts, at any depth, is a key, an archive, a project or a note; a walk that cannot finish keeps it"
       ],
       "skipWhenAny": [
-        "the root or anything in its first two levels changed in the last 24 hours, any file in the tree is that recent, or the root's ctime is",
+        "the root or anything in its first two levels changed within the idle gate (3 hours at <= 25 GB free, 24 hours otherwise), any file in the tree is that recent, or the root's ctime is",
         "a .janitor-keep marker on it, above it or inside it, or the marker walk could not answer",
         "any process holds it open, on a fresh open-file listing taken again right before the delete",
         "a process runs from inside it",
