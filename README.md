@@ -41,7 +41,7 @@ Build the phone app for the simulator with scheme `HogHunterIOS`.  TestFlight bu
 ## Build and run
 
 ```bash
-cd ~/apps/HogHunter
+cd ~/Code/HogHunter
 xcodegen generate
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build
 ```
