@@ -102,6 +102,107 @@ enum WidgetColor {
     }
 }
 
+/// The server's side of the widget.  The Mac's snapshot carries the server's
+/// last reading (`snapshot.server`); the widget used to read only the Mac half
+/// of it, so a person with a server saw nothing about it here.  The state comes
+/// first: a stale or failed reading is said so, never drawn as current.
+struct WidgetServerBlock: View {
+    let server: CompanionServerStatus?
+    /// One line instead of two meters, for the small widget.
+    var compact = false
+
+    var body: some View {
+        if let server {
+            let state = server.resolvedState()
+            switch state {
+            case .notConfigured:
+                EmptyView()
+            case .noReading:
+                note("Server: waiting for a reading")
+            case .error:
+                note("Server: last read failed")
+            case .stale:
+                note("Server: reading is stale")
+            case .ok:
+                if compact {
+                    HStack(spacing: 4) {
+                        Image(systemName: "server.rack")
+                            .font(.caption2)
+                            .foregroundStyle(Color.accentColor)
+                        Text(summary(server))
+                            .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Server \(summary(server))")
+                } else {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "server.rack")
+                                .font(.caption2)
+                                .foregroundStyle(Color.accentColor)
+                            Text("Server")
+                                .font(.caption.weight(.bold))
+                                .lineLimit(1)
+                        }
+                        meter("CPU", percent: server.cpu?.percent,
+                              text: server.cpu?.percentText ?? server.headline?.cpuText,
+                              severity: server.cpu?.severity ?? server.headline?.cpuSeverity)
+                        meter("RAM", percent: server.memory?.percent,
+                              text: server.memory?.percentText ?? server.headline?.memoryText,
+                              severity: server.memory?.severity ?? server.headline?.memorySeverity)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+    }
+
+    private func summary(_ server: CompanionServerStatus) -> String {
+        let cpu = server.cpu?.percentText ?? server.headline?.cpuText
+        let ram = server.memory?.percentText ?? server.headline?.memoryText
+        var parts: [String] = []
+        if let cpu { parts.append("CPU \(cpu)") }
+        if let ram { parts.append("RAM \(ram)") }
+        return parts.isEmpty ? "no readings" : parts.joined(separator: " · ")
+    }
+
+    private func note(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "server.rack")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private func meter(_ label: String, percent: Double?, text: String?, severity: String?) -> some View {
+        if percent != nil || text != nil {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack {
+                    Text(label)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(text ?? CompanionServerStatus.dash)
+                        .font(.system(.caption, design: .monospaced).weight(.bold))
+                        .lineLimit(1)
+                }
+                if let percent {
+                    ProgressView(value: min(max(percent / 100, 0), 1))
+                        .tint(WidgetColor.severityColor(severity ?? "calm"))
+                        .controlSize(.mini)
+                }
+            }
+        }
+    }
+}
+
 struct EmptyWidgetView: View {
     let title: String
     let message: String
@@ -174,6 +275,8 @@ struct HogHunterSmallWidgetView: View {
                         
                 }
                 .accessibilityElement(children: .combine)
+
+                WidgetServerBlock(server: snap.server, compact: true)
 
                 Spacer(minLength: 0)
 
@@ -271,6 +374,8 @@ struct HogHunterMediumWidgetView: View {
 
                 // Right Column: Top Hog & Clean Action
                 VStack(alignment: .leading, spacing: 6) {
+                    WidgetServerBlock(server: snap.server, compact: true)
+
                     if let topHog = snap.rows.first {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Top Hog")
@@ -396,6 +501,13 @@ struct HogHunterLargeWidgetView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .combine)
+                }
+
+                if let server = snap.server, server.resolvedState() != .notConfigured {
+                    WidgetServerBlock(server: server)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
                 }
 
                 // Top Hogs Section
