@@ -750,6 +750,53 @@ private struct MeterRow: View {
     }
 }
 
+/// The server on the Overview tab, beside the Mac: its CPU, memory and disk
+/// with bars, and its busiest processes.  Read-only; the Server tab owns
+/// every control.  It draws only when the phone may see the server and the
+/// reading has numbers; any other state keeps the one-line strip.
+struct ServerOverviewSummary: View {
+    let server: CompanionServerStatus
+    let openServerTab: () -> Void
+
+    var body: some View {
+        Section {
+            if server.resolvedState() == .stale {
+                Text("This reading is stale. The numbers are what the Mac last saw \(ServerFormat.age(server.fetchedAt)).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            MeterRow(title: "CPU", value: server.cpu?.percentText, percent: server.cpu?.percent, severity: server.cpu?.severity, detail: cpuDetail)
+            MeterRow(title: "Memory", value: server.memory?.percentText, percent: server.memory?.percent, severity: server.memory?.severity, detail: server.memory?.detail)
+            if let disk = server.devices?.first {
+                MeterRow(title: disk.title, value: disk.usedText, percent: disk.usedPercent, severity: disk.severity, detail: nil)
+            }
+            ForEach(Array((server.processes ?? []).prefix(3))) { process in
+                HStack {
+                    Text(process.name)
+                        .font(.subheadline)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(process.cpuText ?? ServerFormat.dash)
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                    Text(process.memoryText ?? ServerFormat.dash)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 56, alignment: .trailing)
+                }
+            }
+            Button("Open Server tab", action: openServerTab)
+                .font(.caption.weight(.medium))
+        } header: {
+            Text("Server")
+        }
+    }
+
+    private var cpuDetail: String {
+        let cores = server.cpu?.cores.map { "\($0) cores" } ?? "\(ServerFormat.dash) cores"
+        return "\(cores) · 1m load \(server.cpu?.loadText ?? ServerFormat.dash)"
+    }
+}
+
 // MARK: - Server Controls
 
 /// One finished server action, for the result sheet.

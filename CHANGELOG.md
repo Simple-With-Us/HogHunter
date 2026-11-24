@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+The iPhone Overview shows the server, not only a one-line strip:
+
+- When the phone may see the server and its reading has numbers, the Overview tab now has a Server section with CPU, memory and disk bars and the server's three busiest processes, beside the Mac's.  It is read-only; the Server tab keeps every control.  A stale reading says so.  A failed, not-yet-read or not-set-up server keeps the one-line strip.
+
 The iPhone widget shows the server, not only the Mac:
 
-- The snapshot already carried the server's last reading, but the small, medium and large widgets drew only the Mac half.  Each size now has a server block (host, CPU and RAM) beside the Mac's.  A stale, failed or not-yet-read server says so instead of showing old numbers, and a Mac with no server set up shows nothing extra.  The small widget gets one line, 'CPU x · RAM y'.
+- The snapshot already carried the server's last reading, but the small, medium and large widgets drew only the Mac half.  Each size now has a server block (CPU and RAM) beside the Mac's.  A stale, failed or not-yet-read server says so instead of showing old numbers, and a Mac with no server set up shows nothing extra.  The small widget gets one line, 'CPU x · RAM y'.
 
 In Settings, each Advanced switch sits next to its own label (HH-220):
 

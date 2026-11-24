@@ -1186,7 +1186,9 @@ struct DashboardView: View {
 
         overviewActivitySection(topRows: overviewTopRows)
 
-        if let server = snapshot.server {
+        if let server = snapshot.server, server.resolvedState() == .ok || server.resolvedState() == .stale {
+            ServerOverviewSummary(server: server) { selectedTab = .server }
+        } else if let server = snapshot.server {
             Section {
                 Button { selectedTab = .server } label: {
                     HStack(spacing: 10) {
