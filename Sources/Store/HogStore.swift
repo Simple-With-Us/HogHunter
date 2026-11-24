@@ -2834,7 +2834,8 @@ final class HogStore: ObservableObject {
             rows: rows,
             storage: CompanionSnapshotBuilder.currentStorageSummary(
                 drives: MountedDriveStore.shared.rows,
-                directories: directoryUsage.rows
+                directories: directoryUsage.rows,
+                diskSpace: diskSpace
             ),
             network: networkScan.rows,
             networkNote: networkScan.note,

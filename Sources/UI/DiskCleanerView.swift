@@ -10,6 +10,31 @@ struct DiskCleanerView: View {
     var autoScanOnAppear: Bool = true
     var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
+    /// Startup-volume space, refreshed off the main actor.  Reading
+    /// `DiskSpace.current()` in `body` re-ran CacheDelete purgeable
+    /// accounting on every redraw and hung the panel on a full disk
+    /// (HOGHUNTER-5); the store tick already proved that shape.
+    @State private var volumeSpace: DiskSpace?
+    @State private var volumeRefreshInFlight = false
+    @State private var volumeRefreshPending = false
+
+    /// One refresh at a time: scan progress flips `store.state` often,
+    /// and stacked purgeable-capacity reads would stall the very panel
+    /// they describe.  A change that lands mid-read is remembered and
+    /// gets one trailing refresh, so the gauge never sticks stale.
+    private func refreshVolumeSpace() {
+        guard !volumeRefreshInFlight else { volumeRefreshPending = true; return }
+        volumeRefreshInFlight = true
+        Task { @MainActor in
+            let space = await Task.detached(priority: .utility) { DiskSpace.current() }.value
+            volumeSpace = space
+            volumeRefreshInFlight = false
+            if volumeRefreshPending {
+                volumeRefreshPending = false
+                refreshVolumeSpace()
+            }
+        }
+    }
     /// The unattended clean regimen, as the owner set it.
     @State private var regimen = CleanRegimen.load()
     /// The one runner the app uses.  Observed so the summary and the next
@@ -58,6 +83,8 @@ struct DiskCleanerView: View {
         .onDisappear {
             store.cancelScan()
         }
+        .task { refreshVolumeSpace() }
+        .onChange(of: store.state) { _ in refreshVolumeSpace() }
         .sheet(isPresented: $showExclusionsSheet) {
             CleanerExclusionsSheet(store: store)
         }
@@ -473,8 +500,6 @@ struct DiskCleanerView: View {
         }
         .help("Available space includes macOS purgeable capacity.\u{00A0} Selected item sizes do not predict a free-space gain: Trash and safety snapshots can retain blocks.")
     }
-
-    private var volumeSpace: DiskSpace? { DiskSpace.current() }
 
     private var volumeUsedFraction: Double { volumeSpace?.usedFraction ?? 0 }
 

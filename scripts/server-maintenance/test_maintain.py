@@ -50,6 +50,25 @@ class MaintenanceTests(unittest.TestCase):
         path.write_bytes(b"cache")
         return path
 
+    def test_fleet_extra_pressure_triggers_scheduled_run(self):
+        # Root healthy, fleet-extra full: the run must not skip, because
+        # the volume that fills is fleet-extra, not root.
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        extra = {"mount": "/mnt/fleet-extra", "free_bytes": 10 * 1024**3,
+                 "total_bytes": 100 * 1024**3, "used_percent": 90}
+        self.tool.measure_fleet_extra = lambda: dict(extra)
+        result = self.tool.execute()
+        self.assertTrue(result["pressure"])
+        self.assertTrue(result["fleet_extra_pressure"])
+        self.assertEqual(result["fleet_extra"]["used_percent"], 90)
+        self.assertIn("fleet_extra_observed_free_delta_bytes", result)
+
+    def test_no_fleet_extra_mount_keeps_root_only_contract(self):
+        self.tool.measure_fleet_extra = lambda: None
+        result = self.tool.execute()
+        self.assertNotIn("fleet_extra", result)
+        self.assertTrue(result["pressure"])
+
     def test_healthy_does_not_inventory_run_or_lock(self):
         self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
         self.tool.files = lambda _: self.fail("healthy path scanned filesystem")

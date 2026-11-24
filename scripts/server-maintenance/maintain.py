@@ -59,6 +59,24 @@ class Maintenance:
         return {"free_bytes": s.f_bavail * s.f_frsize, "total_bytes": s.f_blocks * s.f_frsize,
                 "used_percent": round(100 * (s.f_blocks - s.f_bfree) / s.f_blocks, 2)}
 
+    def measure_fleet_extra(self):
+        """Fleet-extra mount usage, or None when it is not mounted.
+
+        The volume that fills (lanes, scratch, runtime data) is not the
+        root filesystem this tool historically gated on, so a root-only
+        reading left the fullest disk unmeasured and uncleaned.
+        """
+        mount = self.path("/mnt/fleet-extra")
+        try:
+            if not os.path.ismount(mount):
+                return None
+            s = os.statvfs(mount)
+        except OSError:
+            return None
+        return {"mount": "/mnt/fleet-extra",
+                "free_bytes": s.f_bavail * s.f_frsize, "total_bytes": s.f_blocks * s.f_frsize,
+                "used_percent": round(100 * (s.f_blocks - s.f_bfree) / s.f_blocks, 2)}
+
     def command(self, argv):
         """Own the process group; cap output and kill/reap on timeout/cancellation."""
         self.check()
@@ -446,6 +464,12 @@ class Maintenance:
             if mode == "run" and not confirm and not dry_run:
                 raise ValueError("explicit run requires --confirm")
             pressure = before["used_percent"] >= 80 or before["free_bytes"] < 25 * 1024**3
+            extra = self.measure_fleet_extra()
+            if extra is not None:
+                extra_pressure = extra["used_percent"] >= 80 or extra["free_bytes"] < 25 * 1024**3
+                result["fleet_extra"] = extra
+                result["fleet_extra_pressure"] = extra_pressure
+                pressure = pressure or extra_pressure
             result["pressure"] = pressure
             if not pressure and not manual:
                 healthy_skip = True
@@ -545,6 +569,12 @@ class Maintenance:
                 result["after"] = self.disk()
                 result["observed_free_delta_bytes"] = result["after"]["free_bytes"] - before["free_bytes"]
                 result["removed_file_bytes"] = self.removed_file_bytes
+                if "fleet_extra" in result:
+                    extra_after = self.measure_fleet_extra()
+                    if extra_after is not None:
+                        result["fleet_extra_after"] = extra_after
+                        result["fleet_extra_observed_free_delta_bytes"] = (
+                            extra_after["free_bytes"] - result["fleet_extra"]["free_bytes"])
             except OSError:
                 result.update(status="partial", reason="final disk measurement unavailable")
             result["duration_seconds"] = round(self.monotonic() - started, 3)

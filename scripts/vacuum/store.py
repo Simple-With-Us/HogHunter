@@ -195,7 +195,19 @@ class VacuumStore:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._lock_path, "a+", encoding="utf-8") as lockf:
             if fcntl is not None:
-                fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+                # Bounded wait: a wedged peer must surface as an error,
+                # never as a silent hang (2026-10-20 reclaim livelock).
+                deadline = time.monotonic() + 5.0
+                while True:
+                    try:
+                        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(
+                                "vacuum store lock busy for over 5s; refusing to hang"
+                            ) from None
+                        time.sleep(0.05)
             try:
                 current = default
                 if path.is_file():
