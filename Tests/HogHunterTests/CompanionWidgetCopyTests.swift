@@ -39,7 +39,7 @@ final class CompanionWidgetCopyTests: XCTestCase {
     func testTheWidgetCopyHasNoServerWhenThePhoneMayNotSeeIt() {
         var off = CompanionTestSnapshots.plain()
         off.remoteServerStatusAllowed = false
-        off.server = nil
+        off.server = server()
         XCTAssertNil(off.widgetCopy().server)
     }
 

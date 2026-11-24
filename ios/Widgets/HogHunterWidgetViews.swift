@@ -142,7 +142,7 @@ struct WidgetServerBlock: View {
                             Image(systemName: "server.rack")
                                 .font(.caption2)
                                 .foregroundStyle(Color.accentColor)
-                            Text(server.headline?.host ?? server.host ?? "Server")
+                            Text("Server")
                                 .font(.caption.weight(.bold))
                                 .lineLimit(1)
                         }

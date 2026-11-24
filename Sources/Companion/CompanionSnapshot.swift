@@ -1692,7 +1692,7 @@ extension CompanionSnapshot {
     /// the stripped copy, as before.
     func widgetCopy() -> CompanionSnapshot {
         var copy = withoutServerDetail()
-        guard case .available(let server) = serverAccess else { return copy }
+        guard remoteServerStatusAllowed != false, case .available(let server) = serverAccess else { return copy }
         copy.server = CompanionServerStatus(
             state: server.state,
             generatedAt: server.generatedAt,
