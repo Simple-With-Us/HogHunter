@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+The iPhone widget shows the server, not only the Mac:
+
+- The snapshot already carried the server's last reading, but the small, medium and large widgets drew only the Mac half.  Each size now has a server block (host, CPU and RAM) beside the Mac's.  A stale, failed or not-yet-read server says so instead of showing old numbers, and a Mac with no server set up shows nothing extra.  The small widget gets one line, 'CPU x · RAM y'.
+
 In Settings, each Advanced switch sits next to its own label (HH-220):
 
 - The Read Settings switch in a service-token row now appears right after its label instead of at the far right of the row beside the Write Settings label, and the Write Settings switch sits by its own label too. Same toggles, same saved settings, no behavior change.
