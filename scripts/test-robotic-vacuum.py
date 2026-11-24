@@ -273,7 +273,9 @@ class TestNotifySuppression(unittest.TestCase):
                 os.environ.pop(alerts.NO_NOTIFY_ENV, None)
             else:
                 os.environ[alerts.NO_NOTIFY_ENV] = value
-            with patch.object(alerts.sys, "platform", "darwin"), patch("vacuum.alerts.subprocess.run") as run:
+            with patch.object(alerts.sys, "platform", "darwin"), \
+                 patch.object(alerts, "hog_hunter_running", return_value=False), \
+                 patch("vacuum.alerts.subprocess.run") as run:
                 real_notify_macos()("Hog Hunter", 'Say "hi"')
         return run
 
@@ -294,6 +296,48 @@ class TestNotifySuppression(unittest.TestCase):
         self.assertTrue(alerts.notifications_suppressed())
         with self.assertRaises(AssertionError):
             alerts.notify_macos("Hog Hunter", "not expected")
+
+
+class TestNotifyNeverLaunchesTheApp(unittest.TestCase):
+    """A banner must never open the app on the owner's screen.
+
+    `tell application "Hog Hunter" to display notification` launches the app
+    when it is not running, so the vacuum used to bring the Hog Hunter window
+    forward every time an alert fired.  With the app closed the banner goes
+    through Script Editor, which launches nothing.
+    """
+
+    def script(self, running: bool) -> str:
+        with patch.dict(os.environ):
+            # The suite runs with the notification switch on, so the banner
+            # would never be posted and this test would prove nothing.
+            os.environ.pop(alerts.NO_NOTIFY_ENV, None)
+            with patch.object(alerts.sys, "platform", "darwin"), \
+                 patch.object(alerts, "hog_hunter_running", return_value=running), \
+                 patch("vacuum.alerts.subprocess.run") as run:
+                real_notify_macos()("Hog Hunter", 'Say "hi"')
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        return argv[2]
+
+    def test_with_the_app_closed_the_banner_launches_nothing(self) -> None:
+        script = self.script(running=False)
+        self.assertNotIn("tell application", script)
+        self.assertIn('display notification "Say \\"hi\\""', script)
+
+    def test_with_the_app_running_the_banner_still_carries_its_name(self) -> None:
+        script = self.script(running=True)
+        self.assertIn('tell application "Hog Hunter"', script)
+        self.assertIn('display notification "Say \\"hi\\""', script)
+
+    def test_the_running_check_asks_for_the_app_by_its_process_name(self) -> None:
+        """The check has to match the executable, not the bundle id."""
+        with patch("vacuum.alerts.subprocess.run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = ""
+            self.assertFalse(alerts.hog_hunter_running())
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:3], ["pgrep", "-x", "HogHunter"])
 
 
 class TestAlertDecisionStillNotifies(_TempHomeCase):
@@ -1682,6 +1726,23 @@ class TestHistoryRetention(unittest.TestCase):
     def test_the_fallback_matches_the_shipped_policy(self):
         policy = json.loads((REPO / "config" / "robotic-vacuum.json").read_text(encoding="utf-8"))
         self.assertEqual(policy["history_max_runs"], DEFAULT_HISTORY_MAX_RUNS)
+
+    def test_the_shipped_policy_carries_the_reclaim_floors(self):
+        """The floors the owner runs with are the floors the repo ships.
+
+        A live override under Application Support is per machine, and a fresh
+        clone or a reinstall of the policy drops it, so the shipped policy has
+        to hold the same numbers.  Otherwise the Mac goes quietly back to
+        waiting until the disk is nearly full before it reclaims anything.
+        """
+        policy = json.loads((REPO / "config" / "robotic-vacuum.json").read_text(encoding="utf-8"))
+        self.assertEqual(policy["janitor"]["low_free_gib"], 100)
+        self.assertEqual(policy["janitor"]["pressure_free_gib"], 80)
+        self.assertEqual(policy["janitor"]["crit_free_gib"], 45)
+        self.assertEqual(policy["lanes"]["retire_min_days"], 3)
+        self.assertEqual(policy["resource_watch"]["clean_cooldown_sec"], 1800)
+        self.assertEqual(policy["resource_watch"]["clean_cooldown_crit_sec"], 600)
+        self.assertEqual(policy["pm2_logs_cap_mb"], 50)
 
     def _store_source(self) -> str:
         """The Mac store's source, found by content rather than by filename.

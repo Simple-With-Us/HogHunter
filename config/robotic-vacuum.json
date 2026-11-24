@@ -22,13 +22,13 @@
     "max_report_age_seconds": 900,
     "min_schema": 2,
     "timeout_seconds": 300,
-    "retire_min_days": 7,
+    "retire_min_days": 3,
     "dependency_min_idle_hours": 24
   },
   "janitor": {
-    "low_free_gib": 80,
-    "pressure_free_gib": 65,
-    "crit_free_gib": 30,
+    "low_free_gib": 100,
+    "pressure_free_gib": 80,
+    "crit_free_gib": 45,
     "stale_days": 7,
     "idle_hours": 4,
     "reap_worktrees": true,
@@ -44,8 +44,9 @@
     "swap_used_pct": 90,
     "swap_used_gb": 32,
     "load1_threshold": 65,
-    "clean_cooldown_sec": 7200,
-    "clean_cooldown_crit_sec": 1800
+    "clean_cooldown_sec": 1800,
+    "clean_cooldown_crit_sec": 600
   },
-  "steps": {}
+  "steps": {},
+  "pm2_logs_cap_mb": 50
 }

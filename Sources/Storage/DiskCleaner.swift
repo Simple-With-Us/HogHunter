@@ -1923,6 +1923,11 @@ final class DiskCleaner: @unchecked Sendable {
         if Self.scanContext == nil { return withScanBudget { scanAIArtifacts() } }
         var items: [CleanItem] = []
         let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        // The MiniMax Code runtime keeps a session's messages, snapshots and
+        // workspace tree forever, and it is the largest single writer on this
+        // Mac.  Two weeks is long enough that a session nobody reopened is
+        // history rather than work in progress.
+        let fourteenDaysAgo = Calendar.current.date(byAdding: .day, value: -14, to: Date()) ?? Date()
 
         // 1. Antigravity brain sessions (~/.gemini/antigravity/brain)
         let brainURL = userHomeURL.appendingPathComponent(".gemini/antigravity/brain", isDirectory: true)
@@ -2092,6 +2097,74 @@ final class DiskCleaner: @unchecked Sendable {
                             detail: "Rotated agent transcript log dump"
                         ))
                     }
+                }
+            }
+        }
+
+        // 7. Stale MiniMax Code runtime state (~/.minimax/v2)
+        // Session days and workspace trees the runtime has not touched for a
+        // fortnight.  A live session keeps writing inside its own folder, so
+        // the age gate is the safety, not a guess about which seat is busy.
+        if !scanShouldStop() {
+            let minimaxRoot = userHomeURL.appendingPathComponent(".minimax/v2", isDirectory: true)
+            let sessionsRoot = minimaxRoot.appendingPathComponent("sessions", isDirectory: true)
+            if let years = try? scanContentsOfDirectory(at: sessionsRoot, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                for yearURL in years {
+                    if scanShouldStop() { break }
+                    guard (try? yearURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                    if let months = try? scanContentsOfDirectory(at: yearURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                        for monthURL in months {
+                            if scanShouldStop() { break }
+                            guard (try? monthURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                            if let days = try? scanContentsOfDirectory(at: monthURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: []) {
+                                for dayURL in days {
+                                    if scanShouldStop() { break }
+                                    guard let values = try? dayURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
+                                          values.isDirectory == true,
+                                          let modDate = values.contentModificationDate,
+                                          modDate < fourteenDaysAgo else { continue }
+                                    let stats = directoryStats(at: dayURL)
+                                    guard !stats.isApproximate, stats.bytes > 0 else { continue }
+                                    items.append(CleanItem(
+                                        category: .aiArtifacts,
+                                        title: "MiniMax Session Day (\(dayURL.lastPathComponent))",
+                                        subtitle: "~/.minimax/v2/sessions/\(yearURL.lastPathComponent)/\(monthURL.lastPathComponent)/\(dayURL.lastPathComponent)",
+                                        url: dayURL,
+                                        bytes: stats.bytes,
+                                        fileCount: stats.fileCount,
+                                        isApproximate: stats.isApproximate,
+                                        lastModified: modDate,
+                                        isSelected: false,
+                                        detail: "MiniMax Code session day older than 14 days"
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let workspacesRoot = minimaxRoot.appendingPathComponent("workspaces", isDirectory: true)
+            if let workspaces = try? scanContentsOfDirectory(at: workspacesRoot, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: []) {
+                for workspaceURL in workspaces {
+                    if scanShouldStop() { break }
+                    guard let values = try? workspaceURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
+                          values.isDirectory == true,
+                          let modDate = values.contentModificationDate,
+                          modDate < fourteenDaysAgo else { continue }
+                    let stats = directoryStats(at: workspaceURL)
+                    guard !stats.isApproximate, stats.bytes > 0 else { continue }
+                    items.append(CleanItem(
+                        category: .aiArtifacts,
+                        title: "MiniMax Workspace (\(workspaceURL.lastPathComponent.prefix(8)))",
+                        subtitle: "~/.minimax/v2/workspaces/\(workspaceURL.lastPathComponent)",
+                        url: workspaceURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
+                        lastModified: modDate,
+                        isSelected: false,
+                        detail: "MiniMax Code workspace tree older than 14 days"
+                    ))
                 }
             }
         }
@@ -2793,7 +2866,9 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/.botfleet/updates/",
                 home + "/Library/Caches/BotFleet/updates/",
                 home + "/.cache/huggingface/",
-                home + "/.ollama/models/blobs/"
+                home + "/.ollama/models/blobs/",
+                home + "/.minimax/v2/sessions/",
+                home + "/.minimax/v2/workspaces/"
             ]
             let isStaleUpdate = path.contains("/.BotFleet.update-") ||
                                path.contains("/.botfleet-server.node_modules.") ||

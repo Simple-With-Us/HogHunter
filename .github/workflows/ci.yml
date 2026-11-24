@@ -126,6 +126,9 @@ jobs:
       - name: Require server maintenance render
         run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png" && test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-incomplete-inventory.png"
 
+      - name: Require the storage cleaner render
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh236-storage-cleaner-tab.png"
+
       - name: Build iOS companion
         run: |
           xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \

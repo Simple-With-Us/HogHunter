@@ -176,11 +176,11 @@ final class MaintainStore: ObservableObject {
         let json = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let lanes = json?["lanes"] as? [String: Any]
-        let fileRetireDays = Self.validRetireDays(lanes?["retire_min_days"]) ?? 7
+        let fileRetireDays = Self.validRetireDays(lanes?["retire_min_days"]) ?? 3
         let infisicalRetireText = infisical.isConfigured
             ? infisicalStore.string(for: InfisicalKey.maintainJanitorRetireMinDays)
             : nil
-        let retireDays = infisicalRetireText.map { Self.validRetireDays($0) ?? 7 } ?? fileRetireDays
+        let retireDays = infisicalRetireText.map { Self.validRetireDays($0) ?? 3 } ?? fileRetireDays
         if worktreeRetireDaysPersisted, worktreeRetireMinDays != retireDays {
             worktreeRetireMinDays = retireDays
         }

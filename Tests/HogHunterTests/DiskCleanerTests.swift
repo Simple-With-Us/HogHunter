@@ -347,6 +347,54 @@ final class DiskCleanerTests: XCTestCase {
         }
     }
 
+    func testIsSafeToDeleteAllowsStaleMiniMaxRuntimeState() {
+        let home = NSHomeDirectory()
+        let validPaths = [
+            "\\(home)/.minimax/v2/sessions/2026/10/22",
+            "\\(home)/.minimax/v2/workspaces/5d6c73ab0aa551369128141d4b49f0b1a70af5c70b0ba48ebff90f98d95e2759"
+        ]
+        for path in validPaths {
+            XCTAssertTrue(
+                cleaner.isSafeToDelete(url: URL(fileURLWithPath: path), category: .aiArtifacts),
+                "Stale MiniMax runtime state should be permitted under the AI artifacts category: \(path)"
+            )
+        }
+        // The runtime's own database is not session state and must survive.
+        let database = URL(fileURLWithPath: "\\(home)/.minimax/v2/sqlite/runtime-state.sqlite")
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: database, category: .aiArtifacts),
+            "The MiniMax runtime database must never be deleted"
+        )
+    }
+
+    func testScanAIArtifactsOffersOnlyStaleMiniMaxRuntimeState() {
+        let fm = FileManager.default
+        guard let home = tempDirectory else { return XCTFail("no temporary home") }
+        let cleaner = DiskCleaner(homeDirectory: home)
+        let staleDay = home.appendingPathComponent(".minimax/v2/sessions/2026/10/22", isDirectory: true)
+        let staleWorkspace = home.appendingPathComponent(".minimax/v2/workspaces/abcdef0123456789", isDirectory: true)
+        let freshDay = home.appendingPathComponent(".minimax/v2/sessions/2026/11/22", isDirectory: true)
+        for dir in [staleDay, staleWorkspace, freshDay] {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? "payload".write(to: dir.appendingPathComponent("state.bin"), atomically: true, encoding: .utf8)
+        }
+        // Set the age after the payload lands, because writing the file moves
+        // the directory's own modification date.
+        let old = Date().addingTimeInterval(-21 * 24 * 3600)
+        try? fm.setAttributes([.modificationDate: old], ofItemAtPath: staleDay.path)
+        try? fm.setAttributes([.modificationDate: old], ofItemAtPath: staleWorkspace.path)
+
+        let items = cleaner.scanCategory(.aiArtifacts)
+        let urls = items.map(\.url.path)
+        XCTAssertTrue(urls.contains(staleDay.path), "A three week old session day should be offered")
+        XCTAssertTrue(urls.contains(staleWorkspace.path), "A three week old workspace should be offered")
+        XCTAssertFalse(urls.contains(freshDay.path), "A fresh session day must not be offered")
+        for item in items where item.url.path.hasPrefix(home.appendingPathComponent(".minimax").path) {
+            XCTAssertEqual(item.category, .aiArtifacts)
+            XCTAssertFalse(item.isSelected, "AI artifacts require explicit review")
+        }
+    }
+
     func testIsSafeToDeleteAllowsValidCategoryPaths() {
         let home = NSHomeDirectory()
 
