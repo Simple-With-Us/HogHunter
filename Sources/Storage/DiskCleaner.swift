@@ -2121,7 +2121,8 @@ final class DiskCleaner: @unchecked Sendable {
                                     if scanShouldStop() { break }
                                     guard let values = try? dayURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
                                           values.isDirectory == true,
-                                          let modDate = values.contentModificationDate else { continue }
+                                          let modDate = values.contentModificationDate,
+                                          modDate < fourteenDaysAgo else { continue }
                                     let stats = directoryStats(at: dayURL)
                                     guard !stats.isApproximate, stats.bytes > 0 else { continue }
                                     // The folder's own stamp only moves when a direct
@@ -2155,7 +2156,8 @@ final class DiskCleaner: @unchecked Sendable {
                     if scanShouldStop() { break }
                     guard let values = try? workspaceURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
                           values.isDirectory == true,
-                          let modDate = values.contentModificationDate else { continue }
+                          let modDate = values.contentModificationDate,
+                          modDate < fourteenDaysAgo else { continue }
                     let stats = directoryStats(at: workspaceURL)
                     guard !stats.isApproximate, stats.bytes > 0 else { continue }
                     // Same age proof as the session days above: the recursive
