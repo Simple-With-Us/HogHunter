@@ -83,7 +83,7 @@ class FingerprintTests(unittest.TestCase):
 
 
 class EnvelopeTests(unittest.TestCase):
-    def captured_send(self, env, conclusion="failure", event="push"):
+    def captured_send(self, env, conclusion="failure", event="push", workflow_names=None):
         posts = []
 
         class FakeResponse:
@@ -113,10 +113,14 @@ class EnvelopeTests(unittest.TestCase):
             "WORKFLOW_RUN_ID": "1",
         }
         base.update(env)
-        # The stale-key drift guard is stubbed so these assertions do not depend
-        # on the live checkout's workflow names; ConfigDriftTests covers it.
+        # Only the workflow-name scan is stubbed, so these tests do not depend on
+        # the live checkout; the real stale-key drift guard still runs, and a
+        # drift event it raises shows up in posts.
+        if workflow_names is None:
+            workflow_names = set(reporter.CRON_SCHEDULES) | set(reporter.UNMONITORED_SCHEDULES)
         with mock.patch.object(reporter.urllib.request, "urlopen", fake_urlopen), \
-                mock.patch.object(reporter, "find_cron_schedule_drift", return_value=[]):
+                mock.patch.object(
+                    reporter, "discover_workflow_names", return_value=set(workflow_names)):
             with mock.patch.dict(os.environ, base, clear=False):
                 if "SENTRY_FLEET_DSN" not in env:
                     os.environ.pop("SENTRY_FLEET_DSN", None)
@@ -175,6 +179,34 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(checkin["monitor_config"]["recovery_threshold"], 1)
         self.assertFalse(
             any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
+
+    def test_scheduled_run_reports_real_drift_alongside_the_checkin(self):
+        """The no-drift assertions above can fail: with the auto-merge workflow
+        gone from the live names, the real drift guard reports its stale entry."""
+        rc, posts = self.captured_send(
+            {
+                "SENTRY_FLEET_DSN": "https://abc123@o1.ingest.example.test/42",
+                "WORKFLOW_NAME": "Hog Hunter iOS TestFlight",
+                "WORKFLOW_BRANCH": "main",
+            },
+            conclusion="success",
+            event="schedule",
+            workflow_names=set(reporter.CRON_SCHEDULES),
+        )
+        self.assertEqual(rc, 0)
+        items = [
+            json.loads(line)
+            for post in posts
+            for line in post["body"].split(b"\n")
+            if line.strip()
+        ]
+        self.assertEqual(len([item for item in items if "monitor_slug" in item]), 1)
+        drift = [
+            item for item in items
+            if item.get("fingerprint") == ["ci-report-config-drift", "hoghunter", "stale-cron-key"]
+        ]
+        self.assertEqual(len(drift), 1)
+        self.assertEqual(drift[0]["extra"]["stale_keys"], sorted(reporter.UNMONITORED_SCHEDULES))
 
     def test_zero_failure_threshold_is_sent_as_sentrys_minimum(self):
         with mock.patch.dict(reporter._CRON_FAILURE_THRESHOLD_FOLDED, {"ci": 0}):
