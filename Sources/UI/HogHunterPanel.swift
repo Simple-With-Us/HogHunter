@@ -14,6 +14,14 @@ private struct ServerOverviewSummaryHeight: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// The height the Overview summary's content actually occupies, measured offscreen
+/// in layout tests so the summary can never silently collapse to 0pt in a short window
+/// (Kody's finding on PR #398) while still growing with the window per Jay's "Grow" decision.
+struct OverviewSummaryHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 enum PanelTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case activity = "Activity"
@@ -420,7 +428,7 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        GeometryReader { geometry in
+        GeometryReader { outer in
             VStack(alignment: .leading, spacing: 12) {
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 12) {
@@ -440,12 +448,18 @@ struct HogHunterPanel: View {
                         }
                         captions
                     }
-                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: outer.size.height * 1.1)
+                    .background(
+                        GeometryReader { summary in
+                            Color.clear.preference(key: OverviewSummaryHeight.self, value: summary.size.height)
+                        }
+                    )
                 }
-                .frame(height: min(320, geometry.size.height * 0.60))
+                .frame(minHeight: 200, maxHeight: .infinity)
+                .layoutPriority(1)
                 .accessibilityLabel("Overview summary, scroll for capacity and captions")
                 activitySection
-                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
+                    .frame(minHeight: 100, alignment: .topLeading)
             }
         }
     }

@@ -49,7 +49,7 @@ private final class ScopedGate<Value> {
 
 @MainActor
 final class InfisicalServiceTokenTests: XCTestCase {
-    private static let project = "00000000-1111-2222-3333-444444444444"
+    private nonisolated static let project = "00000000-1111-2222-3333-444444444444"
     private static let other = "11111111-2222-3333-4444-555555555555"
     private let client = ScopedInfisicalClient()
     private let cache = InfisicalStore()

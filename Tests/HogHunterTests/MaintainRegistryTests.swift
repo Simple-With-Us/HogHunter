@@ -2,7 +2,7 @@ import XCTest
 @testable import HogHunter
 
 final class MaintainRegistryTests: XCTestCase {
-    private final class ProbeFileManager: FileManager, @unchecked Sendable {
+    private final class ProbeFileManager: FileManager {
         var executableProbes: [String] = []
         var directoryProbes: [String] = []
         override func isExecutableFile(atPath path: String) -> Bool {

@@ -92,16 +92,24 @@ final class CompanionServerRoutingTests: XCTestCase {
         XCTAssertEqual(served, 1, "only snapshot fetches count")
     }
 
+    private final class SentBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var values: [Data] = []
+        func append(_ data: Data) {
+            lock.lock(); defer { lock.unlock() }
+            values.append(data)
+        }
+    }
+
     func testOneShotReplySendsOnlyTheFirstAnswer() {
-        var sent: [Data] = []
-        let lock = NSLock()
+        let sent = SentBox()
         let once = CompanionOneShotReply { data in
-            lock.lock(); sent.append(data); lock.unlock()
+            sent.append(data)
         }
         DispatchQueue.concurrentPerform(iterations: 50) { index in
             once.send(Data([UInt8(index)]))
         }
-        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.values.count, 1)
     }
 
     func testRefusalNamesTheRunningCleanWhicheverSideStartedIt() {
