@@ -47,13 +47,14 @@ class FingerprintTests(unittest.TestCase):
             reporter.CRON_SCHEDULES,
             {
                 "Hog Hunter iOS TestFlight": "41 * * * *",
-                "Auto-merge PRs": "*/15 * * * *",
             },
         )
+        self.assertEqual(reporter.UNMONITORED_SCHEDULES, frozenset({"Auto-merge PRs"}))
         self.assertEqual(reporter.find_cron_schedule_drift(reporter.discover_workflow_names()), [])
 
     def test_every_scheduled_workflow_is_mapped_with_its_cron(self):
-        """Reverse drift: a workflow `schedule:` must have a CRON_SCHEDULES entry."""
+        """Reverse drift: a workflow `schedule:` must have a CRON_SCHEDULES entry,
+        unless it is deliberately listed in UNMONITORED_SCHEDULES (AFC-626)."""
         found = {}
         for path in sorted(reporter.WORKFLOWS_DIR.glob("*.y*ml")):
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -66,7 +67,12 @@ class FingerprintTests(unittest.TestCase):
             name = name_match.group(1).strip().strip("\"'")
             self.assertEqual(len(crons), 1, f"{path.name}: one cron per workflow expected")
             found[name] = crons[0].strip()
-        self.assertEqual(reporter.CRON_SCHEDULES, found)
+        unmonitored = {name for name in found if name in reporter.UNMONITORED_SCHEDULES}
+        self.assertEqual(unmonitored, set(reporter.UNMONITORED_SCHEDULES))
+        self.assertEqual(
+            reporter.CRON_SCHEDULES,
+            {name: cron for name, cron in found.items() if name not in unmonitored},
+        )
 
     def test_monitor_slug_stays_under_fifty_chars(self):
         slug = reporter.monitor_slug("hoghunter", "Hog Hunter iOS TestFlight")
@@ -159,10 +165,20 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(
             checkin["monitor_config"]["schedule"], {"type": "crontab", "value": "41 * * * *"})
         self.assertEqual(checkin["monitor_config"]["checkin_margin"], 30)
+        # AFC-626: GitHub drops hourly ship ticks; three misses in a row turn it red.
+        self.assertEqual(checkin["monitor_config"]["failure_issue_threshold"], 3)
+        self.assertEqual(checkin["monitor_config"]["recovery_threshold"], 1)
         self.assertFalse(
             any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
 
-    def test_scheduled_auto_merge_run_sends_checkin_not_drift(self):
+    def test_unlisted_monitor_keeps_sentry_default_threshold(self):
+        config = reporter.monitor_config_for("CI", "17 9 * * 1")
+        self.assertNotIn("failure_issue_threshold", config)
+        self.assertNotIn("recovery_threshold", config)
+        self.assertEqual(config["checkin_margin"], reporter.DEFAULT_CHECKIN_MARGIN_MINUTES)
+
+    def test_scheduled_auto_merge_run_sends_no_checkin_and_no_drift(self):
+        """AFC-626: the 15-minute sweep is unmonitored, and is not config drift."""
         rc, posts = self.captured_send(
             {
                 "SENTRY_FLEET_DSN": "https://abc123@o1.ingest.example.test/42",
@@ -173,20 +189,25 @@ class EnvelopeTests(unittest.TestCase):
             event="schedule",
         )
         self.assertEqual(rc, 0)
+        self.assertEqual(posts, [])
+
+    def test_failed_auto_merge_sweep_still_raises_the_error_event(self):
+        rc, posts = self.captured_send(
+            {
+                "SENTRY_FLEET_DSN": "https://abc123@o1.ingest.example.test/42",
+                "WORKFLOW_NAME": "Auto-merge PRs",
+                "WORKFLOW_BRANCH": "main",
+            },
+            conclusion="failure",
+            event="schedule",
+        )
+        self.assertEqual(rc, 0)
         self.assertEqual(len(posts), 1)
         items = [json.loads(line) for line in posts[0]["body"].split(b"\n") if line.strip()]
-        checkins = [item for item in items if "monitor_slug" in item]
-        self.assertEqual(len(checkins), 1)
-        checkin = checkins[0]
-        self.assertEqual(checkin["status"], "ok")
-        self.assertEqual(
-            checkin["monitor_config"]["schedule"], {"type": "crontab", "value": "*/15 * * * *"})
-        # Default margin: no per-lane override without an actual policy reason.
-        self.assertEqual(
-            checkin["monitor_config"]["checkin_margin"],
-            reporter.DEFAULT_CHECKIN_MARGIN_MINUTES)
-        self.assertFalse(
-            any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
+        self.assertFalse(any("monitor_slug" in item for item in items))
+        events = [item for item in items if "fingerprint" in item]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["fingerprint"], ["ci-failure", "hoghunter", "Auto-merge PRs"])
 
     def test_malformed_dsn_never_fails_the_job(self):
         rc, posts = self.captured_send({"SENTRY_FLEET_DSN": "not-a-dsn"})
