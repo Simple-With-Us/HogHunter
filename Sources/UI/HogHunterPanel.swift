@@ -444,6 +444,7 @@ struct HogHunterPanel: View {
             .frame(minHeight: 0, maxHeight: .infinity)
             .accessibilityLabel("Overview summary, scroll for capacity and captions")
             activitySection
+                .layoutPriority(1)
                 .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
         }
     }
