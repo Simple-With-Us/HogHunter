@@ -28,6 +28,7 @@ private final class ResumeOnceBox: @unchecked Sendable {
         flag = true
         return previous
     }
+}
 
 @MainActor
 final class ServerControl: ObservableObject {
