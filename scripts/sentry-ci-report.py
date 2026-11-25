@@ -134,11 +134,15 @@ def discover_workflow_names(workflows_dir: Path = WORKFLOWS_DIR) -> set[str] | N
 
 
 def find_cron_schedule_drift(known_names: set[str] | None) -> list[str]:
-    """CRON_SCHEDULES keys that match no real workflow `name:`."""
+    """CRON_SCHEDULES keys and UNMONITORED_SCHEDULES names that match no real
+    workflow `name:`.  A stale UNMONITORED_SCHEDULES entry is drift too: after a
+    rename it exempts nothing, while the renamed workflow raises
+    unmapped-schedule drift on every tick."""
     if not known_names:
         return []
     folded = {name.casefold() for name in known_names}
-    return sorted(key for key in CRON_SCHEDULES if key.casefold() not in folded)
+    configured = set(CRON_SCHEDULES) | set(UNMONITORED_SCHEDULES)
+    return sorted(key for key in configured if key.casefold() not in folded)
 
 
 def monitor_config_for(workflow_name: str, cron_expr: str) -> dict:
@@ -151,7 +155,7 @@ def monitor_config_for(workflow_name: str, cron_expr: str) -> dict:
         "timezone": "UTC",
     }
     threshold = _CRON_FAILURE_THRESHOLD_FOLDED.get(folded)
-    if threshold:
+    if threshold is not None:
         config["failure_issue_threshold"] = threshold
         config["recovery_threshold"] = 1
     return config
@@ -250,15 +254,17 @@ def main() -> int:
     if stale_keys:
         joined = ", ".join(repr(key) for key in stale_keys)
         print(
-            f"::error::CRON_SCHEDULES key(s) {joined} match no workflow `name:` under "
-            ".github/workflows/ — those cron check-ins are not being sent.  "
-            "Re-key CRON_SCHEDULES in scripts/sentry-ci-report.py to the current name."
+            f"::error::CRON_SCHEDULES / UNMONITORED_SCHEDULES name(s) {joined} match no "
+            "workflow `name:` under .github/workflows/ — a stale CRON_SCHEDULES key "
+            "sends no cron check-in, and a stale UNMONITORED_SCHEDULES entry exempts "
+            "nothing.  Re-key it in scripts/sentry-ci-report.py to the current name."
         )
         send_config_drift_event(
             envelope_url,
             auth_header,
             "stale-cron-key",
-            f"sentry-ci-report CRON_SCHEDULES has stale workflow name(s): {joined} [{APP}]",
+            f"sentry-ci-report CRON_SCHEDULES/UNMONITORED_SCHEDULES has stale workflow "
+            f"name(s): {joined} [{APP}]",
             ["ci-report-config-drift", APP, "stale-cron-key"],
             {"stale_keys": stale_keys, "run_url": run_url},
         )
