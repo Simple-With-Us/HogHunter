@@ -447,7 +447,6 @@ struct HogHunterPanel: View {
                     }
                     captions
                 }
-                .fixedSize(horizontal: false, vertical: true)
                 .background(
                     GeometryReader { summary in
                         Color.clear.preference(key: OverviewSummaryHeight.self, value: summary.size.height)
