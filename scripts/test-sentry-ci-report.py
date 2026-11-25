@@ -257,6 +257,10 @@ class ConfigDriftTests(unittest.TestCase):
         live = set(reporter.CRON_SCHEDULES) | set(reporter.UNMONITORED_SCHEDULES)
         with mock.patch.dict(reporter.CRON_SCHEDULES, {"Auto-merge PRs": "*/15 * * * *"}):
             self.assertEqual(reporter.find_cron_schedule_drift(live), ["Auto-merge PRs"])
+        # A duplicate that differs only by case reports both spellings.
+        with mock.patch.dict(reporter.CRON_SCHEDULES, {"AUTO-MERGE PRS": "*/15 * * * *"}):
+            self.assertEqual(
+                reporter.find_cron_schedule_drift(live), ["AUTO-MERGE PRS", "Auto-merge PRs"])
 
     def test_stale_unmonitored_entry_raises_the_stale_cron_key_event(self):
         sent = []
