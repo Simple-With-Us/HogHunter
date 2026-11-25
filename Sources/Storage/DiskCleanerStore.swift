@@ -259,6 +259,8 @@ final class DiskCleanerStore: ObservableObject {
         let activeExclusions = exclusions
         let scanOperation = self.scanOperation
         scanTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+
             let scanReport = await scanOperation(currentTier, activeExclusions, depth, { partial in
                     Task { @MainActor [weak self] in
                         guard let self, self.currentScanId == scanId, self.isScanInFlight,
@@ -277,7 +279,7 @@ final class DiskCleanerStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard let self, self.currentScanId == scanId else { return }
+                guard self.currentScanId == scanId else { return }
                 self.report = scanReport
                 // A fresh scan supersedes any report an edit marked stale.
                 self.reportIsStale = false
@@ -467,6 +469,8 @@ final class DiskCleanerStore: ObservableObject {
         NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: initialUpdate)
 
         cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
+            guard let self else { return }
+
             var lastReportedTime = Date.distantPast
             var lastReportedProgress: Double = -1.0
             let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot, exclusions: activeExclusions) { progress, currentItem in
@@ -500,7 +504,7 @@ final class DiskCleanerStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard let self, self.currentCleanId == cleanId else { return }
+                guard self.currentCleanId == cleanId else { return }
                 // An exclusion or temp-policy edit mid-clean left this report
                 // describing paths the scan never saw.  Drop it now that the
                 // deletion is done; `state` is still `.cleaning`, so the result
