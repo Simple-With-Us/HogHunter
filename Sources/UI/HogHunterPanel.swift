@@ -420,33 +420,31 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        GeometryReader { geometry in
-            VStack(alignment: .leading, spacing: 12) {
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(alignment: .top, spacing: 10) {
-                            cpuHistoryCard
-                            Meter(title: "Memory", value: store.pulse.memoryPercent,
-                                  caption: store.memorySizeCaption,
-                                  severity: Severity.forPressure(store.pulse.pressure),
-                                  accessibilityDetail: store.memoryCaption)
-                                .frame(width: 260)
-                        }
-                        .frame(height: 94)
-                        pillRow(memoryPills + thermalPills)
-                        capacityCards
-                        if !store.maintain.vpsStore.configuredHost.isEmpty {
-                            serverStrip
-                        }
-                        captions
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
+                        cpuHistoryCard
+                        Meter(title: "Memory", value: store.pulse.memoryPercent,
+                              caption: store.memorySizeCaption,
+                              severity: Severity.forPressure(store.pulse.pressure),
+                              accessibilityDetail: store.memoryCaption)
+                            .frame(width: 260)
                     }
-                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: 94)
+                    pillRow(memoryPills + thermalPills)
+                    capacityCards
+                    if !store.maintain.vpsStore.configuredHost.isEmpty {
+                        serverStrip
+                    }
+                    captions
                 }
-                .frame(height: min(320, geometry.size.height * 0.60))
-                .accessibilityLabel("Overview summary, scroll for capacity and captions")
-                activitySection
-                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
+                .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(minHeight: 0, maxHeight: .infinity)
+            .accessibilityLabel("Overview summary, scroll for capacity and captions")
+            activitySection
+                .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
